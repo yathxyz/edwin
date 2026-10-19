@@ -67,6 +67,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `src/display.ts`, `test/display.test.mts` | the display seam (DT0, see below): frames with no page, drawn on a cell grid for a terminal or native backend (`edwin-display`) |
 | `native/` | `edwin`, the desktop program (DT1 to DT4, see below): a Rust crate with its own Cargo workspace that embeds V8 and these files; `native/js/` is its JavaScript (prelude, host, terminal, window, startup), `native/src/gui/` the window, `native/tests/` its pseudo-terminal and virtual-display suites (`cargo test`) |
 | `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder, and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
+| `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
 
 These files came from the published Edwin artifact (version 1791768765, 2026-10-12). From now on this directory is
 the source.
@@ -82,6 +83,9 @@ edit.sock client.
   hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
   `boardsDir` is accepted and ignored with a warning for one release, so an edit.json written for the
   previous edwind still starts.
+- **The hub protocol is Edwin's**: `docs/hub-protocol.md` specifies what edwind speaks to a hub (version 1, the
+  messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
+  server, without the ACP messages it served for the session API.
 
 ## Step E0: the core without a browser (done)
 
@@ -286,8 +290,8 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   built-in jobs (deviations recorded in `jobs.mts`).
 - **The hub client (`hub.mts`, `server.hub`)** connects to `hubSocket` when edit.json names one (with none,
   edwind dials nothing and process primitives raise `hub-error` at once), answers the hello as
-  `edwind/<build>`, sends one `watch` (R5.7) and keeps the session summaries current; it reconnects with the
-  backoff of wb-web (250 ms to 5 s, jitter) and re-attaches live processes with `pty.open {resume}` (no
+  `edwind/<build>`, sends one `watch` (R5.7) and keeps the session summaries current; it reconnects with a
+  backoff (250 ms to 5 s, jitter) and re-attaches live processes with `pty.open {resume}` (no
   spawn). An unreachable hub is logged at debug level only. Conditions `hub-error`, `process-error`,
   `stale-object`, `no-leader` sit under `error`; status gains `hub`, `hubVersion`, `hubSessions`.
 - **Processes (R4.43–R4.45, `process.mts`, `scm/process.scm`)** are hub PTY sessions with ids `ed-` + 16 base32

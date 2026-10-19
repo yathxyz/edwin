@@ -1,10 +1,9 @@
-// The hub client (spec §5.1, R5.7, R4.43–R4.45, R3.2): edwind as one client of hub.sock, the way wb-web's
-// control connection is (crates/wb-web/src/hub.rs). It speaks wb_proto::hub unchanged: NDJSON lines, the
-// hub's hello first, our hello within HELLO_TIMEOUT, one `watch` for Summary changes, and requests with a
-// nonzero u64 `rid` that get exactly one `ok` or `err` reply (DESIGN §3.2). Other modules reach it as
-// server.hub: request(), send(), ptyInput(), the `sessions` map and events named after the hub's message
-// types (`session`, `gone`, `pty.out`, `pty.exit`, `pty.fg`, `err`),
-// plus `up` and `down` for the connection itself. edwind never starts a process itself (R4.45): everything a
+// The hub client (spec §5.1, R5.7, R4.43–R4.45, R3.2): edwind as a client of a hub, the process server of
+// docs/hub-protocol.md: NDJSON lines, the hub's hello first, our hello within HELLO_TIMEOUT, one `watch` for
+// Summary changes, and requests with a nonzero `rid` that get exactly one `ok` or `err` reply. Other modules
+// reach it as server.hub: request(), send(), ptyInput(), the `sessions` map and events named after the hub's
+// message types (`session`, `gone`, `pty.out`, `pty.exit`, `pty.fg`, `err`), plus `up` and `down` for the
+// connection itself. edwind never starts a process itself (R4.45): everything a
 // process needs goes through this connection. With no hubSocket in edit.json there is no connection: the hub
 // stays down and every request fails at once with the code `unconfigured`.
 //
@@ -13,19 +12,19 @@ import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import type { Server, Log, SchemeValue } from './main.mts';
 
-/* ---------- wire shapes (crates/wb-proto/src/hub.rs, journal.rs) ---------- */
+/* ---------- wire shapes (docs/hub-protocol.md) ---------- */
 export interface Fault { code: string; message: string }
 /* The PTY's foreground process group; `leader` when the group is the child's own. */
 export interface Fg { comm: string; pgid: number; leader: boolean }
 export interface Exit { code: number | null; signal: number | null; reason: string; at?: number }
 export interface PtyFacts { argv: string[]; pid?: number; fg?: Fg; exit?: Exit }
-/* The hub's facts about one session (wb_proto::hub::Summary); `kind` is `pty` for a PTY, and edwind ignores
+/* The hub's facts about one session (a Summary); `kind` is `pty` for a PTY, and edwind ignores
    sessions of any other kind. */
 export interface Summary {
   sid: string; kind: string; host: string; createdAt: number; updatedAt: number; alive: boolean;
   viewers: number; cwd: string; fault: Fault | null; pty?: PtyFacts;
 }
-/* A line from the hub (wb_proto::hub::HubMessage): the fields of every type it sends, by `t`. */
+/* A line from the hub: the fields of every type it sends, by `t`. */
 export interface HubMessage {
   t: string; rid?: number | null; sid?: string; code?: string; message?: string;
   session?: Summary; epoch?: number; d?: string; out?: number;
@@ -38,7 +37,7 @@ export interface HubHello extends HubMessage {
 }
 export interface HubInfo { version: string; build: string | null; host: string; pid: number; startedAt: number; shells: string[]; defaultShell: string }
 export type HubStatus = 'down' | 'up' | 'incompatible';
-/* A request line (wb_proto::hub::HubRequest); request() adds the rid. */
+/* A request line; request() adds the rid. */
 export interface HubRequest { t: string; sid?: string; [k: string]: unknown }
 /* The `ok` reply fields of each request type; `{}` for the rest. */
 export interface SessionsReply { sessions: Summary[] }
@@ -61,22 +60,22 @@ type PassedOn = 'pty.out' | 'pty.exit' | 'pty.fg';
 interface PendingReply { resolve: (r: HubReply) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
 
 export const name = 'hub';
-/* Constants of the hub protocol, reproduced from the Rust crates. */
-export const PROTO = 1;                                   // wb_proto::hub::PROTO
-export const MAX_LINE = 16 << 20;                          // wb_proto::limits::MAX_LINE (a longer line closes the connection)
-export const PTY_INPUT_FRAME = 1 << 20;                    // wb_proto::limits::PTY_INPUT_FRAME (largest `d` of one pty.input, in bytes)
-export const HELLO_TIMEOUT_MS = 5000;                      // wb_proto::limits::HELLO_TIMEOUT
-/* The control connection's policy, as crates/wb-web/src/hub.rs has it (DESIGN §3.2.10). */
-export const CONNECT_TIMEOUT_MS = 2000;                    // CONNECT_TIMEOUT
-export const BACKOFF_MIN_MS = 250;                         // BACKOFF_MIN
-export const BACKOFF_MAX_MS = 5000;                        // BACKOFF_MAX
-export const STABLE_MS = 5000;                             // STABLE: a connection up this long resets the backoff
-export const REPLY_TIMEOUT_MS = 10000;                     // REPLY_TIMEOUT
+/* Constants of the hub protocol (docs/hub-protocol.md). */
+export const PROTO = 1;
+export const MAX_LINE = 16 << 20;                          // a longer line closes the connection
+export const PTY_INPUT_FRAME = 1 << 20;                    // largest `d` of one pty.input, in bytes
+export const HELLO_TIMEOUT_MS = 5000;
+/* The connection's policy. */
+export const CONNECT_TIMEOUT_MS = 2000;
+export const BACKOFF_MIN_MS = 250;
+export const BACKOFF_MAX_MS = 5000;
+export const STABLE_MS = 5000;                             // a connection up this long resets the backoff
+export const REPLY_TIMEOUT_MS = 10000;
 /* A pty.kill with forget waits for the exit (about 3 s). */
 export const KILL_TIMEOUT_MS = 30000;
 const CLIENT = 'edwind';
 
-/* A failed hub request: `code` is the hub's error code (wb_proto::hub::ErrorCode), or `unavailable` when
+/* A failed hub request: `code` is the hub's error code, or `unavailable` when
    the hub cannot be reached, `unconfigured` when edit.json names none, or `timeout` when it did not answer
    in time. */
 export class HubError extends Error {
@@ -160,7 +159,7 @@ export class Hub extends EventEmitter<HubEvents> {
   onHello(msg: HubHello | null) {
     if (!msg || msg.t !== 'hello') { this.log.warn('hub', { event: 'first line was not a hello' }); this.sock!.destroy(); return; }
     if (msg.proto !== PROTO) {
-      /* DESIGN §3.2.3: a proto mismatch; the hub would answer our hello with err{proto} and close. */
+      /* A proto mismatch: the hub would answer our hello with err{proto} and close. */
       this.status = 'incompatible'; this.log.warn('hub', { event: 'incompatible', proto: msg.proto });
       this.sock!.destroy(); return;
     }

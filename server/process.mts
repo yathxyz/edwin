@@ -1,7 +1,7 @@
 // Processes through the hub (spec §4.8: R4.43, R4.44, R4.45; R9.22; R14.12). edwind never calls
 // child_process: a process is a hub PTY session that this module opens over server.hub (hub.mts) with
-// `pty.open` and a `spawn` of `{argv: [shell, "-c", command], shell, cwd, env}`; the hub only ever runs its
-// configured shells (DESIGN §3.2.7). Output arrives as `pty.out` and goes to the process's filter or into
+// `pty.open` and a `spawn` of `{argv: [shell, "-c", command], shell, cwd, env}`; the hub only ever runs the
+// shells its hello names (docs/hub-protocol.md). Output arrives as `pty.out` and goes to the process's filter or into
 // its buffer at the process mark; `pty.exit` runs the sentinel. The sid is `ed-` followed by 16 random
 // base32 characters, so a hub that shows its sessions can tell edwind's own apart (R9.22).
 //
@@ -38,7 +38,7 @@ export interface SpawnOptions {
   noquery?: boolean; collect?: boolean; who: string;
 }
 export interface ProcessInit extends Omit<SpawnOptions, 'shell'> { sid: string; argv: string[]; shell: string }
-/* The spawn of pty.open (wb_proto::hub::SpawnPty). */
+/* The spawn of pty.open. */
 interface SpawnPty { argv: string[]; shell: string; cwd?: string; env?: Record<string, string> }
 /* A callback thread waiting in a process's queue; done resolves the exit promise in order. */
 type QueueItem = { kind: 'out' | 'exit'; job: (self: Processes) => SchemeGen } | { kind: 'done'; job: () => void };
@@ -48,9 +48,9 @@ interface OutWaiter { procs: Process[]; resolve: (v: boolean) => void }
 export const name = 'process';
 export const DEFAULT_COLS = 120;
 export const DEFAULT_ROWS = 40;
-export const ENV_MAX = 32;                                  // SpawnPty.env: at most 32 entries (wb_proto::hub::SpawnPty)
+export const ENV_MAX = 32;                                  // spawn.env: at most 32 entries
 export const SID_PREFIX = 'ed-';
-/* Shells whose -c syntax accepts the TERM prefix of R4.44 (the hub fixes TERM, crates/wb-hub/src/env.rs). */
+/* Shells whose -c syntax accepts the TERM prefix of R4.44 (the hub sets TERM itself). */
 export const POSIX_SHELLS = ['bash', 'sh', 'zsh'];
 export const TERM_PREFIX = 'export TERM=dumb NO_COLOR=1; ';
 export const LIST_BUFFER = '*Process List*';
