@@ -18,7 +18,7 @@ Workbench's flake check runs this repository's checks too.
 
 ```sh
 nix build .#edwin           # bin/edwin (terminal, -g window), bin/edwin-daemon, bin/edwind
-nix build .#edwin-web       # the frame runtime a page serves: index.html, src/*.js, scm/*.scm
+nix build .#edwin-web       # the frame runtime a page serves: index.html, manifest.json, src/*.js, scm/*.scm
 nix flake check -L          # the suites below, the type check (edwin-typecheck) and programs.edwin
 (cd tools && npm ci)        # without nix: typescript, @types/node and fast-check for tsc and the OT suite
 ```
@@ -69,6 +69,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `native/` | `edwin`, the desktop program (DT1 to DT4, see below): a Rust crate with its own Cargo workspace that embeds V8 and these files; `native/js/` is its JavaScript (prelude, host, terminal, window, startup), `native/src/gui/` the window, `native/tests/` its pseudo-terminal and virtual-display suites (`cargo test`) |
 | `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder, and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
 | `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
+| `console/manifest.json` | what a page that hosts frames loads, in order: `files` (the scripts) and `scm` (the Scheme sources), with `api` 1; `edwin-web` ships it as `manifest.json` |
 
 These files came from the published Edwin artifact (version 1791768765, 2026-10-12). From now on this directory is
 the source.
@@ -97,6 +98,9 @@ edit.sock client.
   paths. The default backend is named `anthropic`, like the `models.anthropic` it comes from (it was
   `workbench`). The build id comes from `EDWIND_BUILD`. A CLI writer is labelled by its session alone. `edwin`
   no longer falls back to Workbench's socket, and `--remote` must name the socket (`HOST:/PATH`).
+- **`edwin-web` ships `manifest.json`**: the runtime's scripts and Scheme sources in load order, with `api` 1,
+  so a page that hosts frames reads the list from the runtime it serves instead of keeping its own copy.
+  `api` changes only when a page has to load the runtime differently.
 
 ## Step E0: the core without a browser (done)
 

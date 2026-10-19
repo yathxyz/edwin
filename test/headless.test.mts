@@ -137,6 +137,18 @@ test('the shipped Scheme in scm/ is what index.html carries', async () => {
   }
 });
 
+test('console/manifest.json: the runtime in the order console/index.html loads it, and the Scheme a frame needs', async () => {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const m = JSON.parse(readFileSync(new URL('../console/manifest.json', import.meta.url), 'utf8'));
+  assert.equal(m.api, 1);
+  const html = readFileSync(new URL('../console/index.html', import.meta.url), 'utf8');
+  assert.deepEqual(m.files, [...html.matchAll(/<script src="(src\/[^"]+\.js)"><\/script>/g)].map(x => x[1]));
+  for (const f of m.files) assert.ok(existsSync(new URL('../' + f.replace(/\.js$/, '.ts'), import.meta.url)), f);
+  for (const f of m.scm) assert.ok(existsSync(new URL('../' + f, import.meta.url)), f);
+  const page = JSON.parse(/const SCM = (\[[^\]]*\])/.exec(html)![1].replace(/'/g, '"'));
+  for (const name of page) assert.ok(m.scm.includes(`scm/${name}.scm`), name + ': the console page loads it');
+});
+
 test('persistent tables flush through the host when the process suspends', async () => {
   await ed.type(':e flush.txt\n');
   ed.host.suspend();

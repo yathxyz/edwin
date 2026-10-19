@@ -1,0 +1,34 @@
+{
+ "api": 1,
+ "files": [
+  "src/host-browser.js",
+  "src/scheme.js",
+  "src/runtime.js",
+  "src/text.js",
+  "src/editor-core.js",
+  "src/editor-prims.js",
+  "src/evil-core.js",
+  "src/pool.js",
+  "src/complete.js",
+  "src/extras.js",
+  "src/stack.js",
+  "src/ai.js",
+  "src/evil-ex.js",
+  "src/org.js",
+  "src/markdown.js",
+  "src/ot.js",
+  "src/sync.js",
+  "src/display.js"
+ ],
+ "scm": [
+  "scm/emacs.scm",
+  "scm/evil.scm",
+  "scm/org.scm",
+  "scm/ai.scm",
+  "scm/init.scm",
+  "scm/notes-syntax.scm",
+  "scm/address.scm",
+  "scm/markdown.scm",
+  "scm/babel.scm"
+ ]
+}
