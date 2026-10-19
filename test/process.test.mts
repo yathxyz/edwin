@@ -179,3 +179,20 @@ test('hub down: hub-error, then reconnect with backoff and re-attach to the live
   assert.equal(await value(c, '(process-live-p pr)'), '#t');
   c.close();
 });
+
+test('no hubSocket: edwind dials no hub, and a process is hub-error at once', async () => {
+  const d = makeDir({ logLevel: 'debug' });
+  const e = await startEdwind(d);
+  try {
+    const c = new EditClient(d.cfg.socket); await c.connect(); assert.equal((await c.hello()).t, 'welcome');
+    assert.equal(await value(c, '(hub-status)'), 'down');
+    const t0 = Date.now();
+    const r = await c.form('(make-process :name "nohub" :command "true")');
+    assert.equal(r.error.condition, 'hub-error');
+    assert.match(r.error.report, /no hub configured/);
+    assert.ok(Date.now() - t0 < 1000, 'no wait for a hub that cannot come');
+    assert.match(e.logs, /none configured/);
+    assert.doesNotMatch(e.logs, /not reachable|connect timeout/, 'no connection was attempted');
+    c.close();
+  } finally { await stopEdwind(e); fs.rmSync(d.root, { recursive: true, force: true }); }
+});

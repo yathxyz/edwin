@@ -142,7 +142,7 @@ export class Processes {
      buffer, filter, sentinel, card, collect, who}; a generator: waits for the hub's reply. */
   *spawnG(o: SpawnOptions): SchemeGen {
     const S = this.S, hub = this.hub;
-    if (!hub.up) throw new S.SchemeError('hub-error', `${o.who}: hub unreachable`, []);
+    if (!hub.up) throw new S.SchemeError('hub-error', `${o.who}: ${hub.unreachable().message}`, []);
     const shell = o.shell || hub.defaultShell();
     const argv = o.command === null || o.command === undefined ? [shell] : [shell, '-c', o.command];
     const sid = newSid();
@@ -385,7 +385,7 @@ export async function install(server: Server): Promise<void> {
     const [cols, rows] = sizeArg(o.size, who);
     return { shell: optStr(o.shell, ':shell', who), cwd: cwdArg(o.cwd, who), env: envArg(o.env, who), cols, rows, who };
   };
-  const requireHub = (who: string): void => { if (!hub.up) throw new S.SchemeError('hub-error', `${who}: hub unreachable`, []); };
+  const requireHub = (who: string): void => { if (!hub.up) throw new S.SchemeError('hub-error', `${who}: ${hub.unreachable().message}`, []); };
   const secs = (x: SchemeValue, who: string): number => { const n = S.num(x, who); if (!(n >= 0)) throw new S.SchemeError('range-error', `${who}: seconds must be non-negative`, [x]); return n; };
 
   blocking('make-process', '&rest :name :command :shell :cwd :env :size :buffer :filter :sentinel :card :noquery', 'Start COMMAND (a string in SHELL\'s syntax) as a hub PTY session (R4.43) and return the process.', function* (args) {

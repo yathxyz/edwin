@@ -272,12 +272,12 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   `unlinked-mentions` block the calling thread while it searches (the sync channel remains for callers outside
   a thread). The pool's Node host compiles the lexer from a source string inside the worker and duplicates the
   built-in jobs (deviations recorded in `jobs.mts`).
-- **The hub client (`hub.mts`, `server.hub`)** connects to `hubSocket` (default `/run/workbench-hub/hub.sock`,
-  DESIGN §3.2.1), answers the hello as `edwind/<build>`, sends one `watch` (R5.7) and keeps the session
-  summaries current; it reconnects with the backoff of wb-web (250 ms to 5 s, jitter) and re-attaches live
-  processes with `pty.open {resume}` (no spawn). An unreachable hub is logged at debug level only. Conditions
-  `hub-error`, `process-error`, `stale-object`, `no-leader` sit under `error`; status gains `hub`, `hubVersion`,
-  `hubSessions`.
+- **The hub client (`hub.mts`, `server.hub`)** connects to `hubSocket` when edit.json names one (with none,
+  edwind dials nothing and process primitives raise `hub-error` at once), answers the hello as
+  `edwind/<build>`, sends one `watch` (R5.7) and keeps the session summaries current; it reconnects with the
+  backoff of wb-web (250 ms to 5 s, jitter) and re-attaches live processes with `pty.open {resume}` (no
+  spawn). An unreachable hub is logged at debug level only. Conditions `hub-error`, `process-error`,
+  `stale-object`, `no-leader` sit under `error`; status gains `hub`, `hubVersion`, `hubSessions`.
 - **Processes (R4.43–R4.45, `process.mts`, `scm/process.scm`)** are hub PTY sessions with ids `ed-` + 16 base32
   chars; `make-process` takes `:name :command :shell :cwd :env :size :buffer :filter :sentinel :card :noquery`
   (default shell bash if the hub offers it, size 120x40). Output and exit run filters and sentinels on background

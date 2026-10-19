@@ -219,7 +219,7 @@ export async function install(server: Server) {
   const blocking = (nm: string, args: string, doc: string, gen: PrimGen) => D(nm, args, doc, () => { throw new S.SchemeError('cannot-block', `${nm}: cannot wait here`, []); }, gen);
   const sleep = (ms: number) => new Promise<void>(r => { const h = setTimeout(r, ms); h.unref(); });
   const absent = (x: SchemeValue) => x === undefined || x === false;
-  const requireHub = (who: string) => { if (!hub.up) throw new S.SchemeError('hub-error', `${who}: hub unreachable`, []); };
+  const requireHub = (who: string) => { if (!hub.up) throw new S.SchemeError('hub-error', `${who}: ${hub.unreachable().message}`, []); };
   const hubErr = (e: unknown, who: string) => hub.toCondition(e, who);
   /* A target (§5.3): a session handle, a sid string or a process; its sid. */
   const sidOf = (x: SchemeValue, who: string): string => {

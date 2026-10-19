@@ -5,7 +5,8 @@
 // server.hub: request(), send(), ptyInput(), the `sessions` map and events named after the hub's message
 // types (`session`, `gone`, `pty.out`, `pty.exit`, `pty.fg`, `acp.ev`, `acp.replayed`, `acp.info`, `err`),
 // plus `up` and `down` for the connection itself. edwind never starts a process itself (R4.45): everything a
-// process needs goes through this connection.
+// process needs goes through this connection. With no hubSocket in edit.json there is no connection: the hub
+// stays down and every request fails at once with the code `unconfigured`.
 //
 // Logging (R15.10): sids, event names and error codes only; never a command, input or output.
 import net from 'node:net';
@@ -79,7 +80,6 @@ export interface HubEvents {
 /* The message types onMessage passes on as they are. */
 type PassedOn = 'pty.out' | 'pty.exit' | 'pty.fg' | 'acp.ev' | 'acp.replayed' | 'acp.info';
 interface PendingReply { resolve: (r: HubReply) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
-interface UpWaiter { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
 
 export const name = 'hub';
 /* Constants of the hub protocol, reproduced from the Rust crates. */
@@ -98,11 +98,11 @@ export const STABLE_MS = 5000;                             // STABLE: a connecti
 export const REPLY_TIMEOUT_MS = 10000;                     // REPLY_TIMEOUT
 /* A pty.kill or acp.kill with forget waits for the exit (about 3 s for a PTY, 8 s for an agent, conn.rs LINGER). */
 export const KILL_TIMEOUT_MS = 30000;
-export const DEFAULT_SOCKET = '/run/workbench-hub/hub.sock'; // DESIGN §3.2.1
 const CLIENT = 'edwind';
 
 /* A failed hub request: `code` is the hub's error code (wb_proto::hub::ErrorCode), or `unavailable` when
-   the hub cannot be reached, or `timeout` when it did not answer in time. */
+   the hub cannot be reached, `unconfigured` when edit.json names none, or `timeout` when it did not answer
+   in time. */
 export class HubError extends Error {
   declare code: string;
   constructor(code: string, message: string) { super(message); this.code = code; }
@@ -122,16 +122,15 @@ export function inputFrames(text: string): string[] {
 }
 
 export class Hub extends EventEmitter<HubEvents> {
-  declare server: Server; declare log: Log; declare path: string;
+  declare server: Server; declare log: Log; declare path: string | null;
   declare status: HubStatus;
   declare info: HubInfo | null;
   declare sessions: Map<string, Summary>;
   declare sock: net.Socket | null; declare pending: Map<number, PendingReply>; declare nextRid: number;
   declare backoff: number; declare timer: NodeJS.Timeout | null; declare stopped: boolean; declare upSince: number;
-  declare upWaiters: UpWaiter[];
   /* Set by install(): a HubError (or any error) as the Scheme condition it stands for. */
   declare toCondition: (e: any, who: string) => SchemeValue; // any: whatever a request or a primitive threw
-  constructor(server: Server, socketPath: string) {
+  constructor(server: Server, socketPath: string | null) {
     super();
     this.server = server; this.log = server.log; this.path = socketPath;
     this.status = 'down';                               // down | up | incompatible
@@ -139,12 +138,11 @@ export class Hub extends EventEmitter<HubEvents> {
     this.sessions = new Map();                           // sid -> Summary, from watch (R5.7); empty while down
     this.sock = null; this.pending = new Map(); this.nextRid = 1;
     this.backoff = BACKOFF_MIN_MS; this.timer = null; this.stopped = false; this.upSince = 0;
-    this.upWaiters = [];
     this.setMaxListeners(0);
   }
 
   /* ---------- connection ---------- */
-  start() { this.stopped = false; this.connect(); }
+  start() { this.stopped = false; if (this.path) this.connect(); else this.log.info('hub', { event: 'none configured' }); }
   stop() {
     this.stopped = true;
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
@@ -152,18 +150,11 @@ export class Hub extends EventEmitter<HubEvents> {
     this.failPending(new HubError('unavailable', 'edwind is stopping'));
   }
   get up() { return this.status === 'up'; }
-  /* Resolves once the hub is up, or rejects with hub unreachable after MS. */
-  whenUp(ms = 0): Promise<void> {
-    if (this.up) return Promise.resolve();
-    if (!ms) return Promise.reject(new HubError('unavailable', 'hub unreachable'));
-    return new Promise((resolve, reject) => {
-      const w: UpWaiter = { resolve, reject, timer: setTimeout(() => { const i = this.upWaiters.indexOf(w); if (i >= 0) this.upWaiters.splice(i, 1); reject(new HubError('unavailable', 'hub unreachable')); }, ms) };
-      w.timer.unref(); this.upWaiters.push(w);
-    });
-  }
+  /* What a request meets while the hub is not up. */
+  unreachable(): HubError { return this.path ? new HubError('unavailable', 'hub unreachable') : new HubError('unconfigured', 'no hub configured (edit.json has no hubSocket)'); }
   connect() {
     if (this.stopped) return;
-    const sock = net.connect(this.path);
+    const sock = net.connect(this.path!);
     this.sock = sock;
     let buf = '', hello = false, connected = false, closed = false;
     const connectTimer = setTimeout(() => { if (!connected) { this.log.debug('hub', { event: 'connect timeout' }); sock.destroy(); } }, CONNECT_TIMEOUT_MS); connectTimer.unref();
@@ -206,7 +197,6 @@ export class Hub extends EventEmitter<HubEvents> {
       for (const s of Array.isArray(r.sessions) ? r.sessions : []) if (s && typeof s.sid === 'string') this.sessions.set(s.sid, s);
       this.status = 'up'; this.upSince = Date.now();
       this.log.info('hub', { event: 'up', version: this.info!.version, host: this.info!.host, shells: this.info!.shells, sessions: this.sessions.size });
-      for (const w of this.upWaiters.splice(0)) { clearTimeout(w.timer); w.resolve(); }
       this.emit('up');
     }, (e: HubError) => { this.log.warn('hub', { event: 'watch failed', code: e.code }); if (this.sock) this.sock.destroy(); });
     this.write({ t: 'watch', rid });
@@ -253,7 +243,7 @@ export class Hub extends EventEmitter<HubEvents> {
   /* ---------- requests ---------- */
   rid() { const r = this.nextRid++; if (this.nextRid > Number.MAX_SAFE_INTEGER) this.nextRid = 1; return r; }
   write(obj: object) {
-    if (!this.sock || this.sock.destroyed) throw new HubError('unavailable', 'hub unreachable');
+    if (!this.sock || this.sock.destroyed) throw this.unreachable();
     this.sock.write(JSON.stringify(obj) + '\n');
   }
   expect<R = HubReply>(rid: number, timeoutMs: number): Promise<R> {
@@ -266,14 +256,14 @@ export class Hub extends EventEmitter<HubEvents> {
   request<T extends keyof HubReplies>(msg: HubRequest & { t: T }, timeoutMs?: number): Promise<HubReplies[T]>;
   request(msg: HubRequest, timeoutMs?: number): Promise<HubReply>;
   request(msg: HubRequest, timeoutMs = REPLY_TIMEOUT_MS): Promise<HubReply> {
-    if (!this.up) return Promise.reject(new HubError('unavailable', 'hub unreachable'));
+    if (!this.up) return Promise.reject(this.unreachable());
     const rid = this.rid();
     const p = this.expect(rid, timeoutMs);
     try { this.write({ ...msg, rid }); } catch (e) { this.pending.delete(rid); return Promise.reject(e); }
     return p;
   }
   /* A message without a reply (pty.input, pty.resize). Throws HubError when down. */
-  send(msg: HubRequest) { if (!this.up) throw new HubError('unavailable', 'hub unreachable'); this.write(msg); }
+  send(msg: HubRequest) { if (!this.up) throw this.unreachable(); this.write(msg); }
   /* pty.input for SID, split at PTY_INPUT_FRAME (R4.43). */
   ptyInput(sid: string, text: string) { for (const d of inputFrames(String(text))) this.send({ t: 'pty.input', sid, d }); }
   /* The shell a spawn without an explicit one uses: bash when the hub offers it, else the hub's default (R4.43). */
@@ -287,7 +277,7 @@ export async function install(server: Server) {
   /* Conditions other modules signal for hub trouble (R4.43, R4.44): hub-error when the hub cannot be
      reached or refuses a request; process-error for a refused spawn or a dead process. */
   for (const k of ['hub-error', 'process-error', 'stale-object', 'no-leader']) S.defineConditionType(k, 'error');
-  const hub = new Hub(server, server.cfg.hubSocket || DEFAULT_SOCKET);
+  const hub = new Hub(server, server.cfg.hubSocket || null);
   server.hub = hub;
   /* A HubError as the Scheme condition it stands for. */
   hub.toCondition = (e, who) => {
