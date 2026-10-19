@@ -1260,7 +1260,7 @@ CMD('describe-browser-keys', '', '', 'List the keys the browser keeps for itself
 
 /* ---------- configuration files: emacs.scm, evil.scm, org.scm, ai.scm and init.scm ---------- */
 /* A lazy config (org.scm) is evaluated at boot without a buffer; :e org.scm then shows the shipped text.
-   The host reads the shipped files (R4.1): the page's Scheme blocks in a browser, edwin/scm/ under Node. */
+   The host reads the shipped files (R4.1): the page's Scheme blocks in a browser, scm/ under Node. */
 /* markdown.scm is loaded when the host has it (package E of E3); the standalone page may not carry it. */
 const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
 const shipped = (name: string) => host.config(name);

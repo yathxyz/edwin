@@ -1,14 +1,14 @@
 /* The window (DT2): what main.ts uses instead of the terminal when edwin runs with --gui.
 
    The frame is the same model frame (display.ts); its backend hands each model to the window (__n.guiDraw,
-   drawn by edwin/native/src/gui). The window's events come back as JSON (__native.gui): keys arrive as the
+   drawn by native/src/gui). The window's events come back as JSON (__native.gui): keys arrive as the
    browser's keydown does, key and code and modifiers, and are named by the core's own Ed.keyName, so a key means
    in the window what it means on the page; text from an input method arrives whole; mouse, focus, paste and
    resize are display.ts's input events already. */
 (function () {
 'use strict';
 const N = globalThis.__n;
-/* What the window sends (edwin/native/src/gui), as JSON: a keydown, an input method's text, the close button, a
+/* What the window sends (native/src/gui), as JSON: a keydown, an input method's text, the close button, a
    dropped file, or a display event. */
 type GuiWindowEvent = ({ type: 'key' } & Parameters<EdGuiApi['keydown']>[0]) | { type: 'text'; text?: unknown } | { type: 'close' } | { type: 'drop'; path?: unknown }
   | Exclude<EdDisplayEvent, { type: 'key' }>;

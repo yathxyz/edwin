@@ -18,7 +18,7 @@
      windows  [{id, x, y, w, h, selected, buffer, start, lastLine}], h counting the modeline row
    Faces are data here too: FACES gives each class the renderer emits (renderBuffer's runs, Org and markdown-mode
    classes, the modeline and echo parts) a spec in palette tokens, and PALETTE gives the tokens the values of
-   edwin/index.html in its light and dark themes. A token set with set-face-color! (host.page vars) wins, as it
+   index.html in its light and dark themes. A token set with set-face-color! (host.page vars) wins, as it
    does on the page. test/display.test.mts checks both tables against the stylesheets they mirror.
 
    What a model frame does not show yet: snipe boxes and the pulse are cell faces or nothing (no animation), the

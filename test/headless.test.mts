@@ -1,4 +1,4 @@
-// Edwin's editing core with no browser: `node --test edwin/test/`.
+// Edwin's editing core with no browser: `node --test test/`.
 // One Edwin per process (it keeps its state in globals), so the cases run in order on fresh buffers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

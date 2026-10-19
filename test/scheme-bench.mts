@@ -1,4 +1,4 @@
-// Evaluator benchmarks for Edwin Scheme: `node edwin/test/scheme-bench.mts [repetitions]`.
+// Evaluator benchmarks for Edwin Scheme: `node test/scheme-bench.mts [repetitions]`.
 //
 // Runs each benchmark on src/scheme.ts with the shadow stack compiled in and compiled out
 // (globalThis.SCHEME_SHADOW_STACK = false at load), in generator mode (globalThis.SCHEME_MODE = 'gen',
@@ -54,9 +54,9 @@ const BENCHES: [name: string, setup: string, expr: string][] = [
 
 function baselineSource(): { src: string; commit: string } | null {
   try {
-    const commits = execFileSync('git', ['log', '--format=%H', '--', 'edwin/src/scheme.ts', 'edwin/src/scheme.js'], { cwd: ROOT, encoding: 'utf8' }).trim().split('\n');
+    const commits = execFileSync('git', ['log', '--format=%H', '--', 'src/scheme.ts', 'src/scheme.js'], { cwd: ROOT, encoding: 'utf8' }).trim().split('\n');
     for (const c of commits) {
-      let src: string; try { src = execFileSync('git', ['show', `${c}:edwin/src/scheme.js`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { src = stripTypeScriptTypes(execFileSync('git', ['show', `${c}:edwin/src/scheme.ts`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 26 }), { mode: 'strip' }); }
+      let src: string; try { src = execFileSync('git', ['show', `${c}:src/scheme.js`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 26, stdio: ['ignore', 'pipe', 'ignore'] }); } catch { src = stripTypeScriptTypes(execFileSync('git', ['show', `${c}:src/scheme.ts`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 1 << 26 }), { mode: 'strip' }); }
       if (!src.includes('SCHEME_SHADOW_STACK')) return { src, commit: c.slice(0, 8) };
     }
   } catch (e) { /* no git: skip the baseline */ }

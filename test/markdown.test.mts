@@ -2,7 +2,7 @@
 // ((reference)) overlays, folding, every command of the table, the task keyword table shared with Org,
 // journal-today's file name and the font-lock budget (a keystroke in a 10,000-line page re-fontifies in
 // 2 ms, never over the whole buffer). One Edwin per process, so the cases run in order on fresh buffers.
-// Run: node --test edwin/test/markdown.test.mts
+// Run: node --test test/markdown.test.mts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

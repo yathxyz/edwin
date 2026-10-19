@@ -53,7 +53,7 @@ export interface Anchor { id: string; pos: number; label?: string; quote: string
 /* An `a` line as read back from a journal: unchecked JSON. */
 export interface AnchorsLineIn { ver?: unknown; anchors?: unknown }
 interface AnchorIn { id?: unknown; pos?: unknown; quote?: unknown; prefix?: unknown; label?: unknown }
-/* A string, or a rope (edwin/src) with slice. */
+/* A string, or a rope (src) with slice. */
 export interface TextLike { slice(start: number, end: number): string }
 
 /* ---------- the marker rules, used by the sequencer ---------- */

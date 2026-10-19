@@ -11,7 +11,7 @@ import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { EditOp, UndoTag } from './ot-sim.mts';
 
-/* A message of the edit protocol (spec §7.1); edwin/server/proto.mts has no message types to import. */
+/* A message of the edit protocol (spec §7.1); server/proto.mts has no message types to import. */
 export type Msg = Record<string, any>; // any: wire JSON
 
 /* edit.json as makeDir writes it, with the fields the suite added. */

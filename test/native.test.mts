@@ -1,6 +1,6 @@
 // The core's seams for the desktop program (DT1): a host file system (host.files), leaving with an exit status
 // (hooks.killEmacs), suspending, the input half of the display seam, and persistent tables read again.
-// The Node host stands in for host-native.ts; the program itself is tested by edwin/native/tests.
+// The Node host stands in for host-native.ts; the program itself is tested by native/tests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

@@ -1,5 +1,5 @@
 // The notes parser (spec R11.2): one pure function, parseFile(id, text, grammar), from a note's text to its
-// records (file, headings, blocks, links, tasks, cards) under the grammar of edwin/scm/notes-syntax.scm.
+// records (file, headings, blocks, links, tasks, cards) under the grammar of scm/notes-syntax.scm.
 // It runs in-process (a buffer re-parse after an edit, the task editor) and as the body of a worker thread
 // (R11.5): started with workerData.notesWorker, this module reads and parses files off the event loop,
 // scans the tree and greps it, so the server never parses on its own thread except one buffer at a time.

@@ -1,4 +1,4 @@
-// The intrinsics lockdown (edwin/server/lockdown.mts, R14.11, R16.16): `node --test edwin/test/lockdown.test.mts`.
+// The intrinsics lockdown (server/lockdown.mts, R14.11, R16.16): `node --test test/lockdown.test.mts`.
 //
 // Each case runs in a child process, so the test runner's own realm stays open: the child locks down, then
 // prints what it found as JSON.

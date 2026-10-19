@@ -4,7 +4,7 @@
 // localStorage exists in this process, so any page access left in the core fails here (R4.1).
 import { createRequire } from 'node:module';
 
-export type Edwin = any; // any: Edwin's core (Ed, E, L) is outside this program's types (edwin/src)
+export type Edwin = any; // any: Edwin's core (Ed, E, L) is outside this program's types (src)
 
 /* The host's key-value store (memoryStorage, or edwind's file store). */
 export interface HostStorage { get(k: string): string | null; set(k: string, v: unknown): boolean; remove(k: string): void; keys(): string[] }

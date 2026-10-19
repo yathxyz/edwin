@@ -1,6 +1,6 @@
 // Workbench objects, the session family and the events (spec §5: R5.2, R5.3 session API, R5.4, R5.7, R5.8;
-// §13.3). The spec puts these primitives in edwin/src/wb.js; server-only code of this repository lives in
-// edwin/server, so they are here (a recorded deviation) and edwin/scm/wb.scm wraps them.
+// §13.3). The spec puts these primitives in src/wb.js; server-only code of this repository lives in
+// server, so they are here (a recorded deviation) and scm/wb.scm wraps them.
 //
 // Sessions are handles: one interned object per sid (eq? after interning), printed #<session pty ed-…>,
 // valid for ever; reading a forgotten session raises stale-object (§5.2). Their facts come from the hub's
@@ -28,7 +28,7 @@ import type { Hub, Summary, SessionKind, HubMessage, AcpEvent } from './hub.mts'
 import type { Scheduler, SchemeGen, Thread } from './threads.mts';
 import type { SBuf } from './buffers.mts';
 
-/* The evaluator S of edwin/src, loaded through vm like the rest of L: its types (core.d.ts) are not this program's. */
+/* The evaluator S of src, loaded through vm like the rest of L: its types (core.d.ts) are not this program's. */
 type Scheme = Lisp['S'];
 /* A function receiving the acp.* messages of one session, and {t: 'down'} when the hub goes away. */
 export type AcpCollector = (m: HubMessage) => void;

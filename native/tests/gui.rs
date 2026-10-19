@@ -292,7 +292,7 @@ fn the_close_button_asks_about_changes() {
     assert_eq!(read(dir.join("a.txt")), "onetwo\n");
 }
 
-/// The budget (edwin/README.md, step DT2): from a key's arrival to the frame's present, on a 200x50 window full of
+/// The budget (README.md, step DT2): from a key's arrival to the frame's present, on a 200x50 window full of
 /// source text, p50 at most 10 ms and p99 at most 25 ms, on the software renderer. Timing on a shared machine is
 /// noisy, so this runs on request and alone: cargo test --release -- --ignored latency
 #[test]

@@ -1,4 +1,4 @@
-// Edwin Scheme by itself: `node --test edwin/test/scheme.test.mts`.
+// Edwin Scheme by itself: `node --test test/scheme.test.mts`.
 // Loads only src/scheme.ts (no editor, no page stand-ins). The suite runs once per evaluator mode
 // in MODES (only 'direct' today; EDWIN_SCHEME_MODE picks one).
 import { test, describe } from 'node:test';

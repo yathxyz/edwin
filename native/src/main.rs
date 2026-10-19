@@ -2,7 +2,7 @@
 //!
 //! The Rust side is the host's floor: the files, the terminal or the window, signals, edwind's socket and the
 //! event loop. Everything Edwin is runs as JavaScript: native/js/prelude.ts, host-native.ts, term.ts and
-//! main.ts, which loads the unchanged core from edwin/src. All of it is compiled into the binary, with the
+//! main.ts, which loads the unchanged core from src. All of it is compiled into the binary, with the
 //! shipped Scheme.
 //!
 //! The loop: poll the terminal (or pump the window's events), the signal pipe and the sockets; hand what arrived

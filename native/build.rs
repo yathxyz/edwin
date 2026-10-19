@@ -59,7 +59,7 @@ fn check_stripped() {
             let age = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
             if age(&js).is_none_or(|j| Some(j) < age(&ts)) {
                 panic!(
-                    "{} is missing or older than {}: run `node tools/strip.mts --in-place edwin/src edwin/native/js` in the repository",
+                    "{} is missing or older than {}: run `node tools/strip.mts --in-place src native/js` in the repository",
                     js.display(),
                     ts.display()
                 );

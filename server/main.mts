@@ -42,11 +42,11 @@ import type { Processes } from './process.mts';
 import type { Wb } from './wb.mts';
 import type { Anchors } from './anchors.mts';
 
-/* edwin/src, loaded through host-node.cts, is outside this program's types: these name what the server holds of it. */
-export type Ed = any; // any: the Edwin core (edwin/src) is outside this program's types
-export type Lisp = any; // any: globalThis.L, the Scheme runtime of edwin/src, is outside this program's types
-export type EdBuffer = any; // any: an Edwin buffer object of edwin/src (rope, mode, markers)
-export type SchemeValue = any; // any: a value of the evaluator (edwin/src), of any Scheme type
+/* src, loaded through host-node.cts, is outside this program's types: these name what the server holds of it. */
+export type Ed = any; // any: the Edwin core (src) is outside this program's types
+export type Lisp = any; // any: globalThis.L, the Scheme runtime of src, is outside this program's types
+export type EdBuffer = any; // any: an Edwin buffer object of src (rope, mode, markers)
+export type SchemeValue = any; // any: a value of the evaluator (src), of any Scheme type
 
 /* The log (R15.10): one line per event with its fields. */
 export type LogFields = Record<string, unknown>;

@@ -608,7 +608,7 @@ impl EdwindUp {
     }
 }
 
-/// Attaching to edwind needs Node and edwind's test harness (edwin/test/edit-client.mts); skipped without node.
+/// Attaching to edwind needs Node and edwind's test harness (test/edit-client.mts); skipped without node.
 #[test]
 fn attached_notes_go_through_edwind_and_other_files_stay_local() {
     if !have_node() {

@@ -8,10 +8,24 @@ The design and the decisions are in the doc "Edwin as Workbench's text daemon" (
 replaces the notes index and `sample` of M5 (M5-W1, M5-W2), pages are files in `notesDir`, markdown-mode comes
 first, undo undoes your own edits, and the runtime is Node.
 
+Until 2026-10-19 this repository was the `edwin/` directory of [Workbench](https://github.com/yathxyz/workbench),
+which now takes it as its flake input `edwin` (its history came along). The step logs below were written there, so
+the `crates/`, `web/`, `tests/`, `docs/DESIGN.md`, `nix/module.nix` and `nix/vm.nix` they name are Workbench's. Two
+suites compare Edwin with Workbench and live there: the board's block addresses against `scm/address.scm`
+(`edit-address`, Workbench's `tests/address.test.mts`) and `MAX_LINE` against wb-proto's (wb-cli's tests).
+Workbench's flake check runs this repository's checks too.
+
+```sh
+nix build .#edwin           # bin/edwin (terminal, -g window), bin/edwin-daemon, bin/edwind
+nix build .#edwin-web       # the frame runtime a page serves: index.html, src/*.js, scm/*.scm
+nix flake check -L          # the suites below, the type check (edwin-typecheck) and programs.edwin
+(cd tools && npm ci)        # without nix: typescript, @types/node and fast-check for tsc and the OT suite
+```
+
 ## TypeScript
 
 edwind (`server/*.mts`) and the suites (`test/*.mts`) are TypeScript that Node 24 runs as it is: Node strips
-the types at load, and `tsc -p edwin` (flake check `typecheck`, `--strict`) checks them. The rules that keep
+the types at load, and `tsc -p .` (flake check `edwin-typecheck`, `--strict`) checks them. The rules that keep
 that working:
 - **Erasable syntax only** (`erasableSyntaxOnly`): no `enum`, `namespace`, parameter properties or `import =`.
   Stripping then leaves every line and column where it was, so stack traces and `defAt` locations match the source.
@@ -19,20 +33,20 @@ that working:
   behaviour.
 - **Relative imports name the `.mts` file** (`allowImportingTsExtensions`); type-only imports use `import type`.
 - **`any` is marked**: every one carries `// any: <reason>`. Most are the aliases in `main.mts` (`Ed`, `Lisp`,
-  `EdBuffer`, `SchemeValue`) for the core in `edwin/src`, which the server loads through `vm` and so sees untyped.
+  `EdBuffer`, `SchemeValue`) for the core in `src`, which the server loads through `vm` and so sees untyped.
 - The unit sets `NODE_COMPILE_CACHE` (`CacheDirectory=workbench-edit`), so only the first start after a deploy
   pays for stripping (about 240 ms).
 
 The core (`src/*.ts`) and desktop Edwin's JavaScript (`native/js/*.ts`) are TypeScript too, checked by
-`tsc -p edwin/src` and `tsc -p edwin/native/js`. They are classic scripts (no `import` or `export`) that share
+`tsc -p src` and `tsc -p native/js`. They are classic scripts (no `import` or `export`) that share
 globals; the types they hand each other are in `src/core.d.ts`. The browser, Node's `vm` and V8 run the `NAME.js`
 that `tools/strip.mts` makes beside each `NAME.ts`, so a page, desktop Edwin's build (`build.rs` refuses a missing or
 stale `.js`) and the nix packages all strip first. In a checkout:
 
-    node tools/strip.mts --in-place edwin/src edwin/native/js
+    node tools/strip.mts --in-place src native/js
 
 `host-node.cts` loads a `.js` only when it is at least as new as its `.ts`, and strips the `.ts` itself otherwise,
-so edwind and the suites need no step. `src/host-node.cts` is checked with the server (`tsc -p edwin`).
+so edwind and the suites need no step. `src/host-node.cts` is checked with the server (`tsc -p .`).
 
 ## Layout
 
@@ -43,7 +57,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `index.html` | the page: styles, the Scheme blocks and the script tags. It loads `src/*.js` relative to itself, so serving this directory runs it, and a published copy keeps the `src/` paths |
 | `src/host-browser.ts`, `src/host-node.cts` | the host layer (R4.1): storage, the shipped Scheme, page attributes, suspend, clipboard, scheduling. The core reaches the page only through it and through frame objects |
 | `test/headless.mts` | loads and boots the editor in Node on `host-node.cts` (no page objects exist in the process) and drives it with keys |
-| `test/headless.test.mts` | the headless suite: `node --test edwin/test/headless.test.mts`, or `nix build .#checks.x86_64-linux.edwin-headless` |
+| `test/headless.test.mts` | the headless suite: `node --test test/headless.test.mts`, or `nix build .#checks.x86_64-linux.edwin-headless` |
 | `test/scheme.test.mts`, `test/scheme-editor.test.mts` | the Scheme suite: the language, and the editor-level forms. `nix build .#checks.x86_64-linux.edwin-scheme` runs both and the benchmark |
 | `test/scheme-bench.mts` | evaluator benchmarks; fails when the shadow stack costs more than 10% (R4.34) |
 | `src/ot.ts` | the OT library (ops, transform, rebase, undo, markers, hash) shared by edwind and its clients (E1) |
@@ -95,19 +109,19 @@ Choices E0 made where the spec left one open:
 
 ## Step E1: edwind, the text daemon (done)
 
-`edwin/server/` is edwind: a Node process that loads the core headless, keeps every shared buffer as an Edwin
+`server/` is edwind: a Node process that loads the core headless, keeps every shared buffer as an Edwin
 buffer, sequences edits from any number of clients over `edit.sock`, journals them, saves atomically and watches
 the files on disk. `crates/wb-cli` is `wb buf`, `wb eval`, `wb edit` and `wb repl` over the same socket.
 `nix/edwind.nix` installs `share/edwin/{src,scm,server}` and `bin/edwind` (the workbench package links them); `nix/module.nix` has
 `services.workbench.edit.*` and `workbench-edit.service`; `nix/checks.nix` has `edwin-ot`, `edit-conformance`,
 `edit-crash` (about thirteen minutes: 1,000 kills) and `edit-disk`; `nix/vm.nix` step 10 covers R16.18's E1 part.
 
-Layout of `edwin/server/`: `main.mts` (config, start, listen, `--check`, `--export`, evaluation, the E1 server
+Layout of `server/`: `main.mts` (config, start, listen, `--check`, `--export`, evaluation, the E1 server
 commands), `session.mts` (one client: §7 messages), `sequencer.mts` (rebase, apply, journal, ack, replay, undo),
 `buffers.mts` (open, save, revert, disk changes, compaction, index), `journal.mts` (group commit, snapshots, the
 image log), `files.mts` (text files, CRLF, atomic save), `paths.mts` (ids and the file authority of R14.8),
 `watch.mts` (inotify, the line-then-character diff, the three-way merge), `proto.mts` (constants and field
-checks). `edwin/src/ot.ts` is the OT library both ends share; `edwin/test/edit-client.mts` is the test client.
+checks). `src/ot.ts` is the OT library both ends share; `test/edit-client.mts` is the test client.
 
 Running edwind by hand: `edwind --config edit.json` where `edit.json` has at least `notesDir` (see
 `loadConfig` in `main.mts` for the fields of R15.4); the socket's directory must be yours and 0700.
@@ -180,7 +194,7 @@ the model layer and processes through the hub are server modules with Scheme pri
 the gates `edit-image`, `edit-notes`, `edit-address`, `edwin-bench` (the evaluator budgets), `edit-lisp`,
 `edit-process`, `edwin-pool` and `edit-security`; wb-web forwards the notes endpoints and `sample` over `edit.sock`.
 
-Layout added in E2 (`edwin/server/` unless said): `threads.mts` (the scheduler, held buffers, ask, timers,
+Layout added in E2 (`server/` unless said): `threads.mts` (the scheduler, held buffers, ask, timers,
 blocking primitives; `scm/threads.scm`), `debug.mts` (the debugger, the inspector, apropos, find-definition,
 room, list-threads, list-clients, the primitive registry; `scm/debug.scm`), `image.mts` (the image log and its
 replication, `*image-log*`), `notes.mts` and `notes-parse.mts` (the notes index on a worker thread;
@@ -282,8 +296,8 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   the send). Hooks: `wb-session-exit-functions`, `wb-session-output-functions` (attached only while non-empty
   and viewed, coalesced per 100 ms), `wb-acp-turn-end-functions`, `wb-page-saved-functions`,
   `wb-card-created/deleted/moved-functions` from diffing saves of `<boardsDir>/<host>.json`; card hooks pass
-  `(id node-alist)` since card handles need the board family (EW-M4). The primitives live in `edwin/server`,
-  not `edwin/src/wb.js` as the spec names, because server-only code lives there. R13.2 (classifying `wb`'s
+  `(id node-alist)` since card handles need the board family (EW-M4). The primitives live in `server`,
+  not `src/wb.js` as the spec names, because server-only code lives there. R13.2 (classifying `wb`'s
   session from the hub summary) is not done; `server.hub.sessions` is ready for it. Both suites run against the
   fake hub `test/fake-hub.mts`.
 - **The model layer (§12, R14.4–R14.7)** is `models.mts` with `scm/models.scm`. Backends are objects of two
@@ -429,7 +443,7 @@ read-only: no text authority runs there, so no editor is offered, and the board'
 `web/app.ts`'s page API (`pageEdit`, `pageSetText`, ...) to the node's text. The vendor bundle and
 `tools/package-lock.json` no longer carry CodeMirror, `@replit/codemirror-vim` or lezer. Edwin's markdown `[[`
 completion gains the hook `linkNames`, through which the board adds its card and folder names, so wiki links to
-cards that are not files still complete. `edwin/test/address.test.mts` runs the board's buffer addresses over
+cards that are not files still complete. The address suite (now Workbench's `tests/address.test.mts`) runs the board's buffer addresses over
 `TextDoc` (app.ts's line index) instead of `@codemirror/state`.
 
 ## Step DT3: attach anywhere (in review)
@@ -609,7 +623,7 @@ images, a menubar, smooth scrolling, opening the window while the snapshot resto
 ## Step DT1: `edwin` in a terminal (done)
 
 `edwin [-nw] [-R] [--standalone | --socket PATH] [+LINE] [FILE]...` is Edwin as a terminal program, meant to stand
-in for Vim or Neovim, `$EDITOR` included. `edwin/native` is a Rust crate (its own Cargo workspace, so V8 stays out
+in for Vim or Neovim, `$EDITOR` included. `native` is a Rust crate (its own Cargo workspace, so V8 stays out
 of the Workbench crates and their Nix build) that embeds V8 (the `v8` crate, 130.0.1, prebuilt) and carries every
 source it runs: the unchanged core in `src/`, the shipped Scheme in `scm/`, and `native/js/`. Rust is only the
 floor: files, `/dev/tty` in raw mode, signals through a self-pipe, edwind's socket and one `poll(2)` loop. Edwin is
@@ -617,7 +631,7 @@ a model frame (DT0) drawn by `native/js/term.ts`.
 
 Build and run (the prebuilt V8 is downloaded by the `v8` crate's build script, or named by `RUSTY_V8_ARCHIVE`; `nix build .#edwin` does it all, see DT4):
 
-    cd edwin/native && cargo build --release && ./target/release/edwin FILE
+    cd native && cargo build --release && ./target/release/edwin FILE
     cargo test --release        # the pseudo-terminal suite (the edwind case needs node)
 
 - **Vim's contract.** `:q` on the last window ends the program, refusing with E37 or E162 while a file has unsaved

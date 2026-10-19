@@ -1,5 +1,5 @@
 // The notes index (spec §11): every *.md and *.org under notesDir parsed under the grammar of
-// edwin/scm/notes-syntax.scm into file, heading, block, link, task and card records (R11.1–R11.3), kept fresh
+// scm/notes-syntax.scm into file, heading, block, link, task and card records (R11.1–R11.3), kept fresh
 // from buffer edits (300 ms after the last one, from the live text), from file system events and a 10 s sweep
 // (R11.4), parsed in a worker thread (R11.5), snapshotted to <stateDir>/notes-index/index.json (R11.6), and
 // announced to every client as notes{gen} on each change (R11.7). The server commands behind wb-web's /api

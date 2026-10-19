@@ -1,5 +1,5 @@
 // The notes index (spec §16.1 edit-notes, §11): a real edwind over a copy of the fixture notesDir
-// (edwin/test/fixtures/notes/root). Every §11.3 command is compared field by field with a golden JSON file
+// (test/fixtures/notes/root). Every §11.3 command is compared field by field with a golden JSON file
 // under fixtures/notes/golden (NOTES_UPDATE_GOLDEN=1 rewrites them); then link resolution (R11.3), freshness
 // from buffer edits, file system events and the sweep (R11.4), the snapshot and restart (R11.6), the notes{gen}
 // message and notes-generation (R11.7), the writes as edits (R11.9), the Lisp procedures (R11.10) and the

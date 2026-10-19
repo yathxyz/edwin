@@ -16,7 +16,7 @@
    results cross by structured clone (plain data, typed arrays, Map, RegExp); typed arrays up to two levels
    deep in the result are transferred.
 
-   Adding a job from another server module: write it in its own file, say edwin/server/notes-job.mts, and
+   Adding a job from another server module: write it in its own file, say server/notes-job.mts, and
    add one line to the list at the end of this file:
        export * from './notes-job.mts';
    A name that is not an identifier is exported as a string: export { parseNote as 'notes-parse' };

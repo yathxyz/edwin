@@ -1,5 +1,5 @@
 // The editor-level Scheme of E0: markers, change hooks, advice, minor and derived modes, buffer-locals,
-// and the user's own init file (R4.11, R4.22–R4.26, R6.11, R6.12). `node --test edwin/test/`.
+// and the user's own init file (R4.11, R4.22–R4.26, R6.11, R6.12). `node --test test/`.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';

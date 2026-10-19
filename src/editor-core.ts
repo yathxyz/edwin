@@ -339,7 +339,7 @@ class Frame extends FrameState {
 /* Ed.makeFrame(el, {buffer, kind: 'card' | 'console', fontSize}) builds a frame's parts inside EL: the
    windows, the echo area, the hidden input textarea and the presence layer, with a menubar for a console
    (R9.2, R9.3). The older form makeFrame(root, parts) takes a page that already holds the parts
-   (edwin/index.html). The window tree starts with one window on BUFFER (else the current buffer).
+   (index.html). The window tree starts with one window on BUFFER (else the current buffer).
    Ed.makeFrame(null, {backend, buffer, kind, theme}) makes a model frame (DT0): no page, no DOM; each redisplay
    lays the frame out on backend.size()'s cell grid and hands the result to backend.draw (display.ts). */
 function makeFrame(root: HTMLElement | null, opts?: EdMakeFrameOpts) {

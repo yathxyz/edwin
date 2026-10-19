@@ -27,7 +27,7 @@ import type { Client } from './session.mts';
 import type { SBuf } from './buffers.mts';
 import type { Ed as Edwin, EdBuffer, Lisp, Log, SchemeValue, Server } from './main.mts';
 
-/* The evaluator S of edwin/src (scheme.ts), outside this program's types like the rest of L. */
+/* The evaluator S of src (scheme.ts), outside this program's types like the rest of L. */
 type Scheme = Lisp['S'];
 /* A generator the scheduler drives: it yields S.Block, S.Suspend or S.PREEMPT and is resumed with a value. */
 export type SchemeGen = Generator<SchemeValue, SchemeValue, SchemeValue>;

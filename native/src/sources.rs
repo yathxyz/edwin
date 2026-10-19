@@ -1,4 +1,4 @@
-//! Every source the binary carries: the core (edwin/src), the native layer (native/js) and the shipped Scheme.
+//! Every source the binary carries: the core (src), the native layer (native/js) and the shipped Scheme.
 
 /// JavaScript, by the name main.ts loads it with (core files bare, the native layer under native/).
 pub const JS: &[(&str, &str)] = &[

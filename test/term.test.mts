@@ -1,4 +1,4 @@
-// The terminal encoder and decoder of desktop Edwin (edwin/native/js/term.ts, DT1).
+// The terminal encoder and decoder of desktop Edwin (native/js/term.ts, DT1).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

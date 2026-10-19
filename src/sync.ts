@@ -4,15 +4,15 @@
    A shared buffer is an Edwin Buffer whose text is driven by the protocol: b.shared, b.id (the buffer id),
    b.sver (the last server version applied), b.inflight (the one unacknowledged batch), b.queue (later local
    batches, rebased on inflight), b.hist (sequenced batches since open), b.meta (file, mode, anchors, ...)
-   and b.presence (other writers' cursors). The transform is edwin/src/ot.ts, used exactly as the test
-   model edwin/test/ot-sim.mts Client does. Every text change goes through Ed.applyOps (R6.8): local
+   and b.presence (other writers' cursors). The transform is src/ot.ts, used exactly as the test
+   model test/ot-sim.mts Client does. Every text change goes through Ed.applyOps (R6.8): local
    commands reach this file through hooks.applied, remote batches are applied with it.
 
    Loaded after ot.ts in both runtimes; it does nothing until Ed.sync.start or Ed.bootServed is called,
    so edwind and the headless tests carry it inert. */
 (function () {
 'use strict';
-/* edwind's messages as this client reads them (edwin/server/proto.mts, section 7) */
+/* edwind's messages as this client reads them (server/proto.mts, section 7) */
 type SyncBy = {
   kind: 'frame' | 'cli' | 'web' | 'disk' | 'server' | 'agent'; cid?: string | null; device?: string | null; session?: string; thread?: string; agent?: string; tab?: unknown;
 };

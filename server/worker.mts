@@ -17,7 +17,7 @@ import { lockdown } from './lockdown.mts';
 import type { TransferListItem } from 'node:worker_threads';
 
 /* What the core files (text.ts, scheme.ts, runtime.ts, pool.ts) leave on the thread's global object. */
-type CoreGlobal = typeof globalThis & Record<string, any>; // any: edwin/src is loaded through vm, outside this program's types
+type CoreGlobal = typeof globalThis & Record<string, any>; // any: src is loaded through vm, outside this program's types
 /* The browser worker's self, as workerMain (pool.ts) uses it. */
 interface WorkerSelf {
   Scheme: unknown;

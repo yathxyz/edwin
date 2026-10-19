@@ -12,7 +12,7 @@ import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts
 import { rng, randOp } from './ot-sim.mts';
 import type { EditOp, OTModule } from './ot-sim.mts';
 
-type EdwinCore = any; // any: Edwin's core (edwin/src) is outside this program's types
+type EdwinCore = any; // any: Edwin's core (src) is outside this program's types
 type Batch = { seq: number; base: number; ops: EditOp[] };
 
 const require = createRequire(import.meta.url);

@@ -1,4 +1,4 @@
-// OT properties (spec §16.2, R16.1–R16.4) over edwin/src/ot.ts: convergence of random replicas,
+// OT properties (spec §16.2, R16.1–R16.4) over src/ot.ts: convergence of random replicas,
 // intention cases, marker agreement and undo. The scenarios come from a seeded generator, so a failing
 // case is one integer; those go to ot-seeds.json and are replayed forever (R16.1).
 import { test } from 'node:test';
@@ -35,7 +35,7 @@ test('R16.1 convergence: every replica ends with the server text', () => {
    deletion collapsed the range the marker stood at or next to: which side of the insert it ends on then
    depends on the order the two replicas applied them (an after marker at the start of a deleted range, a
    before marker at its end). So the property holds for markers no deletion reached; a marker a deletion
-   covered is dead in Edwin's sense and skipped as well. Recorded in edwin/README.md (E1). */
+   covered is dead in Edwin's sense and skipped as well. Recorded in README.md (E1). */
 test('R16.3 markers: markers no deletion reached agree between every replica and the server', () => {
   fc.assert(fc.property(seeds, (seed: number) => {
     const { server, clients } = session(seed);

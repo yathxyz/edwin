@@ -87,7 +87,7 @@ export function exitEvent(code: number | null | undefined, signal: number | null
 export class Process {
   declare name: string; declare sid: string; declare command: string | null; declare argv: string[]; declare shell: string;
   declare cwd: string | null; declare env: Record<string, string> | null; declare cols: number; declare rows: number; declare card: boolean;
-  declare buffer: EdBuffer | null; declare mark: SchemeValue | null; // an Edwin marker (edwin/src)
+  declare buffer: EdBuffer | null; declare mark: SchemeValue | null; // an Edwin marker (src)
   declare filter: SchemeValue | null; declare sentinel: SchemeValue | null; declare plist: Map<string, SchemeValue>; declare queryOnExit: boolean;
   declare pid: number | null; declare epoch: number | null; declare stream: number | null; declare out: number; declare startedAt: number;
   declare status: ProcessStatus;
@@ -120,7 +120,7 @@ export class Process {
 }
 
 export class Processes {
-  declare server: Server; declare log: Log; declare L: Lisp; declare S: Scheme; declare Ed: Edwin; declare E: SchemeValue; // E: Edwin's editor state (edwin/src)
+  declare server: Server; declare log: Log; declare L: Lisp; declare S: Scheme; declare Ed: Edwin; declare E: SchemeValue; // E: Edwin's editor state (src)
   declare byId: Map<string, Process>; declare outWaiters: OutWaiter[];
   declare onCard: ((p: Process) => void) | null; declare listTimer: NodeJS.Timeout | null;
   constructor(server: Server) {

@@ -2752,7 +2752,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 <script type="text/x-scheme" id="notes-syntax-scm">
 ;;; notes-syntax.scm: the one grammar of notes (spec R10.2, R11.2)
 ;;;
-;;; Everything that reads a note agrees here: the notes index (edwin/server/notes-parse.mts), markdown-mode's
+;;; Everything that reads a note agrees here: the notes index (server/notes-parse.mts), markdown-mode's
 ;;; font-lock (E3) and the tests. The grammar is data: regular-expression source strings in the JavaScript
 ;;; dialect (no flags; the reader adds them) and lists of keywords. (notes-grammar) returns it as an alist of
 ;;; name -> value, which the index reads once at install and ships to its parser worker.
@@ -2761,7 +2761,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;;; the heading regexp by the file's extension and applies everything else to both.
 
 ;; Task keywords: the one table shared by Org (org.scm reads org-todo-keywords from it), markdown-mode
-;; (edwin/src/markdown.ts reads notes-task-keywords and notes-done-keywords) and the notes index. An entry is
+;; (src/markdown.ts reads notes-task-keywords and notes-done-keywords) and the notes index. An entry is
 ;; (KEYWORD SELECTION DONE? ALIAS-OF): SELECTION is the Org fast-selection key with its logging flags
 ;; ("w@/!"), or #f for a keyword Org does not offer; DONE? marks a done state; ALIAS-OF names the keyword an
 ;; alias stands for. The first seven are the user's Org set; DOING, NOW and LATER are read as aliases (DOING
@@ -2906,7 +2906,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; A pure Scheme port of bufferAddress, fmtAddr and resolveBufferAddress in web/app.ts (the
 ;; "addresses" section).  An address names a place in a Markdown buffer by its heading path, the
 ;; paragraph number under the innermost heading and a short quote of the words at point, so it
-;; reads aloud and survives line shifts.  The golden test edwin/test/address.test.mts checks every
+;; reads aloud and survives line shifts.  Workbench's golden test tests/address.test.mts checks every
 ;; procedure here against the JavaScript over generated cases, so the regexps and the order of
 ;; the steps below follow app.js exactly, including its corners (a quote may keep a trailing
 ;; space when the line ends in whitespace, an empty name resolves to the first buffer, and so on).
@@ -3105,7 +3105,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;;;
 ;;; The grammar is notes-syntax.scm (wiki links, block refs, anchors, the task keyword table shared with
 ;;; Org, key:: fields, priorities); the lexer, the display overlays and the editing primitives (%markdown-*)
-;;; are in edwin/src/markdown.ts, which loads after org.ts. This file defines the variables the runtimes
+;;; are in src/markdown.ts, which loads after org.ts. This file defines the variables the runtimes
 ;;; bind, the mode, its commands and its keys. org.scm requires it after Org and before init.scm, so the
 ;;; user's init.scm can change everything here.
 
@@ -3311,7 +3311,7 @@ a URL or [label](target) through org-open-at-point."
 ;;
 ;; One engine for both syntaxes of a note: Org's #+begin_src LANG :k v with #+name: and #+RESULTS:, and
 ;; markdown's ```LANG {#id k=v} with ```result {of=id}. The reader and the result writer are primitives of
-;; edwin/server/babel.mts (%babel-*); this file holds the engine: the executors, the note environments, where
+;; server/babel.mts (%babel-*); this file holds the engine: the executors, the note environments, where
 ;; a result goes, the commands and their keys. markdown.scm requires it, so it loads in every runtime: frames
 ;; need the commands to know that they run in edwind.
 ;;

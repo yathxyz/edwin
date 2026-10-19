@@ -14,7 +14,7 @@
 // procedures and plain host objects, numbered so a part can be entered and the path popped. apropos,
 // find-definition, room, list-threads and list-clients render their own special buffers. The primitive
 // registry (R4.48) lists every JS primitive with its arity, documentation, where it runs and its source
-// line in edwin/src or edwin/server; `edwind --primitives` prints it as JSON.
+// line in src or server; `edwind --primitives` prints it as JSON.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,7 @@ import type { Client } from './session.mts';
 import type { SBuf } from './buffers.mts';
 import type { Ed as Edwin, Lisp, Log, SchemeValue, Server } from './main.mts';
 
-/* The evaluator S of edwin/src (scheme.ts), outside this program's types like the rest of L. */
+/* The evaluator S of src (scheme.ts), outside this program's types like the rest of L. */
 type Scheme = Lisp['S'];
 export interface SourceLoc { file?: string | null; line: number; col?: number }
 /* The parts of a procedure the debugger reads: compound procedures have a scope (parameter name -> frame slot). */
@@ -287,7 +287,7 @@ export class Debugger {
     return out.join('\n') + '\n';
   }
   /* Where NAME is defined: {file, line, kind} for a Scheme procedure (its lambda's location), a JS primitive
-     (the registry's line in edwin/src or edwin/server) or a macro; null when unknown. */
+     (the registry's line in src or server) or a macro; null when unknown. */
   findDefinition(nm: string): DefinitionLocation | null {
     const { S, L } = this;
     const f = L.fnOrNull(S.intern(nm));
@@ -307,8 +307,8 @@ export class Debugger {
   }
 
   /* ---------- the primitive registry (R4.48) ---------- */
-  /* Source lines of the definers: D('name', CMD('name', pred('name', blocking('name', G('name' in edwin/src
-     and edwin/server. The scan is textual and runs once. */
+  /* Source lines of the definers: D('name', CMD('name', pred('name', blocking('name', G('name' in src
+     and server. The scan is textual and runs once. */
   sourceMap(): Map<string, string> {
     if (this._sources) return this._sources;
     const map = new Map<string, string>(), files = new Map<string, string>();

@@ -1,5 +1,5 @@
 /* The native host (DT1): the same names as host-browser.ts and host-node.cts (R4.1), for Edwin's core inside
-   the desktop shell (edwin/native, a Rust program with V8 in it). The shell gives it __n, its natives:
+   the desktop shell (native, a Rust program with V8 in it). The shell gives it __n, its natives:
    files, the terminal, sockets, the environment, exit. Unlike the page and edwind, this host has a file
    system the user edits directly: host.files, which the core's Store reads and writes (a file name is a
    path, relative to the directory edwin started in).

@@ -2,7 +2,7 @@
 ;;
 ;; One engine for both syntaxes of a note: Org's #+begin_src LANG :k v with #+name: and #+RESULTS:, and
 ;; markdown's ```LANG {#id k=v} with ```result {of=id}. The reader and the result writer are primitives of
-;; edwin/server/babel.mts (%babel-*); this file holds the engine: the executors, the note environments, where
+;; server/babel.mts (%babel-*); this file holds the engine: the executors, the note environments, where
 ;; a result goes, the commands and their keys. markdown.scm requires it, so it loads in every runtime: frames
 ;; need the commands to know that they run in edwind.
 ;;

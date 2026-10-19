@@ -1,4 +1,4 @@
-/* Edwin's shared types: the model the core files (edwin/src/*.ts) and desktop Edwin (edwin/native/js/*.ts)
+/* Edwin's shared types: the model the core files (src/*.ts) and desktop Edwin (native/js/*.ts)
    hand each other, and the globals one file sets and the next reads.
 
    An ambient script (no import or export): every name here is global to both tsconfigs. The files are classic
@@ -2045,7 +2045,7 @@ interface EdModuleExports {
 
 /* ---------- native: desktop Edwin (native/js) ---------- */
 
-/* __n: the natives the Rust shell gives (edwin/native/src/natives.rs). File calls throw with the system's
+/* __n: the natives the Rust shell gives (native/src/natives.rs). File calls throw with the system's
    message; reading a missing file gives null. */
 interface EdNatives {
   /* run an embedded source (native/js/NAME or a core file) */

@@ -2,7 +2,7 @@
 ;;;
 ;;; The grammar is notes-syntax.scm (wiki links, block refs, anchors, the task keyword table shared with
 ;;; Org, key:: fields, priorities); the lexer, the display overlays and the editing primitives (%markdown-*)
-;;; are in edwin/src/markdown.ts, which loads after org.ts. This file defines the variables the runtimes
+;;; are in src/markdown.ts, which loads after org.ts. This file defines the variables the runtimes
 ;;; bind, the mode, its commands and its keys. org.scm requires it after Org and before init.scm, so the
 ;;; user's init.scm can change everything here.
 

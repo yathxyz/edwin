@@ -831,7 +831,7 @@ function defineNode(name: string, fn: EdPoolJobFn) {
   const jobs = nodeHost!.jobs;
   if (!jobs || jobs.localOnly.has(name)) { registry.set(name, { name, fn, src: null, depsSrc: null, localOnly: true }); return; }
   if (jobs.fns.has(name)) { registry.set(name, { name, fn, src: null, depsSrc: null, localOnly: false }); return; }
-  throw new Error('EdPool.define(' + name + '): a function is not shipped to a thread in edwind; export the job as ' + JSON.stringify(name) + ' from edwin/server/jobs.mts');
+  throw new Error('EdPool.define(' + name + '): a function is not shipped to a thread in edwind; export the job as ' + JSON.stringify(name) + ' from server/jobs.mts');
 }
 function define(name: string, fn: EdPoolJobFn, deps?: Function[]) {
   if (nodeHost) return defineNode(name, fn);

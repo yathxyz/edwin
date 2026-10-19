@@ -5,7 +5,7 @@
 // Backends are objects in the gptel style (R12.1): a name, a kind (the two kinds the spec names,
 // `anthropic` for the Messages API and `openai` for any compatible chat-completions endpoint), an endpoint
 // URL, the models it lists, its tiers and, optionally, a credential. The default backend `workbench` comes
-// from edit.json `models` (R12.3, §15.2); edwin/scm/models.scm adds the Scheme constructors and gptel-send.
+// from edit.json `models` (R12.3, §15.2); scm/models.scm adds the Scheme constructors and gptel-send.
 //
 // Credentials (R14.5–R14.7): `(credential NAME)` is an opaque handle for the file NAME in
 // $CREDENTIALS_DIRECTORY (systemd LoadCredential), bound to the origin of the backend it is configured for.
@@ -41,7 +41,7 @@ import type { Client } from './session.mts';
 import type { WireMessage } from './proto.mts';
 import type { SchemeGen, Thread } from './threads.mts';
 
-/* The evaluator S of edwin/src, outside this program's types like the rest of L. */
+/* The evaluator S of src, outside this program's types like the rest of L. */
 type Scheme = Lisp['S'];
 /* A generator primitive's body: yields S.Block while it waits, returns R. */
 type Gen<R> = Generator<SchemeValue, R, SchemeValue>;
