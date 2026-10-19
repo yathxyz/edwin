@@ -3,10 +3,11 @@
 ;; A pure Scheme port of bufferAddress, fmtAddr and resolveBufferAddress in web/app.ts (the
 ;; "addresses" section).  An address names a place in a Markdown buffer by its heading path, the
 ;; paragraph number under the innermost heading and a short quote of the words at point, so it
-;; reads aloud and survives line shifts.  Workbench's golden test tests/address.test.mts checks every
-;; procedure here against the JavaScript over generated cases, so the regexps and the order of
-;; the steps below follow app.js exactly, including its corners (a quote may keep a trailing
-;; space when the line ends in whitespace, an empty name resolves to the first buffer, and so on).
+;; reads aloud and survives line shifts.  Clients that compute addresses in their own code must
+;; agree with this file (Workbench's board does, and its edit-address check compares the two over
+;; generated cases), so a change to the regexps or to the order of the steps below is one for them
+;; too, including its corners (a quote may keep a trailing space when the line ends in whitespace, an
+;; empty name resolves to the first buffer, and so on).
 ;;
 ;;   (block-address name text pos)   -> address alist for POS (a 0-based offset) in TEXT
 ;;   (format-address address)        -> "Name › Heading ¶N \"quote\""

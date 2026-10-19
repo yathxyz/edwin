@@ -713,7 +713,7 @@ fn remote_notes_go_through_ssh() {
     // ssh's reason when it cannot connect, and exit status 1.
     let mut t = Pty::spawn(
         &d,
-        &["--remote", "unreachable", "a.md"],
+        &["--remote", "unreachable:/run/edwind.sock", "a.md"],
         &[
             ("EDWIN_NO_ATTACH", ""),
             ("EDWIN_SSH", ssh),
@@ -723,6 +723,22 @@ fn remote_notes_go_through_ssh() {
     assert_eq!(t.exit(), 1);
     assert!(
         contains(&t.out, b"Could not resolve hostname unreachable"),
+        "screen tail: {:?}",
+        tail(&t.out)
+    );
+    // An address without a socket names no edwind there.
+    let mut t = Pty::spawn(
+        &d,
+        &["--remote", "box", "a.md"],
+        &[
+            ("EDWIN_NO_ATTACH", ""),
+            ("EDWIN_SSH", ssh),
+            ("NODE_OPTIONS", &node_options()),
+        ],
+    );
+    assert_eq!(t.exit(), 1);
+    assert!(
+        contains(&t.out, b"names no socket"),
         "screen tail: {:?}",
         tail(&t.out)
     );

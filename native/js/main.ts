@@ -1,12 +1,12 @@
 /* edwin, the program: Edwin in a terminal (DT1), as a Vim or Emacs would run, and a usable $EDITOR; or in a
    window of its own (DT2, --gui).
 
-     edwin [-nw | -g] [-R] [-a] [--standalone | --socket PATH | --remote HOST] [+LINE] [FILE | -]...
+     edwin [-nw | -g] [-R] [-a] [--standalone | --socket PATH | --remote HOST:SOCKET] [+LINE] [FILE | -]...
 
    The core runs as a model frame (display.ts) drawn by term.ts, or by the window (gui.ts and the Rust side's
    gui/, which opened it before this file runs: N.guiSize() says so). Files are read and written directly
    (host-native.ts); when an edwind answers on its socket, the notes under its notes directory are opened
-   through it instead, shared with the browser's frames. --remote HOST attaches to the edwind on another machine
+   through it instead, shared with the browser's frames. --remote HOST:SOCKET attaches to the edwind on another machine
    through ssh (DT3); its notes are then named as they are under its notes directory. The process ends with the status the user asked
    for: :q, :wq, ZZ and C-x C-c give 0, :cq gives 1 (or its argument), so git commit and sudoedit can tell
    an abort. C-z suspends to the shell; fg resumes (in the window, C-z iconifies it). */
@@ -14,7 +14,7 @@
 'use strict';
 const N = globalThis.__n, H = globalThis.EdNativeHost, T = globalThis.EdTerm;
 /* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); socket: --socket's path; remote:
-   --remote's HOST[:SOCKET]. */
+   --remote's HOST:SOCKET. */
 interface MainOpts { files: string[]; line: number | null; readOnly: boolean; standalone: boolean; socket: string | null; remote: string | null; stdin: boolean; help: boolean; version: boolean }
 const VERSION = 'edwin DT3';
 const USAGE = `Usage: edwin [OPTION]... [+LINE] [FILE]...
@@ -26,8 +26,8 @@ Edit FILEs in Edwin, in this terminal or in a window.
   -R, --read-only    visit the files read-only
   --standalone       never attach to edwind
   --socket PATH      attach to the edwind listening on PATH
-  --remote HOST[:SOCKET]  attach through ssh to the edwind on HOST (its socket SOCKET, Workbench's by
-                     default); FILEs are then its notes, by their names under its notes directory
+  --remote HOST:SOCKET  attach through ssh to the edwind listening on SOCKET on HOST; FILEs are then
+                     its notes, by their names under its notes directory
   -a, --start-daemon start your own edwind (edwin --daemon) when none answers, then attach to it
   --daemon           start your own edwind in the background (--fg-daemon: in the foreground); each edwin
                      then attaches to it, as emacsclient does to emacs --daemon
@@ -110,7 +110,7 @@ let fenceDone: (() => void) | null = null;
 const fence = new Promise<void>(r => { fenceDone = r; setTimeout(r, gui ? 0 : FENCE_MS); });
 if (!gui) { out(enc!.enter()); N.ttyFlush(); }
 
-/* --remote HOST[:SOCKET] as the socket address the native side takes: ssh://HOST[/SOCKET]. */
+/* --remote HOST:SOCKET as the socket address the native side takes: ssh://HOST/SOCKET. */
 const remoteAddress = (r: string) => { const i = r.indexOf(':/'); return 'ssh://' + (i < 0 ? r : r.slice(0, i) + r.slice(i + 1)); };
 const isRemote = (p: string) => p.startsWith('ssh://');
 /* The connection that proved a remote edwind answers, kept for the first connection of the boot (one ssh). */
@@ -120,7 +120,7 @@ function edwindSocket() {
   if (opts.standalone) return null;
   const user = envOf('XDG_RUNTIME_DIR') ? envOf('XDG_RUNTIME_DIR') + '/edwin/edit.sock' : '';   // edwin --daemon's
   const named = opts.remote !== null ? remoteAddress(opts.remote) : opts.socket;
-  const cands = named ? [named] : [envOf('EDWIN_SOCKET'), user, '/run/workbench-edit/edit.sock'].filter(Boolean);
+  const cands = named ? [named] : [envOf('EDWIN_SOCKET'), user].filter(Boolean);
   for (const p of cands) {
     try {
       if (isRemote(p)) { probeId = N.sockOpen(p, REMOTE_MS); return p; }

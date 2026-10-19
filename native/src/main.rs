@@ -83,8 +83,7 @@ fn may_attach(args: &[String]) -> bool {
 }
 
 /// Whether main.ts will attach to edwind, whose boot (Ed.bootServed) the snapshot cannot hold: the same
-/// choice main.ts makes (--standalone, --socket, --remote, EDWIN_NO_ATTACH, EDWIN_SOCKET, the user's daemon,
-/// the service's socket). A remote edwind (ssh) is not tried here: asking for one counts as attaching.
+/// choice main.ts makes (--standalone, --socket, --remote, EDWIN_NO_ATTACH, EDWIN_SOCKET, the user's daemon). A remote edwind (ssh) is not tried here: asking for one counts as attaching.
 fn will_attach() -> bool {
     let args = option_args();
     if !may_attach(&args) {
@@ -107,7 +106,6 @@ fn will_attach() -> bool {
     }
     let mut cands: Vec<String> = env.into_iter().collect();
     cands.extend(user_socket());
-    cands.push("/run/workbench-edit/edit.sock".into());
     cands
         .iter()
         .any(|p| std::os::unix::net::UnixStream::connect(p).is_ok())

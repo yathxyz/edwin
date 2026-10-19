@@ -153,7 +153,7 @@ const writerKey = (by: SyncBy | null | undefined) => (by ? (by.cid ? 'c:' + by.c
 function writerLabel(by: SyncBy | null | undefined) {
   if (!by) return '?';
   if (by.kind === 'agent') return by.agent || 'agent';
-  if (by.kind === 'cli') return by.session ? 'wb ' + by.session : by.device || 'cli';
+  if (by.kind === 'cli') return by.session || by.device || 'cli';
   if (by.kind === 'disk') return 'disk';
   if (by.kind === 'server') return by.thread || 'server';
   return by.device || by.kind;

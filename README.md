@@ -1,8 +1,9 @@
 # Edwin
 
-Edwin is an Emacs-like editor with Evil keys and Org, scripted in its own Scheme. It runs in a web page. It is
-becoming **edwind**, Workbench's text daemon: one Node service that owns every text buffer on the host. Workbench
-page cards then attach to it as Edwin frames, as `emacsclient` frames attach to `emacs --daemon`.
+Edwin is an Emacs-like editor with Evil keys and Org, scripted in its own Scheme. It runs in a terminal, in a
+window and in a web page. **edwind**, its text daemon, is one Node service that owns every text buffer on the
+host; `edwin` and the frames of a web page attach to it, as `emacsclient` frames attach to `emacs --daemon`.
+Workbench is one such page: its page cards are Edwin frames.
 
 The design and the decisions are in the doc "Edwin as Workbench's text daemon" (decided 2026-10-12): edwind
 replaces the notes index and `sample` of M5 (M5-W1, M5-W2), pages are files in `notesDir`, markdown-mode comes
@@ -91,6 +92,11 @@ edit.sock client.
   `dispatched` and `target`, which only Workbench's dispatch gives a meaning.
 - **`sample` takes `caller`**: the label of the request in the usage log (`[a-z0-9-]`, 1 to 32), `web` when the
   message names none. It was always `board`.
+- **Edwin's own defaults**: `socket` defaults to `$XDG_RUNTIME_DIR/edwin/edit.sock` (where `edwin --daemon`
+  listens; required when that is unset) and `stateDir` to `~/.local/state/edwin/edwind`, no longer Workbench's
+  paths. The default backend is named `anthropic`, like the `models.anthropic` it comes from (it was
+  `workbench`). The build id comes from `EDWIND_BUILD`. A CLI writer is labelled by its session alone. `edwin`
+  no longer falls back to Workbench's socket, and `--remote` must name the socket (`HOST:/PATH`).
 
 ## Step E0: the core without a browser (done)
 
@@ -313,7 +319,7 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   called it (see "Edwin without Workbench").
 - **The model layer (§12, R14.4–R14.7)** is `models.mts` with `scm/models.scm`. Backends are objects of two
   kinds, the ones the spec names (`anthropic`: Messages API, `x-api-key`; `openai`: chat completions, bearer);
-  the default backend `workbench` is `models.anthropic` of `edit.json`, its models the tier values; a backend
+  the default backend `anthropic` (until 2026-10-19 named `workbench`) is `models.anthropic` of `edit.json`, its models the tier values; a backend
   without a credential is usable only on a loopback origin (a local model server). The key is read from
   `$CREDENTIALS_DIRECTORY/NAME` at request time and never stored on the handle; `http-request` takes `:method
   :headers :body :credential :credential-header :timeout :on-chunk`, retries 429/503/529 three times
@@ -470,8 +476,8 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   `~/.ssh/config`). BatchMode: ssh never asks on the terminal edwin holds, so keys come from the agent (or a
   ControlMaster connection, which also makes each connection cheap). edwind's socket directory is mode 0700, so the
   ssh user is the one `services.workbench.user` names; OpenSSH forwards Unix sockets by default
-  (`AllowStreamLocalForwarding`). `EDWIN_SOCKET=ssh://ex44` makes the remote edwind the default; `EDWIN_SSH` names
-  the ssh program.
+  (`AllowStreamLocalForwarding`). `EDWIN_SOCKET=ssh://ex44/run/workbench-edit/edit.sock` makes the remote
+  edwind the default (since 2026-10-19 the address names the socket); `EDWIN_SSH` names the ssh program.
 - **Names.** A FILE argument that is not a path on this machine (not `/…`, `~…`, `./…` or `../…`) is a note on
   the remote host, named as under its notes directory (`journal.md`, `projects/edwin.md`); `./draft.txt` is a file
   here, and so is a full path, even when this machine has a notes directory at the same path. Inside, a full path under the remote notes directory is a note there; other names are files on this
@@ -559,8 +565,8 @@ The flake builds Edwin on its own, as Emacs ships `emacs`, `emacs --daemon` and 
   else one written at each start: notes in `EDWIN_NOTES_DIR` (`~/notes`), state in `~/.local/state/edwin/edwind`,
   the user's Scheme in `~/.config/edwin`, the log (background start) in `~/.local/state/edwin/edwind.log`.
 - **The client.** There is no separate client: every `edwin` and `edwin -g` attaches to the first edwind that
-  answers on `--socket`, `$EDWIN_SOCKET`, `$XDG_RUNTIME_DIR/edwin/edit.sock` or `/run/workbench-edit/edit.sock`
-  (Workbench's), so notes are shared between frames and with the browser. Files outside the notes directory stay
+  answers on `--socket`, `$EDWIN_SOCKET` or `$XDG_RUNTIME_DIR/edwin/edit.sock` (until 2026-10-19 also
+  Workbench's `/run/workbench-edit/edit.sock`), so notes are shared between frames and with the browser. Files outside the notes directory stay
   the program's own (DT1). `--standalone` never attaches.
 - **The build.** The prebuilt V8 (`librusty_v8` 130.0.1) is a fixed-output fetch handed to the `v8` crate as
   `RUSTY_V8_ARCHIVE`, so the build runs offline. The window's libraries (libxkbcommon, Wayland, Vulkan, libGL, X11)
@@ -679,8 +685,8 @@ Build and run (the prebuilt V8 is downloaded by the `v8` crate's build script, o
   200×50 terminal: 155 ms without the snapshot (75 compiling the core, 77 evaluating the Scheme), 40 ms with it
   (`EDWIN_TRACE=1` logs the steps, `EDWIN_NO_SNAPSHOT=1` starts cold). The binary is 37.6 MB: V8, the 5.2 MB
   snapshot and ICU's data (for `\p{...}` in regular expressions).
-- **edwind.** When an edwind answers (`--socket PATH`, else `$EDWIN_SOCKET`, else the service's
-  `/run/workbench-edit/edit.sock`; `--standalone` or `EDWIN_NO_ATTACH=1` never attach), `edwin` boots served
+- **edwind.** When an edwind answers (`--socket PATH`, else `$EDWIN_SOCKET`, else, until 2026-10-19, the
+  service's `/run/workbench-edit/edit.sock`; `--standalone` or `EDWIN_NO_ATTACH=1` never attach), `edwin` boots served
   (`Ed.bootServed`), so its image, commands and user init are edwind's. Notes under edwind's notes directory are
   opened through edwind, shared with the browser's frames; every other file stays the program's own, so a commit
   message never needs edwind's write permission. Quitting waits (up to 5 s) until edwind has acknowledged every

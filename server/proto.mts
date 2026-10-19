@@ -3,7 +3,7 @@
 import { Buffer } from 'node:buffer';
 
 export const PROTO = 1;
-/* wb_proto::limits::MAX_LINE (crates/wb-proto/src/limits.rs): 16 MiB, newline excluded. A test compares. */
+/* The longest line of edit.sock: 16 MiB, newline excluded. */
 export const MAX_LINE = 16 * 1024 * 1024;
 export const RID_MAX = 64;
 /* Bulk payloads go in pieces of this size (R14.14). */

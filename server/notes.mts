@@ -2,8 +2,8 @@
 // scm/notes-syntax.scm into file, heading, block, link, task and card records (R11.1–R11.3), kept fresh
 // from buffer edits (300 ms after the last one, from the live text), from file system events and a 10 s sweep
 // (R11.4), parsed in a worker thread (R11.5), snapshotted to <stateDir>/notes-index/index.json (R11.6), and
-// announced to every client as notes{gen} on each change (R11.7). The server commands behind wb-web's /api
-// routes (§11.3) and the Lisp procedures of §11.4 read it; the writes among them are edits to buffers (R11.9).
+// announced to every client as notes{gen} on each change (R11.7). The notes-* server commands (§11.3) and
+// the Lisp procedures of §11.4 read it; the writes among them are edits to buffers (R11.9).
 import fs from 'node:fs';
 import path from 'node:path';
 import { Worker, MessageChannel, receiveMessageOnPort } from 'node:worker_threads';
@@ -649,7 +649,7 @@ export class Notes {
     this.log.info('notes', { append: sb.id, chars: ins.length });
     return { value: { path: sb.id } };
   }
-  /* The review log (DESIGN §3.3): <notesDir>/.reviews/*.jsonl, one JSON object per line. */
+  /* The review log of cards: <notesDir>/.reviews/*.jsonl, one JSON object per line. */
   reviewsDir(): string { return path.join(this.root, '.reviews'); }
   readReviews() {
     const dir = this.reviewsDir(), out: unknown[] = [];

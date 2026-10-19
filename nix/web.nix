@@ -1,6 +1,6 @@
 # The frame runtime a web page serves (edwind spec R9.19): the console page as index.html, the core's .ts stripped to
-# src/*.js (tools/strip.mts), and the Scheme sources under scm/, which the runtime fetches as text/plain. Workbench
-# serves this tree at /edwin/.
+# src/*.js (tools/strip.mts), and the Scheme sources under scm/, which the runtime fetches as text/plain. A page
+# that hosts frames serves this tree under one prefix.
 {
   lib,
   runCommand,

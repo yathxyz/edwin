@@ -306,9 +306,8 @@ pub fn tty_is_open() -> bool {
 /* ---------- sockets ---------- */
 
 /// A remote edwind: `ssh://DEST/SOCKET`, DEST as ssh takes it (`host`, `user@host`, `host:port`, a Host of
-/// ~/.ssh/config), SOCKET its socket there (/run/workbench-edit/edit.sock, Workbench's, when left out).
+/// ~/.ssh/config), SOCKET its socket there.
 pub const SSH_PREFIX: &str = "ssh://";
-const REMOTE_SOCKET: &str = "/run/workbench-edit/edit.sock";
 
 /// Open edwind's socket at PATH. A remote one runs `ssh -W SOCKET DEST` with its standard input and output on
 /// one end of a socket pair, so the rest of this file sees one more Unix socket. With WAIT (ms) this returns once
@@ -357,7 +356,7 @@ fn ssh_spawn(spec: &str) -> Result<(UnixStream, Ssh), String> {
     static N: AtomicU32 = AtomicU32::new(0);
     let (dest, socket) = match spec.find('/') {
         Some(i) => (&spec[..i], &spec[i..]),
-        None => (spec, REMOTE_SOCKET),
+        None => return Err(format!("{SSH_PREFIX}{spec} names no socket: say HOST:/PATH")),
     };
     if dest.is_empty() {
         return Err("no host in the ssh:// address".into());

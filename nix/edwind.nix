@@ -3,7 +3,7 @@
 # and atomic save need (R8.3, R8.7); edwind guards child_process in-process instead (README.md, E1).
 # No --stack-size: main.mts runs the server on a worker thread whose stack it sizes for the Scheme cap.
 # No --frozen-intrinsics: it slowed the Scheme evaluator 2.3 times; each thread runs lockdown.mts instead.
-# The workbench package installs it (services.workbench.edit), and so does the edwin package (edwin --daemon).
+# The edwin package installs it (edwin --daemon), and so may any package that runs edwind as a service.
 {
   lib,
   stdenv,
@@ -36,7 +36,7 @@ stdenv.mkDerivation {
     cat > $out/bin/edwind <<EOF
     #!${stdenv.shell}
     : "\''${EDWIND_MEMORY_MIB:=1024}"
-    export WB_EDIT_BUILD=${builtins.substring 11 32 (toString src)}
+    export EDWIND_BUILD=${builtins.substring 11 32 (toString src)}
     exec ${nodejs}/bin/node --disallow-code-generation-from-strings \
       --no-warnings=ExperimentalWarning --max-old-space-size="\$EDWIND_MEMORY_MIB" \
       $out/share/edwin/server/main.mts "\$@"
@@ -44,7 +44,7 @@ stdenv.mkDerivation {
     chmod 555 $out/bin/edwind
   '';
   meta = {
-    description = "edwind, Edwin's text daemon: shared buffers and the Lisp machine for Workbench and edwin";
+    description = "edwind, Edwin's text daemon: shared buffers and the Lisp machine for every edwin";
     mainProgram = "edwind";
     platforms = lib.platforms.linux;
   };

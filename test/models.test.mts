@@ -131,11 +131,11 @@ test('R12.3, R12.4, R15.11: the default backend comes from edit.json models; sta
   const st = (await c.call('status')).value;
   assert.equal(st.sample, true); assert.deepEqual(st.models, TIERS);
   const bs = (await c.call('model-backends')).value;
-  assert.equal(bs.length, 1); assert.equal(bs[0].name, 'workbench'); assert.equal(bs[0].kind, 'anthropic'); assert.equal(bs[0].credential, 'anthropic-api-key'); assert.equal(bs[0].usable, true);
+  assert.equal(bs.length, 1); assert.equal(bs[0].name, 'anthropic'); assert.equal(bs[0].kind, 'anthropic'); assert.equal(bs[0].credential, 'anthropic-api-key'); assert.equal(bs[0].usable, true);
   assert.equal(bs[0].url, A.origin + '/v1/messages'); assert.deepEqual(bs[0].models, ['tier-default', 'tier-quick']);
-  assert.equal(await value(c, 'gptel-backend'), '"workbench"');
+  assert.equal(await value(c, 'gptel-backend'), '"anthropic"');
   assert.equal(await value(c, 'gptel-tiers'), '((default . "tier-default") (quick . "tier-quick"))');
-  assert.equal(await value(c, '(gptel-backends)'), '("workbench")');
+  assert.equal(await value(c, '(gptel-backends)'), '("anthropic")');
   assert.equal(await value(c, '(assq-ref (gptel-backend-info) (quote usable))'), '#t');
   assert.equal((await c.call('sample-limits')).value.maxPromptBytes, 4 * 1024 * 1024);
   assert.deepEqual((await c.call('sample-limits')).value, { maxPromptBytes: 4194304, images: true, tools: true });
@@ -222,7 +222,7 @@ test('R12.1, R12.2: Scheme defines backends with credential handles only; a loca
   e = await failure(c, `(gptel-make-anthropic "wrong" :host "${A.origin}" :key (credential "spare-key"))`);
   assert.equal(e.condition, 'credential-origin');
   assert.equal(await value(c, `(gptel-make-openai "local" :host "${A.origin}" :models (quote ("m1" "m2")) :tiers (quote ((default . "m1"))))`), '#<gptel-backend local>');
-  assert.equal(await value(c, '(gptel-backends)'), '("workbench" "local")');
+  assert.equal(await value(c, '(gptel-backends)'), '("anthropic" "local")');
   const r = await value(c, '(gptel-request "hi there" :backend "local" :caller "wb")');
   assert.match(r, /\(text . "Local"\)/); assert.match(r, /\(model . "m1"\)/); assert.match(r, /\(input-tokens . 5\)/);
   const last = A.requests[A.requests.length - 1];
@@ -334,17 +334,17 @@ test('R12.9, R12.14: gptel-send streams into the buffer as the agent gptel:<back
   const o = await f.open(id); assert.equal(o.text, 'Say hi');
   await w.open(id);
   const r = await f.request({ t: 'call', cmd: 'gptel-send', args: [], ctx: { point: 7 }, buf: id });
-  assert.equal(r.error, undefined, JSON.stringify(r.error)); assert.match(r.msg || '', /asking workbench/);
+  assert.equal(r.error, undefined, JSON.stringify(r.error)); assert.match(r.msg || '', /asking anthropic/);
   let text = 'Say hi'; const bys: Msg[] = [];
   const apply = (t: string, ops: [number, string, string][]) => { for (const [pos, del, ins] of ops) t = t.slice(0, pos) + ins + t.slice(pos + del.length); return t; };
   for (let i = 0; i < 40 && !text.endsWith('Hello'); i++) { const e = await w.next(m => m.t === 'edits' && m.buf === id); text = apply(text, e.ops); bys.push(e.by); }
   assert.equal(text, 'Say hi\n\nHello');
   assert.ok(bys.some(b => b.kind === 'frame' && b.via === 'server'), 'the separator comes from the command thread for the frame');
-  assert.ok(bys.some(b => b.kind === 'agent' && b.agent === 'gptel:workbench'), JSON.stringify(bys));
+  assert.ok(bys.some(b => b.kind === 'agent' && b.agent === 'gptel:anthropic'), JSON.stringify(bys));
   assert.equal((await w.request({ t: 'call', form: '(buffer-string)', ctx: {}, buf: id })).value, '"Say hi\\n\\nHello"');
   /* The agent is a writer of the buffer (R6.21: undo-writer picks it once thread batches carry undo groups). */
   const writers = (await w.call('list-writers', [], {}, id)).value;
-  assert.ok(writers.some((b: Msg) => b.kind === 'agent' && b.agent === 'gptel:workbench'), JSON.stringify(writers));
+  assert.ok(writers.some((b: Msg) => b.kind === 'agent' && b.agent === 'gptel:anthropic'), JSON.stringify(writers));
   /* Nothing to send; a request per buffer. */
   assert.equal((await w.request({ t: 'call', form: '(with-current-buffer (get-buffer-create "*empty*") (gptel-send))', ctx: {} })).error.condition, 'user-error');
   for (let i = 0; i < 50 && await value(w, '(null? gptel--running)') !== '#t'; i++) await sleep(20);
@@ -353,7 +353,7 @@ test('R12.9, R12.14: gptel-send streams into the buffer as the agent gptel:<back
   await sleep(50);
   const usage = fs.readFileSync(path.join(dir.dirs.state, 'usage.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
   assert.ok(usage.length >= 10, String(usage.length));
-  const gp = usage.find(l => l.caller === 'gptel' && l.backend === 'workbench');
+  const gp = usage.find(l => l.caller === 'gptel' && l.backend === 'anthropic');
   assert.ok(gp); assert.equal(gp.model, 'tier-default'); assert.equal(gp.tier, 'default'); assert.equal(gp.inputTokens, 7); assert.equal(gp.outputTokens, 3); assert.ok(gp.latencyMs >= 0);
   assert.ok(usage.some(l => l.caller === 'board' && l.error === 'cancelled'), 'the caller a sample names');
   assert.ok(usage.some(l => l.caller === 'web'), 'a sample naming none is the web client\'s');

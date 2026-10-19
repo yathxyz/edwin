@@ -38,8 +38,7 @@ function promoteSnap(next: string, snap: string, log: Log, buf: string): void {
   catch (e) { log.error('compact', { buf, snapshot: e.code || e.message }); }
 }
 const SERVER_BY: By = { kind: 'server' };
-/* The refusal of a destination in, on or above a refused path: the words of wb-web's POST /api/mv (fsapi.rs), which
-   forwards its moves here. */
+/* The refusal of a destination in, on or above a refused path, in words a client can show as they are. */
 export const REFUSED_DST = 'refused: the destination is in or above ~/.ssh or a systemd user-unit directory';
 /* An fs error as the message of a refusal: its code and text, without the paths Node appends. */
 const osMessage = (e: NodeJS.ErrnoException): string => (e && e.code ? String(e.message).replace(/, \w+ '.*$/, '') : String(e && e.message || e));
@@ -454,11 +453,11 @@ export class Buffers {
 
   /* ---------- rename (R4.49, R6.1, R8.1, R8.8, §7 moved) ---------- */
   /* Rename the file or directory SRC to DST, or into DST when that is an existing directory, never replacing
-     anything: the rule of wb-web's POST /api/mv, which forwards here when edwind is configured. Paths are absolute,
-     ~/… or notesDir-relative. Both ends pass the file authority (R14.8; a source above a refused path moves it too,
-     so it is refused), and edwind's own directories and everything above them stay where they are. Loaded buffers
-     visiting the file, or files under the directory, keep their SBuf, jid and history and take the new id: an mv
-     journal line each, a moved record kept 24 h, and moved{buf, to} to every attached client, who stays attached.
+     anything. Paths are absolute, ~/… or notesDir-relative. Both ends pass the file authority (R14.8; a source
+     above a refused path moves it too, so it is refused), and edwind's own directories and everything above them
+     stay where they are. Loaded buffers visiting the file, or files under the directory, keep their SBuf, jid and
+     history and take the new id: an mv journal line each, a moved record kept 24 h, and moved{buf, to} to every
+     attached client, who stays attached.
      Returns {ok, src, dst, from, to, dir?}: the expanded paths and the ids of both ends, so a caller holding ids of
      buffers that are not loaded can follow too. Throws ProtoError. */
   async rename(src: unknown, dst: unknown): Promise<RenameResult> {

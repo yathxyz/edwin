@@ -1,6 +1,6 @@
-// edwind: the Lisp machine inside Workbench, phase E1 (spec §6–§8, §13.1, §14, §15).
+// edwind: Edwin's text daemon and Lisp machine, phase E1 (spec §6–§8, §13.1, §14, §15).
 //
-//   edwind --config /etc/workbench/edit.json          run
+//   edwind --config edit.json                         run
 //   edwind --config … --check                         verify every journal and snapshot offline (R15.12)
 //   edwind --config … --export DIR                    write every live buffer's text to DIR (R15.12)
 //   edwind --config … --write-roots                   print the write roots, one per line (for bin/edwind's flags)
@@ -84,7 +84,7 @@ const require = createRequire(import.meta.url);
 const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, hubModule, processModule, anchorsModule, babelModule];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EDWIN = path.join(HERE, '..');
-export const BUILD = process.env.WB_EDIT_BUILD || 'dev';
+export const BUILD = process.env.EDWIND_BUILD || 'dev';
 const MIN_NODE = [22, 13];
 /* The JS stack of the server thread in MiB (R4.34): the Scheme cap of 10,000 frames needs about 8 MiB in
    generator mode; 32 leaves room for deep primitives. EDWIND_STACK_MIB overrides it. */
@@ -111,12 +111,13 @@ export function loadConfig(file: string): Config {
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k) && !RETIRED.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
   const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
-  const home = process.env.HOME || os.homedir();
+  const home = process.env.HOME || os.homedir(), runtime = process.env.XDG_RUNTIME_DIR;
   const out: Config = {
-    socket: abs('socket', str('socket', false, '/run/workbench-edit/edit.sock')),
+    /* By default the socket `edwin --daemon` listens on, where every edwin looks. */
+    socket: abs('socket', str('socket', !runtime, runtime && path.join(runtime, 'edwin/edit.sock'))),
     hubSocket: abs('hubSocket', str('hubSocket', false, undefined)),
     webSocket: abs('webSocket', str('webSocket', false, undefined)),
-    stateDir: abs('stateDir', str('stateDir', false, path.join(home, '.local/state/workbench/edit'))),
+    stateDir: abs('stateDir', str('stateDir', false, path.join(home, '.local/state/edwin/edwind'))),
     notesDir: abs('notesDir', str('notesDir', true)),
     configDir: abs('configDir', str('configDir', false, path.join(home, '.config/edwin'))),
     host: str('host', false, os.hostname()),
@@ -209,7 +210,7 @@ export class Server {
   defineCommand(name: string, fn: CommandFn) { this.commands.set(name, fn); }
   /* A handler for message type T from any client: FN(client, msg), may return a promise. */
   onMessage(t: string, fn: MessageHandler) { this.handlers.set(t, fn); }
-  /* The `status` command (R15.11): what wb-web shows under /api/status.edit and reads for /api/info.
+  /* The `status` command (R15.11): what a client shows of edwind's health.
      Modules add fields through statusProviders (notes: notesExists, notesGen; models: sample, models;
      threads: loopLagP95Ms, ackP95Ms). */
   status() {

@@ -3,7 +3,7 @@
 ;; Loaded by server/models.mts into the server image only. The primitives it wraps are server-only
 ;; (R4.49): credential, http-request, %make-backend, %model-request, %model-stream, %model-usage.
 ;;
-;; Backends are objects (R12.1). The module defines `workbench` from edit.json `models` (R12.3); init.scm may
+;; Backends are objects (R12.1). The module defines `anthropic` from edit.json `models` (R12.3); init.scm may
 ;; add more and change gptel-backend, after this file has loaded (it provides the feature `models`):
 ;;
 ;;   (gptel-make-openai "local" :host "localhost:11434" :protocol "http"

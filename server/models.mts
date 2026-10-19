@@ -4,7 +4,7 @@
 //
 // Backends are objects in the gptel style (R12.1): a name, a kind (the two kinds the spec names,
 // `anthropic` for the Messages API and `openai` for any compatible chat-completions endpoint), an endpoint
-// URL, the models it lists, its tiers and, optionally, a credential. The default backend `workbench` comes
+// URL, the models it lists, its tiers and, optionally, a credential. The default backend `anthropic` comes
 // from edit.json `models` (R12.3, §15.2); scm/models.scm adds the Scheme constructors and gptel-send.
 //
 // Credentials (R14.5–R14.7): `(credential NAME)` is an opaque handle for the file NAME in
@@ -157,7 +157,7 @@ export const MAX_TOOL_ROUNDS = 8;
 export const USAGE_DAYS = 30;                        // R12.14
 export const DEFAULT_TIERS = { default: 'claude-opus-5-5', quick: 'claude-haiku-5-5' };   // R12.3, R12.6
 export const DEFAULT_BASE_URL = 'https://api.anthropic.com';                              // R12.3
-export const DEFAULT_BACKEND = 'workbench';
+export const DEFAULT_BACKEND = 'anthropic';
 const CALLER_RE = /^[a-z0-9-]{1,32}$/;
 export const MAX_REDIRECTS = 5;
 export const CREDENTIAL_NAME = /^[a-z0-9-]{1,32}$/;   // the names nix/module.nix accepts
@@ -426,7 +426,7 @@ export class Models {
       const b = c[bname];
       if (!b || typeof b !== 'object') { if (bname === 'anthropic') this.bindBackend(DEFAULT_BACKEND, kind, { baseUrl: DEFAULT_BASE_URL }, tiers); continue; }
       if (bname === 'openai' && !b.baseUrl) continue;      // unset means no such backend (§15.2)
-      this.bindBackend(bname === 'anthropic' ? DEFAULT_BACKEND : bname, kind, b, tiers);
+      this.bindBackend(bname, kind, b, tiers);
     }
     /* edit.credentials: more LoadCredential entries, each bound to an origin (R14.4). */
     for (const [nm, e] of Object.entries(c.credentials && typeof c.credentials === 'object' ? c.credentials : {})) {
@@ -450,7 +450,7 @@ export class Models {
     const S = this.S;
     if (typeof nm !== 'string') throw S.typeErr('string', nm, 'credential');
     const origin = this.credentials.get(nm);
-    if (!origin) throw new S.SchemeError('user-error', `credential: no credential named ${JSON.stringify(nm)} is configured (edit.json models or services.workbench.edit.credentials)`, []);
+    if (!origin) throw new S.SchemeError('user-error', `credential: no credential named ${JSON.stringify(nm)} is configured (edit.json models.credentials)`, []);
     return new Credential(nm, origin);
   }
   /* R12.4: a backend is usable with a readable credential, or with none on a loopback origin (a local server). */
@@ -475,7 +475,7 @@ export class Models {
   requireUsable(b: Backend, who: string): Backend {
     if (this.usable(b)) return b;
     const S = this.S;
-    if (b.credential) throw new S.SchemeError('user-error', `${who}: backend ${b.name} has no usable credential: ${b.credential.__print()} is not loaded (services.workbench.edit.models or LoadCredential)`, []);
+    if (b.credential) throw new S.SchemeError('user-error', `${who}: backend ${b.name} has no usable credential: ${b.credential.__print()} is not loaded (LoadCredential)`, []);
     throw new S.SchemeError('user-error', `${who}: backend ${b.name} at ${b.origin} has no credential and is not local`, []);
   }
   status() {
