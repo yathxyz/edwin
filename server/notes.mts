@@ -649,6 +649,16 @@ export class Notes {
     this.log.info('notes', { append: sb.id, chars: ins.length });
     return { value: { path: sb.id } };
   }
+  /* notes-fill {path, text}: the note (created if missing) gets TEXT exactly when it is empty, as one edit, and is
+     saved. The check and the edit are one step here, so two tabs migrating the same page fill it once (R8.18). A path
+     renamed away is left alone. Answers {path, same}: whether the note's text is now TEXT. */
+  async fill(client: Client, p: Params): Promise<CallResult> {
+    if (typeof p.text !== 'string') throw bad('text must be a string');
+    const sb = this.noteBuffer(p.path, true);
+    if (sb.id !== p.path) return { value: { path: sb.id, same: false } };
+    if (sb.text === '' && p.text) { await this.editBuffer(sb, [[0, '', p.text]], this.byOf(p.by, client)); await this.server.buffers.save(sb); }
+    return { value: { path: sb.id, same: sb.text === p.text } };
+  }
   /* The review log (DESIGN §3.3): <notesDir>/.reviews/*.jsonl, one JSON object per line. */
   reviewsDir(): string { return path.join(this.root, '.reviews'); }
   readReviews() {
@@ -765,6 +775,7 @@ export class Notes {
     def('notes-task-set', (c, p) => this.taskSet(c, p));
     def('notes-journal', (c, p) => this.journal(c, p));
     def('notes-append', (c, p) => this.append(c, p));
+    def('notes-fill', (c, p) => this.fill(c, p));
     def('notes-info', () => ({ value: { root: this.root, exists: this.exists(), gen: this.gen, files: this.files.size, ready: true, startup: this.startup, watch: this.recursiveWatch ? 'recursive' : 'sweep', worker: !!this.worker } }));
     def('notes-rebuild', async () => ({ value: await this.rebuild() }));
     def('notes-ambiguous-links', () => ({ value: this.derived().ambiguous }));

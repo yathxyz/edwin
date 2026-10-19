@@ -384,6 +384,26 @@ test('§11.3 notes-append appends as an edit to the buffer, creating the file; p
   a.close(); b.close();
 });
 
+test('§11.3 notes-fill gives an empty note the text once: two callers at once fill it once, a note with text and a renamed id are left alone', async () => {
+  const a = await client(), b = await client({ kind: 'frame' });
+  const text = '# Fill\n\nbody\n';
+  const both = await Promise.all([a, b].map(c => value(c, 'notes-fill', [{ path: 'fill/one.md', text }])));
+  assert.deepEqual(both, [{ path: 'fill/one.md', same: true }, { path: 'fill/one.md', same: true }]);
+  assert.equal((await a.open('fill/one.md')).text, text);
+  assert.equal(fs.readFileSync(path.join(dir.dirs.notes, 'fill', 'one.md'), 'utf8'), text, 'saved at once');
+  assert.deepEqual(await value(b, 'notes-fill', [{ path: 'fill/one.md', text: 'another text\n' }]), { path: 'fill/one.md', same: false });
+  assert.equal((await b.open('fill/one.md')).text, text);
+  /* An empty note renamed away: its old id is sent on to it, which is not filled. */
+  const two = path.join(dir.dirs.notes, 'fill', 'two.md'), three = path.join(dir.dirs.notes, 'fill', 'three.md');
+  fs.writeFileSync(two, '');
+  await a.open('fill/two.md');
+  assert.equal((await a.call('rename-file', [{ src: two, dst: three }])).t, 'result');
+  assert.deepEqual(await value(a, 'notes-fill', [{ path: 'fill/two.md', text }]), { path: 'fill/three.md', same: false });
+  assert.equal(fs.readFileSync(three, 'utf8'), '');
+  assert.equal((await a.call('notes-fill', [{ path: 'fill/x.md' }])).code, 'bad_request');
+  a.close(); b.close();
+});
+
 test('§11.3 notes-reviews reads .reviews/*.jsonl and notes-reviews-append appends to <host>.jsonl', async () => {
   const a = await client();
   const before = await value(a, 'notes-reviews');

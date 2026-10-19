@@ -384,8 +384,9 @@ table in `scm/notes-syntax.scm` shared with Org (`notes-set-task-keywords!` chan
 Font-lock is incremental: 0.6 ms median per keystroke on a 10,000-line page (budget 2 ms).
 
 Migration (R8.16–R8.20, Q3): with the flag on, a page node without `buf` is migrated once on load to
-`notes/<slug>.md` under notesDir (`-2`, `-3`… on a clash), its anchors re-created at their relocated
-positions, then `buf` is set and `text`/`anchors` dropped; wb-web's PUT guard keeps `buf` and strips `text`
+`notes/<slug>.md` under notesDir (`-2`, `-3`… on a clash), an empty file filled by `notes-fill`, which gives a
+note the text only while it is empty, in one step (two tabs migrating at once fill it once; a note with other text
+is a clash), its anchors re-created at their relocated positions, then `buf` is set and `text`/`anchors` dropped; wb-web's PUT guard keeps `buf` and strips `text`
 when an older tab writes the board, and copies the board to `<host>.pre-edwind.json` once before the first
 `buf` arrives. The page is held (no frame, no edit) until the board PUT carrying its `buf` is
 answered 204, so the file never differs from the text of a board that lost that save; a 412 shows the conflict
