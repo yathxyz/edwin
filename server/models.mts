@@ -1,6 +1,6 @@
 // The model layer (spec §12, §14.3, R14.4–R14.7, R12.13–R12.14, R16.15, R16.19): edwind holds the provider
-// keys and runs every model call, for the board's `sample` (forwarded by wb-web, §12.2) and for gptel in the
-// server image (§12.3).
+// keys and runs every model call, for `sample` (a completion streamed to a web client, §12.2) and for gptel
+// in the server image (§12.3).
 //
 // Backends are objects in the gptel style (R12.1): a name, a kind (the two kinds the spec names,
 // `anthropic` for the Messages API and `openai` for any compatible chat-completions endpoint), an endpoint
@@ -22,7 +22,7 @@
 // the image keeps sequencing edits meanwhile; a gptel stream runs on a background thread attributed to
 // {kind: "agent", agent: "gptel:<backend>"} (R12.9) and every chunk wait is a blocking point that lets its
 // edits out to every frame (R4.41). A `sample` runs on a background thread too, with JS callbacks that send
-// the stream to wb-web.
+// the stream to its web client.
 //
 // Limits and accounting (§12.4): at most MAX_CONCURRENT model requests run at once (the rest queue), each
 // under a 10 min deadline, with the provider's rate-limit retry (3 attempts, exponential, retry-after
@@ -62,7 +62,7 @@ export interface ImageInput { data: string; media_type?: string }
 /* One message of a request: role user, assistant or system. */
 export interface ChatMessage { role: string; content: string; images?: ImageInput[] }
 export interface ToolSpec { name: string; description?: string; inputSchema?: unknown }
-/* A model request (REQ of completeG), from the board's sample or from gptel. */
+/* A model request (REQ of completeG), from a sample or from gptel. */
 export interface ModelRequest {
   model: string | null; tier: string; system?: string; messages: ChatMessage[]; tools: ToolSpec[];
   maxTokens?: number; effort?: string | null; temperature?: number; caller: string;
@@ -85,7 +85,7 @@ export interface UsageSummary {
   days: number; since: string; requests: number; errors: number; inputTokens: number; outputTokens: number; latencyMs: number;
   byModel: Record<string, UsageRow>; byCaller: Record<string, UsageRow>; byBackend: Record<string, UsageRow>;
 }
-/* A board sample being streamed to wb-web (§12.2). */
+/* A sample being streamed to a web client (§12.2). */
 export interface ToolAnswer { error?: string; result?: unknown }
 export interface SampleStream {
   sid: string; client: Client; tab: string | null; text: string;
@@ -158,6 +158,7 @@ export const USAGE_DAYS = 30;                        // R12.14
 export const DEFAULT_TIERS = { default: 'claude-opus-5-5', quick: 'claude-haiku-5-5' };   // R12.3, R12.6
 export const DEFAULT_BASE_URL = 'https://api.anthropic.com';                              // R12.3
 export const DEFAULT_BACKEND = 'workbench';
+const CALLER_RE = /^[a-z0-9-]{1,32}$/;
 export const MAX_REDIRECTS = 5;
 export const CREDENTIAL_NAME = /^[a-z0-9-]{1,32}$/;   // the names nix/module.nix accepts
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -706,11 +707,12 @@ export class Models {
     return e && e.message ? e.message : String(e);
   }
 
-  /* ---------- sample for the board (§12.2) ---------- */
-  /* The request of a board sample: INPUT is a string or a list of {role, content}; IMAGES go on the last user
-     message (crates/wb-web/src/sample.rs forwards input, modelTier, model, effort, images, tools as sent). */
+  /* ---------- sample: a completion streamed to a web client (§12.2) ---------- */
+  /* The request of a sample: INPUT is a string or a list of {role, content}; IMAGES go on the last user
+     message; CALLER labels it in the usage log (default `web`). */
   sampleRequest(b: Backend, msg: WireMessage): ModelRequest {
-    const { input, images, tools, effort } = msg;
+    const { input, images, tools, effort, caller } = msg;
+    if (caller !== undefined && (typeof caller !== 'string' || !CALLER_RE.test(caller))) throw new ProtoError('bad_request', 'sample.caller is 1 to 32 of a-z, 0-9 and -');
     let messages: ChatMessage[];
     if (typeof input === 'string') messages = [{ role: 'user', content: input }];
     else if (Array.isArray(input)) messages = input.filter(m => m && typeof m === 'object' && typeof m.role === 'string').map(m => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '') }));
@@ -722,7 +724,7 @@ export class Models {
       messages[i] = { ...messages[i], images: images.filter(x => x && typeof x === 'object' && typeof x.data === 'string') };
     }
     const { model, tier } = b.resolve(msg.modelTier, msg.model);
-    return { model, tier, messages, tools: Array.isArray(tools) ? tools.filter(t => t && typeof t.name === 'string') : [], effort: typeof effort === 'string' && effort ? effort : null, caller: 'board' };
+    return { model, tier, messages, tools: Array.isArray(tools) ? tools.filter(t => t && typeof t.name === 'string') : [], effort: typeof effort === 'string' && effort ? effort : null, caller: caller || 'web' };
   }
   streamKey(client: Client, sid: string): string { return `${client.cid}/${sid}`; }
   onSample(client: Client, msg: WireMessage) {
@@ -730,7 +732,7 @@ export class Models {
     const sid = msg.sid;
     if (typeof sid !== 'string' || !sid) throw new ProtoError('bad_request', 'sample needs a sid');
     const fail = (code: string, message: string, text?: string) => { const m: SampleError = { t: 'sample.error', sid, code, message }; if (text) m.text = text; client.send(m); };
-    /* §7.9: streams are routed only for wb-web, the one client that can deliver them to a tab. */
+    /* §7.9: streams are routed only for web clients, which deliver them to a page's tab. */
     if (client.kind !== 'web') { fail('bad_request', 'sample streams are routed for web clients only'); return; }
     if (this.streams.has(this.streamKey(client, sid))) { fail('bad_request', `stream ${sid} is already running`); return; }
     const b = this.currentBackend();
@@ -820,7 +822,7 @@ export class Models {
     server.onMessage('tool_result', (client, msg) => this.onToolAnswer(client, msg));
     server.onMessage('tool_error', (client, msg) => this.onToolAnswer(client, msg));
     server.onMessage('cancel', (client, msg) => this.onCancel(client, msg));
-    /* `call{cmd: "sample-limits"}` (§12.2, crates/wb-web/src/sample.rs limits()). */
+    /* `call{cmd: "sample-limits"}` (§12.2): what a sample may carry. */
     server.defineCommand('sample-limits', () => ({ value: this.limits() }));
     server.defineCommand('model-usage', (client, args) => { const d = Array.isArray(args) && Number.isInteger(args[0]) && (args[0] as number) > 0 ? args[0] as number : USAGE_DAYS; return { value: this.usage(d) }; });
     server.defineCommand('model-backends', () => ({ value: [...this.backends.values()].map(b => ({ ...b.info(), usable: this.usable(b) })) }));

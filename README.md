@@ -89,6 +89,8 @@ edit.sock client.
 - **Task rows carry `fields`**: every `key::` field (and Org property) of a task, by its lowercased key, in
   `notes-tasks`, `notes-task` and the reply of `notes-task-set`. The rows no longer single out `session`,
   `dispatched` and `target`, which only Workbench's dispatch gives a meaning.
+- **`sample` takes `caller`**: the label of the request in the usage log (`[a-z0-9-]`, 1 to 32), `web` when the
+  message names none. It was always `board`.
 
 ## Step E0: the core without a browser (done)
 

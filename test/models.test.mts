@@ -268,6 +268,8 @@ test('§12.2 sample: the stream of a web client in the shape edit_client.rs rout
   /* Bad input, and a non-web client (§7.9). */
   web.send({ t: 'sample', sid: 's5', tab: 'tab1', input: 42 });
   assert.equal((await web.next(m => m.sid === 's5')).code, 'bad_request');
+  web.send({ t: 'sample', sid: 's6', tab: 'tab1', input: 'hi', caller: 'Not OK' });
+  assert.equal((await web.next(m => m.sid === 's6')).code, 'bad_request');
   const cli = await client();
   cli.send({ t: 'sample', sid: 'c1', input: 'hi' });
   const refused = await cli.next(m => m.t === 'sample.error');
@@ -277,7 +279,7 @@ test('§12.2 sample: the stream of a web client in the shape edit_client.rs rout
 
 test('R12.8, R12.13: cancel aborts the HTTP request; rate limits are retried; four requests run at once and the rest queue', async () => {
   const web = await client({ kind: 'web' });
-  web.send({ t: 'sample', sid: 'slow1', tab: 't', input: 'slow please' });
+  web.send({ t: 'sample', sid: 'slow1', tab: 't', input: 'slow please', caller: 'board' });
   const first = await web.next(m => m.sid === 'slow1' && m.t === 'sample.text');
   assert.equal(first.text, 'He');
   const aborted = A.aborted;
@@ -353,10 +355,11 @@ test('R12.9, R12.14: gptel-send streams into the buffer as the agent gptel:<back
   assert.ok(usage.length >= 10, String(usage.length));
   const gp = usage.find(l => l.caller === 'gptel' && l.backend === 'workbench');
   assert.ok(gp); assert.equal(gp.model, 'tier-default'); assert.equal(gp.tier, 'default'); assert.equal(gp.inputTokens, 7); assert.equal(gp.outputTokens, 3); assert.ok(gp.latencyMs >= 0);
-  assert.ok(usage.some(l => l.caller === 'board' && l.error === 'cancelled'));
+  assert.ok(usage.some(l => l.caller === 'board' && l.error === 'cancelled'), 'the caller a sample names');
+  assert.ok(usage.some(l => l.caller === 'web'), 'a sample naming none is the web client\'s');
   assert.ok(usage.every(l => !JSON.stringify(l).includes('Say hi') && !JSON.stringify(l).includes('hello')));
   const sum = (await w.call('model-usage')).value;
-  assert.equal(sum.days, 30); assert.equal(sum.requests, usage.length); assert.ok(sum.byCaller.board.requests >= 8); assert.ok(sum.byModel['tier-default'].inputTokens >= 7);
+  assert.equal(sum.days, 30); assert.equal(sum.requests, usage.length); assert.ok(sum.byCaller.web.requests + sum.byCaller.board.requests >= 8); assert.ok(sum.byModel['tier-default'].inputTokens >= 7);
   const scm = await w.request({ t: 'call', form: '(model-usage)', ctx: {} });
   assert.match(scm.msg, /^Model usage, 30 days: \d+ requests/); assert.match(scm.value, /\(by-model/);
   assert.match(await value(w, '(assq-ref (model-usage-summary 30) (quote requests))'), /^\d+$/);
