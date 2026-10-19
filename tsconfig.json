@@ -9,7 +9,7 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "types": ["node"],
-    "typeRoots": ["../tools/node_modules/@types"],
+    "typeRoots": ["tools/node_modules/@types"],
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,

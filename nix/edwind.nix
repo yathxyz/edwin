@@ -1,6 +1,6 @@
 # edwind, the text daemon: Edwin's core, Scheme files and the server (R15.3), and the wrapper with the Node
 # flags of R14.11. R14.12's permission model is not among them: Node disables fsync under it, which the journal
-# and atomic save need (R8.3, R8.7); edwind guards child_process in-process instead (edwin/README.md, E1).
+# and atomic save need (R8.3, R8.7); edwind guards child_process in-process instead (README.md, E1).
 # No --stack-size: main.mts runs the server on a worker thread whose stack it sizes for the Scheme cap.
 # No --frozen-intrinsics: it slowed the Scheme evaluator 2.3 times; each thread runs lockdown.mts instead.
 # The workbench package installs it (services.workbench.edit), and so does the edwin package (edwin --daemon).
@@ -13,9 +13,9 @@ let
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
-      (lib.fileset.difference ../edwin/src (lib.fileset.fileFilter (f: f.hasExt "js") ../edwin/src))
-      ../edwin/scm
-      ../edwin/server
+      (lib.fileset.difference ../src (lib.fileset.fileFilter (f: f.hasExt "js") ../src))
+      ../scm
+      ../server
     ];
   };
 in
@@ -29,7 +29,7 @@ stdenv.mkDerivation {
   dontBuild = true;
   installPhase = ''
     mkdir -p $out/share/edwin $out/bin
-    cp -r edwin/src edwin/scm edwin/server $out/share/edwin/
+    cp -r src scm server $out/share/edwin/
     # The core runs as classic scripts through vm, which cannot strip types: each .ts gets its .js beside it.
     chmod -R u+w $out/share/edwin/src
     ${nodejs}/bin/node ${../tools/strip.mts} --in-place $out/share/edwin/src

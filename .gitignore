@@ -1,0 +1,7 @@
+/result
+/result-*
+/tools/node_modules
+/native/target/
+# The classic scripts stripped beside their .ts (node tools/strip.mts --in-place src native/js)
+/src/*.js
+/native/js/*.js

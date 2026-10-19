@@ -23,7 +23,7 @@ in
     package = mkOption {
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.edwin;
-      defaultText = lib.literalExpression "workbench.packages.\${system}.edwin";
+      defaultText = lib.literalExpression "edwin.packages.\${system}.edwin";
       description = "The edwin package.";
     };
     daemon = {

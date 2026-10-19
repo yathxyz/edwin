@@ -8,7 +8,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { makeDir, startEdwind, stopEdwind, EditClient, MAIN, EDWIN } from './edit-client.mts';
+import { makeDir, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
 import type { OTModule } from './ot-sim.mts';
 
@@ -29,13 +29,6 @@ const client = async (opts?: ClientOptions): Promise<WelcomedClient> => { const 
 const note = (name: string, text: string) => { fs.writeFileSync(path.join(dir.dirs.notes, name), text); return name; };
 /* Wait until edwind has dispatched everything C sent so far (one connection's messages are handled in order). */
 const sync = async (c: EditClient) => { const rid = c.newRid(); c.send({ t: 'ping', rid }); await c.next(m => m.t === 'pong' && m.rid === rid); };
-
-test('R7.2 MAX_LINE equals wb_proto::limits::MAX_LINE', () => {
-  const rs = fs.readFileSync(path.join(EDWIN, '../crates/wb-proto/src/limits.rs'), 'utf8');
-  const m = rs.match(/pub const MAX_LINE: usize = (\d+) \* MIB;/);
-  assert.ok(m, 'limits.rs declares MAX_LINE in MiB');
-  assert.equal(MAX_LINE, Number(m[1]) * 1024 * 1024);
-});
 
 test('§7.2 hello and welcome; a bad proto is refused; anything before hello is bad_request', async () => {
   const c = await client();

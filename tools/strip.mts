@@ -1,12 +1,9 @@
-// Strips TypeScript's types from the page's sources, for the browser (the nix web root) and for a repo checkout.
+// Strips TypeScript's types from Edwin's classic scripts, for the browser, Node's vm and V8, and for a repo checkout.
 //
-//   node tools/strip.mts OUT FILE.ts...    write OUT/FILE.js for each FILE.ts
-//   node tools/strip.mts --web WEB OUT     OUT becomes a web root: WEB (the web/ directory) with every .ts as .js,
-//                                           without the .ts, .d.ts and tsconfig files (nix/web.nix uses it; vendor/
-//                                           and fonts/ come from nix, so serving a checkout means copying them in)
-//   node tools/strip.mts --in-place DIR... write NAME.js beside each NAME.ts of each DIR: Edwin's classic scripts
-//                                           (edwin/src, edwin/native/js), which vm and V8 run as .js; the .js are
-//                                           gitignored, and host-node.cts strips a .ts itself when its .js is stale
+//   node tools/strip.mts OUT FILE.ts...    write OUT/FILE.js for each FILE.ts (nix/web.nix: the frame runtime)
+//   node tools/strip.mts --in-place DIR... write NAME.js beside each NAME.ts of each DIR (src, native/js), which vm
+//                                           and V8 run as .js; the .js are gitignored, and host-node.cts strips a
+//                                           .ts itself when its .js is stale
 //
 // Node's stripper replaces each type with whitespace, so a stripped file keeps every line and column of its .ts
 // and a stack trace from the browser points at the source. It accepts erasable syntax only (the configs set
@@ -32,27 +29,12 @@ export function stripInPlace(dir: string): string[] {
   return written;
 }
 
-export function stripWeb(webDir: string, out: string): string[] {
-  const written: string[] = [];
-  fs.mkdirSync(out, { recursive: true });
-  for (const f of fs.readdirSync(webDir)) {
-    const src = path.join(webDir, f);
-    if (SKIP(f) || !fs.statSync(src).isFile()) continue;
-    if (f.endsWith('.ts')) {
-      const dst = path.join(out, f.slice(0, -3) + '.js');
-      fs.writeFileSync(dst, strip(fs.readFileSync(src, 'utf8'), src)); written.push(dst);
-    } else fs.copyFileSync(src, path.join(out, f));
-  }
-  return written;
-}
-
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   process.removeAllListeners('warning'); // stripTypeScriptTypes is experimental in Node 24 and says so on every run
   const args = process.argv.slice(2);
-  if (args[0] === '--web' && args.length === 3) stripWeb(args[1], args[2]);
-  else if (args[0] === '--in-place' && args.length >= 2) for (const d of args.slice(1)) stripInPlace(d);
+  if (args[0] === '--in-place' && args.length >= 2) for (const d of args.slice(1)) stripInPlace(d);
   else if (args.length >= 2 && !args[0].startsWith('-')) {
     fs.mkdirSync(args[0], { recursive: true });
     for (const f of args.slice(1)) fs.writeFileSync(path.join(args[0], path.basename(f).replace(/\.m?ts$/, '.js')), strip(fs.readFileSync(f, 'utf8'), f));
-  } else { console.error('usage: node tools/strip.mts OUT FILE.ts... | --web WEB OUT | --in-place DIR...'); process.exit(2); }
+  } else { console.error('usage: node tools/strip.mts OUT FILE.ts... | --in-place DIR...'); process.exit(2); }
 }

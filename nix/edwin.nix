@@ -1,4 +1,4 @@
-# edwin, Edwin on the desktop (edwin/native, DT1 and DT2): the terminal program (`edwin`, `edwin -nw`), the
+# edwin, Edwin on the desktop (native/, DT1 and DT2): the terminal program (`edwin`, `edwin -nw`), the
 # window (`edwin -g`), and the user's own daemon (`edwin --daemon`, which runs edwind through edwin-daemon), as
 # Emacs ships emacs, emacs --daemon and emacsclient. Each edwin attaches to a running edwind by itself.
 {
@@ -81,13 +81,19 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
 
   src = lib.fileset.toSource {
-    root = ../edwin;
+    root = ../.;
     # An in-tree build leaves its target/ beside the sources.
-    fileset = lib.fileset.difference ../edwin (lib.fileset.maybeMissing ../edwin/native/target);
+    fileset = lib.fileset.difference (lib.fileset.unions [
+      ../src
+      ../scm
+      ../server
+      ../test
+      ../native
+    ]) (lib.fileset.maybeMissing ../native/target);
   };
   buildAndTestSubdir = "native";
   cargoRoot = "native";
-  cargoLock.lockFile = ../edwin/native/Cargo.lock;
+  cargoLock.lockFile = ../native/Cargo.lock;
 
   env.RUSTY_V8_ARCHIVE = rustyV8;
   # build.rs embeds the ICU data the v8 crate carries; here the crate is in the vendored sources.
@@ -99,7 +105,7 @@ rustPlatform.buildRustPackage {
     test -f "$EDWIN_ICU_DATA"
   '';
 
-  # The pseudo-terminal suite (the edwind attach test runs node on edwin/test) and the window's unit tests,
+  # The pseudo-terminal suite (the edwind attach test runs node on test/) and the window's unit tests,
   # which skip without a GPU adapter; tests/gui.rs skips without Xvfb and xdotool.
   nativeCheckInputs = [ nodejs ];
   # The window's renders need a font (and a GPU adapter, which the sandbox lacks, so they skip after it).
