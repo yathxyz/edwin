@@ -65,7 +65,6 @@ export interface Config {
   host: string;
   logLevel: string;
   writablePaths: string[];
-  retired: string[];
   refusePaths: string[];
   models: ModelsConfig;
 }
@@ -102,13 +101,11 @@ export function makeLog(level: string = 'info'): Log {
 
 /* ---------- config (R15.4): edit.json, unknown fields refused ---------- */
 const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'host', 'logLevel']);
-/* Fields an earlier edwind read and this one ignores, so a config written for it still starts; main warns. */
-const RETIRED = new Set(['boardsDir']);
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
   try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: not an object`);
-  for (const k of Object.keys(cfg)) if (!FIELDS.has(k) && !RETIRED.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
+  for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
   const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
   const home = process.env.HOME || os.homedir(), runtime = process.env.XDG_RUNTIME_DIR;
@@ -122,7 +119,7 @@ export function loadConfig(file: string): Config {
     configDir: abs('configDir', str('configDir', false, path.join(home, '.config/edwin'))),
     host: str('host', false, os.hostname()),
     logLevel: str('logLevel', false, 'info'),
-    writablePaths: [], refusePaths: [], models: cfg.models || {}, retired: Object.keys(cfg).filter(k => RETIRED.has(k)),
+    writablePaths: [], refusePaths: [], models: cfg.models || {},
   };
   for (const k of ['writablePaths', 'refusePaths'] as const) {
     const v = cfg[k] === undefined ? [] : cfg[k];
@@ -462,7 +459,6 @@ export async function main(argv: string[]): Promise<number | undefined> {
   let cfg: Config;
   try { cfg = loadConfig(config); } catch (e) { process.stderr.write(`edwind: ${e.message}\n`); return 1; }
   const log = makeLog(cfg.logLevel);
-  for (const k of cfg.retired) log.warn('config', { event: 'field ignored', field: k });
   if (mode === 'roots') { const a = new Authority(cfg); for (const r of [...a.writeRootsForFlags(), path.dirname(cfg.socket)]) process.stdout.write(r + '\n'); return 0; }
   if (mode === 'check') return check(cfg) ? 0 : 1;
   if (mode === 'export') { const n = await exportAll(cfg, exportDir!, log); process.stdout.write(`${n} buffers exported to ${exportDir}\n`); return 0; }

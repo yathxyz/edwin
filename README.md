@@ -74,7 +74,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 These files came from the published Edwin artifact (version 1791768765, 2026-10-12). From now on this directory is
 the source.
 
-## Edwin without Workbench (in review)
+## Edwin without Workbench
 
 Since 2026-10-19 Edwin is its own repository, and Workbench depends on it, never the reverse. Edwin is the Emacs
 replacement: it grows the features an Emacs user expects and loads no extensions. Workbench uses it as an
@@ -83,8 +83,8 @@ edit.sock client.
   `edwin --daemon`, it dials nothing, and process primitives raise `hub-error` (code `unconfigured`) at once.
 - **The §5 session API is gone**: `wb.mts`, `scm/wb.scm` (sessions, cards, `acp-prompt`, `shell-run`, the `wb-*`
   hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
-  `boardsDir` is accepted and ignored with a warning for one release, so an edit.json written for the
-  previous edwind still starts.
+  `boardsDir` was ignored with a warning for one release; since Workbench's module stopped writing it, edwind
+  refuses it like any unknown field.
 - **The hub protocol is Edwin's**: `docs/hub-protocol.md` specifies what edwind speaks to a hub (version 1, the
   messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
   server, without the ACP messages it served for the session API.
