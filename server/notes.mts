@@ -78,12 +78,12 @@ export function ensureNoteDir(id: string, realRoot: string, auth: Authority): st
 /* The shorter path wins an ambiguity (R11.3), then the lexicographically smaller. */
 const shortest = (ids: Iterable<string>) => [...ids].sort((a, b) => a.length - b.length || byPath(a, b))[0];
 const stripExt = (p: string) => p.replace(/\.[^./]+$/, '');
-const publicTask = (t: TaskRec): PublicTask => { const { endLine, fields, ...rest } = t; return rest; };
+const publicTask = (t: TaskRec): PublicTask => { const { endLine, ...rest } = t; return rest; };
 const publicFile = (f: FileRec): PublicFile => { const { orgId, line, ...rest } = f; return rest; };
 const publicHeading = (h: HeadingRec): PublicHeading => { const { orgId, ...rest } = h; return rest; };
 
 /* The records as the index serves them (§11.3): without the parser's internal fields. */
-export type PublicTask = Omit<TaskRec, 'endLine' | 'fields'>;
+export type PublicTask = Omit<TaskRec, 'endLine'>;
 export type PublicFile = Omit<FileRec, 'orgId' | 'line'>;
 export type PublicHeading = Omit<HeadingRec, 'orgId'>;
 export type NodeRow = PublicFile | PublicHeading | BlockRec;
@@ -574,7 +574,7 @@ export class Notes {
     const an = id.replace(/^\^/, '');
     return tasks.find(t => t.id === id) || tasks.find(t => t.node === id) || tasks.find(t => t.node.endsWith('#^' + an)) || null;
   }
-  /* POST /api/task/{id}: the keyword and the session::/dispatched:: fields of a task, as one edit batch. */
+  /* notes-task-set: the keyword and the `key::` fields of a task, as one edit batch. */
   async taskSet(client: Client, p: Params): Promise<CallResult> {
     const t0 = this.findTask(p.id);
     if (!t0) throw bad(`no task ${p.id}`);

@@ -93,7 +93,7 @@ export type PlanningKey = 'scheduled' | 'deadline' | 'closed';
 export interface TaskRec {
   id: string; node: string; kw: string; title: string; priority: string | null;
   scheduled: string | null; deadline: string | null; closed: string | null;
-  tags: string[]; session: string | null; dispatched: string | null; target: string | null; prompt: string;
+  tags: string[]; prompt: string;
   path: string; line: number; endLine: number; fields: Record<string, string>;
 }
 interface CardCommon {
@@ -155,7 +155,7 @@ export function parseFile(id: string, text: string, grammar: RawGrammar): ParseR
     rest = stripAnchor(rest, G);
     const tm = G.orgTags.exec(rest); if (tm) rest = rest.slice(0, tm.index);
     rest = rest.trim();
-    const t: TaskRec = { id: `${id}:${ln}`, node, kw: m[3], title: rest, priority, scheduled: null, deadline: null, closed: null, tags: [], session: null, dispatched: null, target: null, prompt: '', path: id, line: ln, endLine: ln, fields: {} };
+    const t: TaskRec = { id: `${id}:${ln}`, node, kw: m[3], title: rest, priority, scheduled: null, deadline: null, closed: null, tags: [], prompt: '', path: id, line: ln, endLine: ln, fields: {} };
     for (const x of headingTags || []) addTag(t, x);
     if (tm) for (const x of tm[1].split(':').filter(Boolean)) addTag(t, x);
     inlineTags(m[4], t);
@@ -174,7 +174,6 @@ export function parseFile(id: string, text: string, grammar: RawGrammar): ParseR
       else body.push(l.trim());
       t.endLine = j + 1;
     }
-    t.session = t.fields.session ?? null; t.dispatched = t.fields.dispatched ?? null; t.target = t.fields.target ?? null;
     t.prompt = body.join('\n');
     return t;
   };

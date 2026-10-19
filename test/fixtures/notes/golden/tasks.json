@@ -11,12 +11,13 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": "tmux:agent-1",
-   "dispatched": null,
-   "target": "@devbox",
    "prompt": "A body line for the task.",
    "path": "alpha.md",
-   "line": 15
+   "line": 15,
+   "fields": {
+    "session": "tmux:agent-1",
+    "target": "@devbox"
+   }
   },
   {
    "id": "alpha.md:19",
@@ -28,12 +29,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "alpha.md",
-   "line": 19
+   "line": 19,
+   "fields": {}
   },
   {
    "id": "gamma/delta.org:11",
@@ -47,12 +46,12 @@
    "tags": [
     "work"
    ],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "Body of the Org task, which refers to ((Alpha#^links)).",
    "path": "gamma/delta.org",
-   "line": 11
+   "line": 11,
+   "fields": {
+    "id": "22222222-2222-4333-8444-555555555555"
+   }
   },
   {
    "id": "gamma/delta.org:17",
@@ -64,12 +63,10 @@
    "deadline": null,
    "closed": "2026-10-02",
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "gamma/delta.org",
-   "line": 17
+   "line": 17,
+   "fields": {}
   },
   {
    "id": "journal/2026-10-01.md:3",
@@ -81,12 +78,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "journal/2026-10-01.md",
-   "line": 3
+   "line": 3,
+   "fields": {}
   },
   {
    "id": "tasks.md:3",
@@ -98,12 +93,14 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": "tmux:agent-x",
-   "dispatched": "2026-10-01T10:00",
-   "target": "@devbox",
    "prompt": "Ship the thing, then tell [[Beta]].",
    "path": "tasks.md",
-   "line": 3
+   "line": 3,
+   "fields": {
+    "session": "tmux:agent-x",
+    "dispatched": "2026-10-01T10:00",
+    "target": "@devbox"
+   }
   },
   {
    "id": "tasks.md:8",
@@ -117,12 +114,10 @@
    "tags": [
     "urgent"
    ],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "tasks.md",
-   "line": 8
+   "line": 8,
+   "fields": {}
   },
   {
    "id": "tasks.md:11",
@@ -134,12 +129,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "- a child bullet with detail",
    "path": "tasks.md",
-   "line": 11
+   "line": 11,
+   "fields": {}
   },
   {
    "id": "tasks.md:13",
@@ -151,12 +144,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "tasks.md",
-   "line": 13
+   "line": 13,
+   "fields": {}
   },
   {
    "id": "tasks.md:14",
@@ -168,12 +159,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "tasks.md",
-   "line": 14
+   "line": 14,
+   "fields": {}
   },
   {
    "id": "tasks.md:15",
@@ -185,12 +174,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "tasks.md",
-   "line": 15
+   "line": 15,
+   "fields": {}
   },
   {
    "id": "tasks.md:17",
@@ -202,12 +189,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "tasks.md",
-   "line": 17
+   "line": 17,
+   "fields": {}
   },
   {
    "id": "tasks.md:21",
@@ -219,12 +204,10 @@
    "deadline": null,
    "closed": null,
    "tags": [],
-   "session": null,
-   "dispatched": null,
-   "target": null,
    "prompt": "",
    "path": "tasks.md",
-   "line": 21
+   "line": 21,
+   "fields": {}
   }
  ]
 }

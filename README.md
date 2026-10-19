@@ -86,6 +86,9 @@ edit.sock client.
 - **The hub protocol is Edwin's**: `docs/hub-protocol.md` specifies what edwind speaks to a hub (version 1, the
   messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
   server, without the ACP messages it served for the session API.
+- **Task rows carry `fields`**: every `key::` field (and Org property) of a task, by its lowercased key, in
+  `notes-tasks`, `notes-task` and the reply of `notes-task-set`. The rows no longer single out `session`,
+  `dispatched` and `target`, which only Workbench's dispatch gives a meaning.
 
 ## Step E0: the core without a browser (done)
 

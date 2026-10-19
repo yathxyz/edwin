@@ -152,7 +152,7 @@ test('R11.2 record shapes: file, heading, block, task and card fields the fronte
   const tasks = (await value(c, 'notes-tasks')).tasks;
   const ship = tasks.find((t: Msg) => t.id === 'tasks.md:3');
   assert.equal(ship.kw, 'TODO'); assert.equal(ship.title, 'Ship it'); assert.equal(ship.priority, 'B'); assert.equal(ship.node, 'tasks.md#^t1');
-  assert.equal(ship.session, 'tmux:agent-x'); assert.equal(ship.dispatched, '2026-10-01T10:00'); assert.equal(ship.target, '@devbox');
+  assert.deepEqual(ship.fields, { session: 'tmux:agent-x', dispatched: '2026-10-01T10:00', target: '@devbox' }, 'every key:: field, by its lowercased key');
   assert.equal(ship.prompt, 'Ship the thing, then tell [[Beta]].'); assert.equal(ship.path, 'tasks.md'); assert.equal(ship.line, 3);
   const follow = tasks.find((t: Msg) => t.id === 'tasks.md:8');
   assert.equal(follow.scheduled, '2026-10-20'); assert.equal(follow.deadline, '2026-10-25'); assert.deepEqual(follow.tags, ['urgent']); assert.equal(follow.node, 'tasks.md#1');
@@ -287,7 +287,7 @@ test('§11.3 notes-task-set edits the task line and its fields as one edit batch
   const o = await b.open('tasks.md');
   const ver0 = o.ver;
   const r = await value(a, 'notes-task-set', [{ id: 'tasks.md:3', kw: 'NEXT', set: { session: 'tmux:agent-9', dispatched: '2026-10-14T10:00' }, by: { kind: 'agent', agent: 'tester' } }]);
-  assert.equal(r.kw, 'NEXT'); assert.equal(r.session, 'tmux:agent-9'); assert.equal(r.dispatched, '2026-10-14T10:00'); assert.equal(r.id, 'tasks.md:3');
+  assert.equal(r.kw, 'NEXT'); assert.equal(r.fields.session, 'tmux:agent-9'); assert.equal(r.fields.dispatched, '2026-10-14T10:00'); assert.equal(r.id, 'tasks.md:3');
   const ed = await b.next(m => m.t === 'edits' && m.buf === 'tasks.md');
   assert.deepEqual(ed.by, { kind: 'agent', agent: 'tester' });
   assert.equal(ed.ver, ver0! + 1, 'one batch');
@@ -296,7 +296,7 @@ test('§11.3 notes-task-set edits the task line and its fields as one edit batch
   /* A task without the fields gets them inserted under its line, indented; the keyword alone also works. */
   const follow = (await value(a, 'notes-tasks')).tasks.find((t: Msg) => t.title === 'Follow up with the team #urgent');
   const r2 = await value(a, 'notes-task-set', [{ id: follow.id, kw: 'DONE', set: { session: 'tmux:x' } }]);
-  assert.equal(r2.kw, 'DONE'); assert.equal(r2.session, 'tmux:x');
+  assert.equal(r2.kw, 'DONE'); assert.equal(r2.fields.session, 'tmux:x');
   const ed2 = await b.next(m => m.t === 'edits' && m.buf === 'tasks.md');
   assert.deepEqual(ed2.by, { kind: 'web', cid: a.cid, device: a.device }, 'without a by of its own, the caller is the writer');
   const text2 = (await b.open('tasks.md')).text!;
