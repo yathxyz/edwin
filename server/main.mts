@@ -27,7 +27,6 @@ import * as debugModule from './debug.mts';
 import * as modelsModule from './models.mts';
 import * as hubModule from './hub.mts';
 import * as processModule from './process.mts';
-import * as wbModule from './wb.mts';
 import * as anchorsModule from './anchors.mts';
 import * as babelModule from './babel.mts';
 import { lockdown, lockdownState } from './lockdown.mts';
@@ -39,7 +38,6 @@ import type { Notes } from './notes.mts';
 import type { Models } from './models.mts';
 import type { Hub } from './hub.mts';
 import type { Processes } from './process.mts';
-import type { Wb } from './wb.mts';
 import type { Anchors } from './anchors.mts';
 
 /* src, loaded through host-node.cts, is outside this program's types: these name what the server holds of it. */
@@ -63,11 +61,11 @@ export interface Config {
   webSocket: string | undefined;
   stateDir: string;
   notesDir: string;
-  boardsDir: string | undefined;
   configDir: string;
   host: string;
   logLevel: string;
   writablePaths: string[];
+  retired: string[];
   refusePaths: string[];
   models: ModelsConfig;
 }
@@ -83,7 +81,7 @@ export interface ServerModule { install(server: Server): Promise<void>; shutdown
 const require = createRequire(import.meta.url);
 /* The E2 modules, installed in this order after the buffers are loaded; each exports install(server) and
    may export shutdown(server) and name. */
-const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, hubModule, processModule, wbModule, anchorsModule, babelModule];
+const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, hubModule, processModule, anchorsModule, babelModule];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EDWIN = path.join(HERE, '..');
 export const BUILD = process.env.WB_EDIT_BUILD || 'dev';
@@ -103,12 +101,14 @@ export function makeLog(level: string = 'info'): Log {
 }
 
 /* ---------- config (R15.4): edit.json, unknown fields refused ---------- */
-const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'boardsDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'host', 'logLevel']);
+const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'host', 'logLevel']);
+/* Fields an earlier edwind read and this one ignores, so a config written for it still starts; main warns. */
+const RETIRED = new Set(['boardsDir']);
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
   try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: not an object`);
-  for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
+  for (const k of Object.keys(cfg)) if (!FIELDS.has(k) && !RETIRED.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
   const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
   const home = process.env.HOME || os.homedir();
@@ -118,11 +118,10 @@ export function loadConfig(file: string): Config {
     webSocket: abs('webSocket', str('webSocket', false, undefined)),
     stateDir: abs('stateDir', str('stateDir', false, path.join(home, '.local/state/workbench/edit'))),
     notesDir: abs('notesDir', str('notesDir', true)),
-    boardsDir: abs('boardsDir', str('boardsDir', false, undefined)),
     configDir: abs('configDir', str('configDir', false, path.join(home, '.config/edwin'))),
     host: str('host', false, os.hostname()),
     logLevel: str('logLevel', false, 'info'),
-    writablePaths: [], refusePaths: [], models: cfg.models || {},
+    writablePaths: [], refusePaths: [], models: cfg.models || {}, retired: Object.keys(cfg).filter(k => RETIRED.has(k)),
   };
   for (const k of ['writablePaths', 'refusePaths'] as const) {
     const v = cfg[k] === undefined ? [] : cfg[k];
@@ -173,7 +172,6 @@ export class Server {
   declare models: Models;
   declare hub: Hub;
   declare processes: Processes;
-  declare wb: Wb;
   declare anchors: Anchors | null;
   constructor(cfg: Config, log: Log) {
     this.cfg = cfg; this.log = log; this.build = BUILD; this.boot = randomId(8); this.clients = new Set(); this.stopping = false;
@@ -463,6 +461,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   let cfg: Config;
   try { cfg = loadConfig(config); } catch (e) { process.stderr.write(`edwind: ${e.message}\n`); return 1; }
   const log = makeLog(cfg.logLevel);
+  for (const k of cfg.retired) log.warn('config', { event: 'field ignored', field: k });
   if (mode === 'roots') { const a = new Authority(cfg); for (const r of [...a.writeRootsForFlags(), path.dirname(cfg.socket)]) process.stdout.write(r + '\n'); return 0; }
   if (mode === 'check') return check(cfg) ? 0 : 1;
   if (mode === 'export') { const n = await exportAll(cfg, exportDir!, log); process.stdout.write(`${n} buffers exported to ${exportDir}\n`); return 0; }

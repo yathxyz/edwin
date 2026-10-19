@@ -67,12 +67,8 @@ the child sees a terminal."
   "Send the text between START and END of the current buffer to PROCESS."
   (process-send-string process (buffer-substring start end)))
 
-(define (process-session process)
-  "The hub session handle of PROCESS (§5), or #f while the hub does not list it."
-  (and (featurep 'wb-hub) (%session-handle-or-false (process-sid process))))
-
 (define-command (list-processes)
-  "Render every process of the image, card-less ones included (R9.22), in *Process List*; its buffer id."
+  "Render every process of the image (R9.22) in *Process List*; its buffer id."
   (interactive)
   (:where 'server)
   (let ((id (%process-list-refresh)))

@@ -45,7 +45,6 @@ pub const SCM: &[(&str, &str)] = &[
     ("org.scm", include_str!("../../scm/org.scm")),
     ("process.scm", include_str!("../../scm/process.scm")),
     ("threads.scm", include_str!("../../scm/threads.scm")),
-    ("wb.scm", include_str!("../../scm/wb.scm")),
 ];
 
 pub fn js(name: &str) -> Option<&'static str> {

@@ -3,7 +3,7 @@
 // hub's hello first, our hello within HELLO_TIMEOUT, one `watch` for Summary changes, and requests with a
 // nonzero u64 `rid` that get exactly one `ok` or `err` reply (DESIGN §3.2). Other modules reach it as
 // server.hub: request(), send(), ptyInput(), the `sessions` map and events named after the hub's message
-// types (`session`, `gone`, `pty.out`, `pty.exit`, `pty.fg`, `acp.ev`, `acp.replayed`, `acp.info`, `err`),
+// types (`session`, `gone`, `pty.out`, `pty.exit`, `pty.fg`, `err`),
 // plus `up` and `down` for the connection itself. edwind never starts a process itself (R4.45): everything a
 // process needs goes through this connection. With no hubSocket in edit.json there is no connection: the hub
 // stays down and every request fails at once with the code `unconfigured`.
@@ -12,56 +12,40 @@
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import type { Server, Log, SchemeValue } from './main.mts';
-import type { Process } from './process.mts';
 
 /* ---------- wire shapes (crates/wb-proto/src/hub.rs, journal.rs) ---------- */
-export type SessionKind = 'pty' | 'acp' | 'unknown';
 export interface Fault { code: string; message: string }
 /* The PTY's foreground process group; `leader` when the group is the child's own. */
 export interface Fg { comm: string; pgid: number; leader: boolean }
 export interface Exit { code: number | null; signal: number | null; reason: string; at?: number }
 export interface PtyFacts { argv: string[]; pid?: number; fg?: Fg; exit?: Exit }
-export interface AcpLast { seq: number; ts: number; outcome: string; error?: { code: string; message: string } | null }
-export interface AcpFacts {
-  agent: string; agentSessionId: string | null; revivable: boolean; activity: string; pending: unknown[];
-  last: AcpLast | null; headSeq: number; seenSeq: number; title: string | null; modeId: string | null;
-}
-/* The hub's facts about one session (wb_proto::hub::Summary). */
+/* The hub's facts about one session (wb_proto::hub::Summary); `kind` is `pty` for a PTY, and edwind ignores
+   sessions of any other kind. */
 export interface Summary {
-  sid: string; kind: SessionKind; host: string; createdAt: number; updatedAt: number; alive: boolean;
-  viewers: number; cwd: string; fault: Fault | null; pty?: PtyFacts; acp?: AcpFacts;
-}
-/* One ACP journal event, the `ev` of acp.ev (wb_proto::journal::JournalEvent), tagged by `e`. */
-export interface AcpEvent {
-  seq?: number; ts?: number; e: string;
-  prompt?: ({ type?: string; text?: string } | null)[];
-  update?: { sessionUpdate?: string; content?: { type?: string; text?: string } };
-  stopReason?: string; code?: string; message?: string;
-  [k: string]: unknown;
+  sid: string; kind: string; host: string; createdAt: number; updatedAt: number; alive: boolean;
+  viewers: number; cwd: string; fault: Fault | null; pty?: PtyFacts;
 }
 /* A line from the hub (wb_proto::hub::HubMessage): the fields of every type it sends, by `t`. */
 export interface HubMessage {
   t: string; rid?: number | null; sid?: string; code?: string; message?: string;
-  session?: Summary; epoch?: number; d?: string; out?: number; ev?: AcpEvent;
+  session?: Summary; epoch?: number; d?: string; out?: number;
   [k: string]: unknown;
 }
 /* The hub's hello. */
 export interface HubHello extends HubMessage {
   proto: number; version: string; build?: string; host: string; pid: number; startedAt: number;
-  agents?: unknown; shells?: unknown; defaultShell?: unknown;
+  shells?: unknown; defaultShell?: unknown;
 }
-export interface HubInfo { version: string; build: string | null; host: string; pid: number; startedAt: number; agents: { name: string; label: string }[]; shells: string[]; defaultShell: string }
+export interface HubInfo { version: string; build: string | null; host: string; pid: number; startedAt: number; shells: string[]; defaultShell: string }
 export type HubStatus = 'down' | 'up' | 'incompatible';
 /* A request line (wb_proto::hub::HubRequest); request() adds the rid. */
 export interface HubRequest { t: string; sid?: string; [k: string]: unknown }
 /* The `ok` reply fields of each request type; `{}` for the rest. */
 export interface SessionsReply { sessions: Summary[] }
 export interface PtyOpenReply { new: boolean; pid?: number; cwd: string; exit?: Exit; epoch: number; stream: number; out: number; resumed: boolean; replay?: string }
-export interface AcpOpenReply { new: boolean; summary: Summary; session: Record<string, unknown>; head: number; from: number; reset: boolean }
-export interface CaptureReply { text: string }
-export interface HubReplies { list: SessionsReply; watch: SessionsReply; 'pty.open': PtyOpenReply; 'acp.open': AcpOpenReply; 'pty.capture': CaptureReply }
+export interface HubReplies { list: SessionsReply; watch: SessionsReply; 'pty.open': PtyOpenReply }
 export type HubReply = { [k: string]: unknown };
-/* The events of a Hub, by name: the hub's message types, plus `up`, `down` and process.mts's own. */
+/* The events of a Hub, by name: the hub's message types, plus `up` and `down`. */
 export interface HubEvents {
   up: [];
   down: [];
@@ -71,14 +55,9 @@ export interface HubEvents {
   'pty.out': [m: HubMessage];
   'pty.exit': [m: HubMessage];
   'pty.fg': [m: HubMessage];
-  'acp.ev': [m: HubMessage];
-  'acp.replayed': [m: HubMessage];
-  'acp.info': [m: HubMessage];
-  'process.out': [p: Process, d: string];
-  'process.exit': [p: Process, event: string];
 }
 /* The message types onMessage passes on as they are. */
-type PassedOn = 'pty.out' | 'pty.exit' | 'pty.fg' | 'acp.ev' | 'acp.replayed' | 'acp.info';
+type PassedOn = 'pty.out' | 'pty.exit' | 'pty.fg';
 interface PendingReply { resolve: (r: HubReply) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
 
 export const name = 'hub';
@@ -86,17 +65,14 @@ export const name = 'hub';
 export const PROTO = 1;                                   // wb_proto::hub::PROTO
 export const MAX_LINE = 16 << 20;                          // wb_proto::limits::MAX_LINE (a longer line closes the connection)
 export const PTY_INPUT_FRAME = 1 << 20;                    // wb_proto::limits::PTY_INPUT_FRAME (largest `d` of one pty.input, in bytes)
-export const CAPTURE_MAX = 1000;                           // wb_proto::limits::CAPTURE_MAX
-export const FG_POLL_MS = 2000;                            // wb_proto::limits::FG_POLL
 export const HELLO_TIMEOUT_MS = 5000;                      // wb_proto::limits::HELLO_TIMEOUT
-export const CMD_TIMEOUT_DEFAULT_MS = 60000;               // wb_proto::limits::CMD_TIMEOUT_DEFAULT (R5.6)
 /* The control connection's policy, as crates/wb-web/src/hub.rs has it (DESIGN §3.2.10). */
 export const CONNECT_TIMEOUT_MS = 2000;                    // CONNECT_TIMEOUT
 export const BACKOFF_MIN_MS = 250;                         // BACKOFF_MIN
 export const BACKOFF_MAX_MS = 5000;                        // BACKOFF_MAX
 export const STABLE_MS = 5000;                             // STABLE: a connection up this long resets the backoff
 export const REPLY_TIMEOUT_MS = 10000;                     // REPLY_TIMEOUT
-/* A pty.kill or acp.kill with forget waits for the exit (about 3 s for a PTY, 8 s for an agent, conn.rs LINGER). */
+/* A pty.kill with forget waits for the exit (about 3 s). */
 export const KILL_TIMEOUT_MS = 30000;
 const CLIENT = 'edwind';
 
@@ -134,7 +110,7 @@ export class Hub extends EventEmitter<HubEvents> {
     super();
     this.server = server; this.log = server.log; this.path = socketPath;
     this.status = 'down';                               // down | up | incompatible
-    this.info = null;                                    // the hub's hello: version, build, host, shells, defaultShell, agents
+    this.info = null;                                    // the hub's hello: version, build, host, shells, defaultShell
     this.sessions = new Map();                           // sid -> Summary, from watch (R5.7); empty while down
     this.sock = null; this.pending = new Map(); this.nextRid = 1;
     this.backoff = BACKOFF_MIN_MS; this.timer = null; this.stopped = false; this.upSince = 0;
@@ -188,7 +164,7 @@ export class Hub extends EventEmitter<HubEvents> {
       this.status = 'incompatible'; this.log.warn('hub', { event: 'incompatible', proto: msg.proto });
       this.sock!.destroy(); return;
     }
-    this.info = { version: msg.version, build: msg.build || null, host: msg.host, pid: msg.pid, startedAt: msg.startedAt, agents: Array.isArray(msg.agents) ? msg.agents : [], shells: Array.isArray(msg.shells) ? msg.shells : [], defaultShell: typeof msg.defaultShell === 'string' ? msg.defaultShell : '' };
+    this.info = { version: msg.version, build: msg.build || null, host: msg.host, pid: msg.pid, startedAt: msg.startedAt, shells: Array.isArray(msg.shells) ? msg.shells : [], defaultShell: typeof msg.defaultShell === 'string' ? msg.defaultShell : '' };
     this.write({ t: 'hello', proto: PROTO, client: `${CLIENT}/${this.server.build || 'dev'}` });
     /* One watch per connection (R5.7): its reply is the session list, then `session` and `gone` events. */
     const rid = this.rid();
@@ -221,7 +197,7 @@ export class Hub extends EventEmitter<HubEvents> {
         this.emit('gone', msg); return;
       }
       case 'hello': return;                                 // never twice
-      default: this.emit(msg.t as PassedOn, msg);                        // pty.out, pty.exit, pty.fg, acp.ev, acp.replayed, acp.info, or something newer
+      default: this.emit(msg.t as PassedOn, msg);                        // pty.out, pty.exit, pty.fg, or something newer
     }
   }
   onClose() {

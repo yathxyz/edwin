@@ -71,6 +71,18 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 These files came from the published Edwin artifact (version 1791768765, 2026-10-12). From now on this directory is
 the source.
 
+## Edwin without Workbench (in review)
+
+Since 2026-10-19 Edwin is its own repository, and Workbench depends on it, never the reverse. Edwin is the Emacs
+replacement: it grows the features an Emacs user expects and loads no extensions. Workbench uses it as an
+edit.sock client.
+- **No default hub.** edwind connects to a hub only when edit.json names `hubSocket`. With none, as under
+  `edwin --daemon`, it dials nothing, and process primitives raise `hub-error` (code `unconfigured`) at once.
+- **The §5 session API is gone**: `wb.mts`, `scm/wb.scm` (sessions, cards, `acp-prompt`, `shell-run`, the `wb-*`
+  hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
+  `boardsDir` is accepted and ignored with a warning for one release, so an edit.json written for the
+  previous edwind still starts.
+
 ## Step E0: the core without a browser (done)
 
 The E0 gate of the edwind spec (§17) passes: `edwin-scheme`, `edwin-headless` with no stubs, and the other checks.
@@ -200,7 +212,7 @@ room, list-threads, list-clients, the primitive registry; `scm/debug.scm`), `ima
 replication, `*image-log*`), `notes.mts` and `notes-parse.mts` (the notes index on a worker thread;
 `scm/notes-syntax.scm` is the grammar), `worker.mts` and `jobs.mts` (the worker pool's Node host, with
 `src/pool.ts`), `scm/address.scm` (block addresses, R6.14), `process.mts` and `hub.mts` (processes through the
-hub; `scm/process.scm`), `wb.mts` (§5 sessions and events; `scm/wb.scm`), `models.mts` (backends,
+hub; `scm/process.scm`), `models.mts` (backends,
 `http-request`, credentials, `sample`, usage; `scm/models.scm`). Modules install through the extension points
 of `main.mts` (`MODULES`, `defineCommand`, `onMessage`, `statusProviders`, `buffers.on`).
 
@@ -279,27 +291,17 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   spawn). An unreachable hub is logged at debug level only. Conditions `hub-error`, `process-error`,
   `stale-object`, `no-leader` sit under `error`; status gains `hub`, `hubVersion`, `hubSessions`.
 - **Processes (R4.43–R4.45, `process.mts`, `scm/process.scm`)** are hub PTY sessions with ids `ed-` + 16 base32
-  chars; `make-process` takes `:name :command :shell :cwd :env :size :buffer :filter :sentinel :card :noquery`
+  chars; `make-process` takes `:name :command :shell :cwd :env :size :buffer :filter :sentinel :noquery`
   (default shell bash if the hub offers it, size 120x40). Output and exit run filters and sentinels on background
   threads, queued per process so chunks stay ordered; insertion at the process mark ignores read-only (as Emacs
   binds `inhibit-read-only`), with `by {kind: "server", thread: "process NAME"}`. `call-process` and
-  `shell-command-to-string` use a card-less PTY with `TERM=dumb NO_COLOR=1` (bash, sh, zsh only), strip ANSI and
+  `shell-command-to-string` use a PTY with `TERM=dumb NO_COLOR=1` (bash, sh, zsh only), strip ANSI and
   CR, and forget the corpse (`pty.kill forget:true`); `:timeout` signals `timeout`. `accept-process-output`
   returns at once when output arrived since the last call (Emacs). `M-x list-processes` is a server command
-  rendering `name:*Process List*`. `:card t` is only recorded until EW-M4 (such sessions stay hidden `ed-`
-  sessions, R9.22; `server.processes.onCard` is the hook for the board module). `pty.resize` is not sent.
-- **The §5 session API (`wb.mts`, `scm/wb.scm`, feature `wb-hub`)**: interned session handles (`eq?`),
-  `session-list`, `session-get` (one argument gives the handle, two a field), `card-session` (session or
-  process), `card-send`, `card-read` (`pty.capture`, or the Org transcript of an `acp.open` replay),
-  `card-interrupt`, `card-kill` (`:force` or `y-or-n-p`), `acp-prompt` and `acp-prompt-async` (mailbox),
-  `shell-run` (done when `fg.leader` is seen true after the send, `:timeout` 600 s, returns the output since
-  the send). Hooks: `wb-session-exit-functions`, `wb-session-output-functions` (attached only while non-empty
-  and viewed, coalesced per 100 ms), `wb-acp-turn-end-functions`, `wb-page-saved-functions`,
-  `wb-card-created/deleted/moved-functions` from diffing saves of `<boardsDir>/<host>.json`; card hooks pass
-  `(id node-alist)` since card handles need the board family (EW-M4). The primitives live in `server`,
-  not `src/wb.js` as the spec names, because server-only code lives there. R13.2 (classifying `wb`'s
-  session from the hub summary) is not done; `server.hub.sessions` is ready for it. Both suites run against the
-  fake hub `test/fake-hub.mts`.
+  rendering `name:*Process List*`. `kill-process`, like `delete-process`, makes the hub forget the session.
+  `pty.resize` is not sent.
+- **The §5 session API** (`wb.mts`, `scm/wb.scm`, `wb-*` hooks, `:card`) was removed on 2026-10-19: nothing
+  called it (see "Edwin without Workbench").
 - **The model layer (§12, R14.4–R14.7)** is `models.mts` with `scm/models.scm`. Backends are objects of two
   kinds, the ones the spec names (`anthropic`: Messages API, `x-api-key`; `openai`: chat completions, bearer);
   the default backend `workbench` is `models.anthropic` of `edit.json`, its models the tier values; a backend
@@ -521,7 +523,7 @@ markdown). `server/babel.mts` reads and writes block text; `scm/babel.scm` is th
   passes a blocking point (`thread-yield`), so a long block does not hold the note (R4.41); a marker and the id
   find the block again to store the result. A condition (or a raised object) becomes a failed result with its
   report; quit and the frame deadline are not results. `sh`, `bash`, `zsh` blocks run through `call-process`
-  in a card-less hub PTY (R4.44) in the note's directory (`dir=` relative to it), with `in=` bindings as shell
+  in a hub PTY (R4.44) in the note's directory (`dir=` relative to it), with `in=` bindings as shell
   variables; a non-zero status is a failed result ending in `[exit N]`. `babel-define-executor` adds languages
   (the slot H1k's kernels would use).
 - **Tangle** writes through the shared buffer of each file (`%babel-write-file`): the text is replaced as one

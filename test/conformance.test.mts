@@ -410,6 +410,10 @@ test('R15.2, R15.4 the socket is 0600 and edit.json with an unknown field is ref
   const d2 = makeDir({ bogus: 1 });
   await assert.rejects(startEdwind(d2), /unknown field "bogus"/);
   fs.rmSync(d2.root, { recursive: true, force: true });
+  /* A retired field is ignored with a warning, so a config written for an earlier edwind still starts. */
+  const d3 = makeDir({ boardsDir: '/nonexistent/boards' });
+  const ch = await startEdwind(d3);
+  try { assert.match(ch.logs, /field ignored.*boardsDir/); } finally { await stopEdwind(ch); fs.rmSync(d3.root, { recursive: true, force: true }); }
 });
 
 test('R7.8 shutting_down: a stopping edwind tells its clients and exits cleanly', async () => {

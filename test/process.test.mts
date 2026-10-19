@@ -77,21 +77,18 @@ test('R4.43 filters run in order on background threads; accept-process-output; p
   c.close();
 });
 
-test('R4.43 kill-process on a card-less process sends pty.kill with forget; :card keeps the session; delete-process', async () => {
+test('R4.43 kill-process and delete-process send pty.kill with forget; the process leaves the list', async () => {
   const c = await client(); await hubUp(c);
-  assert.equal(await value(c, '(define pk (make-process :name "k" :command "sleep 30")) (define pcard (make-process :name "kc" :command "sleep 30" :card #t)) (list (process-card-p pk) (process-card-p pcard))'), '(#f #t)');
-  const sidK = JSON.parse(await value(c, '(process-sid pk)')), sidC = JSON.parse(await value(c, '(process-sid pcard)'));
-  await hub.waitFor(r => r.t === 'pty.open' && r.sid === sidC);
+  assert.equal(await value(c, '(define pk (make-process :name "k" :command "sleep 30")) (define pd (make-process :name "d" :command "sleep 30")) (list (process-live-p pk) (process-live-p pd))'), '(#t #t)');
+  const sidK = JSON.parse(await value(c, '(process-sid pk)')), sidD = JSON.parse(await value(c, '(process-sid pd)'));
+  await hub.waitFor(r => r.t === 'pty.open' && r.sid === sidD);
   assert.equal(await value(c, '(kill-process pk) (process-status pk)'), 'deleted');
   const [k1] = await hub.waitFor(r => r.t === 'pty.kill' && r.sid === sidK);
-  assert.equal(k1.forget, true, 'card-less: forget');
+  assert.equal(k1.forget, true);
   assert.ok(!hub.sessions.has(sidK), 'the hub forgot it');
-  assert.equal(await value(c, '(kill-process pcard) (list (process-status pcard) (process-exit-status pcard))'), '(signal 1)');
-  const [k2] = await hub.waitFor(r => r.t === 'pty.kill' && r.sid === sidC);
-  assert.equal(k2.forget, false, 'a card process stays listed');
-  assert.ok(hub.sessions.has(sidC));
-  assert.equal(await value(c, '(delete-process pcard) (memq pcard (process-list))'), '#f');
-  await hub.waitFor(r => r.t === 'pty.kill' && r.sid === sidC && r.forget === true);
+  assert.equal(await value(c, '(delete-process pd) (memq pd (process-list))'), '#f');
+  const [k2] = await hub.waitFor(r => r.t === 'pty.kill' && r.sid === sidD);
+  assert.equal(k2.forget, true);
   assert.equal(await value(c, '(memq pk (process-list))'), '#f');
   c.close();
 });
@@ -130,14 +127,14 @@ test('R4.43 a refused spawn is process-error with the hub\'s message; make-proce
   c.close();
 });
 
-test('M-x list-processes renders *Process List* with every process, card-less ones included (R9.22)', async () => {
+test('M-x list-processes renders *Process List* with every process (R9.22)', async () => {
   const c = await client(); await hubUp(c);
   assert.equal(await value(c, '(define pl (make-process :name "lister" :command "sleep 30")) (process-live-p pl)'), '#t');
   const r = await c.call('list-processes');
   assert.equal(r.value, '"name:*Process List*"');
   const o = await c.open('name:*Process List*');
   assert.equal(o.error, null);
-  assert.match(o.text!, /^Process +PID +Status +Buffer +Shell +Session +Card +Command\n/);
+  assert.match(o.text!, /^Process +PID +Status +Buffer +Shell +Session +Command\n/);
   const sid = JSON.parse(await value(c, '(process-sid pl)'));
   const row = o.text!.split('\n').find(l => l.startsWith('lister'));
   assert.ok(row, 'the process is listed'); assert.match(row, /run/); assert.ok(row.includes(sid)); assert.ok(row.includes('sleep 30'));

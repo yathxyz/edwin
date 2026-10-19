@@ -166,11 +166,8 @@ in
     "debug.test.mts"
   ];
 
-  # Processes through the hub (R4.43-R4.45) and the section 5 session API, against the fake hub.
-  edit-process = suite "process" [
-    "process.test.mts"
-    "wb.test.mts"
-  ];
+  # Processes through the hub (R4.43-R4.45), against the fake hub.
+  edit-process = suite "process" [ "process.test.mts" ];
 
   # Source blocks in notes (hypernotes H1: scm/babel.scm, server/babel.mts): the reader and writer, then the
   # engine against a real edwind and the fake hub, for markdown and Org.
