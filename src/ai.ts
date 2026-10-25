@@ -776,7 +776,7 @@ CMD('gptel-resume', '', '', 'Continue a chat after its answer (used by gptel-sen
   b.pt = b.rope.length;
   Ed.insertText(b, (tail.endsWith('\n\n') ? '' : tail.endsWith('\n') ? '\n' : '\n\n') + '* ');
   b.pt = b.rope.length;
-  if (b.file) { Ed.Store.set(b.file, b.text); b.modified = false; }
+  if (b.file) { Ed.Store.set(b.file, b.text); Ed.markSaved(b); }
   if (b === cur() && !E.mini && E.evil && EC.stateOf(b) && EC.stateOf(b) !== 'insert') EC.enterInsert(b, 1, false);
   Ed.message(why!);
   return false;

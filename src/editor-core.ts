@@ -1569,6 +1569,14 @@ function restoreSnap(b: EdBuffer, s: EdSnap) {
   b.mark = s.mark === null ? null : Math.min(s.mark, newLen);
   for (const m of b.markers) if (m.pos !== null && m.pos > newLen) m.pos = newLen;
 }
+/* The buffer now matches its file. Every snapshot in its history differs from the file, so undoing or redoing
+   to one leaves the buffer modified, and undoing back to this state leaves it unmodified again. */
+function markSaved(b: EdBuffer) {
+  b.modified = false;
+  if (b.pendingUndo) b.pendingUndo.modified = true;
+  for (const s of b.undo) s.modified = true;
+  for (const s of b.redo) s.modified = true;
+}
 function flushPendingUndo(b: EdBuffer) {
   if (b.pendingUndo) { if (changedSince(b, b.pendingUndo.ver)) { b.undo.push(b.pendingUndo); b.redo = []; } b.pendingUndo = null; }
 }
@@ -2440,7 +2448,7 @@ globalThis.Ed = {
   normKey, kbd, defineKey, lookupIn, lookupKey, lookupWith, activeMaps, whereIs, keyName, keyChar, selfInsertable, message, ding,
   reportError, errorText, quietQuit, QUIET, feedKey, unreadKeys, flushReplay, nextKey, readMini, exitMini, abortMini, completeMini, historyMove,
   miniCandidates, miniMove, miniInsert, markUsed, termRegex, histories, historyFor, prescient, annotateCommand, annotateFunction, annotateVariable, annotateBuffer, annotateFile, readKeySeq, readChar, commandNames, functionNames, variableNames, bufferNames, isCommand, prefixNumeric, specArgs,
-  specCodes, callInteractively, undoStep, redoStep, snap, runCommand, dispatch, commandLoop, executeKeys, isearch, render, renderBuffer,
+  specCodes, callInteractively, undoStep, redoStep, snap, markSaved, runCommand, dispatch, commandLoop, executeKeys, isearch, render, renderBuffer,
   posFromPoint, windowAt, lineHeight, whenIdle, frameRender, windowState, scrollStart, modelineFields, miniView, echoView, matchSpans, percent, foldsOf, onScroll, scrollWindow, lineIndex, lineNoB, lineStartB, lineCountB, foldAt, vLineNo, vLineStart, vLineCount, windowRows, ensureWindowDom, Window, Split, windowList, selectWindow, splitWindow, deleteWindow, deleteOtherWindows, winConfig, restoreWinConfig, saveWinConfig, windowFor, popToBuffer, leaves, get queueLength() { return queue.length; },
   runCallback,
 } satisfies Partial<EdApi> as unknown as EdApi;

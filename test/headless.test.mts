@@ -103,6 +103,24 @@ test('saving writes the file store', async () => {
   assert.equal(ed.E.current.modified, false);
 });
 
+test('undoing past a save leaves the buffer modified, and undoing back to it does not', async () => {
+  await fresh();
+  await ed.type('ione'); await ed.keys('ESC');
+  await ed.type(':w\n');
+  await ed.type('A two'); await ed.keys('ESC');
+  await ed.type(':w\n');
+  assert.equal(ed.E.current.modified, false);
+  await ed.type('u');
+  assert.equal(ed.text(), 'one');
+  assert.equal(ed.E.current.modified, true);
+  await ed.type(':w\n');
+  assert.equal(ed.Ed.Store.get(`t${n}.txt`), 'one');
+  await ed.keys('C-r');
+  assert.equal(ed.E.current.modified, true);
+  await ed.type('u');
+  assert.equal(ed.E.current.modified, false);
+});
+
 test('Org: a heading, a TODO state from the minibuffer and a demote', async () => {
   await fresh('org');
   assert.equal(ed.E.current.mode, 'org-mode');

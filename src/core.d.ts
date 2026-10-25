@@ -1530,6 +1530,7 @@ interface EdApi {
   specCodes: Record<string, () => Promise<SchemeValue[]>>;
   callInteractively(cmd: SchemeValue): Promise<SchemeValue>;
   undoStep(b: EdBuffer): unknown;
+  markSaved(b: EdBuffer): void;
   redoStep(b: EdBuffer): unknown;
   snap(b: EdBuffer): EdSnap;
   runCommand(def: SchemeValue, keys?: string): Promise<void>;

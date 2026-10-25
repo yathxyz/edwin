@@ -779,7 +779,7 @@ function writeTo(b: EdBuffer, given: string) {
   let ok;
   try { ok = Ed.Store.set(name, b.text); }
   catch (e) { signal('file-error', `Cannot write ${name}: ${e && e.message ? e.message : e}`); }
-  b.file = name; b.modified = false;
+  b.file = name; Ed.markSaved(b);
   if (Ed.hooks.wrote) Ed.hooks.wrote(b, name);
   Ed.message(ok ? `Wrote ${fileLabel(name)}` : `Wrote ${name} (kept for this session only: browser storage is unavailable)`);
 }

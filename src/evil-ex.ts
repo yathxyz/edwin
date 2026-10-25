@@ -843,7 +843,7 @@ D('revert-buffer', '', 'Reload the current buffer from its saved file, dropping 
   const b = cur();
   if (b.shared && Ed.hooks.revertShared) return Ed.hooks.revertShared(b);
   if (!b.file) signal('user-error', 'E32: No file name');
-  const v = Ed.Store.get(b.file!); b.text = v ?? ''; b.pt = Math.min(b.pt, b.rope.length); b.modified = false; b.marks = {}; b.jumps = [];
+  const v = Ed.Store.get(b.file!); b.text = v ?? ''; b.pt = Math.min(b.pt, b.rope.length); Ed.markSaved(b); b.marks = {}; b.jumps = [];
   Ed.message(`"${b.file}" reloaded`); return false;
 });
 {
