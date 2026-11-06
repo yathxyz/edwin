@@ -30,7 +30,7 @@ const mdBuffers = () => E.buffers.filter(isMd);
 
 /* ---------- the shipped Scheme through require ----------
    load-path gets a last entry, edwin:scm, whose files are the shipped Scheme the host carries (the page's
-   text/x-scheme blocks in a browser, scm/ under Node). org.scm ends with (require 'markdown), which loads
+   files fetched from scm/ in a browser, read from scm/ under Node). org.scm ends with (require 'markdown), which loads
    notes-syntax.scm, address.scm and markdown.scm this way, after Org and before init.scm. */
 const SHIPPED = 'edwin:scm';
 {
