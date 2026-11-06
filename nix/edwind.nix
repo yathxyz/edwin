@@ -1,6 +1,6 @@
 # edwind, the text daemon: Edwin's core, Scheme files and the server (R15.3), and the wrapper with the Node
 # flags of R14.11. R14.12's permission model is not among them: Node disables fsync under it, which the journal
-# and atomic save need (R8.3, R8.7); edwind guards child_process in-process instead (README.md, E1).
+# and atomic save need (R8.3, R8.7); edwind guards child_process in-process instead (docs/steps.md, E1).
 # No --stack-size: main.mts runs the server on a worker thread whose stack it sizes for the Scheme cap.
 # No --frozen-intrinsics: it slowed the Scheme evaluator 2.3 times; each thread runs lockdown.mts instead.
 # The edwin package installs it (edwin --daemon), and so may any package that runs edwind as a service.

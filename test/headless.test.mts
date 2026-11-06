@@ -145,14 +145,13 @@ test('Org commands exist after boot (R9.1: boot runs after all 13 files)', () =>
     assert.ok(ed.L.isCommand(ed.L.intern(c)), c);
 });
 
-test('the shipped Scheme in scm/ is what index.html carries', async () => {
-  const { readFileSync } = await import('node:fs');
+test('index.html fetches the shipped Scheme from scm/ and carries none of its own', async () => {
+  const { readFileSync, existsSync } = await import('node:fs');
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  for (const name of ['emacs', 'evil', 'org', 'ai', 'init']) {
-    const m = new RegExp(`<script type="text/x-scheme" id="${name}-scm">\\n([\\s\\S]*?)</script>`).exec(html);
-    assert.ok(m, name);
-    assert.equal(m[1], readFileSync(new URL(`../scm/${name}.scm`, import.meta.url), 'utf8'), name + '.scm');
-  }
+  assert.ok(!html.includes('text/x-scheme'));
+  const page = JSON.parse(/const SCM = (\[[^\]]*\])/.exec(html)![1].replace(/'/g, '"'));
+  for (const name of ['emacs', 'evil', 'org', 'ai', 'init', 'notes-syntax', 'address', 'markdown', 'babel']) assert.ok(page.includes(name), name);
+  for (const name of page) assert.ok(existsSync(new URL(`../scm/${name}.scm`, import.meta.url)), name + '.scm');
 });
 
 test('console/manifest.json: the runtime in the order console/index.html loads it, and the Scheme a frame needs', async () => {

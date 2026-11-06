@@ -34,13 +34,8 @@ const faceOf = (needle: string, off = 0) => { const i = ed.text().indexOf(needle
 const posOf = (needle: string, off = 0) => { const i = ed.text().indexOf(needle); assert.ok(i >= 0, needle); return i + off; };
 const line = () => { const t = ed.text(), p = ed.point(); return t.slice(t.lastIndexOf('\n', p - 1) + 1, t.indexOf('\n', p) < 0 ? t.length : t.indexOf('\n', p)); };
 
-test('the shipped Scheme in scm/ is what index.html carries, markdown.js loads after org.js in both hosts', () => {
+test('markdown.js loads after org.js in both hosts', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  for (const name of ['emacs', 'evil', 'org', 'ai', 'init', 'notes-syntax', 'address', 'markdown', 'babel']) {
-    const m = new RegExp(`<script type="text/x-scheme" id="${name}-scm">\\n([\\s\\S]*?)</script>`).exec(html);
-    assert.ok(m, name);
-    assert.equal(m[1], readFileSync(new URL(`../scm/${name}.scm`, import.meta.url), 'utf8'), name + '.scm');
-  }
   const tags = [...html.matchAll(/<script src="src\/([\w-]+)\.js"><\/script>/g)].map(m => m[1]);
   assert.equal(tags.indexOf('markdown'), tags.indexOf('org') + 1);
   assert.equal(FILES.indexOf('markdown'), FILES.indexOf('org') + 1);

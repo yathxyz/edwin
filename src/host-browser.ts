@@ -3,7 +3,7 @@
    the frame objects it draws into (Ed.makeFrame); the Node host (host-node.cts) provides the same names.
 
    storage   string key-value store: localStorage, in memory when it is unavailable
-   config    the shipped Scheme files, read from the page's <script type="text/x-scheme"> blocks
+   config    the shipped Scheme files, the texts the page fetched from scm/ (EdHost.sources)
    page      page-level presentation: the theme and other data attributes on <html>, CSS variables,
              style sheets, viewport and font events
    lifecycle onSuspend (the page is hidden or closed: flush what must persist), whenLoaded
@@ -22,13 +22,11 @@ const storage: EdHostStorage = {
     return [...s];
   },
 };
-/* The shipped Scheme: in served mode the texts the page fetched (EdHost.sources = {name: text}, set by
-   Ed.bootServed, R9.1); on the standalone page the Scheme blocks named after their files, emacs.scm is
-   <script id="emacs-scm">. */
+/* The shipped Scheme: the texts the page fetched from scm/ (EdHost.sources = {name: text}), set by the standalone
+   page before Ed.boot and by Ed.bootServed (R9.1). */
 function config(name: string) {
   const src = globalThis.EdHost && globalThis.EdHost.sources;
-  if (src) return Object.hasOwn(src, name) ? src[name] : null;
-  const el = doc.getElementById(name.replace(/\.scm$/, '-scm')); return el ? el.textContent.replace(/^\n/, '') : null;
+  return src && Object.hasOwn(src, name) ? src[name] : null;
 }
 /* (require 'feature) and (load "file") read through the load path: the shipped files answer by basename. */
 function readFile(p: string) { const base = String(p).replace(/^.*\//, ''); return config(base); }
