@@ -114,12 +114,19 @@ test('two starts that end before settling put the next in safe mode: no init.scm
   const msgs = f.queue.filter(m => m.t === 'msg').map(m => m.text);
   assert.ok(msgs.some((t: string) => /safe mode/.test(t)), 'a frame is told');
   assert.ok(!f.queue.some(m => m.t === 'image'), 'a frame gets no entry from before the boot');
-  f.close(); a.close();
+  f.close();
+  /* A reset in safe mode: what is defined after it reaches a frame that connects later. */
+  assert.equal((await a.call('image-reset', [{ force: true }])).value.gen, 0);
+  await a.form('(define (safe-fix) 9)');
+  const g = new EditClient(dir.cfg.socket as string); await g.connect(); await g.hello({ kind: 'frame' });
+  await g.request({ t: 'image?', from: 0 });
+  assert.ok(g.queue.some(m => m.t === 'image' && m.forms.includes('(define (safe-fix) 9)')), 'the repair reaches a new frame');
+  g.close(); a.close();
   await restart(); // SIGTERM: a clean stop settles
   a = await cli();
   assert.ok(!(await status(a)).imageSafe);
   assert.equal((await a.form('init-ran')).value, '#t');
-  assert.equal((await a.form('(f1)')).value, '11');
+  assert.equal((await a.form('(safe-fix)')).value, '9');
   a.close();
 });
 
@@ -135,4 +142,22 @@ test('image-restart needs {force: true} and exits with 75 for the service manage
   const b = await cli();
   assert.ok(!(await status(b)).imageSafe, 'a restart is a clean stop: no safe mode');
   b.close();
+});
+
+test('pruning never drops the copy just made, even when every kept generation is labelled', async () => {
+  process.env.EDWIND_IMAGE_GENERATIONS = '1';
+  /* A fresh module instance (the query), so GENERATIONS_KEEP is read with the lowered limit. */
+  const { ImageLog } = await (import('../server/image.mts' + '?keep1') as Promise<typeof import('../server/image.mts')>);
+  delete process.env.EDWIND_IMAGE_GENERATIONS;
+  const d = fs.mkdtempSync(path.join(dir.root, 'prune-'));
+  const log = new ImageLog(path.join(d, 'image.jsonl'));
+  log.ensureEpoch(() => 'e1');
+  log.append('(define (p1) 1)', { kind: 'cli' });
+  const labelled = log.checkpoint({ label: 'kept' }).generation;
+  log.append('(define (p2) 2)', { kind: 'cli' });
+  const fresh = log.checkpoint({ reason: 'before rollback to 1' }).generation;
+  const ids = log.generations().map(g => g.id);
+  assert.deepEqual(ids, [fresh.id], 'the labelled one goes, the new recovery copy stays');
+  assert.notEqual(fresh.id, labelled.id);
+  assert.match(fs.readFileSync(log.genFile(fresh.id), 'utf8'), /\(define \(p2\) 2\)/);
 });
