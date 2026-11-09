@@ -89,7 +89,7 @@ rustPlatform.buildRustPackage {
       ../server
       ../test
       ../native
-    ]) (lib.fileset.maybeMissing ../native/target);
+    ]) (lib.fileset.unions [ (lib.fileset.maybeMissing ../native/target) (lib.fileset.maybeMissing ../server/node_modules) ]);
   };
   buildAndTestSubdir = "native";
   cargoRoot = "native";

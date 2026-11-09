@@ -237,6 +237,8 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   and the confirmation flow (R12.10–R12.12), `gptel`, `gptel-rewrite` and presets (R12.9) on the server; a
   backend defined in `init.scm` runs before the module loads (define it after, or on feature `models`).
   Thread batches carry an undo group (`undo: {g: "thread-…"}`) so gptel output undoes like any writer's.
+  Since 2026-11-09 the two kinds' wire formats are pi-ai's (README, deviations); `http-request` keeps Edwin's own
+  HTTP engine, and the model calls keep its rules through the `fetch` pi-ai is given (`fetchFor`).
 
 ## Step E3: frames in the browser (done)
 

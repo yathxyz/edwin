@@ -65,8 +65,14 @@ test('derived objects still override by assignment (the override mistake), as un
     tryIt('fnName', () => { class A { } A.prototype.constructor = A; const f = function () {}; f.toString = () => 'f'; return String(f); });
     tryIt('mapGet', () => { const m = new Map(); m.get = () => 7; return m.get(1); });
     tryIt('arrPush', () => { const a = []; a.push = () => 'own'; return a.push(1); });
-    tryIt('onProto', () => { Error.prototype.name = 'X'; return Error.prototype.name; });`);
+    tryIt('onProto', () => { Error.prototype.name = 'X'; return Error.prototype.name; });
+    tryIt('genReturn', () => { const g = (async function* () {})(); g.return = () => 'own'; return g.return(); });
+    tryIt('genNext', () => { const g = (function* () {})(); g.next = () => 'own'; return g.next(); });
+    tryIt('genProtoReturn', () => { Object.getPrototypeOf((async function* () {}).prototype).return = null; return 'assigned'; });`);
   assert.equal(o.errName, 'Mine: x');
+  assert.equal(o.genReturn, 'own', 'the openai SDK assigns return on an async generator');
+  assert.equal(o.genNext, 'threw TypeError', 'next stays a plain read-only property (an accessor costs every step)');
+  assert.equal(o.genProtoReturn, 'threw TypeError');
   assert.equal(o.toString, 'own');
   assert.equal(o.fnName, 'f');
   assert.equal(o.mapGet, 7);

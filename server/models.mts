@@ -7,6 +7,13 @@
 // URL, the models it lists, its tiers and, optionally, a credential. The default backend `anthropic` comes
 // from edit.json `models` (R12.3, §15.2); scm/models.scm adds the Scheme constructors and gptel-send.
 //
+// The wire formats are pi-ai's (@earendil-works/pi-ai, server/package.json): each kind maps to one of its
+// APIs (PI_API), loaded on the first request. Edwin keeps what is its own: backends, tiers, the gate, the
+// deadline, the retry, the tool loop, accounting and the credential rules. pi-ai never sees a key: it gets
+// the placeholder KEY_PLACEHOLDER and Edwin's own fetch (fetchFor), which posts to the backend's URL only,
+// puts the key in the header in place of the placeholder when the origin is the credential's, follows
+// redirects by R14.4 and retries rate limits by R12.13.
+//
 // Credentials (R14.5–R14.7): `(credential NAME)` is an opaque handle for the file NAME in
 // $CREDENTIALS_DIRECTORY (systemd LoadCredential), bound to the origin of the backend it is configured for.
 // The handle holds the name and the origin only; the key is read from the file when a request needs it and
@@ -52,7 +59,7 @@ type PrimGen = (args: SchemeValue[]) => SchemeGen;
 export type BackendKind = 'anthropic' | 'openai';
 /* Tier name -> model (R12.6). */
 export type Tiers = Record<string, string>;
-interface KindInfo { endpoint: string; header: string; prefix: string; headers: Record<string, string>; images: boolean }
+interface KindInfo { endpoint: string; images: boolean }
 export interface BackendOptions {
   name: string; kind: BackendKind; baseUrl?: string; url?: string | null; endpoint?: string;
   credential?: Credential | null; models?: string[]; tiers?: Tiers | null; headers?: Record<string, string>; stream?: boolean;
@@ -108,43 +115,26 @@ interface HttpStart { status: number; headers: IncomingHttpHeaders; queue: BodyQ
 export interface HttpResult { status: number; headers: IncomingHttpHeaders; body: string; url: string }
 export interface SseParser { push(chunk: string): void; end(): void }
 
-/* ---------- the providers' wire shapes ---------- */
-interface ProviderError { message?: string; type?: string }
-interface AnthropicUsage { input_tokens?: number; output_tokens?: number }
-interface AnthropicBlock { type: string; id?: string; name?: string; text?: string; input?: unknown }
-type AnthropicEvent =
-  | { type: 'message_start'; message?: { usage?: AnthropicUsage } }
-  | { type: 'content_block_start'; index: number; content_block: AnthropicBlock }
-  | { type: 'content_block_delta'; index: number; delta: { type: 'text_delta'; text: string } | { type: 'input_json_delta'; partial_json: string } | { type: 'thinking_delta' | 'signature_delta' | 'citations_delta' } }
-  | { type: 'message_delta'; delta?: { stop_reason?: string }; usage?: AnthropicUsage }
-  | { type: 'error'; error?: ProviderError }
-  | { type: 'ping' | 'content_block_stop' | 'message_stop' };
-interface OpenAIUsage { prompt_tokens?: number; completion_tokens?: number }
-interface OpenAIToolCallDelta { index?: number; id?: string; function?: { name?: string; arguments?: string } }
-interface OpenAIDelta { content?: string | null; tool_calls?: OpenAIToolCallDelta[] }
-interface OpenAIChoice { finish_reason?: string | null; delta?: OpenAIDelta; message?: OpenAIDelta }
-interface OpenAIChunk { error?: ProviderError; usage?: OpenAIUsage; choices?: OpenAIChoice[] }
-/* A whole (non-streamed) answer of either kind, or an error body. */
-interface ProviderAnswer {
-  type?: string; stop_reason?: string | null; content?: AnthropicBlock[];
-  usage?: AnthropicUsage & OpenAIUsage; choices?: OpenAIChoice[];
-  error?: ProviderError; message?: string;
+/* ---------- pi-ai's shapes (the parts this file builds and reads) ---------- */
+type PiApi = 'anthropic-messages' | 'openai-completions';
+type PiText = { type: 'text'; text: string };
+type PiImage = { type: 'image'; data: string; mimeType: string };
+type PiToolCall = { type: 'toolCall'; id: string; name: string; arguments: Record<string, unknown> };
+type PiUsage = { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number } };
+interface PiAssistant {
+  role: 'assistant'; content: (PiText | PiToolCall | { type: 'thinking' })[]; api: string; provider: string; model: string;
+  usage: PiUsage; stopReason: 'stop' | 'length' | 'toolUse' | 'error' | 'aborted'; errorMessage?: string; timestamp: number;
 }
-/* A content block of a round, as parserOf collects it. */
-interface RoundBlock { type: string; id?: string; name?: string; text?: string; json?: string }
-interface ToolCall { id: string; name: string; input: unknown; args?: string }
-interface ParsedRound { content: string; calls: ToolCall[]; truncated: boolean; blocks?: (RoundBlock | undefined)[] }
-interface Parser { event(d: string): void; whole(j: ProviderAnswer | null): void; result(): ParsedRound }
-interface ContentPart { type: string; text?: string; [k: string]: unknown }
-/* A message in the provider's shape. */
-interface ProviderMessage { role: string; content: string | ContentPart[] | null; tool_calls?: unknown[]; tool_call_id?: string }
-interface ProviderTool { name?: string; description?: string; input_schema?: unknown; type?: string; function?: { name: string; description: string; parameters: unknown } }
-interface ProviderBody {
-  model: string | null; messages: ProviderMessage[]; stream: boolean;
-  max_tokens?: number; system?: string; tools?: ProviderTool[]; temperature?: number; output_config?: { effort: string };
-  stream_options?: { include_usage: boolean }; max_completion_tokens?: number; reasoning_effort?: string;
-}
-interface ToolResult { callId: string; result: unknown }
+type PiMessage =
+  | { role: 'user'; content: string | (PiText | PiImage)[]; timestamp: number }
+  | PiAssistant
+  | { role: 'toolResult'; toolCallId: string; toolName: string; content: PiText[]; isError: boolean; timestamp: number };
+interface PiContext { systemPrompt?: string; messages: PiMessage[]; tools?: { name: string; description: string; parameters: unknown }[] }
+type PiEvent = { type: string; delta?: string };
+interface PiStream extends AsyncIterable<PiEvent> { result(): Promise<PiAssistant> }
+type PiStreamFn = (model: unknown, context: unknown, options: Record<string, unknown>) => PiStream;
+/* What fetchFor saw of one call, so a failed round gives Edwin's condition, not pi-ai's text. */
+interface CallState { failure: SchemeValue | null; status: number; text: string }
 interface GateTicket { promise: Promise<void>; cancel: () => void }
 interface WaitingTicket extends GateTicket { resolve: () => void; granted: boolean }
 
@@ -165,9 +155,20 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCM_FILE = path.join(HERE, '..', 'scm', 'models.scm');
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const KINDS: Record<BackendKind, KindInfo> = {
-  anthropic: { endpoint: '/v1/messages', header: 'x-api-key', prefix: '', headers: { 'anthropic-version': '2023-06-01' }, images: true },
-  openai: { endpoint: '/v1/chat/completions', header: 'authorization', prefix: 'Bearer ', headers: {}, images: true },
+  anthropic: { endpoint: '/v1/messages', images: true },
+  openai: { endpoint: '/v1/chat/completions', images: true },
 };
+const PI_API: Record<BackendKind, PiApi> = { anthropic: 'anthropic-messages', openai: 'openai-completions' };
+/* The apiKey pi-ai is given; fetchFor puts the key in its place on the credential's origin, else drops the header. */
+export const KEY_PLACEHOLDER = 'edwin-credential-placeholder';
+interface PiApis { stream: Record<BackendKind, PiStreamFn>; normalize: (c: PiContext) => unknown }
+let piApis: Promise<PiApis> | null = null;
+/* pi-ai's two APIs and its context normalizer (system prompt and tools become the leading system message of
+   the transcript), imported once: about 80 ms and 35 MiB, so not at startup. */
+const loadPi = () => (piApis ??= Promise.all([
+  import('@earendil-works/pi-ai/api/anthropic-messages'), import('@earendil-works/pi-ai/api/openai-completions'),
+  import('@earendil-works/pi-ai/utils/transcript'),
+]).then(([a, o, t]) => ({ stream: { anthropic: a.stream as unknown as PiStreamFn, openai: o.stream as unknown as PiStreamFn }, normalize: t.normalizeContext as unknown as (c: PiContext) => unknown })));
 const RETRY_STATUS = new Set([429, 503, 529]);
 /* BASE plus the path ENDPOINT, keeping any path of BASE (a proxy prefix). */
 export const joinUrl = (base: string, endpoint: string): string => new URL(String(endpoint).replace(/^\/+/, ''), String(base).endsWith('/') ? String(base) : String(base) + '/').href;
@@ -380,20 +381,14 @@ export class Ctl {
   destroy() { this.aborted = true; if (this.timer) { clearTimeout(this.timer); this.timer = null; } if (this.req) { try { this.req.destroy(); } catch (e) { /* gone */ } } this.req = null; this.res = null; }
 }
 
-/* ---------- SSE ---------- */
-/* A line-oriented text/event-stream parser: ONDATA gets each data: payload (except [DONE]). */
-export function sseParser(onData: (d: string) => void): SseParser {
-  let buf = '';
-  const line = (l: string) => { l = l.replace(/\r$/, ''); if (l.startsWith('data:')) { const d = l.slice(5).trim(); if (d && d !== '[DONE]') onData(d); } };
-  return { push(chunk: string) { buf += chunk; let k; while ((k = buf.indexOf('\n')) >= 0) { line(buf.slice(0, k)); buf = buf.slice(k + 1); } }, end() { if (buf) { line(buf); buf = ''; } } };
-}
 const parseJSON = <T = unknown,>(s: string): T | null => { try { return JSON.parse(s); } catch (e) { return null; } };
 /* An upstream error's message, short and without the request. */
 const upstreamMessage = (status: number, text: string) => {
-  const j = parseJSON<ProviderAnswer>(text);
+  const j = parseJSON<{ error?: { message?: string; type?: string }; message?: string }>(text);
   const m = j && (j.error && (j.error.message || j.error.type) || j.message);
   return `HTTP ${status}${m ? ': ' + String(m).slice(0, 300) : ''}`;
 };
+const ZERO_USAGE: PiUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
 /* ---------- the module ---------- */
 export class Models {
@@ -491,7 +486,7 @@ export class Models {
      string). Returns {text, truncated, model, tier, usage: {input, output}, rounds}. */
   *completeG(b: Backend, req: ModelRequest, hooks: ModelHooks): Gen<ModelResult> {
     const S = this.S;
-    const ctl = new Ctl();
+    const abort = new AbortController();
     const usage = { input: 0, output: 0 };
     const startedAt = Date.now();
     const t = this.server.threads ? this.server.threads.current : null;
@@ -501,164 +496,160 @@ export class Models {
     try { yield new S.Block(ticket.promise, 'a model slot'); } catch (e) { ticket.cancel(); throw e; }
     if (t) this.requests.set(t.id, rec);
     try {
-      const msgs = this.messagesOf(b, req);
+      const ctx = this.contextOf(b, req);
       const deadline = startedAt + REQUEST_DEADLINE_MS;
       for (rounds = 1; rounds <= MAX_TOOL_ROUNDS; rounds++) {
-        const body = this.bodyOf(b, req, msgs);
-        const r = yield* this.callG(b, body, ctl, deadline, usage, hooks, s => joinRounds(text, s));
-        text = joinRounds(text, r.content);
-        if (!r.calls.length) { truncated = !!r.truncated; break; }
+        const msg = yield* this.callG(b, req, ctx, abort, deadline, usage, hooks, s => joinRounds(text, s));
+        text = joinRounds(text, roundText(msg));
+        const calls = msg.content.filter((c): c is PiToolCall => c.type === 'toolCall');
+        if (!calls.length) { truncated = msg.stopReason === 'length'; break; }
         if (!hooks.toolG) { truncated = true; break; }
-        this.pushAssistant(b, msgs, r);
-        const results: ToolResult[] = [];
-        for (const c of r.calls) results.push({ callId: c.id, result: yield* hooks.toolG({ callId: c.id, name: c.name, input: c.input }) });
-        this.pushResults(b, msgs, results);
+        ctx.messages.push(msg);
+        for (const c of calls) {
+          const result = yield* hooks.toolG({ callId: c.id, name: c.name, input: c.arguments || {} });
+          ctx.messages.push({ role: 'toolResult', toolCallId: c.id, toolName: c.name, content: [{ type: 'text', text: String(result) }], isError: false, timestamp: Date.now() });
+        }
         if (rounds === MAX_TOOL_ROUNDS) truncated = true;
       }
       return { text, truncated, model: req.model, tier: req.tier, usage, rounds };
     } catch (e) { error = e; throw e; }
     finally {
-      ctl.destroy();
+      abort.abort();
       this.gate.release();
       if (t) this.requests.delete(t.id);
       this.account(rec, usage, Date.now() - startedAt, error);
     }
   }
-  /* One HTTP call with the rate-limit retry (R12.13). Streamed text reaches HOOKS.onText at once and
-     HOOKS.onTextG between two chunks (a blocking point of the thread); FULL maps a round's text to the whole. */
-  *callG(b: Backend, body: ProviderBody, ctl: Ctl, deadline: number, usage: Usage, hooks: ModelHooks, full: (round: string) => string): Gen<ParsedRound> {
+  /* One round through pi-ai. Streamed text reaches HOOKS.onText at once and HOOKS.onTextG after each delta (a
+     blocking point of the thread); FULL maps a round's text to the whole. A failed round throws Edwin's
+     condition: the one fetchFor raised, else an http-error with the provider's status and message. */
+  *callG(b: Backend, req: ModelRequest, ctx: PiContext, abort: AbortController, deadline: number, usage: Usage, hooks: ModelHooks, full: (round: string) => string): Gen<PiAssistant> {
     const S = this.S;
-    const headers: Record<string, string> = { 'content-type': 'application/json', accept: b.stream ? 'text/event-stream' : 'application/json', ...KINDS[b.kind].headers, ...b.headers };
-    for (let attempt = 0; ; attempt++) {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new S.SchemeError('timeout', `the model request to ${b.name} passed its ${REQUEST_DEADLINE_MS / 60000} min deadline`, []);
-      let pending: string | null = null;
-      const parse = this.parserOf(b, usage, content => { const t = full(content); pending = t; if (hooks.onText) hooks.onText(t); });
-      const sse = sseParser(parse.event);
-      const flushG = function* () { if (pending !== null && hooks.onTextG) { const t = pending; pending = null; yield* hooks.onTextG(t); } pending = null; };
-      let streaming = false;
-      const r = yield* this.http.requestG({
-        url: b.url, method: 'POST', headers, body: JSON.stringify(body), credential: b.credential, credentialHeader: KINDS[b.kind].header, credentialPrefix: KINDS[b.kind].prefix, timeoutMs: remaining, ctl, who: `gptel ${b.name}`,
-        onResponse: (status, h) => { streaming = status >= 200 && status < 300 && /text\/event-stream/.test(String(h['content-type'] || '')); return streaming ? function* (chunk: string) { sse.push(chunk); yield* flushG(); } : null; },
-      });
-      if (streaming) { sse.end(); yield* flushG(); return parse.result(); }
-      if (r.status >= 200 && r.status < 300) { parse.whole(parseJSON<ProviderAnswer>(r.body)); yield* flushG(); return parse.result(); }
-      if (RETRY_STATUS.has(r.status) && attempt + 1 < RETRY_ATTEMPTS) {
-        const wait = Math.min(retryAfterMs(r.headers['retry-after']) ?? 1000 * 2 ** attempt, Math.max(0, deadline - Date.now()));
-        this.log.info('model', { backend: b.name, event: 'retry', status: r.status, attempt: attempt + 1, waitMs: wait });
-        yield new S.Block(sleep(wait), 'a retry');
-        continue;
-      }
-      throw new S.SchemeError('http-error', `${b.name}: ${upstreamMessage(r.status, r.body)}`, [r.status]);
-    }
-  }
-  /* The conversation in the provider's shape. REQ.messages are {role: user|assistant|system, content, images}. */
-  messagesOf(b: Backend, req: ModelRequest): ProviderMessage[] {
-    const out: ProviderMessage[] = [];
-    for (const m of req.messages) {
-      if (m.role === 'system') continue;
-      if (m.role !== 'user' && m.role !== 'assistant') continue;
-      const parts: ContentPart[] = [];
-      if (typeof m.content === 'string' && m.content) parts.push({ type: 'text', text: m.content });
-      for (const im of m.images || []) {
-        if (!im || typeof im.data !== 'string') continue;
-        const mt = typeof im.media_type === 'string' ? im.media_type : 'image/png';
-        parts.push(b.kind === 'anthropic' ? { type: 'image', source: { type: 'base64', media_type: mt, data: im.data } } : { type: 'image_url', image_url: { url: `data:${mt};base64,${im.data}` } });
-      }
-      const content = parts.length === 1 && parts[0].type === 'text' ? parts[0].text! : parts.length ? parts : '';
-      const last = out[out.length - 1];
-      if (b.kind === 'anthropic' && last && last.role === m.role && typeof last.content === 'string' && typeof content === 'string') last.content += '\n\n' + content;
-      else out.push({ role: m.role, content });
-    }
-    if (b.kind === 'anthropic' && (!out.length || out[out.length - 1].role !== 'user')) out.push({ role: 'user', content: 'Continue.' });
-    return out;
-  }
-  bodyOf(b: Backend, req: ModelRequest, msgs: ProviderMessage[]): ProviderBody {
-    const system = req.messages.filter(m => m.role === 'system').map(m => m.content).concat(req.system ? [req.system] : []).filter(Boolean).join('\n\n');
-    const tools = Array.isArray(req.tools) && req.tools.length ? req.tools : null;
-    if (b.kind === 'anthropic') {
-      const body: ProviderBody = { model: req.model, max_tokens: req.maxTokens || 4096, messages: msgs, stream: b.stream };
-      if (system) body.system = system;
-      if (tools) body.tools = tools.map(t => ({ name: t.name, description: t.description || '', input_schema: t.inputSchema || { type: 'object', properties: {} } }));
-      if (typeof req.temperature === 'number') body.temperature = req.temperature;
-      if (req.effort) body.output_config = { effort: req.effort };
-      return body;
-    }
-    const body: ProviderBody = { model: req.model, messages: system ? [{ role: 'system', content: system }, ...msgs] : msgs, stream: b.stream };
-    if (b.stream) body.stream_options = { include_usage: true };
-    if (tools) body.tools = tools.map(t => ({ type: 'function', function: { name: t.name, description: t.description || '', parameters: t.inputSchema || { type: 'object', properties: {} } } }));
-    if (req.maxTokens) body.max_completion_tokens = req.maxTokens;
-    if (typeof req.temperature === 'number') body.temperature = req.temperature;
-    if (req.effort) body.reasoning_effort = req.effort;
-    return body;
-  }
-  /* The SSE and whole-body readers of each kind. Both give {content, calls: [{id, name, input}], truncated}. */
-  parserOf(b: Backend, usage: Usage, onDelta: (content: string) => void): Parser {
-    let content = '', stop: string | null | undefined = null; const blocks: (RoundBlock | undefined)[] = [], calls: ToolCall[] = [];
-    const addText = (s: string | undefined) => { if (!s) return; content += s; onDelta(content); };
-    if (b.kind === 'anthropic') {
-      return {
-        event: d => {
-          const j = parseJSON<AnthropicEvent>(d); if (!j) return;
-          switch (j.type) {
-            case 'message_start': if (j.message && j.message.usage) usage.input += j.message.usage.input_tokens || 0; break;
-            case 'content_block_start': blocks[j.index] = { type: j.content_block.type, id: j.content_block.id, name: j.content_block.name, text: j.content_block.text || '', json: '' }; if (j.content_block.type === 'text' && j.content_block.text) addText(j.content_block.text); break;
-            case 'content_block_delta': { const bl = blocks[j.index] || (blocks[j.index] = { type: 'text', text: '', json: '' }); if (j.delta.type === 'text_delta') { bl.text! += j.delta.text; addText(j.delta.text); } else if (j.delta.type === 'input_json_delta') bl.json! += j.delta.partial_json; break; }
-            case 'message_delta': if (j.delta && j.delta.stop_reason) stop = j.delta.stop_reason; if (j.usage) usage.output += j.usage.output_tokens || 0; break;
-            case 'error': throw new this.S.SchemeError('http-error', `${b.name}: ${j.error && j.error.message || 'stream error'}`, []);
-            default: break;
-          }
-        },
-        whole: j => {
-          if (!j) throw new this.S.SchemeError('http-error', `${b.name}: unreadable answer`, []);
-          if (j.type === 'error') throw new this.S.SchemeError('http-error', `${b.name}: ${j.error && j.error.message || 'error'}`, []);
-          stop = j.stop_reason; if (j.usage) { usage.input += j.usage.input_tokens || 0; usage.output += j.usage.output_tokens || 0; }
-          for (const c of j.content || []) { if (c.type === 'text') { blocks.push({ type: 'text', text: c.text }); addText(c.text); } else if (c.type === 'tool_use') blocks.push({ type: 'tool_use', id: c.id, name: c.name, json: JSON.stringify(c.input || {}) }); }
-        },
-        result: () => {
-          for (const x of blocks) if (x && x.type === 'tool_use') calls.push({ id: x.id || `call_${calls.length}`, name: x.name!, input: parseJSON(x.json || '{}') || {} });
-          return { content, calls: stop === 'tool_use' || calls.length ? calls : [], truncated: stop === 'max_tokens', blocks };
-        },
+    const pi: PiApis = yield new S.Block(loadPi(), 'loading pi-ai');
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new S.SchemeError('timeout', `the model request to ${b.name} passed its ${REQUEST_DEADLINE_MS / 60000} min deadline`, []);
+    const state: CallState = { failure: null, status: 0, text: '' };
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; abort.abort(); }, remaining); timer.unref();
+    try {
+      const options: Record<string, unknown> = {
+        apiKey: KEY_PLACEHOLDER, signal: abort.signal, fetch: this.fetchFor(b, state, deadline), maxRetries: 0,
+        maxTokens: req.maxTokens || 4096, headers: { ...b.headers },
       };
-    }
-    let finish: string | null = null; const tc: { id: string; name: string; args: string }[] = [];
-    return {
-      event: d => {
-        const j = parseJSON<OpenAIChunk>(d); if (!j) return;
-        if (j.error) throw new this.S.SchemeError('http-error', `${b.name}: ${j.error.message || 'stream error'}`, []);
-        if (j.usage) { usage.input += j.usage.prompt_tokens || 0; usage.output += j.usage.completion_tokens || 0; }
-        const ch = j.choices && j.choices[0]; if (!ch) return;
-        if (ch.finish_reason) finish = ch.finish_reason;
-        const delta = ch.delta || ch.message || {};
-        if (typeof delta.content === 'string') addText(delta.content);
-        for (const c of delta.tool_calls || []) { const i = typeof c.index === 'number' ? c.index : tc.length; const x = tc[i] || (tc[i] = { id: '', name: '', args: '' }); if (c.id) x.id += c.id; if (c.function) { if (c.function.name) x.name += c.function.name; if (c.function.arguments) x.args += c.function.arguments; } }
-      },
-      whole: j => {
-        if (!j) throw new this.S.SchemeError('http-error', `${b.name}: unreadable answer`, []);
-        if (j.error) throw new this.S.SchemeError('http-error', `${b.name}: ${j.error.message || 'error'}`, []);
-        if (j.usage) { usage.input += j.usage.prompt_tokens || 0; usage.output += j.usage.completion_tokens || 0; }
-        const ch = j.choices && j.choices[0]; if (!ch) return;
-        finish = ch.finish_reason || null;
-        const m = ch.message || {};
-        if (typeof m.content === 'string') addText(m.content);
-        for (const c of m.tool_calls || []) tc.push({ id: c.id || '', name: c.function && c.function.name || '', args: c.function && c.function.arguments || '' });
-      },
-      result: () => {
-        for (const x of tc) if (x) calls.push({ id: x.id || `call_${calls.length}`, name: x.name, input: parseJSON(x.args || '{}') || {}, args: x.args });
-        return { content, calls, truncated: finish === 'length' };
-      },
+      if (typeof req.temperature === 'number') options.temperature = req.temperature;
+      if (req.effort) {
+        if (b.kind === 'anthropic') { options.thinkingEnabled = true; options.effort = req.effort; }
+        else options.reasoningEffort = req.effort;
+      }
+      const es = pi.stream[b.kind](this.modelOf(b, req), pi.normalize(ctx), options);
+      const it = es[Symbol.asyncIterator]();
+      let round = '';
+      for (;;) {
+        const r: IteratorResult<PiEvent> = yield new S.Block(it.next(), `gptel ${b.name} ${hostOf(b.url)}`);
+        if (r.done) break;
+        if (r.value.type !== 'text_delta' || !r.value.delta) continue;
+        round += r.value.delta;
+        const t = full(round);
+        if (hooks.onText) hooks.onText(t);
+        if (hooks.onTextG) yield* hooks.onTextG(t);
+      }
+      const msg: PiAssistant = yield new S.Block(es.result(), `gptel ${b.name} result`);
+      usage.input += msg.usage.input || 0; usage.output += msg.usage.output || 0;
+      if (msg.stopReason !== 'error' && msg.stopReason !== 'aborted') return msg;
+      if (timedOut) throw new S.SchemeError('timeout', `the request to ${hostOf(b.url)} passed its deadline`, []);
+      if (state.failure) throw state.failure;
+      if (state.status) throw new S.SchemeError('http-error', `${b.name}: ${upstreamMessage(state.status, state.text)}`, [state.status]);
+      if (msg.stopReason === 'aborted') throw new S.SchemeError('cancelled', 'the request was cancelled', []);
+      throw new S.SchemeError('http-error', `${b.name}: ${String(msg.errorMessage || 'the request failed').slice(0, 300)}`, []);
+    } finally { clearTimeout(timer); }
+  }
+  /* pi-ai's fetch for backend B: every request goes to B.url (pi-ai builds the body, Edwin the destination),
+     under R14.4 (https, or http to loopback; the key on the credential's origin only, read from its file per
+     hop; redirects followed by hand, cross-origin ones refused while a key is attached) and R12.13 (429, 503
+     and 529 retried, retry-after honoured, within DEADLINE). A refusal is recorded in STATE and thrown; a
+     final non-2xx answer is recorded with its body and handed back to pi-ai unchanged. */
+  fetchFor(b: Backend, state: CallState, deadline: number): typeof fetch {
+    const S = this.S, who = `gptel ${b.name}`, cred = b.credential;
+    const fail = (e: SchemeValue): never => { state.failure = e; throw e; };
+    return async (_input, init = {}) => {
+      let u = this.http.checkUrl(b.url, who);
+      if (cred && u.origin !== cred.origin) fail(this.http.err('credential-origin', `${who}: ${cred.__print()} is bound to ${cred.origin}, not ${u.origin}`, [cred]));
+      const base = new Headers(init.headers);
+      for (let attempt = 0; ; attempt++) {
+        let method = (init.method || 'POST').toUpperCase(), body = init.body;
+        for (let hop = 0; ; hop++) {
+          const headers = new Headers(base);
+          for (const [k, v] of [...headers]) {
+            if (!v.includes(KEY_PLACEHOLDER)) continue;
+            if (!cred) { headers.delete(k); continue; }
+            const secret = readSecret(cred);
+            if (secret === null) fail(new S.SchemeError('user-error', `${who}: ${cred.__print()} is not available: no readable file ${cred.name} in the credentials directory (LoadCredential)`, [cred]));
+            headers.set(k, v.split(KEY_PLACEHOLDER).join(secret!));
+          }
+          if (body === undefined || body === null) for (const k of BODY_HEADERS) headers.delete(k);
+          const res = await fetch(u, { method, headers, body, signal: init.signal, redirect: 'manual' });
+          if (REDIRECT_STATUS.has(res.status) && res.headers.get('location')) {
+            await res.body?.cancel();
+            if (hop >= MAX_REDIRECTS) fail(this.http.err('http-error', `${who}: too many redirects from ${hostOf(b.url)}`));
+            let next: URL;
+            try { next = new URL(res.headers.get('location')!, u); } catch (e) { return fail(this.http.err('http-error', `${who}: a redirect from ${u.host} named no valid location`)); }
+            if (cred && next.origin !== u.origin) fail(this.http.err('credential-origin', `${who}: ${u.host} redirected to another origin (${next.host}) while ${cred.__print()} was attached; the request was not followed`, [cred]));
+            u = this.http.checkUrl(next.href, who);
+            if ((res.status === 301 || res.status === 302 || res.status === 303) && method !== 'GET' && method !== 'HEAD') { method = 'GET'; body = undefined; }
+            continue;
+          }
+          if (res.ok) return res;
+          const text = await res.text();
+          if (RETRY_STATUS.has(res.status) && attempt + 1 < RETRY_ATTEMPTS) {
+            const wait = Math.min(retryAfterMs(res.headers.get('retry-after') ?? undefined) ?? 1000 * 2 ** attempt, Math.max(0, deadline - Date.now()));
+            this.log.info('model', { backend: b.name, event: 'retry', status: res.status, attempt: attempt + 1, waitMs: wait });
+            await sleep(wait);
+            break;
+          }
+          state.status = res.status; state.text = text;
+          return new Response(text, { status: res.status, statusText: res.statusText, headers: res.headers });
+        }
+        u = this.http.checkUrl(b.url, who);
+      }
     };
   }
-  pushAssistant(b: Backend, msgs: ProviderMessage[], r: ParsedRound) {
-    if (b.kind === 'anthropic') {
-      const content: ContentPart[] = [];
-      for (const x of r.blocks || []) { if (!x) continue; if (x.type === 'text' && x.text) content.push({ type: 'text', text: x.text }); else if (x.type === 'tool_use') content.push({ type: 'tool_use', id: x.id, name: x.name, input: parseJSON(x.json || '{}') || {} }); }
-      msgs.push({ role: 'assistant', content: content.length ? content : [{ type: 'text', text: r.content || '' }] });
-    } else msgs.push({ role: 'assistant', content: r.content || null, tool_calls: r.calls.map(c => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args || JSON.stringify(c.input || {}) } })) });
+  /* pi-ai's model for REQ on B. Edwin's tiers name the model; pi-ai's base URL only steers its per-host
+     compatibility choices (fetchFor posts to B.url whatever the SDK builds). Effort asks for reasoning. */
+  modelOf(b: Backend, req: ModelRequest): Record<string, unknown> {
+    const endpoint = KINDS[b.kind].endpoint, root = b.url.endsWith(endpoint) ? b.url.slice(0, -endpoint.length) : (b.origin || b.url);
+    const host = hostOf(b.url);
+    return {
+      id: req.model, name: req.model, api: PI_API[b.kind], provider: b.kind === 'anthropic' ? 'anthropic' : host === 'api.openai.com' ? 'openai' : b.name,
+      baseUrl: b.kind === 'anthropic' ? root : root + '/v1', reasoning: !!req.effort, input: ['text', 'image'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000_000, maxTokens: req.maxTokens || 4096,
+      ...(b.kind === 'anthropic' && req.effort ? { compat: { forceAdaptiveThinking: true } } : {}),
+    };
   }
-  pushResults(b: Backend, msgs: ProviderMessage[], results: ToolResult[]) {
-    if (b.kind === 'anthropic') msgs.push({ role: 'user', content: results.map(x => ({ type: 'tool_result', tool_use_id: x.callId, content: String(x.result) })) });
-    else for (const x of results) msgs.push({ role: 'tool', tool_call_id: x.callId, content: String(x.result) });
+  /* The conversation as pi-ai's context. REQ.messages are {role: user|assistant|system, content, images}: system
+     messages join the system prompt; for the Messages API, turns of one role in a row join and the last turn is
+     the user's. */
+  contextOf(b: Backend, req: ModelRequest): PiContext {
+    const now = Date.now();
+    const msgs: PiMessage[] = [];
+    for (const m of req.messages) {
+      if (m.role !== 'user' && m.role !== 'assistant') continue;
+      const text = typeof m.content === 'string' ? m.content : '';
+      const last = msgs[msgs.length - 1];
+      if (m.role === 'assistant') {
+        if (b.kind === 'anthropic' && last && last.role === 'assistant') { (last.content[0] as PiText).text += '\n\n' + text; continue; }
+        msgs.push({ role: 'assistant', content: [{ type: 'text', text }], api: PI_API[b.kind], provider: b.kind, model: req.model || '', usage: ZERO_USAGE, stopReason: 'stop', timestamp: now });
+        continue;
+      }
+      const images: PiImage[] = (m.images || []).filter(im => im && typeof im.data === 'string').map(im => ({ type: 'image', data: im.data, mimeType: typeof im.media_type === 'string' ? im.media_type : 'image/png' }));
+      if (b.kind === 'anthropic' && last && last.role === 'user' && typeof last.content === 'string' && !images.length) { last.content += '\n\n' + text; continue; }
+      msgs.push({ role: 'user', content: images.length ? [...(text ? [{ type: 'text' as const, text }] : []), ...images] : text, timestamp: now });
+    }
+    if (b.kind === 'anthropic' && (!msgs.length || msgs[msgs.length - 1].role !== 'user')) msgs.push({ role: 'user', content: 'Continue.', timestamp: now });
+    const system = req.messages.filter(m => m.role === 'system').map(m => m.content).concat(req.system ? [req.system] : []).filter(Boolean).join('\n\n');
+    const ctx: PiContext = { messages: msgs };
+    if (system) ctx.systemPrompt = system;
+    if (Array.isArray(req.tools) && req.tools.length) ctx.tools = req.tools.map(t => ({ name: t.name, description: t.description || '', parameters: t.inputSchema || { type: 'object', properties: {} } }));
+    return ctx;
   }
 
   /* ---------- accounting (R12.14, R15.10) ---------- */
@@ -955,6 +946,7 @@ export class Models {
   }
 }
 const joinRounds = (a: string, b: string) => (a && b ? a + '\n\n' + b : a || b || '');
+const roundText = (m: PiAssistant) => m.content.map(c => (c.type === 'text' ? c.text : '')).join('');
 
 export async function install(server: Server) {
   const m = new Models(server);

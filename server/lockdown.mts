@@ -6,10 +6,12 @@
 // sealed, not frozen. A sealed prototype takes no new keys and loses none (the prototype-pollution case);
 // what it no longer refuses is an assignment over one of its existing methods. The functions they hold are
 // frozen like every other intrinsic. As with the flag, a data property of a frozen prototype becomes an
-// accessor whose setter makes an own property on the derived object, so `err.name = 'X'` still works; the
-// iterator and generator prototypes (those with their own `next`) keep plain read-only data properties,
+// accessor whose setter makes an own property on the derived object, so `err.name = 'X'` still works. The one
+// exception is `next` of the iterator and generator prototypes: it stays a plain read-only data property,
 // because an accessor `next` costs every for-of loop and every generator step (15% on map/fold in gen mode)
-// and nothing assigns `next` on an iterator.
+// and nothing assigns `next` on an iterator. Their `return` and `throw` are accessors like the rest: the
+// openai SDK assigns `return` on an async generator (core/streaming.mjs), and an accessor there costs nothing
+// measurable (gen-mode geo 51.7-54.2 ms against 50.9-55.2 ms before, 2026-11-09).
 //
 // The lockdown is plain JavaScript and engine-neutral. It runs once per realm: main() in main.mts (the main
 // thread and the server thread), worker.mts (the pool) and notes-parse.mts (the notes thread).
@@ -84,8 +86,9 @@ function lists(): { prototypes: object[]; intrinsics: unknown[] } {
 
 /* A configurable data property of OBJ becomes an accessor: reading gives the value, assigning on OBJ itself
    throws, assigning on a derived object makes an own property there (the override mistake, ES5 15.2.3.9). */
-function enableDerivedOverrides(obj: object): void {
+function enableDerivedOverrides(obj: object, skip?: PropertyKey): void {
   for (const prop of Reflect.ownKeys(obj)) {
+    if (prop === skip) continue;
     const desc = Object.getOwnPropertyDescriptor(obj, prop)!;
     if (!has(desc, 'value') || !desc.configurable) continue;
     const value = desc.value;
@@ -120,7 +123,7 @@ function deepFreeze(root: unknown, done: WeakSet<object>): void {
 export function lockdown(): LockdownState {
   if (state) return state;
   const { prototypes, intrinsics } = lists();
-  for (const p of prototypes) if (!SEALED.has(p) && !has(p, 'next')) enableDerivedOverrides(p);
+  for (const p of prototypes) if (!SEALED.has(p)) enableDerivedOverrides(p, 'next');
   const done = new WeakSet<object>();
   for (const x of intrinsics) deepFreeze(x, done);
   Object.defineProperty(globalThis, 'globalThis', { value: globalThis, writable: false, configurable: false });
