@@ -20,6 +20,7 @@ let
   ]) (
     lib.fileset.unions [
       (lib.fileset.maybeMissing ../native/target)
+      (lib.fileset.maybeMissing ../server/node_modules)
       (lib.fileset.fileFilter (f: f.hasExt "js") ../src)
       (lib.fileset.fileFilter (f: f.hasExt "js") ../native/js)
     ]
@@ -37,7 +38,10 @@ let
       }
     } $out/edwin && chmod -R u+w $out
     node ${../tools/strip.mts} --in-place $out/edwin/src $out/edwin/native/js
+    ln -s ${edwindDeps}/node_modules $out/edwin/server/node_modules
   '';
+  # pi-ai for the model layer, as edwind's package links it (nix/edwind-deps.nix).
+  edwindDeps = pkgs.callPackage ./edwind-deps.nix { };
   # fast-check for the OT properties and the TypeScript tools: dev dependencies pinned in
   # tools/package-lock.json (R15.1), installed from the lock with no scripts.
   devDeps = pkgs.stdenv.mkDerivation {
@@ -110,6 +114,7 @@ in
       }
     } src && chmod -R u+w src && cd src
     mkdir tools && ln -s ${devDeps}/node_modules tools/node_modules
+    ln -s ${edwindDeps}/node_modules server/node_modules
     for p in . src native/js; do node tools/node_modules/typescript/bin/tsc -p $p; done
     touch $out
   '';

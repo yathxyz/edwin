@@ -4,18 +4,21 @@
 # No --stack-size: main.mts runs the server on a worker thread whose stack it sizes for the Scheme cap.
 # No --frozen-intrinsics: it slowed the Scheme evaluator 2.3 times; each thread runs lockdown.mts instead.
 # The edwin package installs it (edwin --daemon), and so may any package that runs edwind as a service.
+# server/node_modules is edwind-deps (pi-ai for the model layer), linked in, never the checkout's own.
 {
   lib,
   stdenv,
   nodejs,
+  callPackage,
 }:
 let
+  deps = callPackage ./edwind-deps.nix { };
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [
       (lib.fileset.difference ../src (lib.fileset.fileFilter (f: f.hasExt "js") ../src))
       ../scm
-      ../server
+      (lib.fileset.difference ../server (lib.fileset.maybeMissing ../server/node_modules))
     ];
   };
 in
@@ -25,11 +28,13 @@ stdenv.mkDerivation {
   inherit src;
   # edwind's identity for welcome.build (R15.14): the hash part of the store path of what bin/edwind runs.
   passthru.build = builtins.substring 11 32 (toString src);
+  passthru.deps = deps;
   dontConfigure = true;
   dontBuild = true;
   installPhase = ''
     mkdir -p $out/share/edwin $out/bin
     cp -r src scm server $out/share/edwin/
+    ln -s ${deps}/node_modules $out/share/edwin/server/node_modules
     # The core runs as classic scripts through vm, which cannot strip types: each .ts gets its .js beside it.
     chmod -R u+w $out/share/edwin/src
     ${nodejs}/bin/node ${../tools/strip.mts} --in-place $out/share/edwin/src

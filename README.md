@@ -100,6 +100,14 @@ edit.sock client.
 - **`edwin-web` ships `manifest.json`**: the runtime's scripts and Scheme sources in load order, with `api` 1,
   so a page that hosts frames reads the list from the runtime it serves instead of keeping its own copy.
   `api` changes only when a page has to load the runtime differently.
+- **The model layer speaks through pi-ai** (`@earendil-works/pi-ai`, pinned in `server/package.json`, packaged as
+  `nix/edwind-deps.nix`): the `anthropic` kind is its `anthropic-messages` API and `openai` its
+  `openai-completions`. Edwin keeps backends, tiers, the gate, the deadline, the retry, the tool loop, usage and
+  the credential rules (R14.4–R14.7): pi-ai gets a placeholder for the key and Edwin's own `fetch`, which posts
+  to the backend's URL only and puts the key in on the credential's origin. Requests now carry pi-ai's shape
+  (prompt-cache marks, adaptive thinking when an effort is given). `:stream nil` no longer changes anything:
+  pi-ai always streams. Iterator and generator prototypes keep only `next` read-only under the lockdown, since
+  the openai SDK assigns `return` on an async generator.
 
 ## Build steps
 

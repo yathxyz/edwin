@@ -236,6 +236,21 @@ test('R12.1, R12.2: Scheme defines backends with credential handles only; a loca
   c.close();
 });
 
+test('R14.4, R12.13: a model call follows the credential rules of http-request and names the provider error', async () => {
+  const c = await client();
+  /* pi-ai builds the request, Edwin's fetch sends it: a cross-origin redirect with the key attached is refused. */
+  await value(c, `(gptel-make-anthropic "hop" :host "${A.origin}" :endpoint "/redir-cross" :key (credential "anthropic-api-key") :tiers gptel-tiers)`);
+  const seen = B.requests.length;
+  let e = await failure(c, '(gptel-request "hello" :backend "hop")');
+  assert.equal(e.condition, 'credential-origin', JSON.stringify(e));
+  assert.equal(B.requests.length, seen, 'the other origin saw no request');
+  /* A final non-2xx answer is an http-error with the status and the provider's message, not pi-ai's text. */
+  await value(c, `(gptel-make-anthropic "gone" :host "${A.origin}" :endpoint "/nowhere" :key (credential "anthropic-api-key") :tiers gptel-tiers)`);
+  e = await failure(c, '(gptel-request "hello" :backend "gone")');
+  assert.equal(e.condition, 'http-error'); assert.match(e.report, /HTTP 404/);
+  c.close();
+});
+
 test('§12.2 sample: the stream of a web client in the shape edit_client.rs routes, tools answered by the tab, model and tier', async () => {
   const web = await client({ kind: 'web' });
   const tools = [{ name: 'read_node', description: 'd', inputSchema: { type: 'object' } }];
@@ -248,7 +263,10 @@ test('§12.2 sample: the stream of a web client in the shape edit_client.rs rout
   assert.ok(texts.length >= 1 && texts[texts.length - 1] === 'Tool said: the node', JSON.stringify(texts));
   const reqs = A.requests.filter(r => r.path === '/v1/messages').slice(-2);
   assert.equal(reqs[0].body.model, 'tier-quick'); assert.equal(reqs[0].headers['x-api-key'], KEY); assert.deepEqual(reqs[0].body.output_config, { effort: 'low' });
-  assert.deepEqual(reqs[0].body.tools, [{ name: 'read_node', description: 'd', input_schema: { type: 'object' } }]);
+  /* The wire shape is pi-ai's (it adds cache_control, eager_input_streaming and an empty properties): the tool's
+     name, description and schema type are what Edwin decides. */
+  assert.equal(reqs[0].body.tools.length, 1);
+  const [t0] = reqs[0].body.tools; assert.deepEqual([t0.name, t0.description, t0.input_schema.type], ['read_node', 'd', 'object']);
   assert.equal(reqs[1].body.messages.length, 3); assert.equal(reqs[1].body.messages[2].content[0].tool_use_id, 'toolu_1');
   /* R12.6: a listed model overrides the tier; an unknown one falls back to the tier. */
   web.send({ t: 'sample', sid: 's2', tab: 'tab1', input: 'hi', modelTier: 'quick', model: 'tier-default' });
@@ -258,7 +276,9 @@ test('§12.2 sample: the stream of a web client in the shape edit_client.rs rout
   done = await web.next(m => m.sid === 's3' && m.t === 'sample.done');
   assert.equal(done.modelApplied, 'tier-default'); assert.equal(done.modelTierApplied, 'default');
   const last = A.requests[A.requests.length - 1].body;
-  assert.equal(last.system, 'be brief'); assert.deepEqual(last.messages[0].content[1], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } });
+  assert.deepEqual(last.system.map((p: Msg) => p.text), ['be brief']);
+  const image = last.messages[0].content.find((p: Msg) => p.type === 'image');
+  assert.deepEqual(image.source, { type: 'base64', media_type: 'image/png', data: 'AAAA' });
   /* A tool error goes back to the model as text. */
   web.send({ t: 'sample', sid: 's4', tab: 'tab1', input: 'x', tools });
   const t4 = await web.next(m => m.t === 'sample.tool' && m.sid === 's4');
