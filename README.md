@@ -34,7 +34,7 @@ that working:
 - **Relative imports name the `.mts` file** (`allowImportingTsExtensions`); type-only imports use `import type`.
 - **`any` is marked**: every one carries `// any: <reason>`. Most are the aliases in `main.mts` (`Ed`, `Lisp`,
   `EdBuffer`, `SchemeValue`) for the core in `src`, which the server loads through `vm` and so sees untyped.
-- The unit sets `NODE_COMPILE_CACHE` (`CacheDirectory=workbench-edit`), so only the first start after a deploy
+- The unit sets `NODE_COMPILE_CACHE` (`CacheDirectory=edwind`), so only the first start after a deploy
   pays for stripping (about 240 ms).
 
 The core (`src/*.ts`) and desktop Edwin's JavaScript (`native/js/*.ts`) are TypeScript too, checked by
