@@ -409,6 +409,33 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   ssh reaches the same edwind with the user's keys and no new credential. Starting an edwind on the remote host
   (`-a` is local only), and one frame attached to two edwinds at once (`sync.ts` holds one connection per runtime).
 
+## pi agents: Edwin's AI on pi (done)
+
+Asked 2026-11-09: pi in place of gptel, using an existing agent framework instead of Edwin's own. The model layer's
+wire formats became pi-ai's (README, deviations); on top of it `server/agent.mts` runs a pi-agent-core `Agent` per
+session, and `scm/pi.scm` makes any markdown note a chat with it.
+
+- **One Scheme thread per run.** pi-agent-core runs its loop on promises, outside the Scheme threads. Each run gets a
+  background thread attributed to the agent `pi:<session>` that drains the run's queue in order: text deltas, tool
+  starts and ends, tool calls (the Scheme procedure runs on that thread, its result goes back to the agent) and
+  confirmations. So the agent's edits, in the chat and in any buffer a tool changes, are one writer's, and every frame
+  sees them stream.
+- **Model calls** take a slot of the gate, run under the deadline through `fetchFor`, and log one usage line with
+  caller `pi` (`Models.agentStream`).
+- **Confirmation** (R12.10–R12.12, which the server lacked) is in the note, not the minibuffer: a background thread
+  has no call to ask through. The question is written at the end of the chat; C-c RET allows, C-c C-k denies; a no
+  becomes the tool's result ("The user declined this tool call.") and the model goes on.
+- **Steering** goes through `pi-steer` (a prompt), since C-c RET while a tool waits is the yes.
+- **Sessions** are the agent's messages in `stateDir/pi/NAME.json`, written after each run (tmp + rename, 0600); the
+  session of a note is found again by name after a restart. `pi-model` keeps the messages and changes backend and
+  tier; pi-ai turns Messages API tool blocks into chat-completions tool messages.
+- **Tools from init.scm** are kept by `define-pi-tool` until the agent module is installed, then defined after the
+  built-in ones, so a tool of the same name replaces a built-in.
+
+Not done: a pi tool to open a note that no buffer shows yet (the agent greps, then reads open buffers), images in
+chats, compaction of long sessions (pi-agent-core's transformContext is the hook), and the frame-side `src/ai.ts`
+backends, which a later step makes a client of edwind.
+
 ## Hypernotes H1: source blocks in notes (done)
 
 Step H1 of `docs/HYPERNOTES.md`: one block engine in edwind for Org and markdown notes (R10.8 widened to

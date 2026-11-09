@@ -184,6 +184,10 @@ in
     "models.test.mts"
   ];
 
+  # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved
+  # session, and a switch of provider mid-session.
+  edit-agent = suite "agent" [ "agent.test.mts" ];
+
   # programs.edwin (nix/edwin-module.nix) evaluates into a system: the user unit runs `edwin --fg-daemon` from the
   # package, EDITOR is edwin. Evaluation only, so the edwin package itself is not built here.
   edwin-module =
