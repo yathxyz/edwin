@@ -35,9 +35,16 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   const ev = (type: string, o: object) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...o })}\n\n`);
   ev('message_start', { message: { id: 'm', type: 'message', role: 'assistant', model: b.model, content: [], stop_reason: null, usage: { input_tokens: 9, output_tokens: 0 } } });
-  if (!result && /rename/.test(textOf(last.content)) && b.tools && b.tools.some((t: Msg) => t.name === 'edit_buffer')) {
-    ev('content_block_start', { index: 0, content_block: { type: 'tool_use', id: 'toolu_' + seen.length, name: 'edit_buffer', input: {} } });
-    ev('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ name: target, old: 'Now', new: 'Later' }) } });
+  /* A prompt that names a scripted tool call gets it (once: the next request carries its result). */
+  const ask = textOf(last.content);
+  const call = result ? null
+    : /rename/.test(ask) ? { name: 'edit_buffer', input: { name: target, old: 'Now', new: 'Later' } }
+    : /patch the image/.test(ask) ? { name: 'image_define', input: { code: '(define (agent-fixed) 42)' } }
+    : /describe it/.test(ask) ? { name: 'describe', input: { name: 'image-log' } }
+    : null;
+  if (call && b.tools && b.tools.some((t: Msg) => t.name === call.name)) {
+    ev('content_block_start', { index: 0, content_block: { type: 'tool_use', id: 'toolu_' + seen.length, name: call.name, input: {} } });
+    ev('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(call.input) } });
     ev('content_block_stop', { index: 0 });
     ev('message_delta', { delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } });
   } else {
@@ -152,4 +159,31 @@ test('pi-send needs text; steering and aborting need a run; a session name is ch
   r = await w.request({ t: 'call', form: '(begin (define-pi-tool (quote bad) "x" (quote ((a list "y"))) (lambda (a) "")) #t)', ctx: {} });
   assert.equal(r.error.condition, 'user-error');
   w.close();
+});
+
+test('a pi agent works on the image: describe reads a definition and its shipped source; image_define asks, then logs the definition as the agent and every frame hears of it', async () => {
+  fs.writeFileSync(path.join(dir.dirs.notes, 'pi', 'img.md'), '## You\n\ndescribe it\n');
+  const f = await client('frame'), w = await client();
+  const chat = 'pi/img.md';
+  await f.open(chat);
+  let r = await f.request({ t: 'call', cmd: 'pi-send', args: [], ctx: {}, buf: chat });
+  assert.equal(r.error, undefined, JSON.stringify(r.error));
+  let text = await until(w, chat, t => t.includes('Done:'), 'the description');
+  assert.match(text, /image-log is a procedure/); assert.match(text, /Defined at edwin\/scm\/emacs\.scm:\d+/); assert.match(text, /Source:\n\d+: \(define-command \(image-log\)/);
+
+  await evalIn(w, '(begin (goto-char (point-max)) (insert "patch the image\\n"))', chat);
+  r = await f.request({ t: 'call', cmd: 'pi-send', args: [], ctx: {}, buf: chat });
+  await until(w, chat, t => t.includes('**Allow** `image_define`'), 'the confirmation');
+  assert.equal(await evalIn(w, "(bound? 'agent-fixed)"), '#f', 'nothing is defined before the yes');
+  r = await f.request({ t: 'call', cmd: 'pi-send', args: [], ctx: {}, buf: chat });
+  text = await until(w, chat, t => /Logged as image generation/.test(t), 'the definition');
+  assert.equal(await evalIn(w, '(agent-fixed)'), '42');
+  const session = JSON.parse(await evalIn(w, '(pi--session-name (current-buffer))', chat));
+  const last = (await w.call('image-entries')).value.pop();
+  assert.equal(last.form, '(define (agent-fixed) 42)');
+  assert.deepEqual(last.by, { kind: 'agent', agent: `pi:${session}` }); assert.equal(last.origin, `pi:${session}`);
+  for (let i = 0; i < 100 && !f.queue.some(m => m.t === 'image' && m.forms.includes('(define (agent-fixed) 42)')); i++) await sleep(20);
+  assert.ok(f.queue.some(m => m.t === 'image' && m.forms.includes('(define (agent-fixed) 42)')), 'the frame gets the entry');
+  assert.ok(f.queue.some(m => m.t === 'msg' && new RegExp(`Image changed by pi:${session}: agent-fixed`).test(m.text)), 'Q2: the frame is told who changed the image');
+  f.close(); w.close();
 });

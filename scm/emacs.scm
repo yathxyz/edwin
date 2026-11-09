@@ -496,4 +496,55 @@ without it.  The server image keeps the definition until its next start."
   (let ((r (%image-command "image-revert-entry" gen)))
     (message "Image entry ~a reverted: ~a" gen (image-result-field r 'form))))
 
+;; Generations: copies of the image log to step back through (server/image.mts).  One is made at every
+;; start that replayed cleanly, before compaction, revert, reset and rollback, and by image-checkpoint.
+
+(define-command (image-checkpoint label)
+  "Copy the image log as it is now into a new generation, named LABEL (may be
+empty).  image-rollback returns to it later."
+  (interactive "sCheckpoint label (empty for none): ") (:where 'server)
+  (let ((r (%image-command "image-checkpoint" (if (and (string? label) (> (string-length label) 0)) label #f))))
+    (message "Image generation ~a: ~a entries" (image-result-field r 'id) (image-result-field r 'entries))))
+
+(define (image-generations-text)
+  "The generations as image-generations lists them, newest first."
+  (let ((gens (reverse (%image-command "image-generations"))))
+    (if (null? gens)
+        "No image generation yet.  M-x image-checkpoint makes one.\n"
+        (string-append
+         "Image generations, newest first (M-x image-rollback ID returns to one):\n\n"
+         (string-join
+          (map (lambda (g)
+                 (format "~a  ~a entries, up to gen ~a  ~a  ~a~a"
+                         (image-result-field g 'id) (image-result-field g 'entries) (image-result-field g 'gen)
+                         (image-result-field g 'reason) (image-result-field g 'origin)
+                         (let ((l (image-result-field g 'label))) (if (string? l) (string-append "  \"" l "\"") ""))))
+               gens)
+          "\n")
+         "\n"))))
+
+(define-command (image-generations)
+  "List the image generations in the buffer *image-generations*."
+  (interactive) (:where 'server)
+  (%show-special "*image-generations*" (image-generations-text)))
+
+(define-command (image-rollback id confirm)
+  "Replace the image log by generation ID (the current log is kept as a new
+generation first) and restart edwind, so the server image and every frame
+rebuild from it.  CONFIRM must be the string yes."
+  (interactive "nRoll the image back to generation: \nsRoll back and restart edwind? Type yes: ") (:where 'server)
+  (if (equal? confirm "yes")
+      (let ((r (%image-command "image-rollback" id #t #t)))
+        (message "Image rolled back to generation ~a; edwind restarts" (image-result-field r 'id)))
+      (message "Image rollback cancelled")))
+
+(define-command (image-restart confirm)
+  "Restart edwind: the server image is rebuilt from the shipped Scheme, init.scm
+and the image log; unsaved buffers survive in the journals.  Leaves safe mode.
+CONFIRM must be the string yes."
+  (interactive "sRestart edwind? Type yes: ") (:where 'server)
+  (if (equal? confirm "yes")
+      (begin (%image-command "image-restart" #t) (message "edwind restarts"))
+      (message "Restart cancelled")))
+
 ;;; emacs.scm ends here

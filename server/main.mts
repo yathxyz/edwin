@@ -193,7 +193,10 @@ export class Server {
   async start() {
     const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
     const storageFile = path.join(this.cfg.stateDir, 'storage.json');
+    /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
+    const safe = this.image.bootGuard();
     const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log) });
+    if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
     this.Ed = loadEdwin(host, { mode: 'gen' });
     this.L = (globalThis as any).L; // any: the core sets globalThis.L
     this.Ed.boot({ host });
@@ -247,7 +250,8 @@ export class Server {
           if ((st.mode & 0o777) !== 0o600) throw new Error(`${sock} has mode ${(st.mode & 0o777).toString(8)}, not 600`);
         } catch (e) { server.close(); reject(e); return; }
         this.net = server;
-        this.log.info('listen', { socket: sock, build: this.build, boot: this.boot, lockdown: lockdownState() });
+        this.log.info('listen', { socket: sock, build: this.build, boot: this.boot, lockdown: lockdownState(), safe: this.image.safe ? this.image.safe.reason : undefined });
+        this.image.settleLater();
         fs.writeSync(2, `listening on ${sock}\n`);
         resolve(server);
       });
@@ -264,6 +268,15 @@ export class Server {
     await this.buffers.shutdown();
     try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
     try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+  }
+
+  /* Stop cleanly and exit with RESTART_EXIT, after the caller's result has gone out: the service manager
+     (Restart=on-failure) starts edwind again, which rebuilds the server image from the boot files, init.scm
+     and the image log. Without one, edwind stays stopped until the next `edwin --daemon`. */
+  restart(reason: string) {
+    this.log.info('restart', { reason });
+    for (const c of this.clients) if (c.hello && !c.closed && c.kind !== 'cli') c.send({ t: 'msg', text: `edwind restarts (${reason})`, level: 'info' });
+    setTimeout(() => { this.stop().then(() => process.exit(imageModule.RESTART_EXIT), e => { this.log.error('stop', { error: e.message }); process.exit(1); }); }, 50);
   }
 
   /* ---------- evaluation (§7.4, R14.13, R4.15) ---------- */
@@ -286,7 +299,7 @@ export class Server {
       const forms = L.readAll(form);
       value = S.withOutputTo(port, () => { let v: SchemeValue; for (const f of forms) v = L.ev(f); return v; });
       /* Definitional forms enter the image log and reach every frame (R4.14, R4.15; image.mts). */
-      const note = this.image.record(client, forms); if (note) Ed.E.echo = Ed.E.echo ? Ed.E.echo + '\n' + note : note;
+      const note = this.image.record(client.by(), forms); if (note) Ed.E.echo = Ed.E.echo ? Ed.E.echo + '\n' + note : note;
     } catch (e) {
       error = this.conditionOf(e);
     } finally { S.watchdog.limitMs = limit; L.resetOps(); S.resetStack(); }
