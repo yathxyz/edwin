@@ -34,6 +34,8 @@
 
       # programs.edwin: the edwin package, edwind as a user service, EDITOR=edwin (nix/edwin-module.nix).
       nixosModules.edwin = import ./nix/edwin-module.nix self;
+      # services.edwind: edwind as a system service, for clients such as Workbench (nix/edwind-module.nix).
+      nixosModules.edwind = import ./nix/edwind-module.nix self;
       nixosModules.default = self.nixosModules.edwin;
 
       checks.${system} = import ./nix/checks.nix { inherit pkgs self; };

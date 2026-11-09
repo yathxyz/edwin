@@ -225,4 +225,64 @@ in
     in
     assert lib.assertMsg (got == want) "programs.edwin evaluated to ${got}, expected ${want}";
     pkgs.runCommand "edwin-module" { } "touch $out";
+
+  # services.edwind (nix/edwind-module.nix) evaluates into a system, and edwind itself accepts the edit.json it
+  # writes: loadConfig refuses unknown fields, so a module that drifts from the server fails here.
+  edwind-module =
+    let
+      sys = pkgs.nixos {
+        imports = [ self.nixosModules.edwind ];
+        system.stateVersion = lib.trivial.release;
+        boot.isContainer = true;
+        users.users.alice = {
+          isNormalUser = true;
+          home = "/home/alice";
+        };
+        services.edwind = {
+          enable = true;
+          user = "alice";
+          notesDir = "/home/alice/notes";
+          hubSocket = "/run/hub/hub.sock";
+          models.anthropic.apiKeyFile = "/run/secrets/anthropic";
+          credentials.search = {
+            file = "/run/secrets/search";
+            origin = "https://search.example";
+          };
+        };
+      };
+      unit = sys.config.systemd.services.edwind;
+      edwind = self.packages.${pkgs.stdenv.hostPlatform.system}.edwind;
+      show = v: builtins.unsafeDiscardStringContext (builtins.toJSON v);
+      got = show {
+        exec = unit.serviceConfig.ExecStart;
+        user = unit.serviceConfig.User;
+        creds = unit.serviceConfig.LoadCredential;
+        readOnly = unit.serviceConfig.ReadOnlyPaths;
+        system = builtins.seq sys.config.system.build.toplevel.drvPath true;
+      };
+      want = show {
+        exec = "${edwind}/bin/edwind --config /etc/edwind/edit.json";
+        user = "alice";
+        creds = [
+          "anthropic-api-key:/run/secrets/anthropic"
+          "search:/run/secrets/search"
+        ];
+        readOnly = [
+          "/home/alice/.ssh"
+          "/home/alice/.config/systemd"
+          "/home/alice/.local/share/systemd"
+        ];
+        system = true;
+      };
+    in
+    assert lib.assertMsg (got == want) "services.edwind evaluated to ${got}, expected ${want}";
+    pkgs.runCommand "edwind-module" { } ''
+      export HOME=$TMPDIR
+      ${edwind}/bin/edwind --config ${
+        sys.config.environment.etc."edwind/edit.json".source
+      } --write-roots > roots
+      grep -qx /home/alice/notes roots
+      grep -qx /run/edwind roots
+      touch $out
+    '';
 }
