@@ -201,4 +201,7 @@ a URL or [label](target) through org-open-at-point."
 ;; Source blocks in notes, for markdown and Org alike (babel.scm, hypernotes H1).
 (require 'babel)
 
+;; Chat notes with pi agents (pi.scm).
+(require 'pi)
+
 ;;; markdown.scm ends here

@@ -2,8 +2,9 @@
   "name": "edwind",
   "version": "0.1.0",
   "private": true,
-  "description": "edwind's runtime dependencies: pi-ai is the wire layer of server/models.mts",
+  "description": "edwind's runtime dependencies: pi-ai is the wire layer of server/models.mts, pi-agent-core the agent loop of server/agent.mts",
   "dependencies": {
-    "@earendil-works/pi-ai": "1.5.0"
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-agent-core": "1.5.0"
   }
 }

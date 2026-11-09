@@ -29,6 +29,7 @@
   "scm/notes-syntax.scm",
   "scm/address.scm",
   "scm/markdown.scm",
-  "scm/babel.scm"
+  "scm/babel.scm",
+  "scm/pi.scm"
  ]
 }

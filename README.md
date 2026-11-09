@@ -108,6 +108,14 @@ edit.sock client.
   (prompt-cache marks, adaptive thinking when an effort is given). `:stream nil` no longer changes anything:
   pi-ai always streams. Iterator and generator prototypes keep only `next` read-only under the lockdown, since
   the openai SDK assigns `return` on an async generator.
+- **pi agents in chat notes** (`server/agent.mts`, `scm/pi.scm`, `scm/pi-tools.scm`): `M-x pi` visits
+  `pi/chat.md`; any markdown note is a chat, its session named after the buffer. C-c RET (`pi-send`) sends the text
+  after the last `## You`; a pi-agent-core agent runs the loop on edwind's model layer and its text, tool calls and
+  questions stream into the note as the writer `pi:<session>`. Tools are Scheme (`define-pi-tool`): `list_buffers`,
+  `read_buffer`, `edit_buffer` and `eval_scheme` (both ask first: C-c RET allows, C-c C-k denies), `grep_notes`.
+  `pi-steer` adds to a running agent, `pi-abort` stops it, `pi-model` changes backend and tier mid-session (pi-ai
+  converts the conversation, tool calls included), `pi-forget` drops it. Sessions are saved in
+  `stateDir/pi/NAME.json` (0600). gptel's commands stay as they were, one-shot, on the same model layer.
 
 ## Build steps
 

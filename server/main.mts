@@ -25,6 +25,7 @@ import * as notesModule from './notes.mts';
 import * as threadsModule from './threads.mts';
 import * as debugModule from './debug.mts';
 import * as modelsModule from './models.mts';
+import * as agentModule from './agent.mts';
 import * as hubModule from './hub.mts';
 import * as processModule from './process.mts';
 import * as anchorsModule from './anchors.mts';
@@ -36,6 +37,7 @@ import type { Scheduler } from './threads.mts';
 import type { Debugger } from './debug.mts';
 import type { Notes } from './notes.mts';
 import type { Models } from './models.mts';
+import type { Agents } from './agent.mts';
 import type { Hub } from './hub.mts';
 import type { Processes } from './process.mts';
 import type { Anchors } from './anchors.mts';
@@ -80,7 +82,7 @@ export interface ServerModule { install(server: Server): Promise<void>; shutdown
 const require = createRequire(import.meta.url);
 /* The E2 modules, installed in this order after the buffers are loaded; each exports install(server) and
    may export shutdown(server) and name. */
-const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, hubModule, processModule, anchorsModule, babelModule];
+const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EDWIN = path.join(HERE, '..');
 export const BUILD = process.env.EDWIND_BUILD || 'dev';
@@ -168,6 +170,7 @@ export class Server {
   declare debugger: Debugger;
   declare notes: Notes | null;
   declare models: Models;
+  declare agents: Agents;
   declare hub: Hub;
   declare processes: Processes;
   declare anchors: Anchors | null;

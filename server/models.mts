@@ -121,7 +121,7 @@ type PiText = { type: 'text'; text: string };
 type PiImage = { type: 'image'; data: string; mimeType: string };
 type PiToolCall = { type: 'toolCall'; id: string; name: string; arguments: Record<string, unknown> };
 type PiUsage = { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number } };
-interface PiAssistant {
+export interface PiAssistant {
   role: 'assistant'; content: (PiText | PiToolCall | { type: 'thinking' })[]; api: string; provider: string; model: string;
   usage: PiUsage; stopReason: 'stop' | 'length' | 'toolUse' | 'error' | 'aborted'; errorMessage?: string; timestamp: number;
 }
@@ -131,7 +131,7 @@ type PiMessage =
   | { role: 'toolResult'; toolCallId: string; toolName: string; content: PiText[]; isError: boolean; timestamp: number };
 interface PiContext { systemPrompt?: string; messages: PiMessage[]; tools?: { name: string; description: string; parameters: unknown }[] }
 type PiEvent = { type: string; delta?: string };
-interface PiStream extends AsyncIterable<PiEvent> { result(): Promise<PiAssistant> }
+export interface PiStream extends AsyncIterable<PiEvent> { result(): Promise<PiAssistant> }
 type PiStreamFn = (model: unknown, context: unknown, options: Record<string, unknown>) => PiStream;
 /* What fetchFor saw of one call, so a failed round gives Edwin's condition, not pi-ai's text. */
 interface CallState { failure: SchemeValue | null; status: number; text: string }
@@ -165,7 +165,7 @@ interface PiApis { stream: Record<BackendKind, PiStreamFn>; normalize: (c: PiCon
 let piApis: Promise<PiApis> | null = null;
 /* pi-ai's two APIs and its context normalizer (system prompt and tools become the leading system message of
    the transcript), imported once: about 80 ms and 35 MiB, so not at startup. */
-const loadPi = () => (piApis ??= Promise.all([
+export const loadPi = () => (piApis ??= Promise.all([
   import('@earendil-works/pi-ai/api/anthropic-messages'), import('@earendil-works/pi-ai/api/openai-completions'),
   import('@earendil-works/pi-ai/utils/transcript'),
 ]).then(([a, o, t]) => ({ stream: { anthropic: a.stream as unknown as PiStreamFn, openai: o.stream as unknown as PiStreamFn }, normalize: t.normalizeContext as unknown as (c: PiContext) => unknown })));
@@ -611,6 +611,43 @@ export class Models {
         }
         u = this.http.checkUrl(b.url, who);
       }
+    };
+  }
+  /* A pi-agent-core stream function for backend B (server/agent.mts): each model call of an agent takes a slot of
+     the gate, runs through pi-ai with fetchFor under the 10 min deadline, and logs one usage line for CALLER. A
+     failed call's message is Edwin's (the provider's status and text), not the SDK's. */
+  agentStream(b: Backend, caller: string): (model: unknown, context: unknown, options?: Record<string, unknown>) => Promise<PiStream> {
+    return async (model, context, options = {}) => {
+      const pi = await loadPi();
+      const m = model as { id: string };
+      const ticket = this.gate.acquire();
+      await ticket.promise;
+      const startedAt = Date.now(), deadline = startedAt + REQUEST_DEADLINE_MS;
+      const rec: RequestRecord = { backend: b.name, model: m.id, tier: null, caller, startedAt };
+      const key = -startedAt - Math.random();               // not a thread id: agents run outside the threads
+      this.requests.set(key, rec);
+      const state: CallState = { failure: null, status: 0, text: '' };
+      const signals = [AbortSignal.timeout(REQUEST_DEADLINE_MS), ...(options.signal instanceof AbortSignal ? [options.signal] : [])];
+      const es = pi.stream[b.kind](model, context, {
+        ...options, apiKey: KEY_PLACEHOLDER, fetch: this.fetchFor(b, state, deadline), maxRetries: 0, signal: AbortSignal.any(signals), headers: { ...b.headers },
+      });
+      let finished: Promise<PiAssistant> | null = null;
+      const finish = () => (finished ??= es.result().then(msg => {
+        if (msg.stopReason === 'error') {
+          if (state.failure) msg.errorMessage = this.messageOf(state.failure);
+          else if (state.status) msg.errorMessage = `${b.name}: ${upstreamMessage(state.status, state.text)}`;
+        }
+        return msg;
+      }).finally(() => {
+        ticket.cancel(); this.requests.delete(key);
+      }).then(msg => {
+        this.account(rec, { input: msg.usage.input || 0, output: msg.usage.output || 0 }, Date.now() - startedAt, msg.stopReason === 'error' ? new this.S.SchemeError('http-error', msg.errorMessage || 'error', []) : msg.stopReason === 'aborted' ? new this.S.SchemeError('cancelled', 'cancelled', []) : null);
+        return msg;
+      }));
+      return {
+        async *[Symbol.asyncIterator]() { try { for await (const e of es) yield e; } finally { await finish().catch(() => {}); } },
+        result: finish,
+      } as PiStream;
     };
   }
   /* pi-ai's model for REQ on B. Edwin's tiers name the model; pi-ai's base URL only steers its per-host

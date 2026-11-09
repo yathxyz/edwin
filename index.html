@@ -233,7 +233,7 @@ body {
 /* The shipped Scheme is scm/*.scm next to this page, fetched as the console page fetches it, while the core files load;
    require and load find the other files there by name (EdHost.sources). */
 const scmLoaded = (async () => {
-  const SCM = ['emacs', 'evil', 'org', 'ai', 'init', 'notes-syntax', 'address', 'markdown', 'babel'];
+  const SCM = ['emacs', 'evil', 'org', 'ai', 'init', 'notes-syntax', 'address', 'markdown', 'babel', 'pi'];
   const texts = await Promise.all(SCM.map(async name => { const r = await fetch(`scm/${name}.scm`); if (!r.ok) throw new Error(`scm/${name}.scm: HTTP ${r.status}`); return r.text(); }));
   return Object.fromEntries(SCM.map((name, i) => [name + '.scm', texts[i]]));
 })();

@@ -150,7 +150,7 @@ test('index.html fetches the shipped Scheme from scm/ and carries none of its ow
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   assert.ok(!html.includes('text/x-scheme'));
   const page = JSON.parse(/const SCM = (\[[^\]]*\])/.exec(html)![1].replace(/'/g, '"'));
-  for (const name of ['emacs', 'evil', 'org', 'ai', 'init', 'notes-syntax', 'address', 'markdown', 'babel']) assert.ok(page.includes(name), name);
+  for (const name of ['emacs', 'evil', 'org', 'ai', 'init', 'notes-syntax', 'address', 'markdown', 'babel', 'pi']) assert.ok(page.includes(name), name);
   for (const name of page) assert.ok(existsSync(new URL(`../scm/${name}.scm`, import.meta.url)), name + '.scm');
 });
 
