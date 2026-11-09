@@ -371,7 +371,7 @@ export class Scheduler {
     this.holdCurrent(t);
     return t.done.then(v => {
       const msg = t.ts.data!.echo;
-      const note = this.server.image.record(client, forms);
+      const note = this.server.image.record(client.by(), forms);
       const r: CallResult = { value: S.write(v) };
       const out = outParts.join('');
       if (out) r.out = out;

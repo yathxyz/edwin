@@ -139,7 +139,10 @@ in
 
   # The E2 gates of the edwind spec (§17.1): the image log and its replication (edit-image), the notes index,
   # its grammar and the /api shapes (edit-notes).
-  edit-image = suite "image" [ "image.test.mts" ];
+  edit-image = suite "image" [
+    "image.test.mts"
+    "generations.test.mts"
+  ];
   edit-notes = suite "notes" [ "notes.test.mts" ];
 
   # markdown-mode (E3, §10.1, R10.1-R10.5): the parity table's commands, faces, overlays, folding, the keyword

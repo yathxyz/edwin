@@ -154,7 +154,7 @@ export class Client {
     this.cid = cid; this.kind = kind as ClientKind; this.device = str(msg, 'device', true) || kind + ':' + cid.slice(0, 8);
     this.session = str(msg, 'session', true) || null; this.caps = isObj(msg.caps) ? msg.caps : {};
     this.hello = true; clearTimeout(this.helloTimer);
-    this.send({ t: 'welcome', proto: PROTO, build: this.server.build, boot: this.server.boot, imageEpoch: this.server.image.epoch, gen: this.server.image.gen, caps: {} });
+    this.send({ t: 'welcome', proto: PROTO, build: this.server.build, boot: this.server.boot, imageEpoch: this.server.image.servedEpoch(), gen: this.server.image.gen, caps: {} });
     this.log.info('client', { event: 'connect', cid, kind, device: this.device });
     if (this.server.stopping) { this.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); this.destroy(); }
   }

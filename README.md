@@ -116,6 +116,21 @@ edit.sock client.
   `pi-steer` adds to a running agent, `pi-abort` stops it, `pi-model` changes backend and tier mid-session (pi-ai
   converts the conversation, tool calls included), `pi-forget` drops it. Sessions are saved in
   `stateDir/pi/NAME.json` (0600). gptel's commands stay as they were, one-shot, on the same model layer.
+- **Image generations and safe mode** (`server/image.mts`): Edwin's image is the shipped Scheme (read-only, in the
+  package) plus `init.scm` plus the image log replayed on top, so a snapshot is a copy of `image.jsonl`, not a heap
+  dump. `stateDir/generations/` holds the copies (`<id>.jsonl`, `index.jsonl`); one is made at every start that
+  replayed cleanly, before compaction, revert, reset and rollback, and by `M-x image-checkpoint`. Equal logs share
+  a copy; the newest 32 are kept (`EDWIND_IMAGE_GENERATIONS`). `M-x image-generations` lists them, `image-rollback`
+  puts one back (the log before it becomes a generation too) and restarts edwind, `image-restart` restarts it alone:
+  edwind exits with 75 and the service manager (`Restart=on-failure`) starts it again; the journals keep unsaved
+  text. Two starts in a row that end before settling (30 s up, or a clean stop) make the next start safe mode: no
+  `init.scm`, no replay, frames get a `safe-` epoch and a message; `EDWIND_SAFE=1` forces it. The epoch line keeps a
+  generation floor, so entry numbers never repeat after a rollback. Entries record the build they were made in.
+- **pi agents on the image** (`scm/pi-tools.scm`): `apropos`, `describe` (documentation, location, image entries,
+  shipped source), `read_source` (the shipped tree only, `%edwin-source`), `image_log`, `image_define` (asks; evaluates
+  definitional forms and logs them as `pi:<session>` through `%image-record`, so they persist and reach frames),
+  `image_checkpoint`, `image_generations` and `image_rollback` (asks; no restart, which stays the user's).
+  `eval_scheme` stays the exploratory tool: what it defines is the server's only and gone at the next start.
 
 ## Build steps
 
