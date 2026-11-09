@@ -258,7 +258,7 @@ export class ImageLog {
     writeAtomic(this.genFile(id), text);
     const g: Generation = { id, gen: this.gen, epoch: this.epoch, entries: this.entries.length, bytes: Buffer.byteLength(text), sha256: sha, build: this.server ? this.server.build : null, at: Date.now(), origin: originOf(by), label: label ? String(label).slice(0, 200) : null, reason };
     this.indexAppend(g);
-    this.prune([...gens, g]);
+    this.prune([...gens, g], g);
     if (this.server) this.server.log.info('image', { event: 'checkpoint', id, gen: this.gen, entries: g.entries, reason });
     return { generation: g, made: true };
   }
@@ -270,13 +270,14 @@ export class ImageLog {
     for (const line of text.split('\n')) { try { const o = JSON.parse(line); if (Number.isInteger(o.id)) n = Math.max(n, o.id); } catch (e) { /* torn */ } }
     return n;
   }
-  /* Keep the newest GENERATIONS_KEEP; unlabelled ones are dropped first. The index is compacted when it is
-     four times longer than what it lists. */
-  private prune(gens: Generation[]) {
+  /* Keep the newest GENERATIONS_KEEP; unlabelled ones are dropped first, and the copy just made (KEEP) never:
+     it is the recovery copy of the change that made it. The index is compacted when it is four times longer
+     than what it lists. */
+  private prune(gens: Generation[], keep: Generation) {
     const drop: Generation[] = [];
     let live = [...gens];
-    while (live.length > GENERATIONS_KEEP) {
-      const victim = live.find(g => !g.label) || live[0];
+    while (live.length > Math.max(1, GENERATIONS_KEEP)) {
+      const victim = live.find(g => !g.label && g !== keep) || live.find(g => g !== keep)!;
       live = live.filter(g => g !== victim); drop.push(victim);
     }
     for (const g of drop) { this.indexAppend({ id: g.id, sha256: g.sha256, drop: true }); try { fs.unlinkSync(this.genFile(g.id)); } catch (e) { /* gone */ } }
@@ -511,7 +512,7 @@ export class ImageLog {
     this.checkpointQuiet(`before ${reason}`);
     const archived = path.join(path.dirname(this.file), `image.${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
     try { fs.renameSync(this.file, archived); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-    this.entries = []; this.gen = 0;
+    this.entries = []; this.gen = 0; this.safeFloor = 0; // in safe mode, what is defined after the reset reaches frames
     this.changeEpoch(reason);
     return { archived, gen: 0, epoch: this.epoch };
   }
