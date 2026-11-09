@@ -176,6 +176,8 @@ in
 
   # Processes through the hub (R4.43-R4.45), against the fake hub.
   edit-process = suite "process" [ "process.test.mts" ];
+  # edwin-front (server/front.mts): the floor, edwin-web from memory, and /edit's line relay and close codes.
+  edit-front = suite "front" [ "front.test.mts" ];
 
   # Source blocks in notes (hypernotes H1: scm/babel.scm, server/babel.mts): the reader and writer, then the
   # engine against a real edwind and the fake hub, for markdown and Org.
@@ -248,8 +250,18 @@ in
             file = "/run/secrets/search";
             origin = "https://search.example";
           };
+          front = {
+            enable = true;
+            address = "10.0.0.2";
+            publicOrigin = "https://edwin.example";
+            trustedProxy = "10.0.0.1";
+            proxySecretFile = "/run/secrets/front";
+            firewall.interface = "wg0";
+          };
         };
       };
+      frontUnit = sys.config.systemd.services.edwin-front;
+      frontJson = lib.head frontUnit.restartTriggers;
       unit = sys.config.systemd.services.edwind;
       edwind = self.packages.${pkgs.stdenv.hostPlatform.system}.edwind;
       show = v: builtins.unsafeDiscardStringContext (builtins.toJSON v);
@@ -258,6 +270,8 @@ in
         user = unit.serviceConfig.User;
         creds = unit.serviceConfig.LoadCredential;
         readOnly = unit.serviceConfig.ReadOnlyPaths;
+        frontCreds = frontUnit.serviceConfig.LoadCredential;
+        frontAllow = frontUnit.serviceConfig.IPAddressAllow;
         system = builtins.seq sys.config.system.build.toplevel.drvPath true;
       };
       want = show {
@@ -272,6 +286,8 @@ in
           "/home/alice/.config/systemd"
           "/home/alice/.local/share/systemd"
         ];
+        frontCreds = [ "proxy-secret:/run/secrets/front" ];
+        frontAllow = [ "10.0.0.1" ];
         system = true;
       };
     in
@@ -283,6 +299,14 @@ in
       } --write-roots > roots
       grep -qx /home/alice/notes roots
       grep -qx /run/edwind roots
+      # edwin-front accepts the front.json the module writes, with the credential where systemd would put it.
+      printf '%048d' 0 > secret
+      sed "s|/run/credentials/edwin-front.service/proxy-secret|$PWD/secret|" ${frontJson} > front.json
+      ${pkgs.nodejs}/bin/node --no-warnings=ExperimentalWarning --input-type=module -e "
+        const { loadConfig } = await import('${edwind}/share/edwin/server/front.mts');
+        const c = loadConfig('front.json');
+        if (c.listen.port !== 8091 || c.editSocket !== '/run/edwind/edit.sock') throw new Error(JSON.stringify(c));
+      "
       touch $out
     '';
 }

@@ -5,6 +5,7 @@
   "devDependencies": {
     "fast-check": "4.3.0",
     "typescript": "6.0.3",
-    "@types/node": "24.19.2"
+    "@types/node": "24.19.2",
+    "@types/ws": "8.18.2"
   }
 }

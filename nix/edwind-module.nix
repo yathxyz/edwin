@@ -1,7 +1,8 @@
 # services.edwind: edwind as a system service, the server counterpart of programs.edwin's user daemon. One
 # edwind owns a notes directory and serves every client on its socket: edwin and `edwin -g` (locally or over
-# ssh), Workbench's wb-web and wb, and edwin-web's front. Clients that need it order themselves after
-# edwind.service; edwind needs none of them (without hubSocket, only processes are unavailable).
+# ssh), Workbench's wb-web and wb, and edwin-front (services.edwind.front, edwin-web on its own origin). Clients
+# that need it order themselves after edwind.service; edwind needs none of them (without hubSocket, only processes
+# are unavailable).
 self:
 {
   config,
@@ -13,6 +14,7 @@ let
   inherit (lib)
     mkEnableOption
     mkIf
+    mkMerge
     mkOption
     types
     ;
@@ -91,6 +93,19 @@ let
       "http://[::1]"
     ];
   isName = n: builtins.match "[a-z0-9-]{1,32}" n != null;
+
+  front = cfg.front;
+  isIPv4 = a: builtins.match "[0-9]{1,3}(\\.[0-9]{1,3}){3}" a != null;
+  frontJson = json.generate "edwin-front.json" {
+    listen =
+      if isIPv4 front.address then
+        "${front.address}:${toString front.port}"
+      else
+        "[${front.address}]:${toString front.port}";
+    inherit (front) publicOrigin trustedProxy webRoot;
+    proxySecretFile = "/run/credentials/edwin-front.service/proxy-secret";
+    editSocket = cfg.socket;
+  };
 in
 {
   options.services.edwind = {
@@ -229,109 +244,241 @@ in
         }
       );
     };
-  };
 
-  config = mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = lib.all (p: p == "~" || lib.hasPrefix "~/" p || lib.hasPrefix "/" p) cfg.writablePaths;
-        message = "services.edwind.writablePaths: entries must be absolute or start with ~.";
-      }
-      {
-        assertion =
-          httpsOrLoopback cfg.models.anthropic.baseUrl
-          && (cfg.models.openai.baseUrl == null || httpsOrLoopback cfg.models.openai.baseUrl)
-          && lib.all (c: httpsOrLoopback c.origin) (lib.attrValues cfg.credentials);
-        message = "services.edwind.models.*.baseUrl and credentials.*.origin must be https, or http to loopback.";
-      }
-      {
-        assertion = lib.all isName (lib.attrNames cfg.credentials);
-        message = "services.edwind.credentials: names must match ^[a-z0-9-]{1,32}$.";
-      }
-    ];
+    # edwin-front (server/front.mts): edwin-web and /edit on an origin of its own, for a browser behind an
+    # authenticating reverse proxy. It holds wb-web's floor: only trustedProxy, only with the proxy's secret
+    # header, only the public origin's Host, and an exact Origin on every upgrade. A frame runs Scheme as the
+    # edwind user, so the proxy in front must authenticate.
+    front = {
+      enable = mkEnableOption "edwin-front, Edwin in a browser on its own origin behind an authenticating proxy";
 
-    environment.etc."edwind/edit.json".source = editJson;
+      address = mkOption {
+        type = types.str;
+        example = "10.100.0.2";
+        description = "The address edwin-front listens on; the proxy reaches it there.";
+      };
 
-    # The state and config directories exist before the unit starts (R14.10); the parents are the user's, left
-    # as they are when present.
-    systemd.tmpfiles.rules =
-      map (d: "d ${d} - ${cfg.user} ${userCfg.group} -") (pinnedPaths ++ [ "${home}/.local/state" ])
-      ++ map (d: "d ${d} 0700 ${cfg.user} ${userCfg.group} -") (
-        refusePaths
-        ++ [
-          cfg.stateDir
-          cfg.configDir
-        ]
-      );
+      port = mkOption {
+        type = types.port;
+        default = 8091;
+        description = "The port edwin-front listens on.";
+      };
 
-    # R14.10, R14.11, R15.3. It restarts on its own at a deploy; clients reconnect (R15.8). Edits and the image
-    # log are on disk before they are acknowledged, so a restart loses nothing.
-    systemd.services.edwind = {
-      description = "edwind, Edwin's text daemon";
-      wantedBy = [ "multi-user.target" ];
-      stopIfChanged = false;
-      restartTriggers = [ editJson ];
-      startLimitIntervalSec = 0;
-      environment.EDWIND_MEMORY_MIB = toString cfg.memoryMiB;
-      serviceConfig = {
-        Type = "exec";
-        ExecStart = "${cfg.package}/bin/edwind --config /etc/edwind/edit.json";
-        User = cfg.user;
-        Group = userCfg.group;
-        UMask = "0077";
-        RuntimeDirectory = "edwind";
-        RuntimeDirectoryMode = "0700";
-        # edwind is TypeScript that Node strips at load; the compile cache keeps the stripped code, so only the
-        # first start after a deploy pays for it.
-        CacheDirectory = "edwind";
-        CacheDirectoryMode = "0700";
-        Environment = [ "NODE_COMPILE_CACHE=%C/edwind" ];
-        LoadCredential = credentials;
-        Restart = "always";
-        RestartSec = 1;
-        TimeoutStopSec = 10;
-        OOMScoreAdjust = 100;
-        MemoryMax = "${toString (cfg.memoryMiB * 5 / 4)}M";
-        # The server runs on a worker thread whose stack main.mts sizes itself (32 MiB); the limit only has to
-        # admit that thread's stack.
-        LimitSTACK = "64M";
+      publicOrigin = mkOption {
+        type = types.str;
+        example = "https://edwin.example.org";
+        description = "The origin browsers use (scheme://host[:port], no path); Host and Origin must match it.";
+      };
 
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectSystem = "strict";
-        # The home plus writable paths outside it; the more specific mounts below win inside the home.
-        ReadWritePaths = lib.unique (
-          [
-            home
-            cfg.notesDir
-            cfg.stateDir
-            cfg.configDir
-          ]
-          ++ lib.filter (p: !(lib.hasPrefix "${home}/" p) && p != home) writable
-        );
-        ReadOnlyPaths = refusePaths ++ cfg.readOnlyPaths;
-        BindPaths = pinnedPaths;
-        InaccessiblePaths = [ "-/run/user" ];
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-        ];
-        LockPersonality = true;
-        RestrictRealtime = true;
-        RestrictNamespaces = true;
-        RestrictSUIDSGID = true;
-        SystemCallArchitectures = "native";
-        ProtectClock = true;
-        ProtectHostname = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        CapabilityBoundingSet = "";
-        # No MemoryDenyWriteExecute: V8's JIT needs it.
+      trustedProxy = mkOption {
+        type = types.str;
+        example = "10.100.0.1";
+        description = "The only peer address edwin-front answers.";
+      };
+
+      proxySecretFile = mkOption {
+        type = types.path;
+        description = "Root-readable file holding the secret (at least 32 bytes) the proxy sends as X-Edwin-Proxy-Secret.";
+      };
+
+      webRoot = mkOption {
+        type = types.path;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.edwin-web;
+        defaultText = lib.literalExpression "edwin.packages.\${system}.edwin-web";
+        description = "The edwin-web tree served at /.";
+      };
+
+      firewall.interface = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "wg0";
+        description = "When set, accept the port on this interface from trustedProxy only (iptables).";
       };
     };
   };
+
+  config = mkIf cfg.enable (mkMerge [
+    {
+      assertions = [
+        {
+          assertion = lib.all (p: p == "~" || lib.hasPrefix "~/" p || lib.hasPrefix "/" p) cfg.writablePaths;
+          message = "services.edwind.writablePaths: entries must be absolute or start with ~.";
+        }
+        {
+          assertion =
+            httpsOrLoopback cfg.models.anthropic.baseUrl
+            && (cfg.models.openai.baseUrl == null || httpsOrLoopback cfg.models.openai.baseUrl)
+            && lib.all (c: httpsOrLoopback c.origin) (lib.attrValues cfg.credentials);
+          message = "services.edwind.models.*.baseUrl and credentials.*.origin must be https, or http to loopback.";
+        }
+        {
+          assertion = lib.all isName (lib.attrNames cfg.credentials);
+          message = "services.edwind.credentials: names must match ^[a-z0-9-]{1,32}$.";
+        }
+      ];
+
+      environment.etc."edwind/edit.json".source = editJson;
+
+      # The state and config directories exist before the unit starts (R14.10); the parents are the user's, left
+      # as they are when present.
+      systemd.tmpfiles.rules =
+        map (d: "d ${d} - ${cfg.user} ${userCfg.group} -") (pinnedPaths ++ [ "${home}/.local/state" ])
+        ++ map (d: "d ${d} 0700 ${cfg.user} ${userCfg.group} -") (
+          refusePaths
+          ++ [
+            cfg.stateDir
+            cfg.configDir
+          ]
+        );
+
+      # R14.10, R14.11, R15.3. It restarts on its own at a deploy; clients reconnect (R15.8). Edits and the image
+      # log are on disk before they are acknowledged, so a restart loses nothing.
+      systemd.services.edwind = {
+        description = "edwind, Edwin's text daemon";
+        wantedBy = [ "multi-user.target" ];
+        stopIfChanged = false;
+        restartTriggers = [ editJson ];
+        startLimitIntervalSec = 0;
+        environment.EDWIND_MEMORY_MIB = toString cfg.memoryMiB;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${cfg.package}/bin/edwind --config /etc/edwind/edit.json";
+          User = cfg.user;
+          Group = userCfg.group;
+          UMask = "0077";
+          RuntimeDirectory = "edwind";
+          RuntimeDirectoryMode = "0700";
+          # edwind is TypeScript that Node strips at load; the compile cache keeps the stripped code, so only the
+          # first start after a deploy pays for it.
+          CacheDirectory = "edwind";
+          CacheDirectoryMode = "0700";
+          Environment = [ "NODE_COMPILE_CACHE=%C/edwind" ];
+          LoadCredential = credentials;
+          Restart = "always";
+          RestartSec = 1;
+          TimeoutStopSec = 10;
+          OOMScoreAdjust = 100;
+          MemoryMax = "${toString (cfg.memoryMiB * 5 / 4)}M";
+          # The server runs on a worker thread whose stack main.mts sizes itself (32 MiB); the limit only has to
+          # admit that thread's stack.
+          LimitSTACK = "64M";
+
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectSystem = "strict";
+          # The home plus writable paths outside it; the more specific mounts below win inside the home.
+          ReadWritePaths = lib.unique (
+            [
+              home
+              cfg.notesDir
+              cfg.stateDir
+              cfg.configDir
+            ]
+            ++ lib.filter (p: !(lib.hasPrefix "${home}/" p) && p != home) writable
+          );
+          ReadOnlyPaths = refusePaths ++ cfg.readOnlyPaths;
+          BindPaths = pinnedPaths;
+          InaccessiblePaths = [ "-/run/user" ];
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+          ];
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictNamespaces = true;
+          RestrictSUIDSGID = true;
+          SystemCallArchitectures = "native";
+          ProtectClock = true;
+          ProtectHostname = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          CapabilityBoundingSet = "";
+          # No MemoryDenyWriteExecute: V8's JIT needs it.
+        };
+      };
+    }
+
+    (mkIf front.enable {
+      assertions = [
+        {
+          assertion = builtins.match "https://[^/?#]+" front.publicOrigin != null;
+          message = "services.edwind.front.publicOrigin must be https://host[:port] with no path.";
+        }
+        {
+          assertion = front.firewall.interface == null || (isIPv4 front.address && isIPv4 front.trustedProxy);
+          message = "services.edwind.front.firewall needs an IPv4 address and trustedProxy.";
+        }
+        {
+          assertion = front.firewall.interface == null || !config.networking.nftables.enable;
+          message = "services.edwind.front.firewall uses networking.firewall.extraCommands (iptables); port it before enabling networking.nftables.";
+        }
+      ];
+
+      networking.firewall.extraCommands = mkIf (front.firewall.interface != null) ''
+        iptables -A nixos-fw -i ${lib.escapeShellArg front.firewall.interface} -s ${lib.escapeShellArg front.trustedProxy} -d ${lib.escapeShellArg front.address} -p tcp --dport ${toString front.port} -j nixos-fw-accept
+      '';
+
+      # A restart closes open editors with 1012 and the page reconnects; edwind keeps every buffer.
+      systemd.services.edwin-front = {
+        description = "edwin-front, Edwin in a browser on its own origin";
+        wantedBy = [ "multi-user.target" ];
+        wants = [
+          "edwind.service"
+          "network-online.target"
+        ];
+        after = [
+          "edwind.service"
+          "network-online.target"
+        ];
+        restartTriggers = [ frontJson ];
+        # The address may come up after the unit (a WireGuard interface): it retries until it can bind.
+        startLimitIntervalSec = 0;
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${cfg.package}/bin/edwin-front --config ${frontJson}";
+          # The user edwind runs as: /run/edwind is that user's only.
+          User = cfg.user;
+          Group = userCfg.group;
+          UMask = "0077";
+          LoadCredential = [ "proxy-secret:${front.proxySecretFile}" ];
+          Restart = "always";
+          RestartSec = 1;
+          MemoryMax = "512M";
+
+          # Packets to and from any address but the proxy's are dropped before edwin-front sees them.
+          IPAddressDeny = "any";
+          IPAddressAllow = [ front.trustedProxy ];
+          NoNewPrivileges = true;
+          PrivateTmp = true;
+          PrivateDevices = true;
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          RestrictAddressFamilies = [
+            "AF_UNIX"
+            "AF_INET"
+            "AF_INET6"
+          ];
+          LockPersonality = true;
+          RestrictRealtime = true;
+          RestrictNamespaces = true;
+          RestrictSUIDSGID = true;
+          SystemCallArchitectures = "native";
+          ProtectClock = true;
+          ProtectHostname = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectKernelLogs = true;
+          ProtectControlGroups = true;
+          ProtectProc = "invisible";
+          ProcSubset = "pid";
+          CapabilityBoundingSet = "";
+          # No MemoryDenyWriteExecute: V8's JIT needs it.
+        };
+      };
+    })
+  ]);
 }

@@ -10,6 +10,8 @@
     "moduleResolution": "nodenext",
     "types": ["node"],
     "typeRoots": ["tools/node_modules/@types"],
+    // ws is a runtime dependency of server/ (edwin-front) whose types are a dev dependency of tools/.
+    "paths": { "ws": ["./tools/node_modules/@types/ws/index.d.ts"] },
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,

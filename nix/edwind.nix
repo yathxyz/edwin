@@ -47,6 +47,13 @@ stdenv.mkDerivation {
       $out/share/edwin/server/main.mts "\$@"
     EOF
     chmod 555 $out/bin/edwind
+    # edwin-front (server/front.mts): edwin-web and /edit on an origin of its own, for services.edwind.front.
+    cat > $out/bin/edwin-front <<EOF
+    #!${stdenv.shell}
+    exec ${nodejs}/bin/node --disallow-code-generation-from-strings \
+      --no-warnings=ExperimentalWarning $out/share/edwin/server/front.mts "\$@"
+    EOF
+    chmod 555 $out/bin/edwin-front
   '';
   meta = {
     description = "edwind, Edwin's text daemon: shared buffers and the Lisp machine for every edwin";
