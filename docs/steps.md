@@ -409,6 +409,47 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   ssh reaches the same edwind with the user's keys and no new credential. Starting an edwind on the remote host
   (`-a` is local only), and one frame attached to two edwinds at once (`sync.ts` holds one connection per runtime).
 
+## Notes into brain: the projector (done)
+
+Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
+memories and references. This step is the feed: edwind tells brain what each note file holds. Edwin's own
+commands still read the old index; asking brain instead is the next step.
+
+- **One record per note file (`server/projector.mts`).** `POST <brain>/v1/projection` with `{path, scope, notes}`.
+  A note is an entry with an Org id, the file or a heading: `{id, title, aliases, tags, parent, links}`. `parent` is
+  the nearest id above it; `links` are the link names written under it (`id:…`, and scheme names such as `task:12`),
+  as written, and brain resolves them. No text is sent. A file without ids sends an empty record, and so does a
+  file that is gone; brain drops what the path listed before (a note goes when no path lists its id any more), and
+  a rename keeps a note's identity because its id moves with it.
+- **Gone means gone from disk.** A file is reported gone only when it is in neither the index nor the directory,
+  and never while the index is empty. A file the index leaves out (over 4 MiB, unreadable) keeps what brain was
+  told of it, and a notes directory that failed to mount deletes nothing. The cost: emptying the directory on
+  purpose leaves the last notes in brain, and a file the index left out that is then deleted is reported at the
+  next pass, not at once.
+- **Only saved text.** A file open in a buffer with unsaved changes waits for its save (autosave is two seconds).
+- **A ledger, `stateDir/projector.json`.** Path to the hash of the record brain last took. A restart sends only
+  what changed while edwind was down; deleting the file resends every file that exists, which brain takes as no
+  change and which also repairs brain after anything else wrote to the notes there. It does not remove the notes
+  of a file that went while the ledger was lost.
+- **Failures.** One request at a time. A failed one (no answer, 401, 403, 5xx) is retried after one second, then
+  doubling up to five minutes, and the file it failed on goes after the others, so one file brain cannot take
+  does not hold them up. A record brain refuses (400, 409, 413 with brain's own JSON error: a title that looks
+  like a secret) is logged with its path and waits until the file changes; the same status from anything else
+  (an error page) is a failure and is retried.
+- **Scope.** `#+brain_scope: work.notes` in a file's header; otherwise `brain.scope` (default `self`).
+- **Config.** `edit.json` `brain: {url, credential, scope}`; in NixOS `services.edwind.brain.{url, tokenFile,
+  scope}`. The token is a LoadCredential file read for each request. It is not among the credentials Scheme can
+  name, and the config refuses a name that is. Plain http is sent only to loopback or to an address one of this
+  host's interfaces holds, checked when the request is made, so `http://10.100.0.2:7676` works on the host that
+  holds that address and nowhere else.
+- **The index tells its listeners.** `Notes.onChange` is called after every change of the index. The projector
+  compares the whole index with the ledger then (hashes are cached per parse), so it needs no per-file event and
+  cannot miss one.
+
+Not in it: files without an id (they are not in brain; give a file an `:ID:` and it is), file and URL links,
+Syncthing's conflict copies (skipped: they carry the ids of the file they copy), and a status line for what is
+owed (the log has `projector` lines: sent, refused, errors).
+
 ## Dired: directories as buffers (done)
 
 Asked 2026-11-10: Emacs's dired, so directories and paths are navigated in Edwin as in Emacs, with the file

@@ -198,6 +198,10 @@ in
     "dired-local.test.mts"
   ];
 
+  # The note projector (server/projector.mts): the record of each note file as brain is sent it, saved text only,
+  # retries, refusals, the ledger across a restart, and where the token may go.
+  edit-projector = suite "projector" [ "projector.test.mts" ];
+
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved
   # session, and a switch of provider mid-session.
   edit-agent = suite "agent" [ "agent.test.mts" ];

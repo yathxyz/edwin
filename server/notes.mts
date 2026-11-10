@@ -144,6 +144,8 @@ export class Notes {
   declare snapshotTimer: NodeJS.Timeout | undefined;
   declare sweepSoon: NodeJS.Timeout | null | undefined;
   declare ready: Promise<void>;
+  /* Called after every change of the index (changed()). */
+  declare onChange: (() => void)[];
   constructor(server: Server) {
     this.server = server; this.log = server.log; this.L = server.L; this.S = server.L.S;
     this.root = server.cfg.notesDir; this.realRoot = server.auth.realNotesDir();
@@ -155,6 +157,7 @@ export class Notes {
     this.sweeping = null; this.sweepTimer = null; this.broadcastTimer = null;
     this.startup = { total: 0, parsed: 0, reused: 0, buffers: 0, ms: 0 };
     this.watcher = null; this.recursiveWatch = false;
+    this.onChange = [];
   }
 
   /* ---------- grammar and Scheme ---------- */
@@ -266,6 +269,7 @@ export class Notes {
   changed() {
     this.gen++; this.cache = null; this.dirty = true;
     try { this.L.set('notes-generation', this.gen); } catch (e) { /* the variable is defined by notes-syntax.scm */ }
+    for (const f of this.onChange) f();
     if (!this.broadcastTimer) this.broadcastTimer = setTimeout(() => {
       this.broadcastTimer = null;
       const msg = { t: 'notes', gen: this.gen };

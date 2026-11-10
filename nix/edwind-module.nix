@@ -60,7 +60,10 @@ let
     ++ lib.optional (
       cfg.models.openai.apiKeyFile != null
     ) "openai-api-key:${cfg.models.openai.apiKeyFile}"
+    ++ lib.optional (cfg.brain.url != null) "${brainCredential}:${cfg.brain.tokenFile}"
     ++ lib.mapAttrsToList (name: c: "${name}:${c.file}") cfg.credentials;
+  # The projector's token (server/projector.mts): not among the credentials Scheme can name.
+  brainCredential = "brain-token";
 
   editJson = json.generate "edwind.json" (
     {
@@ -79,6 +82,12 @@ let
         openai = backend "openai" cfg.models.openai;
         tiers = cfg.models.tiers;
         credentials = lib.mapAttrs (_: c: { inherit (c) origin; }) cfg.credentials;
+      };
+    }
+    // lib.optionalAttrs (cfg.brain.url != null) {
+      brain = {
+        inherit (cfg.brain) url scope;
+        credential = brainCredential;
       };
     }
     // lib.optionalAttrs (cfg.hubSocket != null) { inherit (cfg) hubSocket; }
@@ -226,6 +235,28 @@ in
       };
     };
 
+    brain = {
+      url = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://10.100.0.2:7676";
+        description = ''
+          Where brain listens. When set, edwind is the note projector: it tells brain what each note file
+          holds (its Org ids, titles and links, never its text) as the file changes. Plain http is sent only
+          to an address of this host.
+        '';
+      };
+      tokenFile = mkOption {
+        type = types.path;
+        description = "Root-readable file holding the projector's brain token.";
+      };
+      scope = mkOption {
+        type = types.str;
+        default = "self";
+        description = "The brain scope of a note file that names none with `#+brain_scope:`.";
+      };
+    };
+
     credentials = mkOption {
       default = { };
       description = "More LoadCredential entries, readable from Scheme only as (credential \"name\") handles bound to origin.";
@@ -310,6 +341,10 @@ in
             && (cfg.models.openai.baseUrl == null || httpsOrLoopback cfg.models.openai.baseUrl)
             && lib.all (c: httpsOrLoopback c.origin) (lib.attrValues cfg.credentials);
           message = "services.edwind.models.*.baseUrl and credentials.*.origin must be https, or http to loopback.";
+        }
+        {
+          assertion = cfg.brain.url == null || !(cfg.credentials ? ${brainCredential});
+          message = "services.edwind.credentials: ${brainCredential} is the projector's when services.edwind.brain.url is set.";
         }
         {
           assertion = lib.all isName (lib.attrNames cfg.credentials);
