@@ -140,9 +140,36 @@ test('no page objects exist in this process: the core reached none to boot (R4.1
   assert.equal(ed.eval('(selected-frame)'), false);
 });
 
-test('Org commands exist after boot (R9.1: boot runs after all 13 files)', () => {
-  for (const c of ['org-todo', 'org-agenda', 'org-capture', 'org-roam-node-find', 'org-cycle'])
+test('Org commands exist after boot (R9.1: boot runs after every file)', () => {
+  for (const c of ['org-todo', 'org-agenda', 'org-capture', 'dailies-goto-today', 'brain-node-find', 'org-cycle'])
     assert.ok(ed.L.isCommand(ed.L.intern(c)), c);
+});
+
+test('with no edwind there is no brain: its commands say so, and id: links and dailies stay in the file store', async () => {
+  const messages = (): string => ed.Ed.getBuffer('*Messages*').text;
+  const said = async (what: string) => { for (let i = 0; i < 200 && !messages().includes(what); i++) await new Promise(r => setTimeout(r, 5)); assert.ok(messages().includes(what), what); };
+  const lineAt = () => ed.text().split('\n')[ed.Ed.lineNoB(ed.E.current, ed.point()) - 1];
+  ed.Ed.Store.set('held.org', ':PROPERTIES:\n:ID: file-id\n:END:\n#+title: Held\n\n* Entry\n:PROPERTIES:\n:ID: entry-id\n:END:\ntext\n');
+  await fresh('org');
+  await ed.type('i[[id:entry-id][there]] [[id:nowhere][lost]]'); await ed.keys('ESC');
+  const from = ed.E.current;
+  for (const k of ['SPC n r f', 'SPC n r i']) { await ed.keys(k); assert.equal(ed.E.mini, null, 'nothing is asked for'); }
+  await said('No brain here: this Edwin is not attached to edwind');
+  await ed.keys('SPC n r b'); await said('No note at point');
+  from.pt = from.text.indexOf('nowhere');
+  await assert.rejects(ed.Ed.callInteractively(ed.L.intern('org-open-at-point')), /Cannot find entry with ID "nowhere"/);
+  from.pt = 3;
+  await ed.Ed.callInteractively(ed.L.intern('org-open-at-point'));
+  assert.equal(ed.E.current.name, 'held.org'); assert.equal(lineAt(), '* Entry');
+  const before = messages().split('No brain here').length;
+  await ed.keys('SPC n r b');
+  for (let i = 0; i < 200 && messages().split('No brain here').length === before; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(messages().split('No brain here').length, before + 1, 'a note at point, and still no brain to ask');
+  const d = new Date(), day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  await ed.keys('SPC n r d t');
+  for (let i = 0; i < 200 && ed.E.current.name === 'held.org'; i++) await new Promise(r => setTimeout(r, 5));
+  assert.match(ed.Ed.Store.get(`daily/${day}.org`), new RegExp(`^:PROPERTIES:\\n:ID: [0-9a-f-]{36}\\n:END:\\n#\\+title: ${day}\\n\\* \\d\\d:\\d\\d \\n$`));
+  assert.match(lineAt(), /^\* \d\d:\d\d $/);
 });
 
 test('index.html fetches the shipped Scheme from scm/ and carries none of its own', async () => {

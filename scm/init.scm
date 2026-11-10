@@ -129,9 +129,10 @@
 ;; SPC, then the group letter, as in init-evil.el; pause after SPC to see
 ;; what comes next.  Edwin adds groups of its own where they do not
 ;; collide: w windows, t toggles, b buffers, f files, h help, m eval.
-;; org-roam-*, org-agenda, org-capture, org-id-get-create and the gptel
-;; commands come from org.scm and ai.scm.  Normal and Visual state only, as
-;; general.el's :states; after an operator SPC is a motion again (d SPC).
+;; brain-*, dailies-*, org-agenda, org-capture, org-id-get-create and the
+;; gptel commands come from brain.ts, org.ts and ai.scm.  Normal and Visual
+;; state only, as general.el's :states; after an operator SPC is a motion
+;; again (d SPC).
 (evil-define-key '(normal visual) 'global
   ;; files and buffers
   "SPC SPC" 'consult-buffer          ; consult-project-buffer
@@ -166,12 +167,12 @@
   "SPC g L" 'gptel-menu
   "SPC g a" 'gptel                   ; agent-shell on the desktop
   "SPC c c" 'compile                 ; desktop only
-  ;; notes: org-roam (n r), org (m, o)
-  "SPC n r f" 'org-roam-node-find
-  "SPC n r i" 'org-roam-node-insert
-  "SPC n r a" 'org-roam-node-random
-  "SPC n r d t" 'org-roam-dailies-goto-today
-  "SPC n r d d" 'org-roam-dailies-goto-date
+  ;; notes: the nodes of brain and the dailies (n r), org (m, o)
+  "SPC n r f" 'brain-node-find
+  "SPC n r i" 'brain-node-insert
+  "SPC n r b" 'brain-backlinks
+  "SPC n r d t" 'dailies-goto-today
+  "SPC n r d d" 'dailies-goto-date
   "SPC n j j" 'org-journal-new-entry ; desktop only
   "SPC m I" 'org-id-get-create
   "SPC m a" 'org-agenda
@@ -227,7 +228,7 @@
 ;; Buffers that start in Motion state (help, the buffer list, the agenda)
 ;; share the same leader keys through their own maps.
 (for-each (lambda (mode) (evil-define-key 'motion mode "SPC" (lookup-key evil-normal-state-map "SPC")))
-          '(special-mode org-agenda-mode org-roam-mode dired-mode))
+          '(special-mode org-agenda-mode brain-mode dired-mode))
 
 ;; C-c keys: i in Insert sends the buffer to the LLM; c in Normal state opens
 ;; a chat (agent-shell on the desktop, gptel here, as SPC g a).

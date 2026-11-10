@@ -861,8 +861,8 @@ interface EdBuffer extends SchemeForeign {
   /* pool.ts: the word index and running jobs */
   _wix?: { src: string; ver: number; ix: EdWordIndex; busy: boolean } | null;
   _jobs?: Map<number | symbol, number>;
-  /* org.ts: the node an org-roam buffer shows */
-  roamNode?: unknown;
+  /* brain.ts: what a brain buffer shows */
+  brain?: unknown;
   /* ai.ts */
   _avail?: unknown;
   gptel?: unknown;
@@ -1087,6 +1087,8 @@ interface EdMiniOpts {
   def?: string;
   keepOrder?: boolean;
   listOrder?: boolean;
+  /* whether the completer's candidates are already the matches for INPUT, so the minibuffer does not filter them */
+  filtered?: (input: string) => boolean;
   annotate?: ((cand: string) => string) | null;
   label?: (cand: string) => string;
   /* where the completed field starts in the input (a path's last component): the candidates complete what
@@ -1605,6 +1607,7 @@ interface EdApi {
   setLeaderKey(name: string): string;
   fileLabel(name: string): string;
   visit(name: string): EdBuffer | null | Promise<EdBuffer | null | false>;
+  servedName(id: string): string;
   symProp(sym: SchemeValue, name: string): SchemeValue;
   adviceOf(name: string): { how: string; fn: SchemeValue; name: string | null | undefined }[];
   defineMinorMode(...args: unknown[]): unknown;
@@ -2073,6 +2076,21 @@ interface YasApi {
 interface EdModuleExports {
   [name: string]: unknown;
 }
+/* org.ts, as brain.ts uses it: links, the Org id around point and the entry of one, new notes from a template. */
+interface OrgApi extends EdModuleExports {
+  linkAt(b: EdBuffer, p: number): { s: number; e: number; target: string; desc?: string } | null;
+  openLink(target: string): Promise<void>;
+  idAtPoint(b: EdBuffer): string | null;
+  gotoId(b: EdBuffer, id: string | null): void;
+  createNote(title: string): Promise<{ id: string; file: string; cursor: number }>;
+  visitNote(rel: string): EdBuffer | null | Promise<EdBuffer | null | false>;
+}
+/* brain.ts, as org.ts follows links with it: open a node of brain by its reference, and the reference of the
+   note with a title or alias (null with none, and where there is no edwind to ask). */
+interface BrainApi {
+  open(ref: string): Promise<EdBuffer | false>;
+  noteTitled(title: string): Promise<string | null>;
+}
 
 /* ---------- native: desktop Edwin (native/js) ---------- */
 
@@ -2237,10 +2255,11 @@ declare var EdPoolWorker: EdPoolWorkerModule;
 declare var Complete: CompleteApi;
 declare var Yas: YasApi;
 declare var Stack: EdModuleExports;
-/* ai.ts, org.ts, markdown.ts */
+/* ai.ts, org.ts, markdown.ts, brain.ts */
 declare var EdAI: EdModuleExports;
-declare var Org: EdModuleExports;
+declare var Org: OrgApi;
 declare var Markdown: EdModuleExports;
+declare var Brain: BrainApi;
 /* ot.ts */
 declare var EdOT: EdOTApi;
 /* ai.ts reads it (also as window.claude) */

@@ -1,4 +1,4 @@
-;;; org.scm: Org mode as the desktop init-org.el sets it up: keywords, capture and roam
+;;; org.scm: Org mode as the desktop init-org.el sets it up: keywords, capture and note
 ;;; templates, the agenda groups, and the evil-org keys.  The commands live in org.ts, which
 ;;; loads after this file, so the variables are defined here and leader keys go in init.scm.
 
@@ -26,10 +26,11 @@
         ("r" "Reading" entry (file+headline "readlist.org" "Inbox")
          "** TODO %?\n:PROPERTIES:\n:CREATED: %U\n:END:\n%i\n%a\n" :empty-lines 1)))
 
-;; Roam: notes under roam/, named by a timestamp and the slug of the title.
-(define org-roam-directory "roam/")
-(define org-roam-dailies-directory "daily/")
-(define org-roam-capture-templates
+;; New notes (brain-node-find, brain-node-insert) go in the notes root, named by a timestamp and the
+;; slug of the title; the dailies go under daily/.  Both directories are relative to the notes root.
+(define note-directory "")
+(define dailies-directory "daily/")
+(define note-capture-templates
       '(("n" "note" plain "%?"
          :target (file+head "%<%Y%m%d%H%M%S>-${slug}.org"
                             "#+title: ${title}\n#+created: %U\n\n"))
@@ -45,7 +46,7 @@
         ("m" "markdown note" plain "%?"
          :target (file+head "%<%Y%m%d%H%M%S>-${slug}.md"
                             "---\nid: ${id}\ntitle: ${title}\ncreated: \"%<%Y-%m-%dT%H:%M:%S%z>\"\ntags: []\n---\n\n"))))
-(define org-roam-dailies-capture-templates
+(define dailies-capture-templates
       '(("d" "daily" entry "* %<%H:%M> %?"
          :target (file+head "%<%Y-%m-%d>.org" "#+title: %<%Y-%m-%d>\n"))))
 
@@ -60,10 +61,10 @@
         (:name "Waiting" :todo ("WAITING" "HOLD") :order 6)
         (:name "Someday" :todo "SOMEDAY" :order 9)))
 
-;; Agenda and roam buffers are read only and start in Motion state.
-(set! evil-motion-state-modes (append evil-motion-state-modes '(org-agenda-mode org-roam-mode)))
+;; Agenda and brain buffers are read only and start in Motion state.
+(set! evil-motion-state-modes (append evil-motion-state-modes '(org-agenda-mode brain-mode)))
 (define org-agenda-mode-map (make-sparse-keymap "org-agenda-mode-map"))
-(define org-roam-mode-map (make-sparse-keymap "org-roam-mode-map"))
+(define brain-mode-map (make-sparse-keymap "brain-mode-map"))
 (define markdown-mode-map (make-sparse-keymap "markdown-mode-map"))
 
 ;; TAB cycles the subtree at point, S-TAB the whole buffer, as outline folding in Emacs.
@@ -99,8 +100,8 @@
 (define-key org-mode-map "C-c !" 'org-time-stamp-inactive)
 (define-key org-mode-map "C-c C-q" 'org-set-tags-command)
 (define-key org-mode-map "C-c C-x C-b" 'org-toggle-checkbox)
-(define-key org-mode-map "C-c n l" 'org-roam-buffer-toggle)
-(define-key org-mode-map "C-c n i" 'org-roam-node-insert)
+(define-key org-mode-map "C-c n l" 'brain-backlinks)
+(define-key org-mode-map "C-c n i" 'brain-node-insert)
 (define-key org-mode-map "C-c C-n" 'org-next-visible-heading)
 (define-key org-mode-map "C-c C-p" 'org-previous-visible-heading)
 (define-key org-mode-map "C-c C-u" 'outline-up-heading)
@@ -137,8 +138,8 @@
 (define-key markdown-mode-map "C-c C-o" 'org-open-at-point)
 (define-key markdown-mode-map "C-c C-l" 'org-insert-link)
 (define-key markdown-mode-map "C-c C-x C-b" 'org-toggle-checkbox)
-(define-key markdown-mode-map "C-c n l" 'org-roam-buffer-toggle)
-(define-key markdown-mode-map "C-c n i" 'org-roam-node-insert)
+(define-key markdown-mode-map "C-c n l" 'brain-backlinks)
+(define-key markdown-mode-map "C-c n i" 'brain-node-insert)
 
 (evil-define-key 'motion 'org-agenda-mode
   "RET" 'org-agenda-switch-to
@@ -147,8 +148,8 @@
   "r" 'org-agenda-redo
   "g r" 'org-agenda-redo
   "q" 'org-agenda-quit)
-(evil-define-key 'motion 'org-roam-mode
-  "RET" 'org-open-at-point
+(evil-define-key 'motion 'brain-mode
+  "RET" 'brain-follow
   "q" 'quit-window)
 
 ;; markdown-mode (markdown.scm, R10.1-R10.5) builds on these outline keys: it loads here, after Org and

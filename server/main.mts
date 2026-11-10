@@ -32,6 +32,7 @@ import * as anchorsModule from './anchors.mts';
 import * as babelModule from './babel.mts';
 import * as fsModule from './fs.mts';
 import * as projectorModule from './projector.mts';
+import * as brainModule from './brain.mts';
 import { SCOPE } from './projector.mts';
 import { lockdown, lockdownState } from './lockdown.mts';
 import type { By, CallCtx, CallResult, Condition, WireMessage } from './proto.mts';
@@ -72,8 +73,9 @@ export interface Config {
   writablePaths: string[];
   refusePaths: string[];
   models: ModelsConfig;
-  /* Where the note projector sends (server/projector.mts); absent, nothing is projected. */
-  brain?: { url: string; credential: string; scope: string };
+  /* brain: `credential` is what the note projector writes with (server/projector.mts) and `readCredential` what
+     the brain-* commands read with (server/brain.mts); without one, that half is off. */
+  brain?: { url: string; credential?: string; readCredential?: string; scope: string };
 }
 
 /* A server command (§4.6): the result object, a promise of one, or undefined for a delayed result. */
@@ -87,7 +89,7 @@ export interface ServerModule { install(server: Server): Promise<void>; shutdown
 const require = createRequire(import.meta.url);
 /* The E2 modules, installed in this order after the buffers are loaded; each exports install(server) and
    may export shutdown(server) and name. */
-const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule, fsModule, projectorModule];
+const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule, fsModule, projectorModule, brainModule];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EDWIN = path.join(HERE, '..');
 export const BUILD = process.env.EDWIND_BUILD || 'dev';
@@ -145,21 +147,27 @@ export function loadConfig(file: string): Config {
     if (m.baseUrl !== undefined) { if (typeof m.baseUrl !== 'string') throw new Error(`${file}: models.${name}.baseUrl must be a string`); checkUrl(`models.${name}.baseUrl`, m.baseUrl); }
     if (m.credential !== undefined && (typeof m.credential !== 'string' || !/^[a-z0-9-]{1,32}$/.test(m.credential))) throw new Error(`${file}: models.${name}.credential must be a credential name`);
   }
-  /* brain (server/projector.mts): {url, credential, scope}. The URL is http or https; where plain http may go is
-     checked when a request is made. The credential is the projector's alone: Scheme can name the ones under
-     models.credentials, so it may not be one of those. */
+  /* brain: {url, credential, readCredential, scope} (server/projector.mts, server/brain.mts). The URL is http or
+     https; where plain http may go is checked when a request is made. The credentials are edwind's alone: Scheme
+     can name the ones under models.credentials, so neither may be one of those. */
   if (cfg.brain !== undefined) {
     const b = cfg.brain;
     if (!b || typeof b !== 'object' || Array.isArray(b)) throw new Error(`${file}: brain must be an object`);
-    for (const k of Object.keys(b)) if (!['url', 'credential', 'scope'].includes(k)) throw new Error(`${file}: brain: unknown field ${JSON.stringify(k)}`);
+    for (const k of Object.keys(b)) if (!['url', 'credential', 'readCredential', 'scope'].includes(k)) throw new Error(`${file}: brain: unknown field ${JSON.stringify(k)}`);
     let u; try { u = new URL(b.url); } catch (e) { throw new Error(`${file}: brain.url is not a URL`); }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(`${file}: brain.url must be http or https`);
-    if (typeof b.credential !== 'string' || !/^[a-z0-9-]{1,32}$/.test(b.credential)) throw new Error(`${file}: brain.credential must be a credential name`);
     const models = out.models as Record<string, any>; // any: checked above
-    if (Object.keys(models.credentials || {}).includes(b.credential) || Object.values(models).some(m => m && m.credential === b.credential)) throw new Error(`${file}: brain.credential ${JSON.stringify(b.credential)} is also a models credential`);
+    for (const k of ['credential', 'readCredential']) {
+      const c = b[k];
+      if (c === undefined) continue;
+      if (typeof c !== 'string' || !/^[a-z0-9-]{1,32}$/.test(c)) throw new Error(`${file}: brain.${k} must be a credential name`);
+      if (Object.keys(models.credentials || {}).includes(c) || Object.values(models).some(m => m && m.credential === c)) throw new Error(`${file}: brain.${k} ${JSON.stringify(c)} is also a models credential`);
+    }
+    if (b.credential === undefined && b.readCredential === undefined) throw new Error(`${file}: brain needs a credential (to project notes) or a readCredential (to read)`);
+    if (b.credential !== undefined && b.credential === b.readCredential) throw new Error(`${file}: brain.readCredential must not be the projector's: brain takes a projector's token on no reading route`);
     const scope = b.scope === undefined ? 'self' : b.scope;
     if (typeof scope !== 'string' || !SCOPE.test(scope)) throw new Error(`${file}: brain.scope must be a brain scope such as self or work.notes`);
-    out.brain = { url: b.url, credential: b.credential, scope };
+    out.brain = { url: b.url, scope, ...(b.credential === undefined ? {} : { credential: b.credential }), ...(b.readCredential === undefined ? {} : { readCredential: b.readCredential }) };
   }
   return out;
 }

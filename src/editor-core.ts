@@ -1345,6 +1345,8 @@ function miniCandidates(sync?: boolean) {
     m.cache = out; m.cacheKey = q; m.cacheAll = all;
     return out;
   };
+  /* A completer that matched the input itself is taken at its word: its candidates are shown as they are. */
+  if (m.opts.filtered && m.opts.filtered(q)) { m.matched = all; m.matchedKey = q; return finish(all.slice()); }
   if (!terms.length) return finish(all.slice());
   /* The base: the previous matches when this input narrows them (kept in list order), else all. */
   const base = m.matched && m.cacheAll === all && miniPrefix(m, m.matchedKey!) === pre && narrows(m.matchedKey!.slice(pre.length), field) ? m.matched : all;

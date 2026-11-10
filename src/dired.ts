@@ -18,7 +18,7 @@ const { lineNoB, lineStartB } = Ed;
 interface DiredEntry extends EdFileEntry { name: string }
 interface DiredListing { dir: string; home: string; entries: DiredEntry[]; truncated?: boolean }
 /* Where the files are. A path is absolute or starts with ~/. resolve says whether PATH is a directory and the
-   name Ed.visit takes for it; a backend that need not ask answers at once. remove answers false for a
+   name Ed.visit takes for it (Ed.servedName of edwind's id); a backend that need not ask answers at once. remove answers false for a
    directory that is not empty and was left alone; rename and copy put the source inside DST when DST is a
    directory. */
 interface DiredPlace { dir: boolean; name: string }
@@ -50,13 +50,9 @@ async function rpc(cmd: string, a: Record<string, unknown>): Promise<unknown> {
   if (r.error) signal('user-error', r.error.condition === 'offline' ? 'Not connected to edwind' : r.error.report || r.error.condition);
   return r.value;
 }
-/* The name Ed.visit takes for edwind's buffer ID. In a frame it is the id. The desktop program's visit sends a
-   path under the notes directory to edwind and opens every other one itself (native/js/main.ts), so there a
-   note goes by its path. */
-const visitName = (id: string) => { const notes = String(L.get('notes-directory') || ''); return Ed.host.files && notes && !/^(\/|~\/)/.test(id) ? join(notes, id) : id; };
 const SERVED: DiredFs = {
   list: dir => rpc('fs-list', dir === null ? {} : { dir }) as Promise<DiredListing>,
-  resolve: p => (rpc('fs-stat', { path: p }) as Promise<{ id: string | null; entry: DiredEntry | null }>).then(r => ({ dir: !!r.entry && isDirEntry(r.entry), name: r.id ? visitName(r.id) : p })),
+  resolve: p => (rpc('fs-stat', { path: p }) as Promise<{ id: string | null; entry: DiredEntry | null }>).then(r => ({ dir: !!r.entry && isDirEntry(r.entry), name: r.id ? Ed.servedName(r.id) : p })),
   remove: (p, recursive) => (rpc('fs-delete', { path: p, recursive }) as Promise<{ deleted: boolean }>).then(r => r.deleted),
   rename: (src, dst) => rpc('rename-file', { src, dst }),
   copy: (src, dst) => rpc('fs-copy', { src, dst }),

@@ -19,7 +19,7 @@ const ROOT = path.join(SRC, '..');
 const WORKER_FILE = path.join(ROOT, 'server', 'worker.mts');
 const JOBS_FILE = path.join(ROOT, 'server', 'jobs.mts');
 /* The core, in load order: the order of the script tags in index.html. */
-const FILES = ['scheme', 'runtime', 'text', 'editor-core', 'editor-prims', 'evil-core', 'pool', 'complete', 'extras', 'stack', 'ai', 'evil-ex', 'org', 'markdown', 'dired', 'ot', 'sync', 'display'];
+const FILES = ['scheme', 'runtime', 'text', 'editor-core', 'editor-prims', 'evil-core', 'pool', 'complete', 'extras', 'stack', 'ai', 'evil-ex', 'org', 'markdown', 'dired', 'brain', 'ot', 'sync', 'display'];
 
 /* The host's shape, as src/core.d.ts has it (EdHost and its parts) for the Node host; core.d.ts is not part of
    this program, so the names here are this file's own. */

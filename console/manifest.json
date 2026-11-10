@@ -17,6 +17,7 @@
   "src/org.js",
   "src/markdown.js",
   "src/dired.js",
+  "src/brain.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

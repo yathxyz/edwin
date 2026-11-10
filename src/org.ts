@@ -1,9 +1,10 @@
-/* Org mode for Edwin: the parts of Org, org-modern, evil-org, org-super-agenda, org-capture and
-   org-roam that the desktop configuration uses every day. Buffers are rendered through the span
+/* Org mode for Edwin: the parts of Org, org-modern, evil-org, org-super-agenda and org-capture that
+   the desktop configuration uses every day, and new notes and dailies made from templates. Finding a
+   node, linking to one and listing what links to it ask brain (brain.ts). Buffers are rendered through the span
    mechanism of renderBuffer: hooks.lexSeg classifies the shown segment only (a class per character
    and hidden markers), and b.folds lists the hidden ranges that TAB cycling makes. Headlines are
    found by searching the rope for the next or previous line that starts with stars, never by
-   scanning the whole buffer on a key. The agenda and roam indexes are built by a pure job function
+   scanning the whole buffer on a key. The index the agenda reads is built by a pure job function
    that runs in the worker pool when it offers EdPool.run, else on the main thread. */
 (function () {
 'use strict';
@@ -30,21 +31,22 @@ L.defvar('org-agenda-start-on-weekday', 1, 'Day the week agenda starts on, 0 Sun
 L.defvar('org-deadline-warning-days', 14, 'Days ahead that a deadline appears in the agenda.');
 L.defvar('org-super-agenda-groups', NIL, 'Groups of the agenda: a list of plists with :name and selectors.');
 L.defvar('org-capture-templates', NIL, 'Capture templates: (KEY DESCRIPTION entry TARGET TEMPLATE . OPTIONS).');
-L.defvar('org-roam-directory', 'roam/', 'Directory of the roam notes, relative to the store.');
-L.defvar('org-roam-dailies-directory', 'daily/', 'Directory of the dailies, relative to org-roam-directory.');
-L.defvar('org-roam-capture-templates', NIL, 'Roam note templates: (KEY DESCRIPTION plain TEMPLATE (file+head FILE HEAD)).');
-L.defvar('org-roam-dailies-capture-templates', NIL, 'Daily note templates: (KEY DESCRIPTION entry TEMPLATE (file+head FILE HEAD)).');
+L.defvar('note-directory', '', 'Directory new notes are made in, relative to the notes root (empty: the root itself).');
+L.defvar('note-capture-templates', NIL, 'New-note templates: (KEY DESCRIPTION plain TEMPLATE (file+head FILE HEAD)).');
+L.defvar('dailies-directory', 'daily/', 'Directory of the dailies, relative to the notes root.');
+L.defvar('dailies-capture-templates', NIL, 'Daily note templates: (KEY DESCRIPTION entry TEMPLATE (file+head FILE HEAD)).');
 L.defvar('org-after-todo-state-change-hook', NIL, 'Procedures of no arguments called after org-todo changes a state; they read org-state and org-last-state.');
 L.defvar('org-state', false, 'The new TODO state (a string, or #f for none) while org-after-todo-state-change-hook runs.');
 L.defvar('org-last-state', false, 'The previous TODO state (a string, or #f) while org-after-todo-state-change-hook runs.');
 L.defvar('org-capture-after-finalize-hook', NIL, 'Procedures called after a capture is stored.');
 L.defvar('after-save-hook', NIL, 'Procedures called after a buffer is saved.');
-Ed.MODE_NAMES['markdown-mode'] = 'Markdown'; Ed.MODE_NAMES['org-agenda-mode'] = 'Org Agenda'; Ed.MODE_NAMES['org-roam-mode'] = 'Org Roam';
-for (const mode of ['markdown-mode', 'org-agenda-mode', 'org-roam-mode'])
+Ed.MODE_NAMES['markdown-mode'] = 'Markdown'; Ed.MODE_NAMES['org-agenda-mode'] = 'Org Agenda';
+for (const mode of ['markdown-mode', 'org-agenda-mode'])
   CMD(mode, '', '', `Switch the current buffer to ${Ed.MODE_NAMES[mode]} mode.`, () => Ed.switchMajorMode(cur(), mode));
 H.modeFor = name => /\.org$/i.test(name) ? 'org-mode' : /\.(md|markdown)$/i.test(name) ? 'markdown-mode' : null;
 H.ellipsis = () => String(L.get('org-ellipsis') ?? '...');
-const isOrg = (b: { mode: string }) => b.mode === 'org-mode' || b.mode === 'org-roam-mode';
+/* brain.ts writes its buffers (a record, the backlinks) as Org, so they are drawn and their links followed as Org. */
+const isOrg = (b: { mode: string }) => b.mode === 'org-mode' || b.mode === 'brain-mode';
 const isMd = (b: { mode: string }) => b.mode === 'markdown-mode';
 const isOutline = (b: { mode: string }) => isOrg(b) || isMd(b);
 const starOf = (b: { mode: string }) => isMd(b) ? '#' : '*';
@@ -929,7 +931,18 @@ function linkAt(b: EdBuffer, p: number) {
 async function openLink(target: string) {
   let m;
   target = target.trim();
-  if ((m = /^id:(.+)$/.exec(target))) { await ensureIndex(); const node = entryById(m[1].trim()); if (!node) signal('user-error', `Cannot find entry with ID "${m[1].trim()}"`); visitNode(node!); return; }
+  if ((m = /^brain:(.+)$/.exec(target))) { await Brain.open(m[1].trim()); return; }
+  if ((m = /^id:(.+)$/.exec(target))) {
+    /* An id that a file here holds is followed here; brain knows the others, where there is an edwind to ask it. */
+    const id = m[1].trim();
+    await ensureIndex();
+    const file = fileOfId(id);
+    if (!file && served()) { await Brain.open('org-id:' + id); return; }
+    if (!file) signal('user-error', `Cannot find entry with ID "${id}"`);
+    const b = await Ed.visit(file!);
+    if (b instanceof Ed.Buffer) gotoId(b, id);
+    return;
+  }
   if (/^https?:\/\//.test(target)) { const ok = Ed.host.openUrl(target); Ed.message(ok ? `Opened ${target}` : `Could not open ${target} (popup blocked?)`); return; }
   if ((m = /^file:(.+)$/.exec(target)) || (m = /^(.+\.(?:org|md|txt|scm))(::.*)?$/.exec(target))) {
     let name = m[1], search: string | null = null;
@@ -944,14 +957,14 @@ async function openLink(target: string) {
     }
     return;
   }
-  if ((m = /^roam:(.+)$/.exec(target))) { await ensureIndex(); const node = nodeByTitle(m[1].trim()); if (!node) signal('user-error', `No roam node titled "${m[1].trim()}"`); visitNode(node!); return; }
+  /* A title, with roam: before it or bare, is the note brain has under that title or alias. */
+  if ((m = /^roam:(.+)$/.exec(target))) { const ref = await Brain.noteTitled(m[1].trim()); if (!ref) signal('user-error', `No note titled "${m[1].trim()}"`); await Brain.open(ref!); return; }
   if (Ed.Store.get(target) !== null) { L.call('find-file', [target]); return; }
-  await ensureIndex();
-  const node = nodeByTitle(target);
-  if (node) { visitNode(node); return; }
+  const ref = await Brain.noteTitled(target);
+  if (ref) { await Brain.open(ref); return; }
   signal('user-error', `No link found: ${target}`);
 }
-CMD('org-open-at-point', '', '', 'Open the link at point: id: links visit the roam node, file: links the file, https links a new tab (C-c C-o).', async () => {
+CMD('org-open-at-point', '', '', 'Open the link at point: id: and brain: links open the node, file: links the file, https links a new tab (C-c C-o).', async () => {
   const b = cur(), lk = linkAt(b, b.pt);
   if (!lk) signal('user-error', 'No link found');
   await openLink(lk!.target); return false;
@@ -1038,7 +1051,7 @@ CMD('org-set-tags-command', async () => {
 }, 'TAGS', 'Set the tags of the headline at point, given as :a:b: or a b (C-c C-q).', ([tags]: SchemeValue[]) => { const b = cur(); setTags(b, headlineOrError(b), tags); return false; });
 D('org-get-tags', '', 'The tags of the headline at point as a list of strings.', () => { const b = cur(), hs = headlineBefore(b, b.pt); return hs === null ? NIL : listOf(headingInfo(b, hs).tagList); });
 
-/* ---------- the index: headlines, planning, tags, ids and links of every Org file ----------
+/* ---------- the index: headlines, planning, tags and ids of every Org file ----------
    orgParseFile is pure: its source is shipped to the worker pool (EdPool.define), so it uses nothing
    from the page. ITEM is {file, text, keywords, done} or {file, buf} (a buffer mirror for ctx.buffer). */
 function orgParseFile(item: OrgParseItem, ctx?: { buffer?: (id: string | number) => unknown } | null): OrgParsed {
@@ -1048,9 +1061,8 @@ function orgParseFile(item: OrgParseItem, ctx?: { buffer?: (id: string | number)
   const TS = /[<[](\d{4}-\d{2}-\d{2})(?: [^\s>\]]{1,3}\.?)?(?: (\d{1,2}:\d{2})(?:-\d{1,2}:\d{2})?)?(?: [+.]+(\d+)([hdwmy]))?(?: -\d+[hdwmy])?[>\]]/g;
   /* The repeater (+1w, ++1d, .+1m) of a timestamp match, or null. */
   const rep = (t: RegExpExecArray) => t[3] && +t[3] > 0 ? { n: +t[3], u: t[4] } : null;
-  const LINK = /\[\[id:([^\]\n]+)\](?:\[([^\]\n]*)\])?\]|\]\(id:([^)\n]+)\)/g;
   const category = file.replace(/^.*\//, '').replace(/\.[^.]+$/, '');
-  const entries: OrgEntry[] = [], links: OrgLink[] = [];
+  const entries: OrgEntry[] = [];
   let title: string | null = null, id: string | null = null, tags: string[] = [], cur: OrgEntry | null = null, inFront = false, lineNo = 0, i = 0;
   const n = text.length;
   while (i <= n) {
@@ -1086,12 +1098,10 @@ function orgParseFile(item: OrgParseItem, ctx?: { buffer?: (id: string | number)
       TS.lastIndex = 0;
       while ((m = TS.exec(line))) if (m[0][0] === '<') cur.ts.push({ date: m[1], time: m[2] || null, rep: rep(m) });
     }
-    LINK.lastIndex = 0;
-    while ((m = LINK.exec(line))) links.push({ to: (m[1] || m[3]).trim(), from: cur ? cur.id : null, file, pos: i + m.index, line: lineNo, ctx: line.trim().slice(0, 120) });
     if (j >= n) break;
     i = j + 1;
   }
-  return { file, title: title || category, id, tags, entries, links };
+  return { file, title: title || category, id, tags, entries };
 }
 if (globalThis.EdPool && EdPool.define) { try { EdPool.define('org-parse', orgParseFile, []); ORG.poolJob = true; } catch (e) { ORG.poolJob = false; } }
 function indexDirty() { if (ORG.ix) ORG.ix.dirty = true; }
@@ -1099,7 +1109,7 @@ function indexDirty() { if (ORG.ix) ORG.ix.dirty = true; }
 function indexSources() {
   const out = new Map<string, { file: string; b?: EdBuffer }>();
   for (const f of Ed.Store.list()) if (/\.(org|md|markdown)$/i.test(f)) out.set(f, { file: f });
-  for (const b of E.buffers) if (isOutline(b) && b.mode !== 'org-roam-mode' && !b.capture && (b.file || /\.(org|md)$/i.test(b.name))) out.set(b.file || b.name, { file: b.file || b.name, b });
+  for (const b of E.buffers) if (isOutline(b) && !b.capture && (b.file || /\.(org|md)$/i.test(b.name))) out.set(b.file || b.name, { file: b.file || b.name, b });
   return [...out.values()];
 }
 function refreshIndex() {
@@ -1126,7 +1136,7 @@ function refreshIndex() {
     if (!results) { const ctx = { buffer: (id: string | number) => { const b = E.buffers.find(x => x.id === id); return b ? b.text : ''; } }; results = plain.map(it => orgParseFile(it, ctx)); }
     results.forEach((res, i) => { Object.assign(res, items[i].meta); res.kw = kw; keep.set(items[i].file, res); });
     ix.files = keep; ix.dirty = false; ix.built = Date.now();
-    buildNodes(ix);
+    buildIds(ix);
   };
   ix.promise = run().finally(() => { ix.promise = null; });
   return ix.promise;
@@ -1136,167 +1146,117 @@ async function ensureIndex() { await refreshIndex(); return ORG.ix; }
 function scheduleRefresh() {
   indexDirty();
   clearTimeout(ORG.refreshTimer);
-  ORG.refreshTimer = setTimeout(() => { refreshIndex().then(() => { redrawRoamBuffer(); Ed.render(); }, () => {}); }, 300);
+  ORG.refreshTimer = setTimeout(() => { refreshIndex().then(() => Ed.render(), () => {}); }, 300);
 }
-/* ---------- roam nodes and backlinks, from the index ---------- */
-const roamDir = () => String(L.get('org-roam-directory') || 'roam/').replace(/\/?$/, '/');
-function buildNodes(ix: OrgIndex) {
-  const nodes: OrgNode[] = [], byId = new Map<string, OrgNode>(), byTitle = new Map<string, OrgNode>(), byFile = new Map<string, OrgNode>(), backlinks = new Map<string, OrgBacklink[]>(), ids = new Map<string, OrgNode>();
-  /* Every :ID: of every indexed file, as org-id-locations: id: links resolve anywhere, roam or not. */
-  for (const f of ix.files.values()) {
-    if (f.id) ids.set(f.id, { id: f.id, title: f.title, file: f.file, pos: 0, level: 0, tags: f.tags.slice() });
-    for (const e of f.entries) if (e.id) ids.set(e.id, { id: e.id, title: e.title, file: f.file, pos: e.pos, level: e.level, tags: [...f.tags, ...e.tags] });
-  }
+/* Every :ID: of every indexed file with the file that holds it, as org-id-locations: an id: link to one of
+   them is followed without asking anyone. */
+function buildIds(ix: OrgIndex) {
+  const ids = new Map<string, string>();
+  for (const f of ix.files.values()) { if (f.id) ids.set(f.id, f.file); for (const e of f.entries) if (e.id) ids.set(e.id, f.file); }
   ix.ids = ids;
-  for (const f of ix.files.values()) {
-    if (!f.file.startsWith(roamDir())) continue;
-    const fn = { id: f.id, title: f.title, file: f.file, pos: 0, level: 0, tags: f.tags.slice() };
-    nodes.push(fn); byFile.set(f.file, fn);
-    for (const e of f.entries) if (e.id) nodes.push({ id: e.id, title: e.title, file: f.file, pos: e.pos, level: e.level, tags: [...f.tags, ...e.tags] });
-  }
-  for (const nd of nodes) { if (nd.id) byId.set(nd.id, nd); if (!byTitle.has(nd.title.toLowerCase())) byTitle.set(nd.title.toLowerCase(), nd); }
-  for (const f of ix.files.values()) for (const l of f.links) {
-    const src = (l.from && byId.get(l.from)) || byFile.get(f.file) || { id: null, title: f.title, file: f.file, pos: 0 };
-    if (!backlinks.has(l.to)) backlinks.set(l.to, []);
-    backlinks.get(l.to)!.push({ ...l, src });
-  }
-  nodes.sort((a, b) => a.title.localeCompare(b.title));
-  ix.nodes = nodes; ix.byId = byId; ix.byTitle = byTitle; ix.byFile = byFile; ix.backlinks = backlinks;
 }
-const nodeById = (id: string) => (ORG.ix && ORG.ix.byId && ORG.ix.byId.get(id)) || null;
-const entryById = (id: string) => (ORG.ix && ORG.ix.ids && ORG.ix.ids.get(id)) || nodeById(id);
-const nodeByTitle = (t: SchemeValue) => (ORG.ix && ORG.ix.byTitle && ORG.ix.byTitle.get(String(t).toLowerCase())) || null;
-function nodeLabels(ix: OrgIndex) {
-  const labels: string[] = [], map = new Map<string, OrgNode>(), seen = new Map<string, boolean>();
-  for (const nd of ix.nodes || []) { let l = nd.title; if (seen.has(l)) l = `${nd.title} (${nd.file})`; seen.set(l, true); labels.push(l); map.set(l, nd); }
-  return { labels, map };
+const fileOfId = (id: string) => (ORG.ix && ORG.ix.ids && ORG.ix.ids.get(id)) || null;
+/* Point of B on the entry whose :ID: is ID, unfolded: its headline, or the top of the file for the file's own
+   drawer, for the id: of a Markdown file's front matter and for an id the text does not hold. */
+function gotoId(b: EdBuffer, id: string | null) {
+  let hs: number | null = null;
+  /* The line is the entry's own only in its property drawer: one quoted in a block names nothing. */
+  const re = id ? new RegExp('^[ \\t]*:ID:[ \\t]+' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[ \\t]*$', 'gm') : null, text = b.text;
+  for (let m; hs === null && re && (m = re.exec(text));) { const h = headlineBefore(b, m.index); if (h !== null && entryId(b, h) === id) hs = h; }
+  b.pt = hs ?? 0;
+  if (hs !== null) { while (reveal(b, hs)) { /* every fold over it */ } E.recenter = 'center'; }
 }
-const nodeAnnotation = (map: Map<string, OrgNode>, l: string) => { const nd = map.get(l); return nd ? `${nd.file.padEnd(30)} ${nd.tags.map(t => ':' + t + ':').join('')}` : 'new note'; };
-function visitNode(node: { file: string; pos: number }) {
-  const b = L.call('find-file', [node.file]);
-  if (b instanceof Ed.Buffer) { b.pt = node.pos ? Math.min(node.pos, b.rope.length) : 0; if (node.pos) reveal(b, b.pt); }
-  return b;
+/* The id: of the front matter of a Markdown buffer, or null. */
+function frontMatterId(b: EdBuffer) {
+  const head = b.rope.slice(0, 4000);
+  if (!/^---\r?\n/.test(head)) return null;
+  const end = head.indexOf('\n---', 3), m = /^id:\s*(\S+)/m.exec(end < 0 ? head : head.slice(0, end + 1));
+  return m ? m[1] : null;
 }
-/* The node that holds point: the headline with an :ID: around it, else the file. */
-function nodeAtPoint(b: EdBuffer): OrgNode | null {
-  if (!ORG.ix || !b.file) return null;
+/* The Org id of the note that holds point in B: that of the nearest headline at or above point that has an
+   :ID:, else the file's (its drawer above the first headline, or its front matter in Markdown); null with none. */
+function idAtPoint(b: EdBuffer): string | null {
+  if (!isOutline(b)) return null;
   const r = b.rope;
-  for (let hs = headlineBefore(b, b.pt); hs !== null; hs = levelAt(b, hs) > 1 ? parentOf(b, hs) : null) {
-    const end = entryEnd(b, hs), drawer = r.slice(eol(r, hs) + 1, Math.min(end, eol(r, hs) + 400));
-    const m = /^\s*:ID:\s+(\S+)/m.exec(drawer);
-    if (m && nodeById(m[1])) return nodeById(m[1]);
-  }
-  return ORG.ix.byFile!.get(b.file) || null;
+  for (let hs = headlineBefore(b, b.pt); hs !== null; hs = levelAt(b, hs) > 1 ? parentOf(b, hs) : null) { const id = entryId(b, hs); if (id) return id; }
+  if (isMd(b)) return frontMatterId(b);
+  const found = propertyIdIn(b, 0, r.length);
+  return found ? found.id : null;
 }
 function parentOf(b: EdBuffer, hs: number) { const level = levelAt(b, hs); let h = prevHeadline(b, hs); while (h >= 0 && levelAt(b, h) >= level) h = prevHeadline(b, h); return h < 0 ? null : h; }
+
+/* ---------- new notes and dailies, from templates ---------- */
 const slugOf = (t: string) => t.normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '').toLowerCase();
-function roamTemplates(varName: string) {
+/* The directory variable NAME as a prefix: empty for the notes root, else ending in a slash. */
+const dirOf = (name: string) => { const d = String(L.get(name) || ''); return d && d.replace(/\/?$/, '/'); };
+function noteTemplates(varName: string) {
   return arr(L.get(varName) ?? NIL).map(t => {
     const a = arr(t); if (a.length < 4) return null;
-    /* The target is the :target property, as org-roam 2 writes it, or the fourth element. */
+    /* The target is the :target property, or the fifth element. */
     let target: SchemeValue = null;
     for (let i = 4; i < a.length; i++) if (a[i] instanceof Sym && (a[i] as SchemeSym).name === ':target') { target = a[i + 1]; break; }
     if (target === null && a.length > 4 && !(a[4] instanceof Sym)) target = a[4];
     const tg = target ? arr(target).map(x => sval(x)) : [];
     return { key: String(a[0]), desc: String(a[1]), type: sval(a[2]), template: String(a[3]), file: tg[1] || '', head: tg[2] || '' };
-  }).filter(Boolean) as OrgRoamTemplate[];
+  }).filter(Boolean) as OrgNoteTemplate[];
 }
-/* Replace %U %<...> and the ${...} fields of a roam template. */
-function fillRoam(s: string, fields: Record<string, string>, now: Date) {
+/* Replace %U %<...> and the ${...} fields of a note template. */
+function fillTemplate(s: string, fields: Record<string, string>, now: Date) {
   return s.replace(/\$\{(\w+)\}/g, (m, k) => fields[k] ?? '').replace(/%<([^>]+)>/g, (m, f) => strftime(f, now))
     .replace(/%U/g, stamp(now, false, true)).replace(/%u/g, stamp(now, false, false)).replace(/%T/g, stamp(now, true, true)).replace(/%t/g, stamp(now, true, false));
 }
-/* Write a new note from a roam template and return its node (the file is in the store, not yet visited). */
-function writeNote(tpl: OrgRoamTemplate, title: string, now?: Date) {
-  now = now || ORG.now();
-  const id = uuid(), fields = { title, slug: slugOf(title), id };
-  const file = roamDir() + fillRoam(tpl.file, fields, now);
-  const head = fillRoam(tpl.head, fields, now);
-  let body = fillRoam(tpl.template, fields, now);
-  const cursor = body.indexOf('%?'); body = body.replace('%?', '');
-  const pre = /\.md$/i.test(file) ? '' : `:PROPERTIES:\n:ID: ${id}\n:END:\n`;
-  Ed.Store.set(file, pre + head + body);
-  indexDirty();
-  return { id, title, file, pos: 0, level: 0, tags: [], cursor: pre.length + head.length + (cursor < 0 ? body.length : cursor), created: true };
-}
-async function pickRoamTemplate() {
-  const ts = roamTemplates('org-roam-capture-templates');
-  if (!ts.length) signal('user-error', 'No org-roam-capture-templates');
-  if (ts.length === 1) return ts[0];
-  const k = await keyOf('Capture template: ' + ts.map(t => `[${t.key}] ${t.desc}`).join('  ') + ' ', ts.map(t => t.key));
-  return ts.find(t => t.key === k)!;
-}
-async function createNote(title: string) { const tpl = await pickRoamTemplate(); return writeNote(tpl, title); }
-/* Give NODE an :ID: (a file-level property drawer, or id: in Markdown front matter) when it has none. */
-function ensureNodeId(node: { id: string | null; file: string; pos?: number }) {
-  if (node.id) return node.id;
-  const id = uuid(), vb = E.buffers.find(x => x.file === node.file), md = /\.md$/i.test(node.file);
-  const text = vb ? vb.text : (Ed.Store.get(node.file) ?? '');
-  let pos = 0, ins = `:PROPERTIES:\n:ID: ${id}\n:END:\n`;
-  if (md) { if (/^---\n/.test(text)) { pos = 4; ins = `id: ${id}\n`; } else ins = `---\nid: ${id}\n---\n`; }
-  if (vb) { const pt = vb.pt; Ed.replaceText(vb, pos, pos, ins); vb.pt = pt >= pos ? pt + ins.length : pt; autosave(vb); }
-  else Ed.Store.set(node.file, text.slice(0, pos) + ins + text.slice(pos));
-  node.id = id; node.pos = 0;
-  if (ORG.ix && ORG.ix.byId) ORG.ix.byId.set(id, node as OrgNode);
-  if (ORG.ix && ORG.ix.ids) ORG.ix.ids.set(id, node as OrgNode);
-  indexDirty();
-  return id;
-}
-CMD('org-roam-node-find', async () => {
-  await ensureIndex();
-  const { labels, map } = nodeLabels(ORG.ix!);
-  return [await Ed.readMini('Node: ', '', () => labels, { kind: 'org-roam-node', annotate: l => nodeAnnotation(map, l) })];
-}, 'TITLE', 'Visit the roam node TITLE; with no such node, make a note for it from a template (SPC n r f).', async ([title]: SchemeValue[]) => {
-  await ensureIndex();
-  const node = nodeLabels(ORG.ix!).map.get(title as string) || nodeByTitle(title);
-  if (node) { visitNode(node); return false; }
-  if (!String(title).trim()) signal('user-error', 'No title');
-  const nd = await createNote(String(title).trim());
-  const b = L.call('find-file', [nd.file]) as EdBuffer; b.pt = Math.min(nd.cursor, b.rope.length);
-  Ed.message(`New note ${nd.file}`); return false;
-});
-CMD('org-roam-node-insert', async () => {
-  const b = cur(); let sel = null;
-  if (EC.stateOf(b) === 'visual' && b.mark !== null) { const [s, e] = EC.visualRange(b, true); sel = { s, e, text: b.rope.slice(s, e) }; }
-  await ensureIndex();
-  const { labels, map } = nodeLabels(ORG.ix!);
-  const v = await Ed.readMini('Node: ', sel ? sel.text : '', () => labels, { kind: 'org-roam-node', annotate: l => nodeAnnotation(map, l) });
-  return [v, sel ? sel.s + 1 : false, sel ? sel.e + 1 : false, sel ? sel.text : false];
-}, 'TITLE &optional BEG END DESCRIPTION', 'Insert a link to the roam node TITLE, [[id:ID][Title]]; the selection, when there is one, becomes the description (SPC n r i).', async ([title, s, e, desc]: SchemeValue[]) => {
-  const b = cur(); await ensureIndex();
-  let node = nodeLabels(ORG.ix!).map.get(title as string) || nodeByTitle(title);
-  if (!node) { if (!String(title).trim()) signal('user-error', 'No title'); node = await createNote(String(title).trim()); }
-  const id = ensureNodeId(node);
-  const text = isMd(b) ? `[${desc || node.title}](id:${id})` : `[[id:${id}][${desc || node.title}]]`;
-  if (typeof s === 'number') { Ed.replaceText(b, s - 1, (e as number) - 1, text); b.pt = s - 1 + text.length; } else Ed.insertText(b, text);
-  indexDirty(); return false;
-});
-CMD('org-roam-node-random', '', '', 'Visit a roam node chosen at random (SPC n r a).', async () => {
-  await ensureIndex(); const nodes = ORG.ix!.nodes!;
-  if (!nodes.length) signal('user-error', 'No roam nodes');
-  visitNode(nodes[Math.floor(Math.random() * nodes.length)]); return false;
-});
-function dailiesTemplate() { const ts = roamTemplates('org-roam-dailies-capture-templates'); return ts[0] || { template: '* %<%H:%M> %?', file: '%<%Y-%m-%d>.org', head: '#+title: %<%Y-%m-%d>\n' }; }
-function dailyFile(d: Date) { return roamDir() + String(L.get('org-roam-dailies-directory') || 'daily/').replace(/\/?$/, '/') + fillRoam(dailiesTemplate().file, {}, d); }
-function gotoDaily(d: Date) {
-  const file = dailyFile(d), tpl = dailiesTemplate();
-  const now = ORG.now(), when = new Date(d.getFullYear(), d.getMonth(), d.getDate(), now.getHours(), now.getMinutes());
-  let cursor = -1;
-  if (Ed.Store.get(file) === null && !E.buffers.some(x => x.file === file)) {
-    const head = fillRoam(tpl.head, {}, when);
-    let body = fillRoam(tpl.template, {}, when); cursor = body.indexOf('%?'); body = body.replace('%?', '');
-    const pre = `:PROPERTIES:\n:ID: ${uuid()}\n:END:\n`;
-    Ed.Store.set(file, pre + head + body + (body.endsWith('\n') ? '' : '\n'));
-    cursor = pre.length + head.length + (cursor < 0 ? body.length : cursor);
-    indexDirty();
+/* Whether the notes are edwind's files: a served frame, or the desktop program attached to an edwind. */
+const served = () => !!(Ed.sync && Ed.sync.started);
+/* Visit the file REL of the notes root. Where the notes are edwind's, a file no buffer holds yet opens as a
+   replica and the answer is a promise of it. */
+const visitNote = (rel: string) => Ed.visit(served() ? Ed.servedName(rel) : rel);
+/* Make the file REL of the notes root holding TEXT; false when it is there already. Where the notes are edwind's
+   the file is made through it (its buffer opened, filled when empty, and saved), so it is on disk, where the
+   projector reads it, before anything links to it: the store of a served browser is memory edwind never sees.
+   Elsewhere the store is the files. */
+async function makeFile(rel: string, text: string) {
+  if (!served()) {
+    if (Ed.Store.get(rel) !== null || E.buffers.some(x => x.file === rel)) return false;
+    Ed.Store.set(rel, text); indexDirty();
+    return true;
   }
-  const b = L.call('find-file', [file]) as EdBuffer;
-  if (cursor >= 0) b.pt = Math.min(cursor, b.rope.length);
+  if (Ed.sync.state !== 'online') signal('user-error', 'Not connected to edwind');
+  const b = await Ed.sync.open(rel, { create: true }).catch(e => signal('file-error', `Cannot make ${rel}: ${e && e.message ? e.message : e}`) as never);
+  if (!b || b.rope.length) return false;
+  Ed.replaceText(b, 0, 0, text);
+  const r = await Ed.sync.save(b);
+  if (r.error) signal('file-error', `Cannot save ${rel}: ${r.error.report}`);
+  return true;
+}
+/* Make a note titled TITLE from one of note-capture-templates (one key picks it when there are several) and
+   answer its id, its file and where the template's %? was. The file is made, not shown. */
+async function createNote(title: string) {
+  const ts = noteTemplates('note-capture-templates');
+  if (!ts.length) signal('user-error', 'No note-capture-templates');
+  const k = ts.length === 1 ? ts[0].key : await keyOf('Capture template: ' + ts.map(t => `[${t.key}] ${t.desc}`).join('  ') + ' ', ts.map(t => t.key));
+  const tpl = ts.find(t => t.key === k)!, now = ORG.now(), id = uuid(), fields = { title, slug: slugOf(title), id };
+  const file = dirOf('note-directory') + fillTemplate(tpl.file, fields, now), head = fillTemplate(tpl.head, fields, now);
+  let body = fillTemplate(tpl.template, fields, now);
+  const at = body.indexOf('%?'); body = body.replace('%?', '');
+  const pre = /\.md$/i.test(file) ? '' : `:PROPERTIES:\n:ID: ${id}\n:END:\n`;
+  if (!await makeFile(file, pre + head + body)) signal('user-error', `${file} is already there`);
+  return { id, file, cursor: pre.length + head.length + (at < 0 ? body.length : at) };
+}
+function dailiesTemplate() { const ts = noteTemplates('dailies-capture-templates'); return ts[0] || { template: '* %<%H:%M> %?', file: '%<%Y-%m-%d>.org', head: '#+title: %<%Y-%m-%d>\n' }; }
+/* Visit the daily note of day D, made from the dailies template when it is new, with point where its %? was. */
+async function gotoDaily(d: Date) {
+  const tpl = dailiesTemplate(), file = dirOf('dailies-directory') + fillTemplate(tpl.file, {}, d);
+  const now = ORG.now(), when = new Date(d.getFullYear(), d.getMonth(), d.getDate(), now.getHours(), now.getMinutes());
+  const pre = `:PROPERTIES:\n:ID: ${uuid()}\n:END:\n`, head = fillTemplate(tpl.head, {}, when);
+  let body = fillTemplate(tpl.template, {}, when);
+  const at = body.indexOf('%?'); body = body.replace('%?', '');
+  const made = await makeFile(file, pre + head + body + (body.endsWith('\n') ? '' : '\n'));
+  const b = await visitNote(file);
+  if (made && b instanceof Ed.Buffer) b.pt = Math.min(pre.length + head.length + (at < 0 ? body.length : at), b.rope.length);
   return b;
 }
-CMD('org-roam-dailies-goto-today', '', '', 'Visit today’s daily note, making it from the dailies template when it is new (SPC n r d t).', () => { gotoDaily(ORG.now()); return false; });
-CMD('org-roam-dailies-goto-date', async () => [ymd((await readDate('Daily for date (default today): ', '')).date)], 'DATE', 'Visit the daily note of DATE, making it when it is new (SPC n r d d).', ([d]: SchemeValue[]) => { gotoDaily(fromYmd(str(d)) || ORG.now()); return false; });
-L.alias('org-roam-dailies-capture-today', 'org-roam-dailies-goto-today');
+CMD('dailies-goto-today', '', '', 'Visit today’s daily note, making it from the dailies template when it is new (SPC n r d t).', async () => { await gotoDaily(ORG.now()); return false; });
+CMD('dailies-goto-date', async () => [ymd((await readDate('Daily for date (default today): ', '')).date)], 'DATE', 'Visit the daily note of DATE, making it when it is new (SPC n r d d).', async ([d]: SchemeValue[]) => { await gotoDaily(fromYmd(str(d)) || ORG.now()); return false; });
 /* :ID: properties. */
 function propertyIdIn(b: EdBuffer, from: number, to: number) {
   const r = b.rope;
@@ -1308,6 +1268,11 @@ function propertyIdIn(b: EdBuffer, from: number, to: number) {
     if (eol(r, q) >= r.length) break;
   }
   return null;
+}
+/* The :ID: in the property drawer of the entry at HS, which is under its headline and planning line; null with none. */
+function entryId(b: EdBuffer, hs: number) {
+  const pl = planningLine(b, hs), found = propertyIdIn(b, (pl ? pl.e : eol(b.rope, hs)) + 1, entryEnd(b, hs));
+  return found ? found.id : null;
 }
 function ensureHeadlineId(b: EdBuffer, hs: number) {
   const r = b.rope, pl = planningLine(b, hs), anchor = pl ? pl.e : eol(r, hs);
@@ -1321,13 +1286,18 @@ function ensureHeadlineId(b: EdBuffer, hs: number) {
   return id;
 }
 function ensureFileId(b: EdBuffer) {
-  if (isMd(b)) { const node: { id: string | null; file: string } = { id: null, file: b.file || b.name }; ensureNodeId(node); return node.id!; }
+  if (isMd(b)) {
+    const had = frontMatterId(b);
+    if (had) return had;
+    const id = uuid(), front = /^---\r?\n/.test(b.rope.slice(0, 5)), pos = front ? b.rope.indexOf('\n') + 1 : 0, ins = front ? `id: ${id}\n` : `---\nid: ${id}\n---\n`, pt = b.pt;
+    Ed.replaceText(b, pos, pos, ins); b.pt = pt >= pos ? pt + ins.length : pt;
+    return id;
+  }
   const found = propertyIdIn(b, 0, b.rope.length);
   if (found && found.id) return found.id;
-  const id = uuid(), pt = b.pt;
-  if (found) { Ed.replaceText(b, found.insertAt!, found.insertAt!, `:ID: ${id}\n`); }
-  else { Ed.replaceText(b, 0, 0, `:PROPERTIES:\n:ID: ${id}\n:END:\n`); }
-  void pt;
+  const id = uuid();
+  if (found) Ed.replaceText(b, found.insertAt!, found.insertAt!, `:ID: ${id}\n`);
+  else Ed.replaceText(b, 0, 0, `:PROPERTIES:\n:ID: ${id}\n:END:\n`);
   return id;
 }
 CMD('org-id-get-create', '', '', 'Give the entry at point (or the file, above the first headline) an :ID: property, and return it (SPC m I).', () => {
@@ -1340,49 +1310,6 @@ D('org-id-get', '', 'The :ID: of the entry at point, or #f.', () => {
   const f = hs === null ? propertyIdIn(b, 0, b.rope.length) : propertyIdIn(b, (planningLine(b, hs) ? planningLine(b, hs)!.e : eol(b.rope, hs)) + 1, entryEnd(b, hs));
   return f && f.id ? f.id : false;
 });
-/* The backlinks buffer, in a side window on the right. */
-function roamBufferText(node: OrgNode) {
-  const ix = ORG.ix!, links = node.id ? (ix.backlinks!.get(node.id) || []) : [];
-  const lines = [`#+title: ${node.title}`, `#+filetags: ${node.tags.map(t => ':' + t + ':').join('')}`, '', `* Backlinks (${links.length})`];
-  for (const l of links) {
-    const s = l.src, link = s.id ? `[[id:${s.id}][${s.title}]]` : `[[file:${s.file}][${s.title}]]`;
-    lines.push(`** ${link}`, `   ${l.ctx}`);
-  }
-  return lines.join('\n') + '\n';
-}
-function redrawRoamBuffer() {
-  const rb = Ed.getBuffer('*org-roam*'); if (!rb || !Ed.windowFor(rb) || !ORG.ix || !ORG.ix.byFile) return;
-  const w = E.win, node = w && w !== rb ? nodeAtPoint(w) : rb.roamNode as OrgNode | undefined;
-  if (!node) return;
-  const text = roamBufferText(node);
-  if (rb.text !== text || rb.roamNode !== node) { rb.text = text; rb.pt = Math.min(rb.pt, rb.rope.length); rb.modified = false; rb.undo = []; rb.redo = []; rb.roamNode = node; }
-}
-CMD('org-roam-buffer-toggle', '', '', 'Show the backlinks of the node at point in a side window, or hide that window (C-c n l).', async () => {
-  const rb0 = Ed.getBuffer('*org-roam*'), w0 = rb0 && Ed.windowFor(rb0);
-  if (w0) { if (Ed.windowList().length > 1) Ed.deleteWindow(w0); else L.call('quit-window', []); return false; }
-  const b = cur(); await ensureIndex();
-  const node = nodeAtPoint(b);
-  if (!node) signal('user-error', 'Not in a roam node');
-  const rb = Ed.getBufferCreate('*org-roam*');
-  rb.mode = 'org-roam-mode'; rb.readOnly = true; rb.evilState = 'motion';
-  rb.text = roamBufferText(node!); rb.pt = 0; rb.modified = false; rb.undo = []; rb.redo = []; rb.roamNode = node;
-  const sel = E.sel, nw = Ed.splitWindow(sel, 'right'); nw.popup = true;
-  Ed.setWindowBuffer(rb, nw); Ed.selectWindow(sel!);
-  return false;
-});
-D('org-roam-backlinks', '&optional ID', 'The backlinks of the node ID (default the node at point) as a list of (FILE . CONTEXT).', ([id]: SchemeValue[]) => {
-  const ix = ORG.ix; if (!ix || !ix.backlinks) return NIL;
-  const key = L.absent(id) ? (nodeAtPoint(cur()) || {} as Partial<OrgNode>).id : str(id);
-  return listOf((ix.backlinks.get(key as string) || []).map(l => new L.Pair(l.file, l.ctx)));
-});
-/* Refresh the roam window when point moves to another node. */
-const prevPost2 = H.postCommand;
-H.postCommand = (def, b, failed) => {
-  if (prevPost2) prevPost2(def, b, failed);
-  if (E.depth > 0 || E.mini) return;
-  const rb = Ed.getBuffer('*org-roam*');
-  if (rb && E.win !== rb && ORG.ix && Ed.windowFor(rb)) { const node = nodeAtPoint(E.win!); if (node && node !== rb.roamNode) redrawRoamBuffer(); }
-};
 
 /* ---------- the agenda ---------- */
 const lst = (v: SchemeValue) => (v instanceof L.Pair || v === NIL ? arr(v) : [v]).map(sval);
@@ -1663,7 +1590,7 @@ CMD('org-capture-kill', '', '', 'Drop the capture buffer (C-c C-k).', () => {
   const b = cur(); if (!b.capture) signal('user-error', 'This does not seem to be a capture buffer for Org mode');
   endCapture(b); Ed.message('Capture aborted'); return false;
 });
-for (const n of ['org-capture', 'org-capture-finalize', 'org-capture-kill', 'org-roam-node-find', 'org-roam-node-insert', 'org-roam-node-random', 'org-roam-dailies-goto-today', 'org-roam-dailies-goto-date', 'org-roam-buffer-toggle', 'org-id-get-create']) L.put(intern(n), 'evil-repeat', intern('abort'));
+for (const n of ['org-capture', 'org-capture-finalize', 'org-capture-kill', 'dailies-goto-today', 'dailies-goto-date', 'org-id-get-create']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 /* ---------- saving: after-save-hook, and the indexes follow the files ---------- */
 for (const name of ['save-buffer', 'write-file']) {
@@ -1727,7 +1654,8 @@ const CSS = `
 Ed.host.page.addStyle('org-css', CSS);
 
 globalThis.Org = { ORG, parseFile: orgParseFile, refreshIndex, ensureIndex, index: () => ORG.ix, ON, OC, lexSeg: H.lexSeg, parseDate, stamp, strftime, slugOf, todoKeywords,
-  headlineBefore, nextHeadline, prevHeadline, subtreeEnd, entryEnd, children, headingInfo, levelAt, foldsOf, addFold, removeFolds, reveal, isHidden, groupItems, weekView, todoView, expandTemplate, nodeAtPoint, uuid,
+  headlineBefore, nextHeadline, prevHeadline, subtreeEnd, entryEnd, children, headingInfo, levelAt, foldsOf, addFold, removeFolds, reveal, isHidden, groupItems, weekView, todoView, expandTemplate, uuid,
+  linkAt, openLink, idAtPoint, gotoId, createNote, visitNote,
   /* The class name of each character of the segment FROM..TO of B, for tests. */
   classesOf(b: EdBuffer, from: number, to: number) { const seg = b.rope.slice(from, to); const r = H.lexSeg!(b, from, to, seg) as OrgLex | null; return r ? Array.from(r.cls, c => ON[c]) : null; } };
 /* the keyword sets of org-todo-keywords */
@@ -1753,29 +1681,22 @@ interface OrgEntry {
   file: string; pos: number; line: number; level: number; todo: string | null; done: boolean; title: string; tags: string[];
   priority: string | null; scheduled: OrgTs | null; deadline: OrgTs | null; closed: OrgTs | null; ts: OrgTs[]; id: string | null; category: string;
 }
-interface OrgLink { to: string; from: string | null; file: string; pos: number; line: number; ctx: string }
-interface OrgParsed { file: string; title: string; id: string | null; tags: string[]; entries: OrgEntry[]; links: OrgLink[] }
+interface OrgParsed { file: string; title: string; id: string | null; tags: string[]; entries: OrgEntry[] }
 /* an indexed file: the parse, and what it was parsed from */
 interface OrgFileIx extends OrgParsed { bufId?: number | string; ver?: number; src?: string; kw?: OrgKeywords }
 interface OrgParseItem {
   file: string; text?: string; buf?: number | string; keywords?: string[]; done?: string[];
   meta?: { bufId?: number | string; ver?: number; src?: string };
 }
-interface OrgNode { id: string | null; title: string; file: string; pos: number; level: number; tags: string[]; cursor?: number; created?: boolean }
-interface OrgBacklink extends OrgLink { src: Pick<OrgNode, 'id' | 'title' | 'file' | 'pos'> }
 interface OrgIndex {
   files: Map<string, OrgFileIx>;
   dirty: boolean;
   built: number;
   promise?: Promise<void> | null;
-  ids?: Map<string, OrgNode>;
-  nodes?: OrgNode[];
-  byId?: Map<string, OrgNode>;
-  byTitle?: Map<string, OrgNode>;
-  byFile?: Map<string, OrgNode>;
-  backlinks?: Map<string, OrgBacklink[]>;
+  /* every :ID: and the file that holds it */
+  ids?: Map<string, string>;
 }
-interface OrgRoamTemplate { key: string; desc: string; type: string; template: string; file: string; head: string }
+interface OrgNoteTemplate { key: string; desc: string; type: string; template: string; file: string; head: string }
 /* a capture template: its fields, and the options after the template by name */
 interface OrgCaptureTemplate { key: string; desc: string; type: string; target: string[]; template: string; [opt: string]: SchemeValue }
 /* the agenda */

@@ -769,6 +769,10 @@ function visit(name: string) {
   return b;
 }
 Ed.visit = visit;
+/* The name visit takes for edwind's buffer ID. In a frame it is the id. The desktop program's visit sends a
+   path under the notes directory to edwind and opens every other one itself (native/js/main.ts), so there a
+   note goes by its path. */
+Ed.servedName = id => { const notes = String(L.get('notes-directory') || ''); return host.files && notes && !/^(\/|~\/)/.test(id) ? notes.replace(/\/?$/, '/') + id : id; };
 /* Where there are directories (dired.ts) the name is read as a path, completed from its directory, and a
    directory is shown as a listing; elsewhere the candidates are the recent files. */
 const readFileName = (prompt: string) => (Ed.hooks.readFileName && Ed.hooks.readFileName(prompt)) || Ed.readMini(prompt, '', () => (Ed.hooks.recentFiles ? Ed.hooks.recentFiles() : Ed.Store.list()), { kind: 'file', annotate: Ed.annotateFile, listOrder: true });

@@ -106,6 +106,8 @@ export interface ClozeCard extends CardCommon { id: string; kind: 'cloze'; text:
 export type CardRec = FrontBackCard | ClozeCard;
 export interface ParseResult { file: FileRec; headings: HeadingRec[]; blocks: BlockRec[]; links: LinkRec[]; tasks: TaskRec[]; cards: CardRec[] }
 
+/* A Markdown inline link to a node rather than a file or an address: [Title](id:ORG-ID), [Title](brain:NODE-ID). */
+const NODE_LINK = /^(?:id|brain):\S/i;
 /* Classify a link target as the index knows it (R11.2): wiki, title (an id: link), file, url. */
 function linkKind(target: string, G: Grammar): LinkKind {
   if (/^id:/i.test(target)) return 'title';
@@ -273,6 +275,7 @@ export function parseFile(id: string, text: string, grammar: RawGrammar): ParseR
       const target = m[2];
       if (G.url.test(target)) links.push({ src: srcId, srcFile: id, dst: target, dstFile: null, kind: 'url', label: m[1] || null, line: ln, path: id });
       else if (NOTE_EXT.test(target.split('#')[0])) links.push({ src: srcId, srcFile: id, dst: target, dstFile: null, kind: 'file', label: m[1] || null, line: ln, path: id });
+      else if (NODE_LINK.test(target)) links.push({ src: srcId, srcFile: id, dst: target, dstFile: null, kind: linkKind(target, G), label: m[1] || null, line: ln, path: id });
     }
   }
   if (!file.title) file.title = (!isOrg && firstHeadingTitle) || base;

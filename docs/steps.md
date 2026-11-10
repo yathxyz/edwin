@@ -413,7 +413,7 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
 memories and references. This step is the feed: edwind tells brain what each note file holds. Edwin's own
-commands still read the old index; asking brain instead is the next step.
+commands ask brain since the next step, "Nodes from brain".
 
 - **One record per note file (`server/projector.mts`).** `POST <brain>/v1/projection` with `{path, scope, notes}`.
   A note is an entry with an Org id, the file or a heading: `{id, title, aliases, tags, parent, links}`. `parent` is
@@ -450,6 +450,68 @@ commands still read the old index; asking brain instead is the next step.
 Not in it: files without an id (they are not in brain; give a file an `:ID:` and it is), file and URL links,
 Syncthing's conflict copies (skipped: they carry the ids of the file they copy), and a status line for what is
 owed (the log has `projector` lines: sent, refused, errors).
+
+## Nodes from brain (done)
+
+Asked 2026-11-10: the commands that found, linked and listed notes read an index the frame built from its own
+file store, which is empty in the served browser. They ask brain now, through edwind, and what they find is
+every node brain holds, not only notes. The `org-roam-*` commands and variables are gone, with no aliases:
+Emacs's names for this are not kept.
+
+- **edwind reads for the frame (`server/brain.mts`).** `brain-titles {q, kind?, limit?}` is brain's
+  `GET /v1/titles` and `brain-node REF` its `GET /v1/nodes/REF` (a node id, or `scheme:value` such as
+  `org-id:<id>`). The token is `brain.readCredential` (`services.edwind.brain.readTokenFile`), one brain takes
+  on its reading routes only and not the projector's; no frame holds it. Without it, or with brain out of
+  reach, the answer is the condition `brain-unavailable`; what brain itself refuses is `brain-refused` in
+  brain's words. The log has the route and the status, never the query.
+- **`brain-node-find` (`SPC n r f`, `src/brain.ts`).** The minibuffer's candidates are brain's names for the
+  input: the 50 best, asked for again 120 ms after the typing rests (with nothing typed, the nodes changed
+  last). An answer replaces the candidates when it is for the input still shown; a later one for older input is
+  dropped. brain's answer for the input shown is listed as brain gave it (the minibuffer's own filter, which
+  reads capitals and regexp characters its own way, only narrows an older answer meanwhile), and a highlight
+  moved off the first candidate stays on its candidate. `RET` typed ahead of the answer takes nothing from the
+  names of an earlier input: brain is asked for what was typed, and the node is the one titled exactly so,
+  else brain's first. A candidate is the alias that matched, else the title, annotated with the kind and then the file of
+  a note (and `→ Title` after an alias) or the scope of anything else. Two nodes with one name take their kind,
+  and the end of their id when the kind is shared too.
+- **Opening a node.** A note is its file (`props.sources[0]`), visited through edwind and waited for, with
+  point on the entry that holds the note's `:ID:`, unfolded. Anything else is a record: `*brain: Title*` in
+  `brain-mode`, read only and in Motion state, written as Org (title, kind · scope · trust, the plain props,
+  the body, the links under a heading per relation), so `RET` (`brain-follow`) opens a link and `q` leaves.
+- **`brain-node-insert` (`SPC n r i`, `C-c n i`).** `[[id:ORG-ID][Title]]` to a note, `[[brain:UUID][Title]]` to
+  anything else; `[Title](id:ORG-ID)` and `[Title](brain:UUID)` in Markdown. A Visual selection is what is
+  looked for and stays as the description. The description is on one line with `(` `)` for `[` `]`, which
+  would end the link or start another: titles are anyone's who writes to brain.
+- **A name brain has no node for makes a note.** Find and insert make it from `note-capture-templates` under
+  `note-directory` (the notes root by default), with a new `:ID:`. Where the notes are edwind's the file is
+  made through edwind (opened with create, filled, saved), so it is on disk and the projector sends it; the
+  file store of a served browser is memory edwind never sees. `dailies-goto-today` and `dailies-goto-date`
+  (`SPC n r d t`, `SPC n r d d`; `dailies-directory`, `dailies-capture-templates`) make a daily the same way.
+- **`brain-backlinks` (`SPC n r b`, `C-c n l`).** A window on the right with what `brain-node org-id:<id>` says
+  of the note at point (the nearest heading at or above point with an `:ID:` in its property drawer, else the
+  file's, or the `id:` of a Markdown file's front matter): its title, `* Backlinks (n)` with a line per `linked from` link, then a
+  heading per other relation. It follows point into another note 200 ms after point rests. A note brain does
+  not know, and a brain that does not answer, are said in that window and not signalled, or every cursor move
+  through such a note would be an error.
+- **Links (`openLink` in `src/org.ts`).** `brain:UUID` opens that node. `id:ID` is followed here when a file
+  the frame holds has the id (`org.ts` keeps id to file for the buffers and the local store), and otherwise
+  asked of brain as `org-id:ID`. `roam:Title` and a bare `[[Title]]` are the note whose title or alias is that
+  text, whatever the case, as brain has it: with no brain they find nothing.
+- **Where there is no brain** (a plain browser, an edwind with no `readCredential`, offline) the three commands
+  say so in a sentence and do nothing else; `id:` links to files the frame holds, the agenda and the dailies
+  work. The directories moved with the names: new notes go to the notes root where they went to `roam/`, and
+  dailies to `daily/` where they went to `roam/daily/`, as the notes are laid out on disk; a file store from
+  before keeps its old files where they are.
+- **What went.** `org-roam-node-find`, `-insert` and `-random`, `org-roam-buffer-toggle`, the `org-roam-backlinks`
+  primitive, `org-roam-mode`, the `org-roam-dailies-*` names, and the frame's index of nodes, titles and links;
+  it keeps headlines, tags and ids, which the agenda and `id:` links need. `org-roam-directory` is
+  `note-directory` and `org-roam-capture-templates` is `note-capture-templates`; an init file that names the
+  old ones has to be changed.
+
+Not in it: a Markdown `[[wiki link]]` still goes to `wiki-follow-function` (the page's opener), not to brain;
+a random node; completing a link's title while typing it; and a record is read only (brain's tasks and
+memories are changed where they are made). A new note is in brain once the projector has sent its file, a
+moment after the save, so it is not a candidate before that.
 
 ## Dired: directories as buffers (done)
 

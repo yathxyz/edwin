@@ -202,6 +202,11 @@ in
   # retries, refusals, the ledger across a restart, and where the token may go.
   edit-projector = suite "projector" [ "projector.test.mts" ];
 
+  # Nodes from brain (server/brain.mts, src/brain.ts): a served Edwin against a real edwind and a stand-in for
+  # brain. The read token is sent and never logged, nor is what was asked; finding, linking and opening a node;
+  # the backlinks window; id: and title links; a new note and a daily made on disk through edwind.
+  edit-brain = suite "brain" [ "brain.test.mts" ];
+
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved
   # session, and a switch of provider mid-session.
   edit-agent = suite "agent" [ "agent.test.mts" ];

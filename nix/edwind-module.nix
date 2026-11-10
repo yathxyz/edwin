@@ -60,10 +60,13 @@ let
     ++ lib.optional (
       cfg.models.openai.apiKeyFile != null
     ) "openai-api-key:${cfg.models.openai.apiKeyFile}"
-    ++ lib.optional (cfg.brain.url != null) "${brainCredential}:${cfg.brain.tokenFile}"
+    ++ lib.optional (cfg.brain.tokenFile != null) "${brainCredential}:${cfg.brain.tokenFile}"
+    ++ lib.optional (cfg.brain.readTokenFile != null) "${brainReadCredential}:${cfg.brain.readTokenFile}"
     ++ lib.mapAttrsToList (name: c: "${name}:${c.file}") cfg.credentials;
-  # The projector's token (server/projector.mts): not among the credentials Scheme can name.
+  # brain's tokens, the projector's (server/projector.mts) and the reader's (server/brain.mts): not among the
+  # credentials Scheme can name.
   brainCredential = "brain-token";
+  brainReadCredential = "brain-read-token";
 
   editJson = json.generate "edwind.json" (
     {
@@ -85,10 +88,12 @@ let
       };
     }
     // lib.optionalAttrs (cfg.brain.url != null) {
-      brain = {
-        inherit (cfg.brain) url scope;
-        credential = brainCredential;
-      };
+      brain =
+        {
+          inherit (cfg.brain) url scope;
+        }
+        // lib.optionalAttrs (cfg.brain.tokenFile != null) { credential = brainCredential; }
+        // lib.optionalAttrs (cfg.brain.readTokenFile != null) { readCredential = brainReadCredential; };
     }
     // lib.optionalAttrs (cfg.hubSocket != null) { inherit (cfg) hubSocket; }
   );
@@ -241,14 +246,27 @@ in
         default = null;
         example = "http://10.100.0.2:7676";
         description = ''
-          Where brain listens. When set, edwind is the note projector: it tells brain what each note file
-          holds (its Org ids, titles and links, never its text) as the file changes. Plain http is sent only
-          to an address of this host.
+          Where brain listens. Plain http is sent only to an address of this host. With `tokenFile`, edwind
+          is the note projector; with `readTokenFile`, Edwin finds and opens brain's nodes through it.
         '';
       };
       tokenFile = mkOption {
-        type = types.path;
-        description = "Root-readable file holding the projector's brain token.";
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Root-readable file holding the projector's brain token. When set, edwind tells brain what each
+          note file holds (its Org ids, titles and links, never its text) as the file changes. One edwind
+          projects a notes directory.
+        '';
+      };
+      readTokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Root-readable file holding a read-only brain token (brain's `readOnly`). When set, the brain-titles
+          and brain-node commands answer, so a frame can find a node by name and open it. What the token is
+          cleared for is what every process that can open edwind's socket can read.
+        '';
       };
       scope = mkOption {
         type = types.str;
@@ -343,8 +361,14 @@ in
           message = "services.edwind.models.*.baseUrl and credentials.*.origin must be https, or http to loopback.";
         }
         {
-          assertion = cfg.brain.url == null || !(cfg.credentials ? ${brainCredential});
-          message = "services.edwind.credentials: ${brainCredential} is the projector's when services.edwind.brain.url is set.";
+          assertion =
+            cfg.brain.url == null
+            || !(cfg.credentials ? ${brainCredential} || cfg.credentials ? ${brainReadCredential});
+          message = "services.edwind.credentials: ${brainCredential} and ${brainReadCredential} are brain's when services.edwind.brain.url is set.";
+        }
+        {
+          assertion = cfg.brain.url == null || cfg.brain.tokenFile != null || cfg.brain.readTokenFile != null;
+          message = "services.edwind.brain.url needs brain.tokenFile (to project notes) or brain.readTokenFile (to read).";
         }
         {
           assertion = lib.all isName (lib.attrNames cfg.credentials);

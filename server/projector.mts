@@ -18,13 +18,12 @@
 // Scheme can name (models.credentials). Plain http goes only to this host: loopback, or an address the request
 // can also leave from, which the kernel grants only for an address of this host.
 import fs from 'node:fs';
-import net from 'node:net';
 import path from 'node:path';
-import http from 'node:http';
-import https from 'node:https';
+import type http from 'node:http';
 import crypto from 'node:crypto';
 import { writeAtomic } from './files.mts';
-import { Credential, isLoopback, readSecret } from './models.mts';
+import { Credential } from './models.mts';
+import { brainRequest } from './brain.mts';
 import type { Server, Log } from './main.mts';
 import type { Notes, IndexEntry } from './notes.mts';
 import type { ParseResult } from './notes-parse.mts';
@@ -116,7 +115,7 @@ export class Projector {
     const cfg = server.cfg.brain!;
     this.server = server; this.log = server.log; this.notes = notes;
     this.url = new URL('v1/projection', cfg.url.endsWith('/') ? cfg.url : cfg.url + '/');
-    this.credential = new Credential(cfg.credential, this.url.origin); this.scope = cfg.scope;
+    this.credential = new Credential(cfg.credential!, this.url.origin); this.scope = cfg.scope;
     this.ledgerFile = path.join(server.cfg.stateDir, 'projector.json');
     this.ledger = new Map(); this.hashes = new WeakMap();
     this.timer = null; this.started = false; this.running = false; this.stopped = false; this.dirty = false; this.retryMs = 0; this.request = null; this.failed = null;
@@ -209,34 +208,10 @@ export class Projector {
     }
   }
   /* POST RECORD; resolves to the status when brain took it (2xx) or refused it for good, rejects otherwise. */
-  send(record: ProjectedFile): Promise<number> {
-    return new Promise((resolve, reject) => {
-      const u = this.url;
-      /* Plain http only to this host. Off loopback, the request leaves from the address it goes to, and the
-         kernel binds a socket only to an address this host holds: the check is the connection itself. */
-      const host = u.hostname.replace(/^\[|\]$/g, '');
-      const local = u.protocol === 'http:' && !isLoopback(u.href);
-      if (local && !net.isIP(host)) { reject(new Error(`plain http only to this host: ${host} must be one of its addresses, as a number`)); return; }
-      const token = readSecret(this.credential);
-      if (!token) { reject(new Error(`the credential ${this.credential.name} is not readable`)); return; }
-      const body = Buffer.from(JSON.stringify(record));
-      const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', timeout: REQUEST_TIMEOUT_MS, ...(local ? { localAddress: host } : {}), headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': body.length } }, res => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-        res.on('data', (d: Buffer) => { if (size < ANSWER_BYTES) { chunks.push(d); size += d.length; } });
-        res.on('end', () => {
-          this.request = null;
-          const s = res.statusCode || 0;
-          if ((s >= 200 && s < 300) || (REFUSED.has(s) && refusal(Buffer.concat(chunks).toString()))) resolve(s);
-          else reject(new Error(`brain answered ${s}`));
-        });
-        res.on('error', e => { this.request = null; reject(e); });
-      });
-      this.request = req;
-      req.on('timeout', () => req.destroy(new Error('brain did not answer in time')));
-      req.on('error', (e: NodeJS.ErrnoException) => { this.request = null; reject(local && e.code === 'EADDRNOTAVAIL' ? new Error(`plain http only to this host, and ${host} is not an address of it`) : e); });
-      req.end(body);
-    });
+  async send(record: ProjectedFile): Promise<number> {
+    const a = await brainRequest(this.url, this.credential, { method: 'POST', body: Buffer.from(JSON.stringify(record)), timeoutMs: REQUEST_TIMEOUT_MS, maxBytes: ANSWER_BYTES, track: r => { this.request = r; } });
+    if ((a.status >= 200 && a.status < 300) || (REFUSED.has(a.status) && refusal(a.text))) return a.status;
+    throw new Error(`brain answered ${a.status}`);
   }
   stop() {
     this.stopped = true;
@@ -249,7 +224,7 @@ export class Projector {
 let projector: Projector | null = null;
 export async function install(server: Server): Promise<void> {
   const notes = server.notes;
-  if (!server.cfg.brain || !notes) return;
+  if (!server.cfg.brain || !server.cfg.brain.credential || !notes) return;
   const p = projector = new Projector(server, notes);
   notes.onChange.push(() => p.schedule());
   /* A save changes no parse, only whether the buffer's text is the file's. */
