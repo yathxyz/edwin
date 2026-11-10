@@ -2,8 +2,11 @@
    Motion state, one line per name with its mode, size and time; RET visits a file or enters a directory, - goes
    up, and the marks (m, d) choose what D, R and C act on. Deletes are permanent and nothing is ever overwritten.
    The files are those of a backend: edwind's commands fs-list, fs-stat, fs-delete, fs-copy, fs-mkdir and
-   rename-file in served mode (server/fs.mts, with its refusals). A browser that keeps its files in its own
-   storage has no directories: there find-file offers the recent files as before. */
+   rename-file in served mode (server/fs.mts, with its refusals), and the desktop program's own directories
+   (host.files.tree). Attached to edwind, the desktop program has both: the notes directory is edwind's, every
+   other one its own, and a rename or copy stays within the backend of the listing it starts from. A browser
+   that keeps its files in its own storage has no directories: there find-file offers the recent files as
+   before. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -12,14 +15,16 @@ const cur = () => E.current;
 const { lineNoB, lineStartB } = Ed;
 
 /* One name of a directory, as fs-list gives it: dir is set on a link that leads to a directory. */
-interface DiredEntry { name: string; kind: 'dir' | 'file' | 'link' | 'other'; size: number; mtime: number; mode: number; target?: string; dir?: boolean }
+interface DiredEntry extends EdFileEntry { name: string }
 interface DiredListing { dir: string; home: string; entries: DiredEntry[]; truncated?: boolean }
 /* Where the files are. A path is absolute or starts with ~/. resolve says whether PATH is a directory and the
-   name Ed.visit takes for it (edwind's buffer id). remove answers false for a directory that is not empty and
-   was left alone; rename and copy put the source inside DST when DST is a directory. */
+   name Ed.visit takes for it; a backend that need not ask answers at once. remove answers false for a
+   directory that is not empty and was left alone; rename and copy put the source inside DST when DST is a
+   directory. */
+interface DiredPlace { dir: boolean; name: string }
 interface DiredFs {
   list(dir: string | null): Promise<DiredListing>;
-  resolve(path: string): Promise<{ dir: boolean; name: string }>;
+  resolve(path: string): DiredPlace | Promise<DiredPlace>;
   remove(path: string, recursive: boolean): Promise<boolean>;
   rename(src: string, dst: string): Promise<unknown>;
   copy(src: string, dst: string): Promise<unknown>;
@@ -29,7 +34,7 @@ interface DiredFs {
    by name ('*' marked, 'D' flagged for deletion). */
 interface Dired { fs: DiredFs; dir: string; home: string; entries: DiredEntry[]; marks: Map<string, string>; truncated: boolean }
 
-const isDirEntry = (e: DiredEntry) => e.kind === 'dir' || !!e.dir;
+const isDirEntry = (e: EdFileEntry) => e.kind === 'dir' || !!e.dir;
 const join = (dir: string, name: string) => (dir.endsWith('/') ? dir : dir + '/') + name;
 const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i <= 0 ? (p.startsWith('/') ? '/' : p) : p.slice(0, i); };
 const baseOf = (p: string) => p.slice(p.lastIndexOf('/') + 1);
@@ -45,18 +50,83 @@ async function rpc(cmd: string, a: Record<string, unknown>): Promise<unknown> {
   if (r.error) signal('user-error', r.error.condition === 'offline' ? 'Not connected to edwind' : r.error.report || r.error.condition);
   return r.value;
 }
+/* The name Ed.visit takes for edwind's buffer ID. In a frame it is the id. The desktop program's visit sends a
+   path under the notes directory to edwind and opens every other one itself (native/js/main.ts), so there a
+   note goes by its path. */
+const visitName = (id: string) => { const notes = String(L.get('notes-directory') || ''); return Ed.host.files && notes && !/^(\/|~\/)/.test(id) ? join(notes, id) : id; };
 const SERVED: DiredFs = {
   list: dir => rpc('fs-list', dir === null ? {} : { dir }) as Promise<DiredListing>,
-  resolve: p => (rpc('fs-stat', { path: p }) as Promise<{ id: string | null; entry: DiredEntry | null }>).then(r => ({ dir: !!r.entry && isDirEntry(r.entry), name: r.id || p })),
+  resolve: p => (rpc('fs-stat', { path: p }) as Promise<{ id: string | null; entry: DiredEntry | null }>).then(r => ({ dir: !!r.entry && isDirEntry(r.entry), name: r.id ? visitName(r.id) : p })),
   remove: (p, recursive) => (rpc('fs-delete', { path: p, recursive }) as Promise<{ deleted: boolean }>).then(r => r.deleted),
   rename: (src, dst) => rpc('rename-file', { src, dst }),
   copy: (src, dst) => rpc('fs-copy', { src, dst }),
   mkdir: p => rpc('fs-mkdir', { path: p }),
 };
-/* The backend that holds PATH, or null where there are no directories: a page that keeps its files in the
-   browser, and for now the desktop program, whose own files edwind does not hold. */
-function fsFor(path: string | null): DiredFs | null { void path; return Ed.host.kind !== 'native' && Ed.sync && Ed.sync.started ? SERVED : null; }
-const needFs = (path: string | null) => fsFor(path) || signal('user-error', Ed.host.kind === 'native' ? 'Dired does not list the desktop program\'s files yet' : 'No directories here: this Edwin keeps its files in the browser') as never;
+/* The most names one listing shows, as edwind's fs-list (server/fs.mts MAX_ENTRIES). */
+const MAX_ENTRIES = 10000;
+/* The desktop program's own directories, through host.files F and its tree T. */
+function localFs(f: EdHostFiles, t: EdHostTree): DiredFs {
+  const home = Ed.host.dirs ? Ed.host.dirs.home : '';
+  /* The host's errors are the system's messages. */
+  const io = <T>(fn: () => T): T => { try { return fn(); } catch (e) { return signal('file-error', e && (e as Error).message ? (e as Error).message : String(e)) as never; } };
+  const need = (p: string) => t.entry(p) || signal('file-error', `${p}: No such file or directory`) as never;
+  /* Where SRC lands for the destination DST: inside it when it is a directory, and never on a name in use. */
+  const landing = (src: string, dst: string) => {
+    const d = t.entry(dst), to = d && isDirEntry(d) ? join(dst, baseOf(src)) : dst;
+    if (t.entry(to)) signal('file-error', `${to}: destination exists`);
+    return to;
+  };
+  /* A path with its directory's links resolved and its last name as written. */
+  const real = (p: string) => join(f.truename(parentOf(p)), baseOf(p));
+  return {
+    async list(dir) {
+      const d = f.truename(dir === null ? f.cwd : dir), names = io(() => t.names(d)), truncated = names.length > MAX_ENTRIES;
+      const entries: DiredEntry[] = [];
+      for (const name of truncated ? names.slice(0, MAX_ENTRIES) : names) { const e = t.entry(join(d, name)); if (e) entries.push({ name, ...e }); }
+      return { dir: d, home, entries, truncated };
+    },
+    resolve(p) { const e = t.entry(f.resolve(p)); return { dir: !!e && isDirEntry(e), name: p }; },
+    async remove(path, recursive) {
+      const p = f.resolve(path), e = need(p);
+      if (e.kind !== 'dir') { io(() => f.remove(p)); return true; }
+      if (!recursive && io(() => t.names(p)).length) return false;
+      io(() => t.rmdir(p, recursive)); return true;
+    },
+    async rename(from, dst) {
+      const src = f.resolve(from); need(src);
+      const to = landing(src, f.resolve(dst)), at = real(src);
+      /* The buffers that visit SRC or a file under it follow it: found by true name before the move. */
+      const open = E.buffers.filter(b => b.file && !b.shared).map(b => [b, f.truename(b.file!)] as const).filter(([, n]) => n === at || n.startsWith(at + '/'));
+      io(() => t.rename(src, to));
+      for (const [b, n] of open) {
+        const old = b.file!, file = to + n.slice(at.length);
+        b.file = file;
+        if ((b.name === old || b.name === Ed.fileLabel(old)) && !Ed.getBuffer(Ed.fileLabel(file))) b.name = Ed.fileLabel(file);
+      }
+    },
+    async copy(from, dst) {
+      const src = f.resolve(from), e = need(src), to = landing(src, f.resolve(dst));
+      if (e.kind === 'dir' && (real(to) + '/').startsWith(f.truename(src) + '/')) signal('file-error', 'Cannot copy a directory into itself');
+      io(() => t.copy(src, to));
+    },
+    async mkdir(path) { const p = f.resolve(path); if (t.entry(p)) signal('file-error', `${p} exists`); io(() => t.mkdir(p)); },
+  };
+}
+let localOf: EdHostFiles | null = null, LOCAL: DiredFs | null = null;
+function local() {
+  const f = Ed.host.files;
+  if (!f || !f.tree) return null;
+  if (localOf !== f) { localOf = f; LOCAL = localFs(f, f.tree); }
+  return LOCAL;
+}
+/* The backend that holds PATH (null: no path, the place a buffer without a directory starts from), or null
+   where there are no directories. The desktop program's own unless it is attached and PATH is edwind's. */
+function fsFor(path: string | null): DiredFs | null {
+  const here = local();
+  if (!(Ed.sync && Ed.sync.started)) return here;
+  return !here || (path !== null && H.servedPath && H.servedPath(path)) ? SERVED : here;
+}
+const needFs = (path: string | null) => fsFor(path) || signal('user-error', 'No directories here: this Edwin keeps its files in the browser') as never;
 
 /* ---------- the listing ---------- */
 const NAME_COL = 38;
@@ -129,10 +199,16 @@ async function enter(b: EdBuffer, path: string, at?: string | null) {
   const nb = await show(path, at);
   if (nb !== b && E.buffers.includes(b) && !Ed.windowFor(b)) L.call('kill-buffer', [b]);
 }
-/* The directory of buffer B: of its listing or its file; null for the backend's own. */
+/* The directory of buffer B: of its listing or its file; null when it has none. A served buffer's file is its
+   path once edwind has told it; before that, and after a rename, it is the id, for a note its path under the
+   notes directory. */
 function directoryOf(b: EdBuffer): string | null {
   if (b.dired) return (b.dired as Dired).dir;
-  return b.file && (b.file.startsWith('/') || b.file.startsWith('~/')) ? parentOf(b.file) : null;
+  const f = b.file;
+  if (!f) return null;
+  if (f.startsWith('/') || f.startsWith('~/')) return parentOf(f);
+  const notes = b.shared ? String(L.get('notes-directory') || '') : '';
+  return notes ? parentOf(join(notes, f)) : null;
 }
 
 /* ---------- reading a path ---------- */
@@ -185,7 +261,10 @@ H.findDirectory = name => {
   if (!fs) return null;
   if (name.length > 1 && name.endsWith('/')) return show(stripSlash(name)).catch(failed);
   if (E.buffers.some(b => b.file === name || b.id === name)) return null;
-  return fs.resolve(name).then(r => (r.dir ? show(name) : Ed.visit(r.name)), () => Ed.visit(name)).catch(failed);
+  const r = fs.resolve(name);
+  /* A backend that answers at once leaves a file to find-file, which gives its callers the buffer. */
+  if (!(r instanceof Promise)) return r.dir ? show(name).catch(failed) : null;
+  return r.then(x => (x.dir ? show(name) : Ed.visit(x.name)), () => Ed.visit(name)).catch(failed);
 };
 
 /* ---------- commands ---------- */

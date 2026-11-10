@@ -94,7 +94,22 @@ function label(p: string) {
   if (HOME !== '/' && a.startsWith(HOME + '/')) return '~/' + a.slice(HOME.length + 1);
   return a;
 }
-const files: EdHostFiles = { read, write, remove: name => { N.remove(resolve(name)); listCache = null; }, list, resolve, label, truename, exists: name => N.stat(resolve(name)) !== null, get cwd() { return CWD; } };
+/* A renamed file keeps its line ends and byte order mark: the shapes move with the path, also those under a
+   renamed directory. */
+function rename(src: string, dst: string) {
+  N.rename(src, dst);
+  for (const [p, sh] of [...shapes]) if (p === src || p.startsWith(src + '/')) { shapes.delete(p); shapes.set(dst + p.slice(src.length), sh); }
+  listCache = null;
+}
+const files: EdHostFiles = {
+  read, write, remove: name => { N.remove(resolve(name)); listCache = null; }, list, resolve, label, truename, exists: name => N.stat(resolve(name)) !== null, get cwd() { return CWD; },
+  tree: {
+    entry: p => N.lstat(p), names: dir => N.readDir(dir).map(e => e[0]), rename,
+    copy: (src, dst) => { N.copyTree(src, dst); listCache = null; },
+    rmdir: (p, recursive) => { N.removeDir(p, recursive); listCache = null; },
+    mkdir: p => N.mkdirs(p, 0o777),
+  },
+};
 
 /* ---------- storage ---------- */
 function jsonStorage(file: string): EdHostStorage & { flush(): void } {

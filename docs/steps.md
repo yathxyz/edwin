@@ -409,7 +409,7 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   ssh reaches the same edwind with the user's keys and no new credential. Starting an edwind on the remote host
   (`-a` is local only), and one frame attached to two edwinds at once (`sync.ts` holds one connection per runtime).
 
-## Dired: directories as buffers (edwind done, desktop's own files pending)
+## Dired: directories as buffers (done)
 
 Asked 2026-11-10: Emacs's dired, so directories and paths are navigated in Edwin as in Emacs, with the file
 operations.
@@ -431,11 +431,19 @@ operations.
   directory's contents; `TAB` walks into the highlighted name, `//` and `/~` restart the path as in Emacs.
   A directory opens as a listing. The minibuffer gained `boundary` (`EdMiniOpts`): where the completed field of
   the input starts, here after the last `/`. Recent files stay on `SPC f r`.
-- **Not yet:** the desktop program (`edwin`, attached or not) has no dired and keeps the old `find-file`;
-  wdired, chmod, compression, shell commands, previews and a trash are
-  not planned for this step.
+- **The desktop program lists its own directories.** `host.files.tree` (`EdHostTree`) is the second backend:
+  four natives (`lstat`, `rename`, `copyTree`, `removeDir`; `mkdirs` takes a mode) under a local `DiredFs` in
+  `src/dired.ts` that keeps the same rules (a copy makes every name new, a rename looks first, a link stays a
+  link). It has no refusal list: these are the user's files, as in Emacs. A renamed file's buffer follows it and
+  keeps its line ends. Attached to edwind, the notes directory and what is under it are edwind's
+  (`hooks.servedPath`, `native/js/main.ts`) and every other directory is the program's own; a rename or copy
+  stays within the backend of the listing it starts from, so it does not cross to a remote edwind's machine.
+  A local `find-file` still answers its buffer at once: only a directory is intercepted.
+- **Not in this step:** wdired, chmod, compression, shell commands, previews, a trash, a rename across file
+  systems (the system's error is shown), and `edwin DIR` on the command line.
 
-Suites: `test/fs.test.mts`, `test/dired.test.mts` (check `edit-dired`).
+Suites: `test/fs.test.mts`, `test/dired.test.mts`, `test/dired-local.test.mts` (check `edit-dired`), and two
+terminal tests in `native/tests/terminal.rs`.
 
 ## pi agents: Edwin's AI on pi (done)
 

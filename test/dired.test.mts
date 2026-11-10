@@ -198,3 +198,22 @@ test('what edwind refuses stays refused: no listing of ~/.ssh, no delete of the 
   goTo('.ssh'); await keys('D'); await type('y');
   assert.ok(fs.existsSync(at('.ssh/authorized_keys'))); assert.match(messages(), /\.ssh: refused/);
 });
+
+test('a note starts find-file and dired-jump in its own directory under the notes', async () => {
+  fs.mkdirSync(path.join(dir.dirs.notes, 'area'), { recursive: true });
+  fs.writeFileSync(path.join(dir.dirs.notes, 'area', 'deep.md'), 'deep\n');
+  fs.writeFileSync(path.join(dir.dirs.notes, 'area', 'next.md'), 'next\n');
+  await Ed.visit('area/deep.md');
+  await until(() => cur().id === 'area/deep.md' && cur().text === 'deep\n', 'the note');
+  const area = path.join(fs.realpathSync(dir.dirs.notes), 'area');
+  await keys('SPC f f');
+  assert.equal(E.minibuf.text, area + '/');
+  await until(() => Ed.miniCandidates().length === 2, 'the names of the note\'s directory');
+  assert.deepEqual(Ed.miniCandidates(), ['deep.md', 'next.md']);
+  await type('next.md'); await keys('RET');
+  await until(() => cur().id === 'area/next.md', 'the note beside it');
+  await keys('C-x C-j');
+  await until(() => cur().mode === 'dired-mode', 'the listing');
+  assert.equal(cur().dired.dir, area);
+  assert.equal(here(), 'next.md');
+});

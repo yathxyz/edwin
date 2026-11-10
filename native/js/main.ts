@@ -300,6 +300,8 @@ async function start() {
     };
     visitHere = (name: string) => { Ed.hooks.visit = null; try { return Ed.visit(name); } finally { Ed.hooks.visit = hook; } };
     Ed.hooks.visit = hook;
+    /* Dired likewise: the notes directory and what is under it are listed and changed by edwind. */
+    Ed.hooks.servedPath = (p: string) => { const abs = remote ? p : H.truename(p); return !!root && (abs === root || abs.startsWith(root + '/')); };
   } else {
     Ed.loadUserInit();
   }

@@ -1357,6 +1357,9 @@ interface EdHooks {
      no directories), and show NAME when it is a directory (null: it is not one, visit it) */
   readFileName?: ((prompt: string) => Promise<string> | null) | null;
   findDirectory?: ((name: string) => unknown) | null;
+  /* the desktop program attached to edwind (native/js/main.ts): PATH is the notes directory or under it, so
+     its files are edwind's and not the program's own */
+  servedPath?: ((path: string) => boolean) | null;
   /* the files offered by find-file, and the file visits (stack.ts) */
   recentFiles?: (() => string[]) | null;
   visited?: ((b: EdBuffer, name: string, fresh: boolean) => void) | null;
@@ -1684,6 +1687,21 @@ interface EdHostPage {
   onFontsLoaded(f: () => void): void;
 }
 /* A file system the user edits directly (native): NAME is a path, relative to the directory edwin started in. */
+/* What a name in a directory is, a final symbolic link not followed: target is a link's as written, and dir is
+   set on a link that leads to a directory. mtime is in milliseconds, mode the permission bits. */
+interface EdFileEntry { kind: 'dir' | 'file' | 'link' | 'other'; size: number; mtime: number; mode: number; target?: string; dir?: boolean }
+/* A host's directories, on absolute paths: what a name is (null: nothing there), the names in a directory, and
+   the changes, which throw the system's message. rename replaces a destination that exists; copy takes a
+   directory with everything in it, keeps links as links and overwrites nothing; rmdir takes an empty directory
+   unless RECURSIVE. */
+interface EdHostTree {
+  entry(path: string): EdFileEntry | null;
+  names(dir: string): string[];
+  rename(src: string, dst: string): void;
+  copy(src: string, dst: string): void;
+  rmdir(path: string, recursive: boolean): void;
+  mkdir(path: string): void;
+}
 interface EdHostFiles {
   read(name: string): string | null;
   write(name: string, text: string): void;
@@ -1694,6 +1712,8 @@ interface EdHostFiles {
   truename(name: string): string;
   exists(name: string): boolean;
   readonly cwd: string;
+  /* directories, for dired (src/dired.ts); absent where the files are not a tree */
+  tree?: EdHostTree;
 }
 /* The Node host's job table for the worker threads (host-node.cts). */
 interface EdHostJobs {
@@ -2074,7 +2094,14 @@ interface EdNatives {
   realpath(path: string): string | null;
   readDir(path: string): [name: string, dir: boolean][];
   remove(path: string): void;
-  mkdirs(path: string): void;
+  /* private (0700) unless MODE is given, which the umask narrows */
+  mkdirs(path: string, mode?: number): void;
+  /* dired: a name with a final link not followed (null: nothing there); rename replaces a destination that
+     exists, copyTree makes every name new, removeDir takes an empty directory unless RECURSIVE */
+  lstat(path: string): EdFileEntry | null;
+  rename(src: string, dst: string): void;
+  copyTree(src: string, dst: string): void;
+  removeDir(path: string, recursive: boolean): void;
   readStdin(): string;
   ttyOpen(): boolean;
   ttyClose(): void;

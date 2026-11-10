@@ -330,6 +330,66 @@ fn files_keep_their_line_ends_mode_and_links() {
     );
 }
 
+/// Dired on the program's own files: the natives behind host.files.tree (lstat, rename, copyTree, removeDir).
+#[test]
+fn dired_lists_and_changes_the_programs_own_directories() {
+    let d = workdir("dired");
+    std::fs::create_dir_all(d.join("sub/deep")).unwrap();
+    std::fs::write(d.join("a.txt"), "a\n").unwrap();
+    std::fs::write(d.join("b.txt"), "one\r\ntwo\r\n").unwrap();
+    std::fs::write(d.join("sub/in.txt"), "inside\n").unwrap();
+    std::os::unix::fs::symlink("in.txt", d.join("sub/ln")).unwrap();
+    let mut t = Pty::spawn(&d, &["b.txt"], &[]);
+    t.ready();
+    // SPC f d offers the working directory; the listing shows a name with its mode and size.
+    t.keys(" fd");
+    t.pump(200);
+    t.keys("\r");
+    t.pump(300);
+    assert!(
+        contains(&t.out, b"drwx") && contains(&t.out, b"-rw-"),
+        "no listing in {:?}",
+        tail(&t.out)
+    );
+    // Rename the open file: its buffer follows, and keeps its line ends.
+    t.keys("/b.txt\r").keys("R");
+    t.pump(200);
+    t.keys("c.txt\r");
+    t.pump(300);
+    // Copy a directory with a link in it, make directories, delete a file and a directory with contents.
+    t.keys("/sub\r").keys("C");
+    t.pump(200);
+    t.keys("copy\r");
+    t.pump(300);
+    t.keys("+");
+    t.pump(200);
+    t.keys("made/deeper\r");
+    t.pump(300);
+    t.keys("/a.txt\r").keys("D");
+    t.pump(200);
+    t.keys("y");
+    t.pump(300);
+    t.keys("/sub\r").keys("D");
+    t.pump(200);
+    t.keys("y");
+    t.pump(200);
+    t.keys("yes\r");
+    t.pump(300);
+    t.keys(":b c.txt\r").keys("Gothree").esc().keys(":wq\r");
+    assert_eq!(t.exit(), 0);
+    assert!(!d.join("b.txt").exists());
+    assert_eq!(read(d.join("c.txt")), "one\r\ntwo\r\nthree\r\n");
+    assert_eq!(read(d.join("copy/in.txt")), "inside\n");
+    assert_eq!(
+        std::fs::read_link(d.join("copy/ln")).unwrap(),
+        Path::new("in.txt")
+    );
+    assert!(d.join("copy/deep").is_dir());
+    assert!(d.join("made/deeper").is_dir());
+    assert!(!d.join("a.txt").exists());
+    assert!(!d.join("sub").exists());
+}
+
 #[test]
 fn one_file_under_two_names_is_one_buffer() {
     let d = workdir("names");
@@ -667,6 +727,59 @@ fn attached_notes_go_through_edwind_and_other_files_stay_local() {
 }
 
 /// The Node options the helpers need here (Node 22 runs .mts files only with --experimental-strip-types).
+/// Attached, dired asks edwind about the notes directory and lists every other directory itself.
+#[test]
+fn attached_dired_asks_edwind_about_the_notes_only() {
+    if !have_node() {
+        return;
+    }
+    let up = EdwindUp::start();
+    let (socket, notes) = (up.socket.clone(), up.notes.clone());
+    let d = workdir("attach-dired");
+    std::fs::write(d.join("local.txt"), "local\n").unwrap();
+    let mut t = Pty::spawn(
+        &d,
+        &["--socket", &socket, "local.txt"],
+        &[("EDWIN_NO_ATTACH", "")],
+    );
+    t.ready();
+    t.pump(500);
+    // The program's own directory: the rename is done here.
+    t.keys(" fd");
+    t.pump(200);
+    t.keys("\r");
+    t.pump(300);
+    t.keys("/local.txt\r").keys("R");
+    t.pump(200);
+    t.keys("moved.txt\r");
+    t.pump(300);
+    // The notes directory, typed after the offered one (a path starts again at //): edwind's commands.
+    t.keys(" fd");
+    t.pump(200);
+    t.keys(&format!("{notes}/\r"));
+    t.pump(500);
+    t.keys("+");
+    t.pump(200);
+    t.keys("made\r");
+    t.pump(500);
+    t.keys("/a.md\r").keys("C");
+    t.pump(200);
+    t.keys("copy.md\r");
+    t.pump(500);
+    t.keys(":q!\r");
+    assert_eq!(t.exit(), 0);
+    assert!(!d.join("local.txt").exists());
+    assert_eq!(read(d.join("moved.txt")), "local\n");
+    assert!(Path::new(&notes).join("made").is_dir());
+    assert_eq!(read(Path::new(&notes).join("copy.md")), "# Shared page\n");
+    // edwind logs the changes it makes: the two in the notes, and not the rename.
+    let after = up.finish();
+    assert!(
+        after.contains(r##""fs":["mkdir","copy"]"##),
+        "edwind ran: {after}"
+    );
+}
+
 fn node_options() -> String {
     std::env::var("NODE_OPTIONS").unwrap_or_default()
 }

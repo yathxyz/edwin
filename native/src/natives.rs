@@ -338,13 +338,131 @@ fn remove(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, _rv:
         }
     }
 }
+/// Make a directory and the parents it lacks: private (0700) unless a second argument gives the mode, which
+/// the umask then narrows.
 fn mkdirs(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
     let p = arg_str(scope, &args, 0);
+    let mode = if args.length() > 1 {
+        args.get(1).uint32_value(scope).unwrap_or(0o700)
+    } else {
+        0o700
+    };
     if let Err(e) = std::fs::DirBuilder::new()
         .recursive(true)
-        .mode(0o700)
+        .mode(mode)
         .create(&p)
     {
+        throw(scope, &io_msg(&p, &e));
+    }
+}
+/// One name as dired lists it, a final symbolic link not followed: its kind, size, time and permission bits,
+/// and for a link its target as written and whether it leads to a directory. null when nothing is there.
+fn lstat(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let p = arg_str(scope, &args, 0);
+    let Ok(m) = std::fs::symlink_metadata(&p) else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+    let t = m.file_type();
+    let kind = if t.is_dir() {
+        "dir"
+    } else if t.is_file() {
+        "file"
+    } else if t.is_symlink() {
+        "link"
+    } else {
+        "other"
+    };
+    let o = v8::Object::new(scope);
+    let v = v8::String::new(scope, kind).unwrap().into();
+    set(scope, o, "kind", v);
+    let v = v8::Number::new(scope, m.len() as f64).into();
+    set(scope, o, "size", v);
+    let v = v8::Number::new(
+        scope,
+        m.mtime() as f64 * 1000.0 + (m.mtime_nsec() / 1_000_000) as f64,
+    )
+    .into();
+    set(scope, o, "mtime", v);
+    let v = v8::Integer::new(scope, (m.mode() & 0o7777) as i32).into();
+    set(scope, o, "mode", v);
+    if t.is_symlink() {
+        if let Ok(target) = std::fs::read_link(&p) {
+            let v = v8::String::new(scope, &target.to_string_lossy())
+                .unwrap()
+                .into();
+            set(scope, o, "target", v);
+        }
+        if std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false) {
+            let v = v8::Boolean::new(scope, true).into();
+            set(scope, o, "dir", v);
+        }
+    }
+    rv.set(o.into());
+}
+/// Rename or move within a file system. A destination that exists is replaced, as rename(2) does: the
+/// caller looks first.
+fn rename(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue) {
+    let (src, dst) = (arg_str(scope, &args, 0), arg_str(scope, &args, 1));
+    if let Err(e) = std::fs::rename(&src, &dst) {
+        throw(scope, &io_msg(&src, &e));
+    }
+}
+/// Copy a file, a symbolic link (as a link) or a directory with everything in it. Every name is made new,
+/// so nothing is overwritten; a socket, a device or a pipe is refused.
+fn copy_into(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let m = std::fs::symlink_metadata(src)?;
+    let t = m.file_type();
+    if t.is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+    } else if t.is_dir() {
+        // Writable while it is filled; the source's permissions once it is.
+        std::fs::DirBuilder::new().mode(0o700).create(dst)?;
+        for ent in std::fs::read_dir(src)? {
+            let ent = ent?;
+            copy_into(&ent.path(), &dst.join(ent.file_name()))?;
+        }
+        std::fs::set_permissions(dst, std::fs::Permissions::from_mode(m.mode() & 0o777))
+    } else if t.is_file() {
+        let mut from = std::fs::File::open(src)?;
+        let mut to = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(m.mode() & 0o777)
+            .open(dst)?;
+        std::io::copy(&mut from, &mut to).map(|_| ())
+    } else {
+        Err(std::io::Error::other("Not a file, a link or a directory"))
+    }
+}
+fn copy_tree(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let (src, dst) = (arg_str(scope, &args, 0), arg_str(scope, &args, 1));
+    if let Err(e) = copy_into(Path::new(&src), Path::new(&dst)) {
+        throw(scope, &io_msg(&src, &e));
+    }
+}
+/// Remove a directory: an empty one, or with a true second argument everything in it (links are removed,
+/// never followed).
+fn remove_dir(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let p = arg_str(scope, &args, 0);
+    let r = if args.get(1).boolean_value(scope) {
+        std::fs::remove_dir_all(&p)
+    } else {
+        std::fs::remove_dir(&p)
+    };
+    if let Err(e) = r {
         throw(scope, &io_msg(&p, &e));
     }
 }
@@ -537,7 +655,7 @@ macro_rules! natives {
         $m!(
             "load" load, "args" args, "print" print, "eprint" eprint, "env" env, "cwd" cwd, "now" now,
             "readFile" read_file, "writeFile" write_file, "appendFile" append_file, "stat" stat, "realpath" realpath, "readDir" read_dir,
-            "remove" remove, "mkdirs" mkdirs, "readStdin" read_stdin, "ttyOpen" tty_open, "ttyClose" tty_close,
+            "remove" remove, "mkdirs" mkdirs, "lstat" lstat, "rename" rename, "copyTree" copy_tree, "removeDir" remove_dir, "readStdin" read_stdin, "ttyOpen" tty_open, "ttyClose" tty_close,
             "ttyWrite" tty_write, "ttyFlush" tty_flush, "ttySize" tty_size, "suspend" suspend, "exit" exit,
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
             "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard
