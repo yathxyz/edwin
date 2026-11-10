@@ -189,6 +189,13 @@ in
     "models.test.mts"
   ];
 
+  # Directories (server/fs.mts, src/dired.ts): the fs-* commands and their refusals, then dired and find-file's
+  # path reading in a served Edwin against a real edwind.
+  edit-dired = suite "dired" [
+    "fs.test.mts"
+    "dired.test.mts"
+  ];
+
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved
   # session, and a switch of provider mid-session.
   edit-agent = suite "agent" [ "agent.test.mts" ];

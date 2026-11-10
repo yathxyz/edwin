@@ -769,7 +769,14 @@ function visit(name: string) {
   return b;
 }
 Ed.visit = visit;
-CMD('find-file', 'FFind file: ', 'FILENAME', 'Visit FILENAME. Files are kept in this browser’s storage.', ([n]) => { if (!str(n).trim()) signal('user-error', 'No file name given'); return visit((n as string).trim()); });
+/* Where there are directories (dired.ts) the name is read as a path, completed from its directory, and a
+   directory is shown as a listing; elsewhere the candidates are the recent files. */
+const readFileName = (prompt: string) => (Ed.hooks.readFileName && Ed.hooks.readFileName(prompt)) || Ed.readMini(prompt, '', () => (Ed.hooks.recentFiles ? Ed.hooks.recentFiles() : Ed.Store.list()), { kind: 'file', annotate: Ed.annotateFile, listOrder: true });
+CMD('find-file', async () => [await readFileName('Find file: ')], 'FILENAME', 'Visit FILENAME, or list it when it is a directory (dired).', ([n]) => {
+  const name = str(n).trim();
+  if (!name) signal('user-error', 'No file name given');
+  return (Ed.hooks.findDirectory && Ed.hooks.findDirectory(name)) || visit(name);
+});
 L.defvar('require-final-newline', false, 'When true, saving a file adds a newline at its end if it has none (the terminal program sets it, as Vim does).');
 function writeTo(b: EdBuffer, given: string) {
   const name = fileOf(given);

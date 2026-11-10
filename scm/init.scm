@@ -137,6 +137,7 @@
   "SPC SPC" 'consult-buffer          ; consult-project-buffer
   "SPC <"   'switch-to-buffer
   "SPC f f" 'find-file
+  "SPC f d" 'dired
   "SPC f s" 'save-buffer
   "SPC f S" 'evil-write-all
   "SPC f r" 'consult-recent-file
@@ -226,7 +227,7 @@
 ;; Buffers that start in Motion state (help, the buffer list, the agenda)
 ;; share the same leader keys through their own maps.
 (for-each (lambda (mode) (evil-define-key 'motion mode "SPC" (lookup-key evil-normal-state-map "SPC")))
-          '(special-mode org-agenda-mode org-roam-mode))
+          '(special-mode org-agenda-mode org-roam-mode dired-mode))
 
 ;; C-c keys: i in Insert sends the buffer to the LLM; c in Normal state opens
 ;; a chat (agent-shell on the desktop, gptel here, as SPC g a).

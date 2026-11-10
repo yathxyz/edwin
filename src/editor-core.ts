@@ -1226,13 +1226,17 @@ const idleWaiters: (() => void)[] = [];
 function whenIdle() { return new Promise<void>(r => { if (E.idle && !queue.length) r(); else idleWaiters.push(r); }); }
 
 /* ---------- minibuffer: a recursive edit that runs commands until exit or abort ---------- */
+/* With opts.boundary (a path: dired.ts) the candidates complete the input from the boundary on; what is before
+   it stays as typed. No candidate is highlighted while that field is empty, so RET takes the input (a directory). */
+const miniPrefix = (m: EdMini, text: string) => (m.opts.boundary ? text.slice(0, m.opts.boundary(text)) : '');
+const miniIndex0 = (opts: EdMiniOpts, text: string) => (opts.noIndex || (opts.boundary && opts.boundary(text) >= text.length) ? -1 : 0);
 async function readMini(prompt: string, initial?: string, completer?: EdCompleter | null, opts?: EdMiniOpts) {
   opts = opts || {};
   if (E.mini) signal('error', 'Command attempted to use minibuffer while in minibuffer');
   const mb = E.minibuf;
   mb.text = initial || ''; mb.pt = mb.rope.length; mb.mark = null; mb.markActive = false; mb.undo = []; mb.redo = []; mb.pendingUndo = null;
   const saved = { cur: E.current, prefix: E.prefixArg, cmd: E.thisCommand, keys: E.thisKeys, last: E.lastCommand };
-  const m: EdMini = E.mini = { prompt, completer: completer || null, opts, histIdx: -1, history: opts.history || historyFor(opts.kind), done: null, index: opts.noIndex ? -1 : 0, cache: null, cacheKey: null, scroll: 0 };
+  const m: EdMini = E.mini = { prompt, completer: completer || null, opts, histIdx: -1, history: opts.history || historyFor(opts.kind), done: null, index: miniIndex0(opts, mb.text), cache: null, cacheKey: null, scroll: 0 };
   E.current = mb; E.echo = ''; E.miniFlash = '';
   E.depth++;
   try {
@@ -1241,7 +1245,7 @@ async function readMini(prompt: string, initial?: string, completer?: EdComplete
       const k = await nextKey();
       const before = mb.text;
       await dispatch(k);
-      if (E.mini === m && mb.text !== before) { m.index = opts.noIndex ? -1 : 0; m.scroll = 0; if (opts.onChange) opts.onChange(mb.text); }
+      if (E.mini === m && mb.text !== before) { m.index = miniIndex0(opts, mb.text); m.scroll = 0; if (opts.onChange) opts.onChange(mb.text); }
       if (E.mini === m && opts.onSelect) { const c = miniCandidates(); opts.onSelect(m.index >= 0 && m.index < c.length ? c[m.index] : null, mb.text); }
     }
   } finally {
@@ -1319,7 +1323,8 @@ function miniCandidates(sync?: boolean) {
   const q = E.minibuf.text;
   if (m.cache && m.cacheKey === q) return m.cache;
   const all = m.completer(q);
-  const terms = q.trim().split(/\s+/).filter(Boolean).map(termRegex);
+  const pre = miniPrefix(m, q), field = q.slice(pre.length);
+  const terms = field.trim().split(/\s+/).filter(Boolean).map(termRegex);
   const recent = recentUse.get(m.opts.kind || m.prompt) || new Map<string, number>();
   const pres = prescientFor(m.opts.kind);
   const finish = (out: string[]) => {
@@ -1342,7 +1347,7 @@ function miniCandidates(sync?: boolean) {
   };
   if (!terms.length) return finish(all.slice());
   /* The base: the previous matches when this input narrows them (kept in list order), else all. */
-  const base = m.matched && m.cacheAll === all && narrows(m.matchedKey!, q) ? m.matched : all;
+  const base = m.matched && m.cacheAll === all && miniPrefix(m, m.matchedKey!) === pre && narrows(m.matchedKey!.slice(pre.length), field) ? m.matched : all;
   const filter = (list: string[]) => { const out = []; for (const c of list) { let ok = true; for (const t of terms) if (!t.test(c)) { ok = false; break; } if (ok) out.push(c); } return out; };
   if (!sync && base.length >= ASYNC_MIN && globalThis.EdPool && EdPool.ok) {
     if (m.asyncKey !== q) {
@@ -1368,16 +1373,17 @@ function markUsed(m: EdMini, v: string) { const key = m.opts.kind || m.prompt; l
 function exitMini(inputOnly?: boolean) {
   const m = E.mini; if (!m) return;
   let v = E.minibuf.text;
+  const has = (x: string) => m.completer!(x).includes(x.slice(miniPrefix(m, x).length));
   if (m.completer && !inputOnly) {
     const c = miniCandidates(true);
-    if (m.index >= 0 && m.index < c.length) v = c[m.index];
-    else if (m.opts.require && !m.completer(v).includes(v)) {
+    if (m.index >= 0 && m.index < c.length) v = miniPrefix(m, v) + c[m.index];
+    else if (m.opts.require && !has(v)) {
       if (v === '' && m.opts.def !== undefined) v = m.opts.def;
       else { E.miniFlash = c.length ? ' [Incomplete]' : ' [No match]'; return; }
     }
   }
   if (v === '' && m.opts.def !== undefined) v = m.opts.def;
-  if (m.opts.require && m.completer && !m.completer(v).includes(v) && !(v === '' && m.opts.def !== undefined)) { E.miniFlash = ' [No match]'; return; }
+  if (m.opts.require && m.completer && !has(v) && !(v === '' && m.opts.def !== undefined)) { E.miniFlash = ' [No match]'; return; }
   if (m.completer && v) markUsed(m, v);
   if (v && m.history[0] !== v) { m.history.unshift(v); if (m.history.length > 100) m.history.length = 100; }
   m.done = { value: v };
@@ -1394,19 +1400,21 @@ function miniMove(d: number, cycle = true) {
 function miniInsert() {
   const m = E.mini; if (!m || !m.completer) return;
   const c = miniCandidates(true);
-  if (m.index >= 0 && m.index < c.length) { E.minibuf.text = c[m.index]; E.minibuf.pt = c[m.index].length; m.cache = null; }
+  if (m.index >= 0 && m.index < c.length) { const t = miniPrefix(m, E.minibuf.text) + c[m.index]; E.minibuf.text = t; E.minibuf.pt = t.length; m.cache = null; }
   else completeMini();
 }
 function abortMini() { if (E.mini) E.mini.done = { quit: true }; }
 function completeMini() {
-  const m = E.mini!, c = miniCandidates(true), mb = E.minibuf;
-  if (m.completer && m.index >= 0 && m.index < c.length && c.length > 1 && !c.every(x => x.startsWith(mb.text))) { miniInsert(); return; }
+  const m = E.mini!, c = miniCandidates(true), mb = E.minibuf, pre = miniPrefix(m, mb.text), field = mb.text.slice(pre.length);
+  if (m.completer && m.index >= 0 && m.index < c.length && c.length > 1 && !c.every(x => x.startsWith(field))) { miniInsert(); return; }
   if (!c.length) { E.miniFlash = ' [No match]'; return; }
-  if (c.length === 1) { mb.text = c[0]; mb.pt = c[0].length; E.miniFlash = ' [Sole completion]'; return; }
+  if (c.length === 1) { mb.text = pre + c[0]; mb.pt = mb.rope.length; E.miniFlash = ' [Sole completion]'; return; }
   let p = c[0];
   for (const s of c) while (!s.startsWith(p)) p = p.slice(0, -1);
-  if (p.length > mb.rope.length) { mb.text = p; mb.pt = p.length; }
-  else E.miniFlash = c.includes(mb.text) ? ' [Complete, but not unique]' : '';
+  if (p.length > field.length) { mb.text = pre + p; mb.pt = mb.rope.length; }
+  /* In a path the next TAB takes the highlighted name, so a tree is walked with TAB alone. */
+  else if (m.opts.boundary && m.index >= 0) miniInsert();
+  else E.miniFlash = c.includes(field) ? ' [Complete, but not unique]' : '';
 }
 function historyMove(d: number) {
   const m = E.mini; if (!m) return;
@@ -2302,7 +2310,7 @@ function miniView(): EdMiniView {
   const N = Math.max(3, Math.min(20, Number(L.get('vertico-count')) || 12));
   if (m.index < m.scroll) m.scroll = Math.max(0, m.index);
   if (m.index >= m.scroll + N) m.scroll = m.index - N + 1;
-  const terms = E.minibuf.text.trim().split(/\s+/).filter(Boolean).map(termRegex);
+  const terms = E.minibuf.text.slice(miniPrefix(m, E.minibuf.text).length).trim().split(/\s+/).filter(Boolean).map(termRegex);
   const items = cands.slice(m.scroll, m.scroll + N).map((c, i) => {
     const lab = String(label(c));
     return { label: lab, ann: annotate ? String(annotate(c) || '') : '', sel: i + m.scroll === m.index, marks: matchSpans(lab, terms) };

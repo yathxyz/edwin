@@ -137,6 +137,9 @@ const FACES: Record<string, DispFaceSpec> = {
   okw: { fg: 'dim' }, oti: { fg: 'fg', w: 700 }, obd: { fg: 'dim' }, osb: { bg: ['org-block-bg', BLOCK_BG] }, oqb: { i: 1, fg: 'dim', bg: ['org-block-bg', BLOCK_BG] },
   olk: { fg: 'st', u: 1 }, ocb: { fg: 'co', w: 600 }, ocx: { fg: 'dim' }, odr: { fg: 'dim' }, opr: { fg: 'rb1', w: 700 }, ocm: { fg: 'cm', i: 1 },
   oli: { fg: 'kw', w: 700 }, otb: { fg: 'co' }, ohr: { fg: 'rule' }, oe: { fg: 'dim' },
+  /* Dired (dired.ts CSS) */
+  'dired-header': { w: 700, fg: 'fg' }, 'dired-dim': { fg: 'dim' }, 'dired-dir': { fg: 'fn', w: 600 }, 'dired-link': { fg: 'st' },
+  'dired-mark': { fg: 'co', w: 700 }, 'dired-marked': { fg: 'co', w: 600 }, 'dired-flag': { fg: 'rb1', w: 700 }, 'dired-flagged': { fg: 'rb1', w: 600 },
   oad: { w: 700, fg: 'fg' }, oat: { w: 700, fg: 'kw' }, oag: { w: 700, fg: 'fn' }, oac: { fg: 'dim' }, oaw: { fg: 'co' }, oao: { fg: 'rb1', w: 600 },
 };
 const NAMED: Record<string, string> = { black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000', blue: '#0000ff', yellow: '#ffff00', cyan: '#00ffff', magenta: '#ff00ff',

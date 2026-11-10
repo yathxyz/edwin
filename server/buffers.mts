@@ -41,7 +41,21 @@ const SERVER_BY: By = { kind: 'server' };
 /* The refusal of a destination in, on or above a refused path, in words a client can show as they are. */
 export const REFUSED_DST = 'refused: the destination is in or above ~/.ssh or a systemd user-unit directory';
 /* An fs error as the message of a refusal: its code and text, without the paths Node appends. */
-const osMessage = (e: NodeJS.ErrnoException): string => (e && e.code ? String(e.message).replace(/, \w+ '.*$/, '') : String(e && e.message || e));
+export const osMessage = (e: NodeJS.ErrnoException): string => (e && e.code ? String(e.message).replace(/, \w+ '.*$/, '') : String(e && e.message || e));
+
+/* A path a client names for a file operation (rename-file, the fs-* commands): absolute, ~/…, or notesDir-relative
+   with no empty, . or .. segment. Lexical only; nothing is resolved. Throws ProtoError bad_request. */
+export function lexicalPath(auth: Authority, p: unknown): string {
+  if (typeof p !== 'string' || !p || p.includes('\0')) throw new ProtoError('bad_request', 'a path must be a non-empty string');
+  if (p === '~' || p.startsWith('~/') || p.startsWith('/')) return path.resolve(expandHome(p));
+  if (p.startsWith('name:') || p.split('/').some(x => x === '' || x === '.' || x === '..')) throw new ProtoError('bad_request', `bad path ${JSON.stringify(p)}`);
+  return path.join(auth.notesDir, p);
+}
+/* The parent resolved by the kernel and the last component left alone: what a rename or a delete acts on (a
+   symlink itself, never its target). */
+export function realEntry(p: string): string {
+  try { return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)); } catch (e) { throw new ProtoError('bad_request', osMessage(e)); }
+}
 
 /* An undo tag (R6.19): the group, and for an undo batch the group it undoes (of) and that group's writer (ofCid). */
 export interface UndoTag extends Undo { ofCid?: string | null }
@@ -462,16 +476,9 @@ export class Buffers {
      buffers that are not loaded can follow too. Throws ProtoError. */
   async rename(src: unknown, dst: unknown): Promise<RenameResult> {
     const auth = this.auth;
-    const lexical = (p: unknown): string => {
-      if (typeof p !== 'string' || !p || p.includes('\0')) throw new ProtoError('bad_request', 'src and dst must be non-empty paths');
-      if (p === '~' || p.startsWith('~/') || p.startsWith('/')) return path.resolve(expandHome(p));
-      if (p.startsWith('name:') || p.split('/').some(x => x === '' || x === '.' || x === '..')) throw new ProtoError('bad_request', `bad path ${JSON.stringify(p)}`);
-      return path.join(auth.notesDir, p);
-    };
-    /* The parent resolved by the kernel and the last component left alone: what a rename moves (a symlink itself). */
-    const real = (p: string): string => { try { return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)); } catch (e) { throw new ProtoError('bad_request', osMessage(e)); } };
-    const srcAbs = lexical(src);
-    let dstAbs = lexical(dst);
+    const real = realEntry;
+    const srcAbs = lexicalPath(auth, src);
+    let dstAbs = lexicalPath(auth, dst);
     if (srcAbs === '/') throw new ProtoError('bad_request', 'cannot move /');
     try { if (fs.statSync(dstAbs).isDirectory()) dstAbs = path.join(dstAbs, path.basename(srcAbs)); } catch (e) { /* a new name */ }
     if (auth.refused(dstAbs)) throw new ProtoError('refused_path', REFUSED_DST);
@@ -487,6 +494,8 @@ export class Buffers {
       let r = root; try { r = fs.realpathSync.native(root); } catch (e) { /* not made yet */ }
       if ([root, r].some(x => under(x, srcReal) || under(x, srcAbs))) throw new ProtoError('refused_path', `${srcReal}: holds edwind's directory ${root}`);
     }
+    /* edwind's journals, snapshots and image log are its own: nothing moves out of, into or inside stateDir. */
+    if (auth.inState(srcReal) || auth.inState(dstReal)) throw new ProtoError('refused_path', `${auth.inState(srcReal) ? srcReal : dstReal}: inside edwind's state directory`);
     const dir = st.isDirectory();
     if (this.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
     /* Node has no renameat2: the destination is claimed first (an exclusive create, or mkdir), so a name that

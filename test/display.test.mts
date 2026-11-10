@@ -358,7 +358,7 @@ test('FACES mirror the page\'s stylesheets: index.html, markdown-mode and Org', 
   const fromCss: Record<string, Spec> = {};
   const add = (k: string, sp: Spec) => { fromCss[k] = Object.assign(fromCss[k] || {}, sp); };
   for (const [sel, sp] of rules(style)) if (SEL[sel]) add(SEL[sel], sp);
-  for (const id of ['markdown-css', 'org-css']) {
+  for (const id of ['markdown-css', 'org-css', 'dired-css']) {
     assert.ok(sheets[id], id + ' was registered');
     for (const [sel, sp] of rules(sheets[id])) { const m = /^\.text \.([\w-]+)$/.exec(sel); if (m) add(m[1], sp); }
   }

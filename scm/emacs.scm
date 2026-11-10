@@ -359,6 +359,7 @@ of a line, swap the two characters before point."
    ("M-g i" . consult-imenu)         ("M-g r" . consult-recent-file)
    ("C-x C-b" . list-buffers)
    ("C-x C-f" . find-file)           ("C-x C-s" . save-buffer)
+   ("C-x d" . dired)                 ("C-x C-j" . dired-jump)
    ("C-x C-w" . write-file)          ("C-x C-q" . read-only-mode)
    ("C-x =" . what-cursor-position)  ("M-=" . count-words-region)
    ("C-h k" . describe-key)          ("C-h c" . describe-key-briefly)

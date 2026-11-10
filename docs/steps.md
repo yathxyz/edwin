@@ -409,6 +409,34 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   ssh reaches the same edwind with the user's keys and no new credential. Starting an edwind on the remote host
   (`-a` is local only), and one frame attached to two edwinds at once (`sync.ts` holds one connection per runtime).
 
+## Dired: directories as buffers (edwind done, desktop's own files pending)
+
+Asked 2026-11-10: Emacs's dired, so directories and paths are navigated in Edwin as in Emacs, with the file
+operations.
+
+- **edwind lists and changes directories (`server/fs.mts`).** Five server commands, each taking one object:
+  `fs-list {dir}` (entries with kind, size, mtime, mode and a link's target; at most 10,000), `fs-stat {path}`
+  (the entry, and for a file the canonical id a frame opens it under), `fs-delete {path, recursive}`,
+  `fs-copy {src, dst}` and `fs-mkdir {path}`. Renaming stays `rename-file`. They answer to the path authority
+  (`server/paths.mts`): nothing in or on the refusal list is listed or touched, a change must lie inside the
+  writable paths, edwind's own directories and anything that holds them are never an operand, and a link is
+  removed or copied as a link, never its target. Delete is permanent; copy and rename never overwrite.
+- **`src/dired.ts`** draws a listing (mode, size, date, name; directories first, dot files shown) in a read-only
+  `dired-mode` buffer named after the directory, one per directory. Motion-state keys: `RET`
+  open or enter, `-` up, `g r` refresh, `q` quit, `m` `u` `U` `t` marks, `d` then `x` flag and delete, `D`
+  delete, `R` rename or move, `C` copy, `+` new directory, `Y` copy the path. `SPC f d` and `C-x d` ask for a
+  directory, `dired-jump` (`C-x C-j`) lists the current buffer's with point on its file. A file needs one `y`
+  to delete, a directory with contents a typed `yes`.
+- **`find-file` reads a path.** `SPC f f` starts from the current buffer's directory and completes that
+  directory's contents; `TAB` walks into the highlighted name, `//` and `/~` restart the path as in Emacs.
+  A directory opens as a listing. The minibuffer gained `boundary` (`EdMiniOpts`): where the completed field of
+  the input starts, here after the last `/`. Recent files stay on `SPC f r`.
+- **Not yet:** the desktop program (`edwin`, attached or not) has no dired and keeps the old `find-file`;
+  wdired, chmod, compression, shell commands, previews and a trash are
+  not planned for this step.
+
+Suites: `test/fs.test.mts`, `test/dired.test.mts` (check `edit-dired`).
+
 ## pi agents: Edwin's AI on pi (done)
 
 Asked 2026-11-09: pi in place of gptel, using an existing agent framework instead of Edwin's own. The model layer's

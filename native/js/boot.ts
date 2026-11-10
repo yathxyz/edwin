@@ -9,7 +9,7 @@
 'use strict';
 const N = globalThis.__n;
 /* The core files, in load order: host-node.cts's FILES (a test keeps the two equal). */
-const FILES = ['scheme', 'runtime', 'text', 'editor-core', 'editor-prims', 'evil-core', 'pool', 'complete', 'extras', 'stack', 'ai', 'evil-ex', 'org', 'markdown', 'ot', 'sync', 'display'];
+const FILES = ['scheme', 'runtime', 'text', 'editor-core', 'editor-prims', 'evil-core', 'pool', 'complete', 'extras', 'stack', 'ai', 'evil-ex', 'org', 'markdown', 'dired', 'ot', 'sync', 'display'];
 
 const host = globalThis.EdNativeHost.createHost();
 globalThis.EdHost = host;

@@ -66,6 +66,14 @@ export class Authority {
   }
   /* Nothing in, on or above a refused path (the rule of POST /api/mv). */
   refused(real: string): boolean { return this.realRefuse.some(r => under(real, r) || under(r, real)) || this.refuse.some(r => under(real, r) || under(r, real)); }
+  /* In or on a refused path. A directory above one is not: it lists, and shows the refused name and nothing of
+     its inside. */
+  inRefused(real: string): boolean { return this.realRefuse.some(r => under(real, r)) || this.refuse.some(r => under(real, r)); }
+  /* In or on edwind's state directory (journals, snapshots, the image log), by either spelling. */
+  inState(real: string): boolean {
+    let r = this.stateDir; try { r = fs.realpathSync.native(r); } catch (e) { /* not made yet */ }
+    return under(real, r) || under(real, this.stateDir);
+  }
   /* A read of REAL: anywhere but the refusal list. Throws PathError refused_path. */
   checkRead(real: string): string { if (this.refused(real)) throw new PathError('refused_path', `${real}: refused`); return real; }
   /* A write of REAL (save, create, rename, delete). Throws PathError refused_path. */

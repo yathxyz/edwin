@@ -847,12 +847,15 @@ interface EdBuffer extends SchemeForeign {
   _foldVer?: number;
   _foldPre?: number[] | null;
   agenda?: unknown;
+  /* a directory listing (dired.ts) */
+  dired?: unknown;
   capture?: { tpl: unknown; win: EdWinConfig } | null;
   _cycle?: unknown;
   _gcycle?: unknown;
   _olx?: unknown;
   _fences?: unknown;
   _mlx?: unknown;
+  _dlx?: unknown;
   _mdf?: unknown;
   _mdfm?: unknown;
   /* pool.ts: the word index and running jobs */
@@ -1086,6 +1089,9 @@ interface EdMiniOpts {
   listOrder?: boolean;
   annotate?: ((cand: string) => string) | null;
   label?: (cand: string) => string;
+  /* where the completed field starts in the input (a path's last component): the candidates complete what
+     follows, and what is before stays as typed */
+  boundary?: (input: string) => number;
   [opt: string]: unknown;
 }
 /* E.mini: the minibuffer being read. */
@@ -1347,6 +1353,10 @@ interface EdHooks {
   mouseDown?: ((b: EdBuffer, pos: number, ev?: { button?: number; shiftKey?: boolean; ctrlKey?: boolean; altKey?: boolean; detail?: number }) => void) | null;
   mouseDrag?: ((b: EdBuffer, from: number, p: number) => void) | null;
   miniExit?: ((m: EdMini) => void) | null;
+  /* directories (dired.ts): read a path with the names of its directory as candidates (null: this Edwin has
+     no directories), and show NAME when it is a directory (null: it is not one, visit it) */
+  readFileName?: ((prompt: string) => Promise<string> | null) | null;
+  findDirectory?: ((name: string) => unknown) | null;
   /* the files offered by find-file, and the file visits (stack.ts) */
   recentFiles?: (() => string[]) | null;
   visited?: ((b: EdBuffer, name: string, fresh: boolean) => void) | null;
@@ -2167,7 +2177,7 @@ interface EdClaudeRuntime {
 
 /* ---------- globals ----------
    Set by the file named; read by the files after it in the load order (README: scheme runtime text
-   editor-core editor-prims evil-core pool complete extras stack ai evil-ex org markdown ot sync display,
+   editor-core editor-prims evil-core pool complete extras stack ai evil-ex org markdown dired ot sync display,
    after host-browser.ts or the Node or native host). Module objects are typed as present: the readers that
    may run before them check globalThis.X first. */
 

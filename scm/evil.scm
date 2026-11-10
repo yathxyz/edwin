@@ -1486,6 +1486,26 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "q" 'quit-window
   "RET" 'evil-buffer-menu-visit)
 
+;; Dired, as evil-collection binds it.  j and k move; the marks choose what
+;; D, R and C act on, and with none they act on the file at point.
+(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode)))
+(evil-define-key 'motion 'dired-mode
+  "RET" 'dired-find-file
+  "-" 'dired-up-directory
+  "g r" 'dired-revert
+  "q" 'quit-window
+  "m" 'dired-mark
+  "u" 'dired-unmark
+  "U" 'dired-unmark-all-marks
+  "t" 'dired-toggle-marks
+  "d" 'dired-flag-file-deletion
+  "x" 'dired-do-flagged-delete
+  "D" 'dired-do-delete
+  "R" 'dired-do-rename
+  "C" 'dired-do-copy
+  "+" 'dired-create-directory
+  "Y" 'dired-copy-filename-as-kill)
+
 ;; Surround, snipe and comments take s, S and gc from the default bindings above.
 (define-key evil-normal-state-map "s" 'evil-snipe-s)
 (define-key evil-normal-state-map "S" 'evil-snipe-S)
