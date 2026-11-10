@@ -15,10 +15,10 @@
 // `brain`.
 //
 // The token is a LoadCredential file, read for each request and never logged; it is not among the credentials
-// Scheme can name (models.credentials). Plain http goes only to this host: loopback, or an address one of its
-// interfaces holds, checked when the request is made.
+// Scheme can name (models.credentials). Plain http goes only to this host: loopback, or an address the request
+// can also leave from, which the kernel grants only for an address of this host.
 import fs from 'node:fs';
-import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -99,9 +99,6 @@ export function recordOf(id: string, rec: ParseResult | null, scope: string): Pr
   return out;
 }
 const hashOf = (record: ProjectedFile): string => crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex');
-/* Whether HOST, a URL's hostname, is an address of this machine. */
-const localAddress = (host: string): boolean => { const h = host.replace(/^\[|\]$/g, ''); return Object.values(os.networkInterfaces()).some(list => (list || []).some(a => a.address === h)); };
-
 export class Projector {
   declare server: Server; declare log: Log; declare notes: Notes;
   declare url: URL; declare credential: Credential; declare scope: string;
@@ -215,11 +212,15 @@ export class Projector {
   send(record: ProjectedFile): Promise<number> {
     return new Promise((resolve, reject) => {
       const u = this.url;
-      if (u.protocol === 'http:' && !isLoopback(u.href) && !localAddress(u.hostname)) { reject(new Error(`plain http only to this host, and ${u.hostname} is not an address of it`)); return; }
+      /* Plain http only to this host. Off loopback, the request leaves from the address it goes to, and the
+         kernel binds a socket only to an address this host holds: the check is the connection itself. */
+      const host = u.hostname.replace(/^\[|\]$/g, '');
+      const local = u.protocol === 'http:' && !isLoopback(u.href);
+      if (local && !net.isIP(host)) { reject(new Error(`plain http only to this host: ${host} must be one of its addresses, as a number`)); return; }
       const token = readSecret(this.credential);
       if (!token) { reject(new Error(`the credential ${this.credential.name} is not readable`)); return; }
       const body = Buffer.from(JSON.stringify(record));
-      const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', timeout: REQUEST_TIMEOUT_MS, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': body.length } }, res => {
+      const req = (u.protocol === 'https:' ? https : http).request(u, { method: 'POST', timeout: REQUEST_TIMEOUT_MS, ...(local ? { localAddress: host } : {}), headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': body.length } }, res => {
         const chunks: Buffer[] = [];
         let size = 0;
         res.on('data', (d: Buffer) => { if (size < ANSWER_BYTES) { chunks.push(d); size += d.length; } });
@@ -233,7 +234,7 @@ export class Projector {
       });
       this.request = req;
       req.on('timeout', () => req.destroy(new Error('brain did not answer in time')));
-      req.on('error', e => { this.request = null; reject(e); });
+      req.on('error', (e: NodeJS.ErrnoException) => { this.request = null; reject(local && e.code === 'EADDRNOTAVAIL' ? new Error(`plain http only to this host, and ${host} is not an address of it`) : e); });
       req.end(body);
     });
   }

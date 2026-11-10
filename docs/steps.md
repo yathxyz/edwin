@@ -439,9 +439,10 @@ commands still read the old index; asking brain instead is the next step.
 - **Scope.** `#+brain_scope: work.notes` in a file's header; otherwise `brain.scope` (default `self`).
 - **Config.** `edit.json` `brain: {url, credential, scope}`; in NixOS `services.edwind.brain.{url, tokenFile,
   scope}`. The token is a LoadCredential file read for each request. It is not among the credentials Scheme can
-  name, and the config refuses a name that is. Plain http is sent only to loopback or to an address one of this
-  host's interfaces holds, checked when the request is made, so `http://10.100.0.2:7676` works on the host that
-  holds that address and nowhere else.
+  name, and the config refuses a name that is. Plain http is sent only to loopback or to an address of this
+  host: the request is bound to leave from the address it goes to, which the kernel allows only for an address
+  the host holds, so `http://10.100.0.2:7676` works on the host that holds that address and nowhere else. (The
+  first version listed the interfaces instead, which the unit's RestrictAddressFamilies forbids.)
 - **The index tells its listeners.** `Notes.onChange` is called after every change of the index. The projector
   compares the whole index with the ledger then (hashes are cached per parse), so it needs no per-file event and
   cannot miss one.
