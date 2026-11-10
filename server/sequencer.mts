@@ -22,6 +22,11 @@ export const HIST_MIN_MS = 24 * 3600 * 1000;
 export const HIST_MAX_BYTES = 32 * 1024 * 1024;
 /* Every HASH_EVERY versions ack and edits carry the text hash (R7.14). */
 export const HASH_EVERY = 50;
+/* Past HASH_SPAN characters the interval grows with the text: hashing takes about 18 ns a character on edwind's
+   event loop and on every frame's main thread, so a 10 MB buffer stalled every client for 200 ms each 50 edits.
+   The interval stays a multiple of HASH_EVERY, and a client checks a hash only when one is sent (R7.14). */
+export const HASH_SPAN = 256 * 1024;
+export const hashDue = (ver: number, len: number): boolean => ver % (HASH_EVERY * Math.max(1, Math.ceil(len / HASH_SPAN))) === 0;
 
 /* An edit as the session checked it (R7.11). */
 export interface EditRequest { base: number; seq: number; ops: Op[]; undo: Undo | undefined }
@@ -66,13 +71,14 @@ export class Sequencer {
 
   /* Check and apply OPS (already against the current text) to SB as one sequenced batch by BY.
      Returns the history entry. Throws ProtoError bad_edit with nothing applied (every op is checked
-     against a string copy before the rope changes). */
+     against the text before the rope changes). */
   applyBatch(sb: SBuf, ops: Op[], by: By, { cid = null, seq = null, undo = null }: BatchOpts = {}): HistEntry {
     const Ed = this.Ed;
     /* A thread holding SB (R4.41) has its pending edits sequenced first, so the history stays in rope order. */
     if (sb.hold && this.flushHold) this.flushHold(sb);
-    const text = sb.ed.rope.toString();
-    try { OT.apply(text, ops); } catch (e) { throw new ProtoError('bad_edit', e.message); }
+    /* OT.check reads one op off the rope itself; joining the rope into a string first cost a 10 MB buffer 5 ms
+       an edit. */
+    try { OT.check(sb.ed.rope, ops); } catch (e) { throw new ProtoError('bad_edit', e.message); }
     const len = sb.ed.rope.length;
     const anchorsBefore = anchorsSnapshot(sb);
     Ed.withOrigin(originOf(by), () => {
@@ -127,7 +133,7 @@ export class Sequencer {
     }
   }
 
-  hashIf(sb: SBuf): number | undefined { return sb.ver % HASH_EVERY === 0 ? OT.hash(sb.ed.rope) : undefined; }
+  hashIf(sb: SBuf): number | undefined { return hashDue(sb.ver, sb.ed.rope.length) ? OT.hash(sb.ed.rope) : undefined; }
 
   /* One `edit` from CLIENT (R7.11, R7.15). Resolves after the ack is queued. */
   async edit(client: Client, sb: SBuf, msg: EditRequest): Promise<void> {
@@ -202,7 +208,7 @@ export class Sequencer {
   replay(client: Client, sb: SBuf, since: number): void {
     for (const b of sb.hist) {
       if (b.ver <= since) continue;
-      const h = b.ver % HASH_EVERY === 0 && b.ver === sb.ver ? OT.hash(sb.ed.rope) : undefined;
+      const h = b.ver === sb.ver && hashDue(b.ver, sb.ed.rope.length) ? OT.hash(sb.ed.rope) : undefined;
       if (b.cid === client.cid) client.send(h === undefined ? { t: 'ack', buf: sb.id, seq: b.seq, ver: b.ver } : { t: 'ack', buf: sb.id, seq: b.seq, ver: b.ver, h });
       else client.sendBulkish(h === undefined ? { t: 'edits', buf: sb.id, ver: b.ver, ops: b.ops, by: b.by } : { t: 'edits', buf: sb.id, ver: b.ver, ops: b.ops, by: b.by, h });
     }

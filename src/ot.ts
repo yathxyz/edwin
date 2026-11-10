@@ -55,7 +55,13 @@ function apply(text: EdText, ops: EdOTOp[]) {
 }
 /* Check OPS against TEXT without building the result for a string: the length and the pieces are what
    a rope-backed buffer needs. Returns the length after the ops. */
-function check(text: EdText, ops: EdOTOp[]) { return apply(text, ops).length; }
+function check(text: EdText, ops: EdOTOp[]) {
+  if (!Array.isArray(ops)) throw new OTError('bad_edit', 'ops is not an array');
+  /* One op, as a keystroke sends, is checked on TEXT itself: apply would join a rope into one string first,
+     which cost a 10 MB buffer 5 ms an edit. */
+  if (ops.length === 1) { checkOp(text, ops[0]); return text.length - ops[0][1].length + ops[0][2].length; }
+  return apply(text, ops).length;
+}
 /* The inverse of OPS: each op inverted and the order reversed (R6.16). */
 function invert(ops: EdOTOp[]) { const out: EdOTOp[] = []; for (let i = ops.length - 1; i >= 0; i--) { const [p, d, n] = ops[i]; out.push([p, n, d]); } return out; }
 /* Length change of OPS. */
