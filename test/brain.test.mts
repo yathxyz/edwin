@@ -24,29 +24,29 @@ const require = createRequire(import.meta.url);
 const { createHost, loadEdwin, memoryStorage } = require('../src/host-node.cts');
 
 const TOKEN = 'brain-read-token-for-the-tests-0123456789', TASK_TOKEN = 'brain-task-token-for-the-tests-9876543210';
-interface Node { id: string; kind: string; title: string; aliases?: string[]; scope: string; org_id?: string; path?: string; body?: string; props?: Record<string, unknown>; links?: string[][] }
+interface Node { id: string; kind: string; title: string; aliases?: string[]; tags: string[]; org_id?: string; path?: string; body?: string; props?: Record<string, unknown>; links?: string[][] }
 const id = (n: number, tail = '') => `${String(n).repeat(8)}-0000-4000-8000-${(tail || String(n).repeat(12)).padStart(12, '0')}`;
-const ALPHA: Node = { id: id(1), kind: 'note', title: 'Alpha note', aliases: ['First letter'], scope: 'self', org_id: 'a-file', path: 'alpha.org' };
-const SECTION: Node = { id: id(2), kind: 'note', title: 'Section', scope: 'self', org_id: 'a-section', path: 'alpha.org' };
-const BETA: Node = { id: id(3), kind: 'note', title: 'Beta', scope: 'self', org_id: 'b-file', path: 'sub/beta.md' };
-const DEEP: Node = { id: id(4), kind: 'note', title: 'Deep heading', scope: 'self', org_id: 'deep-id', path: 'deep/only.org' };
-const TASK: Node = { id: id(5), kind: 'task', title: 'Ship the thing', scope: 'work', body: 'Do it.\n* a star line of the body\n', props: { status: 'open', priority: 2, nested: { x: 1 } } };
-const MEET_NOTE: Node = { id: id(6), kind: 'note', title: 'Meeting', scope: 'self', org_id: 'm-file', path: 'meeting.org' };
-const MEET_TASK: Node = { id: id(7), kind: 'task', title: 'Meeting', scope: 'work' };
-const STAND_1: Node = { id: id(8, 'a1'), kind: 'memory', title: 'Standup', scope: 'self' };
-const STAND_2: Node = { id: id(8, 'a2'), kind: 'memory', title: 'Standup', scope: 'self' };
-const EXACT: Node = { id: id(8, 'b1'), kind: 'reference', title: 'Note', scope: 'ref' };
-const WIP: Node = { id: id(8, 'b2'), kind: 'reference', title: '[WIP] Roadmap', scope: 'ref' };
+const ALPHA: Node = { id: id(1), kind: 'note', title: 'Alpha note', aliases: ['First letter'], tags: ['roam'], org_id: 'a-file', path: 'alpha.org' };
+const SECTION: Node = { id: id(2), kind: 'note', title: 'Section', tags: ['roam'], org_id: 'a-section', path: 'alpha.org' };
+const BETA: Node = { id: id(3), kind: 'note', title: 'Beta', tags: ['roam'], org_id: 'b-file', path: 'sub/beta.md' };
+const DEEP: Node = { id: id(4), kind: 'note', title: 'Deep heading', tags: ['roam'], org_id: 'deep-id', path: 'deep/only.org' };
+const TASK: Node = { id: id(5), kind: 'task', title: 'Ship the thing', tags: ['prv'], body: 'Do it.\n* a star line of the body\n', props: { status: 'open', priority: 2, nested: { x: 1 } } };
+const MEET_NOTE: Node = { id: id(6), kind: 'note', title: 'Meeting', tags: ['roam'], org_id: 'm-file', path: 'meeting.org' };
+const MEET_TASK: Node = { id: id(7), kind: 'task', title: 'Meeting', tags: ['prv'] };
+const STAND_1: Node = { id: id(8, 'a1'), kind: 'memory', title: 'Standup', tags: ['own'] };
+const STAND_2: Node = { id: id(8, 'a2'), kind: 'memory', title: 'Standup', tags: ['own'] };
+const EXACT: Node = { id: id(8, 'b1'), kind: 'reference', title: 'Note', tags: ['ref'] };
+const WIP: Node = { id: id(8, 'b2'), kind: 'reference', title: '[WIP] Roadmap', tags: [] };
 /* FAR is a note no case opens before the one that follows a link to it; brain still has VANISHED and MISLAID,
    whose file and directory are gone. */
-const FAR: Node = { id: id(8, 'c1'), kind: 'note', title: 'Faraway', scope: 'self', org_id: 'far-id', path: 'far/away.org' };
-const VANISHED: Node = { id: id(8, 'c2'), kind: 'note', title: 'Vanished', scope: 'self', org_id: 'vanished-id', path: 'vanished.org' };
-const MISLAID: Node = { id: id(8, 'c3'), kind: 'note', title: 'Mislaid', scope: 'self', org_id: 'mislaid-id', path: 'nowhere/mislaid.org' };
+const FAR: Node = { id: id(8, 'c1'), kind: 'note', title: 'Faraway', tags: ['roam'], org_id: 'far-id', path: 'far/away.org' };
+const VANISHED: Node = { id: id(8, 'c2'), kind: 'note', title: 'Vanished', tags: ['roam'], org_id: 'vanished-id', path: 'vanished.org' };
+const MISLAID: Node = { id: id(8, 'c3'), kind: 'note', title: 'Mislaid', tags: ['roam'], org_id: 'mislaid-id', path: 'nowhere/mislaid.org' };
 const NODES = [ALPHA, SECTION, BETA, DEEP, TASK, MEET_NOTE, MEET_TASK, STAND_1, STAND_2, EXACT, WIP, FAR, VANISHED, MISLAID];
 ALPHA.links = [['linked from', BETA.id], ['linked from', TASK.id], ['links_to', SECTION.id]];
 TASK.links = [['about', ALPHA.id]];
 const byId = (i: string) => NODES.find(n => n.id === i)!;
-const row = (n: Node, alias: string | null = null) => ({ id: n.id, kind: n.kind, title: n.title, alias, scope: n.scope, org_id: n.org_id ?? null, path: n.path ?? null, updated_at: '2026-11-10T10:00:00Z' });
+const row = (n: Node, alias: string | null = null) => ({ id: n.id, kind: n.kind, title: n.title, alias, tags: n.tags, org_id: n.org_id ?? null, path: n.path ?? null, updated_at: '2026-11-10T10:00:00Z' });
 /* brain's GET /v1/titles: the nodes whose title or an alias holds q; with no q the two changed last. The query
    "al" is answered late and wrongly, as an answer that the next letters overtake. */
 const SLOW_MS = 400;
@@ -60,50 +60,54 @@ function nodeOf(ref: string) {
   const n = NODES.find(x => x.id === ref || (x.org_id && 'org-id:' + x.org_id === ref)), t = TASKS.find(x => x.id === ref);
   if (t) return { ...taskView(t), identifiers: [], links: [] };
   if (!n) return null;
-  return { id: n.id, kind: n.kind, title: n.title, body: n.body ?? null, props: n.kind === 'note' ? { sources: [n.path] } : n.props ?? {}, scope: n.scope, trust: 'owner', updated_at: '2026-11-10T10:00:00Z',
+  return { id: n.id, kind: n.kind, title: n.title, body: n.body ?? null, props: n.kind === 'note' ? { sources: [n.path] } : n.props ?? {}, tags: n.tags, trust: 'owner', updated_at: '2026-11-10T10:00:00Z',
     identifiers: n.org_id ? [{ scheme: 'org-id', value: n.org_id }] : [],
-    links: (n.links || []).map(([rel, to], i) => ({ rel, forward: rel !== 'linked from', edge_id: `e${i}`, id: to, kind: byId(to).kind, title: byId(to).title, scope: byId(to).scope })) };
+    links: (n.links || []).map(([rel, to], i) => ({ rel, forward: rel !== 'linked from', edge_id: `e${i}`, id: to, kind: byId(to).kind, title: byId(to).title, tags: byId(to).tags })) };
 }
 
 /* brain's tasks. A task keeps what it was at each revision, as brain's history does. */
-interface Task { id: string; number: number; title: string; body: string | null; scope: string; trust: string; revision: number; props: Record<string, unknown>; history: Map<number, Record<string, unknown>> }
+interface Task { id: string; number: number; title: string; body: string | null; tags: string[]; trust: string; revision: number; props: Record<string, unknown>; history: Map<number, Record<string, unknown>> }
 type Send = (status: number, body: unknown) => void;
 let TASKS: Task[] = [];
 /* Every write brain was sent. */
 const written: { method: string; path: string; auth: string | undefined; session: unknown; body: Record<string, unknown> }[] = [];
-const fieldsOf = (t: Task): Record<string, unknown> => ({ title: t.title, body: t.body, scope: t.scope, trust: t.trust, ...t.props });
-function task(number: number, title: string, scope: string, props: Record<string, unknown>, trust = 'owner', revision = 1): Task {
-  const t: Task = { id: id(0, String(number)), number, title, body: null, scope, trust, revision, props, history: new Map() };
+const fieldsOf = (t: Task): Record<string, unknown> => ({ title: t.title, body: t.body, tags: t.tags, trust: t.trust, ...t.props });
+/* Tags as brain keeps them: lower case, each once, in order. */
+const tagList = (x: unknown): string[] => [...new Set((Array.isArray(x) ? x : []).map(t => String(t).toLowerCase()))].sort();
+function task(number: number, title: string, tags: string[], props: Record<string, unknown>, trust = 'owner', revision = 1): Task {
+  const t: Task = { id: id(0, String(number)), number, title, body: null, tags, trust, revision, props, history: new Map() };
   t.history.set(revision, fieldsOf(t));
   return t;
 }
 /* The tasks as each case finds them, in brain's order. Today is Tuesday 10 November 2026. */
 function resetTasks() {
   TASKS = [
-    task(1, 'Pay the invoice', 'work', { state: 'todo', priority: 'A', due: '2026-11-07' }, 'owner', 3),
-    task(2, 'Call the plumber', 'work', { state: 'todo', scheduled: '2026-11-10T14:30', tags: ['home', 'phone'] }),
-    task(3, 'Write the report', 'work', { state: 'next', due: '2026-11-12' }, 'agent', 2),
-    task(4, 'Read the paper', 'ref', { state: 'next' }),
-    task(5, 'Water the plants', 'pub', { state: 'waiting', scheduled: '2026-11-08', recur: '+1w' }),
-    task(6, 'Learn the cello', 'pub', { state: 'someday' }),
-    task(7, 'Closed long ago', 'work', { state: 'done', closed: '2026-11-01T10:00:00Z' }),
+    task(1, 'Pay the invoice', ['prv'], { state: 'todo', priority: 'A', due: '2026-11-07' }, 'owner', 3),
+    task(2, 'Call the plumber', ['home', 'phone', 'prv'], { state: 'todo', scheduled: '2026-11-10T14:30' }),
+    task(3, 'Write the report', ['prv'], { state: 'next', due: '2026-11-12' }, 'agent', 2),
+    task(4, 'Read the paper', ['ref'], { state: 'next' }),
+    task(5, 'Water the plants', [], { state: 'waiting', scheduled: '2026-11-08', recur: '+1w' }),
+    task(6, 'Learn the cello', [], { state: 'someday' }),
+    task(7, 'Closed long ago', ['prv'], { state: 'done', closed: '2026-11-01T10:00:00Z' }),
   ];
   written.length = 0;
 }
 const taskN = (n: number) => TASKS.find(t => t.number === n)!;
-const taskView = (t: Task) => ({ id: t.id, kind: 'task', title: t.title, body: t.body, props: t.props, scope: t.scope, trust: t.trust, revision: t.revision, number: t.number, created_by_title: t.trust === 'owner' ? 'Yanni' : 'agents@test', updated_at: '2026-11-10T08:00:00Z' });
+const taskView = (t: Task) => ({ id: t.id, kind: 'task', title: t.title, body: t.body, props: t.props, tags: t.tags, trust: t.trust, revision: t.revision, number: t.number, created_by_title: t.trust === 'owner' ? 'Yanni' : 'agents@test', updated_at: '2026-11-10T08:00:00Z' });
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const plusDays = (day: string, n: number) => new Date(Date.parse(day.slice(0, 10) + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
 /* brain's PATCH: with base_revision a field left as it was then is not written, and one that changed on both
-   sides is written and listed as a clash. Done on a task that repeats moves its dates a week on instead. */
+   sides is written and listed as a clash. add_tags and remove_tags change the tags the task has now. Done on a
+   task that repeats moves its dates a week on instead. */
 function change(t: Task, fields: Record<string, unknown>) {
   const base = typeof fields.base_revision === 'number' ? t.history.get(fields.base_revision) : null, clashes: unknown[] = [];
   for (const [k, v] of Object.entries(fields)) {
-    if (k === 'base_revision') continue;
+    if (k === 'base_revision' || k === 'add_tags' || k === 'remove_tags') continue;
     const was = fieldsOf(t)[k];
     if (base) { if (same(v, base[k])) continue; if (!same(was, base[k])) clashes.push({ field: k, was: was ?? null, base: base[k] ?? null, now: v }); }
-    if (k === 'title' || k === 'scope') t[k] = String(v); else if (k === 'body') t.body = v as string | null; else if (v === null) delete t.props[k]; else t.props[k] = v;
+    if (k === 'title') t.title = String(v); else if (k === 'tags') t.tags = tagList(v); else if (k === 'body') t.body = v as string | null; else if (v === null) delete t.props[k]; else t.props[k] = v;
   }
+  if (fields.add_tags || fields.remove_tags) t.tags = tagList([...t.tags.filter(x => !tagList(fields.remove_tags).includes(x)), ...tagList(fields.add_tags)]);
   if (t.props.state === 'done' && t.props.recur) { t.props.state = 'todo'; for (const k of ['due', 'scheduled']) if (typeof t.props[k] === 'string') t.props[k] = plusDays(t.props[k] as string, 7); }
   t.revision++; t.history.set(t.revision, fieldsOf(t));
   return clashes;
@@ -123,8 +127,9 @@ function agendaOf(open: Task[], from: string, days: number) {
   }
   return { from, days, overdue, dated: Object.keys(dated).sort().map(date => ({ date, tasks: dated[date] })), next };
 }
-/* The task routes. brain takes the read token on the two that read and the task token on the two that write,
-   and this token is cleared for three scopes. */
+/* The task routes. brain takes the read token on the two that read and the task token on the two that write.
+   It has no scopes, and says so to a write that names one; the tag `own` hides a task, and the task token is
+   not cleared for it. */
 function tasksRoute(method: string, u: URL, auth: string | undefined, session: unknown, body: Record<string, unknown>, send: Send) {
   if (method === 'GET') {
     if (auth !== `Bearer ${TOKEN}`) return send(403, { error: 'this token does not read' });
@@ -135,10 +140,11 @@ function tasksRoute(method: string, u: URL, auth: string | undefined, session: u
   }
   written.push({ method, path: u.pathname, auth, session, body });
   if (auth !== `Bearer ${TASK_TOKEN}`) return send(403, { error: 'this token does not write tasks' });
-  if (typeof body.scope === 'string' && !['pub', 'ref', 'work'].includes(body.scope)) return send(403, { error: `scope ${body.scope} is outside this token` });
+  if ('scope' in body) return send(400, { error: 'scope is no more: a record carries tags' });
+  if ([body.tags, body.add_tags].flatMap(tagList).includes('own')) return send(403, { error: 'outside your clearance: own' });
   if (method === 'POST' && u.pathname === '/v1/tasks') {
-    const { title, body: text, scope, ...props } = body;
-    const t = task(Math.max(...TASKS.map(x => x.number)) + 1, String(title), String(scope || 'work'), { state: 'todo', ...props });
+    const { title, body: text, tags, ...props } = body;
+    const t = task(Math.max(...TASKS.map(x => x.number)) + 1, String(title), tagList(tags), { state: 'todo', ...props });
     t.body = typeof text === 'string' ? text : null; TASKS.push(t);
     return send(201, taskView(t));
   }
@@ -165,7 +171,7 @@ function feedRoute(u: URL, auth: string | undefined, res: http.ServerResponse, s
     if (feedAway) return send(503, { error: 'brain is away' });
     if (auth !== `Bearer ${TOKEN}`) return send(403, { error: 'this token does not read' });
     if (after === 'now') return send(200, { changes: [], cursor: String(feedAt) });
-    const node = { id: taskN(1).id, kind: 'task', title: FEED_TITLE, props: {}, scope: 'work', trust: 'owner', revision: 9, deleted_at: null, updated_at: '2026-11-10T08:00:00Z', number: 1 };
+    const node = { id: taskN(1).id, kind: 'task', title: FEED_TITLE, props: {}, tags: ['prv'], trust: 'owner', revision: 9, deleted_at: null, updated_at: '2026-11-10T08:00:00Z', number: 1 };
     send(200, Number(after) < feedAt ? { changes: [{ cursor: String(feedAt), op: 'update', at: '2026-11-10T08:00:00Z', node }], cursor: String(feedAt) } : { changes: [], cursor: after });
   };
   if (feedAway || after === 'now' || Number(after) < feedAt || !u.searchParams.get('wait')) return answer();
@@ -313,7 +319,7 @@ test('brain-node-find: candidates follow the typing, a late answer is dropped, a
   assert.equal(Ed.getBuffer('alpha.org'), null, 'the note’s file is not open');
   await ask('SPC n r f');
   assert.deepEqual(candidates(), ['Ship the thing', 'Alpha note'], 'with nothing typed, the nodes changed last, in brain’s order');
-  assert.equal(annotation('Ship the thing'), 'task       work'); assert.equal(annotation('Alpha note'), 'note       alpha.org');
+  assert.equal(annotation('Ship the thing'), 'task       :prv:'); assert.equal(annotation('Alpha note'), 'note       alpha.org');
   // "al" is answered late; by then the input is "alpha" and its own answer is shown.
   await type('al'); await sleep(200); await type('pha');
   await until(() => asked.some(a => a.url.startsWith('/v1/titles?q=alpha&')), 'brain is asked for the input');
@@ -346,7 +352,7 @@ test('nodes with one title are told apart by kind, then by the end of their id',
   await type('meeting');
   await until(() => candidates().length === 2 && candidates()[0].startsWith('Meeting'), 'both meetings');
   assert.deepEqual(candidates(), ['Meeting (note)', 'Meeting (task)']);
-  assert.equal(annotation('Meeting (note)'), 'note       meeting.org'); assert.equal(annotation('Meeting (task)'), 'task       work');
+  assert.equal(annotation('Meeting (note)'), 'note       meeting.org'); assert.equal(annotation('Meeting (task)'), 'task       :prv:');
   await clear(); await type('standup');
   await until(() => candidates().length === 2 && candidates()[0].startsWith('Standup'), 'both standups');
   assert.deepEqual(candidates(), ['Standup (memory 000000a1)', 'Standup (memory 000000a2)']);
@@ -417,7 +423,7 @@ test('a node that is not a note opens as a record: read only, in Motion state, R
   await L.call('brain-node-find', [TASK.id]);
   const b = cur();
   assert.equal(b.name, '*brain: Ship the thing*'); assert.equal(b.mode, 'brain-mode'); assert.equal(b.readOnly, true); assert.equal(b.evilState, 'motion');
-  assert.equal(b.text, `#+title: Ship the thing\ntask · work · owner\n\nstatus: open\npriority: 2\n\nDo it.\n * a star line of the body\n\n* about (1)\n** [[brain:${ALPHA.id}][Alpha note]] · note\n`);
+  assert.equal(b.text, `#+title: Ship the thing\ntask · :prv: · owner\n\nstatus: open\npriority: 2\n\nDo it.\n * a star line of the body\n\n* about (1)\n** [[brain:${ALPHA.id}][Alpha note]] · note\n`);
   b.pt = b.text.indexOf('** [[brain:'); await keys('RET');
   await until(() => cur().id === 'alpha.org', 'the note the record links to');
   await L.call('brain-node-find', [TASK.id]);
@@ -654,21 +660,24 @@ test('edwind reads tasks with the read token and writes them with the task token
   for (const bad of [{ state: 'Open' }, { state: 7 }, { tag: 'two words' }, { q: 'x'.repeat(201) }]) assert.equal((await sync.call({ cmd: 'brain-tasks', args: [bad] })).error.condition, 'wrong-type-argument');
   assert.equal(asked[asked.length - 1].url, '/v1/tasks?limit=2&offset=1&state=open&q=zebra-task-words&tag=home', 'a filter that is not one is not left out of a question that is sent');
 
-  const made = await sync.call({ cmd: 'brain-task-add', args: [{ title: 'Quiet-title-words', scope: 'pub', body: 'Quiet-body-words', priority: 'B', tags: ['x'], props: { other: 1 }, client_id: 'c', links: [], identifiers: [], trust: 'owner' }] });
-  assert.equal(made.value.number, 8); assert.equal(made.value.scope, 'pub');
-  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Quiet-title-words', body: 'Quiet-body-words', scope: 'pub', priority: 'B', tags: ['x'] } });
+  const made = await sync.call({ cmd: 'brain-task-add', args: [{ title: 'Quiet-title-words', body: 'Quiet-body-words', priority: 'B', tags: ['x'], props: { other: 1 }, client_id: 'c', links: [], identifiers: [], trust: 'owner' }] });
+  assert.equal(made.value.number, 8); assert.deepEqual(made.value.tags, ['x']);
+  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Quiet-title-words', body: 'Quiet-body-words', priority: 'B', tags: ['x'] } }, 'only the fields of a task are sent');
   const set = await sync.call({ cmd: 'brain-task-set', args: [taskN(8).id, { state: 'next', due: null, base_revision: 1, trust: 'owner', deleted: true, expect_revision: 7, set_props: { other: 1 }, props: {} }] });
   assert.equal(set.value.props.state, 'next'); assert.deepEqual(set.value.clashes, []);
   assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/tasks/${taskN(8).id}`, auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { state: 'next', due: null, base_revision: 1 } }, 'a task is not deleted through edwind, and its trust is not set');
   await sync.call({ cmd: 'brain-task-set', args: ['task:8', { priority: 'A' }] });
   assert.equal(asked[asked.length - 1].url, '/v1/tasks/task%3A8', 'a reference is one path segment');
+  const tagged = await sync.call({ cmd: 'brain-task-set', args: [taskN(8).id, { add_tags: ['y'], remove_tags: ['x'], base_revision: 3 }] });
+  assert.deepEqual(tagged.value.tags, ['y']);
+  assert.deepEqual(lastWrite().body, { add_tags: ['y'], remove_tags: ['x'], base_revision: 3 }, 'a change may add tags and remove them');
 
-  const refused = await sync.call({ cmd: 'brain-task-add', args: [{ title: 'Private', scope: 'self' }] });
-  assert.equal(refused.error.condition, 'brain-refused'); assert.equal(refused.error.report, 'brain: scope self is outside this token');
+  const refused = await sync.call({ cmd: 'brain-task-add', args: [{ title: 'Private', tags: ['own'] }] });
+  assert.equal(refused.error.condition, 'brain-refused'); assert.equal(refused.error.report, 'brain: outside your clearance: own');
   const w = written.length;
-  for (const args of [[{ scope: 'work' }], [{ title: '  ' }], ['a title'], []]) assert.equal((await sync.call({ cmd: 'brain-task-add', args })).error.condition, 'wrong-type-argument');
-  for (const args of [['', { state: 'done' }], [taskN(1).id], [taskN(1).id, 'done'], [7, {}]]) assert.equal((await sync.call({ cmd: 'brain-task-set', args })).error.condition, 'wrong-type-argument');
-  assert.equal(written.length, w, 'what is not a task or a change is not sent');
+  for (const args of [[{ tags: ['prv'] }], [{ title: '  ' }], ['a title'], [], [{ title: 'From an old frame', scope: 'work' }]]) assert.equal((await sync.call({ cmd: 'brain-task-add', args })).error.condition, 'wrong-type-argument');
+  for (const args of [['', { state: 'done' }], [taskN(1).id], [taskN(1).id, 'done'], [7, {}], [taskN(1).id, { state: 'done', scope: 'work' }]]) assert.equal((await sync.call({ cmd: 'brain-task-set', args })).error.condition, 'wrong-type-argument');
+  assert.equal(written.length, w, 'what is not a task or a change, or names a scope, is not sent');
 
   assert.match(child.logs, /brain-write/, 'a write is logged');
   for (const secret of [TOKEN, TASK_TOKEN, 'Quiet-title-words', 'Quiet-body-words', 'zebra-task-words', 'not-passed-on', taskN(8).id]) assert.ok(!child.logs.includes(secret), `${secret} is not in the log`);
@@ -698,19 +707,19 @@ test('SPC m a a: the week from today, what is overdue first and the undated next
   assert.equal(b.text, [
     'Agenda for 7 days from 2026-11-10',
     'Overdue',
-    '  task:1    3 d. ago:   TODO [#A] Pay the invoice  work',
-    '  task:5    Sched. 2x:  WAITING Water the plants  pub',
+    '  task:1    3 d. ago:   TODO [#A] Pay the invoice  :prv:',
+    '  task:5    Sched. 2x:  WAITING Water the plants',
     'Tuesday    10 November 2026',
-    '  task:2    Scheduled:  14:30 TODO Call the plumber  :home:phone:  work',
+    '  task:2    Scheduled:  14:30 TODO Call the plumber  :home:phone:prv:',
     'Wednesday  11 November 2026',
     'Thursday   12 November 2026',
-    '  task:3    Due:        NEXT Write the report  work  by agents@test',
+    '  task:3    Due:        NEXT Write the report  :prv:  by agents@test',
     'Friday     13 November 2026',
     'Saturday   14 November 2026',
     'Sunday     15 November 2026',
     'Monday     16 November 2026',
     'Next',
-    '  task:4    NEXT Read the paper  ref',
+    '  task:4    NEXT Read the paper  :ref:',
     ''].join('\n'));
   assert.equal(lineAt(), 'Tuesday    10 November 2026', 'point is on today');
   assert.equal(asked[asked.length - 1].url, '/v1/agenda?from=2026-11-10&days=7');
@@ -729,33 +738,33 @@ test('SPC m a t: every open task by state, in brain’s order, asked for a page 
   assert.equal(cur().text, [
     'Open tasks (6)',
     'Next (2)',
-    '  task:3    NEXT Write the report  work  by agents@test  due 2026-11-12',
-    '  task:4    NEXT Read the paper  ref',
+    '  task:3    NEXT Write the report  :prv:  by agents@test  due 2026-11-12',
+    '  task:4    NEXT Read the paper  :ref:',
     'To do (2)',
-    '  task:1    TODO [#A] Pay the invoice  work  due 2026-11-07',
-    '  task:2    TODO Call the plumber  :home:phone:  work  scheduled 2026-11-10 14:30',
+    '  task:1    TODO [#A] Pay the invoice  :prv:  due 2026-11-07',
+    '  task:2    TODO Call the plumber  :home:phone:prv:  scheduled 2026-11-10 14:30',
     'Waiting (1)',
-    '  task:5    WAITING Water the plants  pub  scheduled 2026-11-08',
+    '  task:5    WAITING Water the plants  scheduled 2026-11-08',
     'Someday (1)',
-    '  task:6    SOMEDAY Learn the cello  pub',
+    '  task:6    SOMEDAY Learn the cello',
     ''].join('\n'));
-  assert.equal(lineAt(), '  task:3    NEXT Write the report  work  by agents@test  due 2026-11-12', 'point is on the first task');
-  for (let k = 0; k < 200; k++) TASKS.push(task(100 + k, `Filler ${k}`, 'pub', { state: 'hold' }));
+  assert.equal(lineAt(), '  task:3    NEXT Write the report  :prv:  by agents@test  due 2026-11-12', 'point is on the first task');
+  for (let k = 0; k < 200; k++) TASKS.push(task(100 + k, `Filler ${k}`, [], { state: 'hold' }));
   const n = asked.length, was = agenda().agenda;
   await keys('r');
   await until(() => agenda().agenda !== was, 'the list again');
   assert.deepEqual(asked.slice(n).map(a => a.url), ['/v1/tasks?limit=200&offset=0&state=open', '/v1/tasks?limit=200&offset=200&state=open']);
   assert.equal(body()[0], 'Open tasks (206)'); assert.ok(body().includes('Hold (200)'));
-  assert.equal(lineAt(), '  task:3    NEXT Write the report  work  by agents@test  due 2026-11-12', 'point stays on its task');
+  assert.equal(lineAt(), '  task:3    NEXT Write the report  :prv:  by agents@test  due 2026-11-12', 'point stays on its task');
   // Exactly as many as are shown: one more question says that nothing follows the last full page.
-  for (let k = 0; k < 1794; k++) TASKS.push(task(1000 + k, `More ${k}`, 'pub', { state: 'hold' }));
+  for (let k = 0; k < 1794; k++) TASKS.push(task(1000 + k, `More ${k}`, [], { state: 'hold' }));
   const m = asked.length, then = agenda().agenda;
   await keys('r');
   await until(() => agenda().agenda !== then, 'the list again');
   assert.equal(asked[asked.length - 1].url, '/v1/tasks?limit=1&offset=2000&state=open');
   assert.equal(asked.length - m, 11);
   assert.equal(body()[0], 'Open tasks (2000)');
-  TASKS.push(task(5000, 'One too many', 'pub', { state: 'hold' }));
+  TASKS.push(task(5000, 'One too many', [], { state: 'hold' }));
   const last = agenda().agenda;
   await keys('r');
   await until(() => agenda().agenda !== last, 'the list again');
@@ -767,12 +776,12 @@ test('RET opens the task’s record; t, x, s, d and p change the task at point a
   await showTasks('a');
   onTask(1); await keys('RET');
   await until(() => cur().name === '*brain: Pay the invoice*', 'the record');
-  assert.match(cur().text, /^#\+title: Pay the invoice\ntask · work · owner\n\nstate: todo\npriority: A\ndue: 2026-11-07\n/);
+  assert.match(cur().text, /^#\+title: Pay the invoice\ntask · :prv: · owner\n\nstate: todo\npriority: A\ndue: 2026-11-07\n/);
   await showTasks('a');
 
   onTask(1); await saying('task:1: next', () => pick('t', 'n'));
   assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/tasks/${taskN(1).id}`, auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { state: 'next', base_revision: 3 } });
-  assert.equal(lineAt(), '  task:1    3 d. ago:   NEXT [#A] Pay the invoice  work', 'the view is asked for again and point stays on the task');
+  assert.equal(lineAt(), '  task:1    3 d. ago:   NEXT [#A] Pay the invoice  :prv:', 'the view is asked for again and point stays on the task');
   await saying('Invalid key z', () => pick('t', 'z'));
   assert.equal(written.length, 1);
 
@@ -780,47 +789,55 @@ test('RET opens the task’s record; t, x, s, d and p change the task at point a
   assert.deepEqual(lastWrite().body, { state: 'done', base_revision: 1 });
   assert.ok(!agenda().text.includes('task:2 '), 'a closed task leaves the agenda');
   onTask(5); await saying('task:5: done; it repeats, scheduled 2026-11-15', () => keys('x'));
-  assert.equal(lineAt(), '  task:5    Scheduled:  TODO Water the plants  pub', 'a task that repeats moved on, and point with it');
+  assert.equal(lineAt(), '  task:5    Scheduled:  TODO Water the plants', 'a task that repeats moved on, and point with it');
   assert.equal(body()[body().indexOf(lineAt()) - 1], 'Sunday     15 November 2026');
 
   onTask(4); await saying('task:4: scheduled 2026-11-13 09:15', () => answer('s', '2026-11-13 09:15'));
   assert.deepEqual(lastWrite().body, { scheduled: '2026-11-13T09:15', base_revision: 1 });
-  assert.equal(lineAt(), '  task:4    Scheduled:  09:15 NEXT Read the paper  ref');
+  assert.equal(lineAt(), '  task:4    Scheduled:  09:15 NEXT Read the paper  :ref:');
   assert.equal(body()[body().indexOf(lineAt()) - 1], 'Friday     13 November 2026');
   await saying('task:4: due 2026-11-10', () => answer('d', ''));
   assert.deepEqual(lastWrite().body, { due: '2026-11-10', base_revision: 2 }, 'nothing typed is today, and a day has no time');
   await saying('task:4: not scheduled', () => keys('C-u s'));
   assert.deepEqual(lastWrite().body, { scheduled: null, base_revision: 3 });
   assert.equal(E.mini, null, 'C-u asks for no date');
-  assert.equal(lineAt(), '  task:4    Due:        NEXT Read the paper  ref');
+  assert.equal(lineAt(), '  task:4    Due:        NEXT Read the paper  :ref:');
   await saying('task:4: not due', () => L.call('brain-task-due', [false]));
-  assert.deepEqual(body().slice(-3), ['Next', '  task:4    NEXT Read the paper  ref', '']);
+  assert.deepEqual(body().slice(-3), ['Next', '  task:4    NEXT Read the paper  :ref:', '']);
   await saying('Not a date: someday maybe', () => answer('d', 'someday maybe'));
 
   await saying('task:4: priority B', () => pick('p', 'b'));
   assert.deepEqual(lastWrite().body, { priority: 'B', base_revision: 5 });
-  assert.equal(lineAt(), '  task:4    NEXT [#B] Read the paper  ref');
+  assert.equal(lineAt(), '  task:4    NEXT [#B] Read the paper  :ref:');
   await saying('task:4: no priority', () => pick('p', 'SPC'));
   assert.deepEqual(lastWrite().body, { priority: null, base_revision: 6 });
   await keys('q');
 });
 
-test('e and m: a new title, another scope; what brain refuses is said in its words', async () => {
+test('e and :: a new title, tags added and removed; what brain refuses is said in its words', async () => {
   await showTasks('t');
   onTask(4);
   await keys('e'); await until(() => E.mini, 'the minibuffer');
   assert.equal(E.mini.prompt, 'Title: '); assert.equal(E.minibuf.text, 'Read the paper', 'the title is there to edit');
   await saying('task:4: Read the paper twice', () => type(' twice\n'));
   assert.deepEqual(lastWrite().body, { title: 'Read the paper twice', base_revision: 1 });
-  assert.equal(lineAt(), '  task:4    NEXT Read the paper twice  ref');
+  assert.equal(lineAt(), '  task:4    NEXT Read the paper twice  :ref:');
 
-  await keys('m'); await until(() => E.mini, 'the minibuffer');
-  assert.deepEqual(candidates(), ['pub', 'ref', 'work', 'infra']);
-  await saying('task:4: in pub', () => type('pub\n'));
-  assert.deepEqual(lastWrite().body, { scope: 'pub', base_revision: 2 });
+  await keys(':'); await until(() => E.mini, 'the minibuffer');
+  assert.equal(E.mini.prompt, 'Tags (+a -b): '); assert.equal(E.minibuf.text, '');
+  await saying('task:4: :later:paper:', () => type('+later paper -ref\n'));
+  assert.deepEqual(lastWrite().body, { add_tags: ['later', 'paper'], remove_tags: ['ref'], base_revision: 2 });
+  assert.equal(lineAt(), '  task:4    NEXT Read the paper twice  :later:paper:');
+  await saying('task:4: no tags', () => answer(':', '-later -paper'));
+  assert.deepEqual(lastWrite().body, { remove_tags: ['later', 'paper'], base_revision: 3 });
+  assert.equal(lineAt(), '  task:4    NEXT Read the paper twice');
   const shown = agenda().text;
-  await saying('brain: scope infra is outside this token', () => answer('m', 'infra'));
-  assert.equal(taskN(4).scope, 'pub'); assert.equal(agenda().text, shown, 'a refusal changes nothing');
+  await saying('brain: outside your clearance: own', () => answer(':', 'own'));
+  assert.deepEqual(taskN(4).tags, []); assert.equal(agenda().text, shown, 'a refusal changes nothing');
+  const w = written.length;
+  await saying('+ names no tag', () => answer(':', 'a +'));
+  await saying('No tags', () => answer(':', '  '));
+  assert.equal(written.length, w, 'what names no tag is not sent');
 
   await keys('q');
 });
@@ -831,11 +848,11 @@ test('a change is made against the revision shown: brain keeps what changed sinc
   change(taskN(1), { title: 'Pay the big invoice', priority: 'C' });
   onTask(1); await saying('task:1: waiting', () => pick('t', 'w'));
   assert.deepEqual(lastWrite().body, { state: 'waiting', base_revision: 3 });
-  assert.equal(lineAt(), '  task:1    3 d. ago:   WAITING [#C] Pay the big invoice  work', 'what changed elsewhere is kept and shown');
+  assert.equal(lineAt(), '  task:1    3 d. ago:   WAITING [#C] Pay the big invoice  :prv:', 'what changed elsewhere is kept and shown');
   change(taskN(1), { priority: 'A', due: '2026-11-09' });
   await saying('task:1: priority B; replaced what had changed since: priority was A', () => pick('p', 'b'));
   assert.deepEqual(lastWrite().body, { priority: 'B', base_revision: 5 });
-  assert.equal(lineAt(), '  task:1    1 d. ago:   WAITING [#B] Pay the big invoice  work');
+  assert.equal(lineAt(), '  task:1    1 d. ago:   WAITING [#B] Pay the big invoice  :prv:');
   await keys('q');
 });
 
@@ -865,8 +882,8 @@ test('a prompt changes the task it was opened on, only #f clears a field, and a 
   taskN(6).title = 'Learn\u202e the\u2028cello\u0085';
   (taskN(4) as unknown as { title: null }).title = null;
   await keys('r');
-  await until(() => body().includes('  task:6    SOMEDAY Learn  the cello  pub'), `the title on one line: ${JSON.stringify(body())}`);
-  assert.ok(body().includes('  task:4    NEXT (no title)  ref  scheduled 2026-11-14 00:30'), JSON.stringify(body()));
+  await until(() => body().includes('  task:6    SOMEDAY Learn  the cello'), `the title on one line: ${JSON.stringify(body())}`);
+  assert.ok(body().includes('  task:4    NEXT (no title)  :ref:  scheduled 2026-11-14 00:30'), JSON.stringify(body()));
   await keys('q');
 });
 
@@ -876,7 +893,7 @@ test('after a change the agenda could not show, it takes no change until it is a
   readsFail = true;
   try {
     await saying('task:5: done; it repeats, scheduled 2026-11-15; the agenda is not refreshed (r asks again): brain answered 503', () => keys('x'));
-    assert.equal(lineAt(), '  task:5    Sched. 2x:  WAITING Water the plants  pub', 'the line is the old one');
+    assert.equal(lineAt(), '  task:5    Sched. 2x:  WAITING Water the plants', 'the line is the old one');
     const w = written.length;
     // The same key again would close the next occurrence too.
     await saying('The agenda does not show the last change: r asks brain again', () => keys('x'));
@@ -918,11 +935,11 @@ test('q closes a window made for the agenda, and gives a window the agenda took 
   Ed.deleteOtherWindows();
 });
 
-test('SPC o adds a task in brain-task-scope: the selection is its body, and the note at point is named by its id alone', async () => {
+test('SPC o adds a task with the tags of brain-task-tags: the selection is its body, and the note at point is named by its id alone', async () => {
   resetTasks();
   await visit('host.org');
-  await saying('task:8 added (work)', () => answer('SPC o', 'Buy milk'));
-  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Buy milk', scope: 'work' } });
+  await saying('task:8 added', () => answer('SPC o', 'Buy milk'));
+  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Buy milk' } });
   const w = written.length;
   await saying('No title', () => answer('SPC o', '  '));
   assert.equal(written.length, w);
@@ -931,39 +948,39 @@ test('SPC o adds a task in brain-task-scope: the selection is its body, and the 
   b.pt = b.text.indexOf('Under the section.');
   await keys('V'); await keys('SPC o'); await until(() => E.mini, 'the minibuffer');
   assert.equal(E.mini.prompt, 'Task: ');
-  L.set('brain-task-scope', 'pub');
-  try { await saying('task:9 added (pub)', () => type('Follow this up\n')); } finally { L.set('brain-task-scope', 'work'); }
-  assert.deepEqual(lastWrite().body, { title: 'Follow this up', scope: 'pub', body: 'Under the section.\n\n[[id:a-section]]' });
+  L.set('brain-task-tags', 'prv  Home');
+  try { await saying('task:9 added :home:prv:', () => type('Follow this up\n')); } finally { L.set('brain-task-tags', ''); }
+  assert.deepEqual(lastWrite().body, { title: 'Follow this up', tags: ['prv', 'Home'], body: 'Under the section.\n\n[[id:a-section]]' });
   assert.notEqual((globalThis as unknown as { EvilCore: EdwinCore }).EvilCore.stateOf(b), 'visual', 'the selection is over');
   b.pt = 0;
-  await saying('task:10 added (work)', () => L.call('brain-task-add', ['From Scheme', 'Its body']));
-  assert.deepEqual(lastWrite().body, { title: 'From Scheme', scope: 'work', body: 'Its body' });
-  L.set('brain-task-scope', 'self');
-  try { await assert.rejects(L.call('brain-task-add', ['Private']), /^Error: brain: scope self is outside this token$/); } finally { L.set('brain-task-scope', 'work'); }
+  await saying('task:10 added', () => L.call('brain-task-add', ['From Scheme', 'Its body']));
+  assert.deepEqual(lastWrite().body, { title: 'From Scheme', body: 'Its body' });
+  L.set('brain-task-tags', 'own');
+  try { await assert.rejects(L.call('brain-task-add', ['Private']), /^Error: brain: outside your clearance: own$/); } finally { L.set('brain-task-tags', ''); }
   assert.equal(TASKS.length, 10);
 });
 
 test('a in the agenda adds a task, and an agenda that is shown follows a task added from another window', async () => {
   await showTasks('t');
   onTask(1);
-  await saying('task:8 added (work)', () => answer('a', 'Ring the bank'));
-  assert.ok(body().includes('  task:8    TODO Ring the bank  work'), 'the list shows the new task');
+  await saying('task:8 added', () => answer('a', 'Ring the bank'));
+  assert.ok(body().includes('  task:8    TODO Ring the bank'), 'the list shows the new task');
   assert.equal(body()[0], 'Open tasks (7)');
-  assert.equal(lineAt(), '  task:1    TODO [#A] Pay the invoice  work  due 2026-11-07', 'point stays on its task');
+  assert.equal(lineAt(), '  task:1    TODO [#A] Pay the invoice  :prv:  due 2026-11-07', 'point stays on its task');
   onTask(6);
   const shown = Ed.windowFor(agenda()), other = Ed.windowList().find((w: EdwinCore) => w.buffer !== agenda());
   Ed.selectWindow(other);
   assert.equal(cur().id, 'host.org');
-  await saying('task:9 added (work)', () => L.call('brain-task-add', ['Post the letter']));
-  assert.ok(body().includes('  task:9    TODO Post the letter  work'));
-  assert.equal(body()[Ed.lineNoB(agenda(), shown.pt) - 1], '  task:6    SOMEDAY Learn the cello  pub', 'the agenda’s window is not the selected one, and its point is on its task still');
+  await saying('task:9 added', () => L.call('brain-task-add', ['Post the letter']));
+  assert.ok(body().includes('  task:9    TODO Post the letter'));
+  assert.equal(body()[Ed.lineNoB(agenda(), shown.pt) - 1], '  task:6    SOMEDAY Learn the cello', 'the agenda’s window is not the selected one, and its point is on its task still');
   await saying('task:6: next', () => L.call('brain-task-state', ['next', taskN(6).id]));
-  assert.equal(body()[Ed.lineNoB(agenda(), shown.pt) - 1], '  task:6    NEXT Learn the cello  pub', 'and when its line moves to another place, the window’s point goes with it');
+  assert.equal(body()[Ed.lineNoB(agenda(), shown.pt) - 1], '  task:6    NEXT Learn the cello', 'and when its line moves to another place, the window’s point goes with it');
   assert.equal(cur().id, 'host.org', 'the window that added it stays selected');
   // An agenda in no window is left as it is.
   Ed.selectWindow(Ed.windowFor(agenda())); await keys('q');
   const text = agenda().text;
-  await saying('task:10 added (work)', () => L.call('brain-task-add', ['Unseen']));
+  await saying('task:10 added', () => L.call('brain-task-add', ['Unseen']));
   assert.equal(agenda().text, text);
 });
 
@@ -986,8 +1003,8 @@ test('an agenda in a window follows brain: a task changed elsewhere is in it wit
   const n = asked.length;
   await followed(() => { change(taskN(3), { due: '2026-11-13' }); change(taskN(2), { state: 'done' }); taskChanged(); });
   assert.ok(!body().some(l => l.includes('Call the plumber')), 'what was closed is gone');
-  assert.equal(body()[body().indexOf('Friday     13 November 2026') + 1], '  task:3    Due:        NEXT Write the report  work  by agents@test');
-  assert.equal(lineAt(), '  task:3    Due:        NEXT Write the report  work  by agents@test', 'point is on its task');
+  assert.equal(body()[body().indexOf('Friday     13 November 2026') + 1], '  task:3    Due:        NEXT Write the report  :prv:  by agents@test');
+  assert.equal(lineAt(), '  task:3    Due:        NEXT Write the report  :prv:  by agents@test', 'point is on its task');
   assert.deepEqual(asked.slice(n).map(x => x.url), ['/v1/agenda?from=2026-11-10&days=7'], 'the agenda is asked for once');
   assert.equal(agenda().modified, false); assert.equal(agenda().readOnly, true);
   // In a window that is not the selected one, while the minibuffer reads: both are left alone.
@@ -995,8 +1012,8 @@ test('an agenda in a window follows brain: a task changed elsewhere is in it wit
   await keys('SPC n r f'); await until(() => E.mini, 'the minibuffer');
   const mini = E.mini;
   await followed(() => { change(taskN(3), { state: 'todo', priority: 'B' }); change(taskN(4), { title: 'Read the other paper' }); taskChanged(); });
-  assert.equal(lineIn(shown), '  task:3    Due:        TODO [#B] Write the report  work  by agents@test', 'the window’s point is on its task');
-  assert.ok(body().includes('  task:4    NEXT Read the other paper  ref'));
+  assert.equal(lineIn(shown), '  task:3    Due:        TODO [#B] Write the report  :prv:  by agents@test', 'the window’s point is on its task');
+  assert.ok(body().includes('  task:4    NEXT Read the other paper  :ref:'));
   assert.equal(E.mini, mini, 'the minibuffer reads on');
   await keys('C-g');
   assert.equal(cur().id, 'host.org', 'and the selected window is the one it was');
@@ -1005,7 +1022,7 @@ test('an agenda in a window follows brain: a task changed elsewhere is in it wit
   await followed(async () => { change(taskN(6), { state: 'next' }); taskChanged(); await until(() => held.size === 1, 'edwind asks again'); change(taskN(6), { priority: 'C' }); taskChanged(); });
   await sleep(600);
   assert.ok(asked.length - m <= 2, `${asked.length - m} questions for two changes`);
-  assert.ok(body().includes('  task:6    NEXT [#C] Learn the cello  pub'));
+  assert.ok(body().includes('  task:6    NEXT [#C] Learn the cello'));
   // The task at point is gone: point stays on its line.
   const at = Ed.lineNoB(agenda(), shown.pt);
   await followed(() => { change(taskN(3), { state: 'cancelled' }); taskChanged(); });
@@ -1032,7 +1049,7 @@ test('edwind follows brain only while an agenda is shown, once for every frame t
   // One stops watching: the other is still told, and it is not.
   assert.equal((await cl.call('brain-tasks-follow', [false])).value, false);
   await followed(() => { change(taskN(4), { title: 'Read no paper' }); taskChanged(); });
-  assert.ok(body().includes('  task:4    NEXT Read no paper  ref'));
+  assert.ok(body().includes('  task:4    NEXT Read no paper  :ref:'));
   await until(() => held.size === 1, 'edwind asks again');
   // The agenda leaves its window: the frame stops watching, and edwind drops the question brain holds.
   await keys('q');
@@ -1049,11 +1066,11 @@ test('edwind follows brain only while an agenda is shown, once for every frame t
   // An agenda shown some other way than asked for is followed too, and asked for again.
   const w = Ed.windowFor(cur());
   await followed(async () => { await keys('M-x'); await type('switch-to-buffer\n'); await until(() => E.mini && /buffer/i.test(E.mini.prompt), 'the buffer prompt'); await type('*Agenda*\n'); });
-  assert.ok(body().includes('  task:4    NEXT Unseen change  ref'));
+  assert.ok(body().includes('  task:4    NEXT Unseen change  :ref:'));
   // A new connection is a new client to edwind: the frame asks it to follow again, and asks for the agenda.
   const h = fed.length;
   await followed(() => { change(taskN(4), { title: 'Changed while away' }); sync.sock.close(); });
-  assert.ok(body().includes('  task:4    NEXT Changed while away  ref'));
+  assert.ok(body().includes('  task:4    NEXT Changed while away  :ref:'));
   await until(() => held.size === 1, 'edwind asks what changes');
   assert.equal(fed[h].url, '/v1/changes?after=now');
   assert.equal(Ed.windowFor(agenda()), w); await keys('q');
@@ -1071,7 +1088,7 @@ test('a brain that is away is asked again more and more slowly, and what changed
   await until(() => fed.length === f + 1, 'another question');
   feedIsAway(false);
   await followed(() => {});
-  assert.equal(lineAt(), '  task:1    3 d. ago:   TODO [#C] Pay the invoice  work');
+  assert.equal(lineAt(), '  task:1    3 d. ago:   TODO [#C] Pay the invoice  :prv:');
   const again = fed.slice(f);
   assert.equal(again.length, 2, 'brain was asked twice in all');
   assert.ok(again.every(x => x.url === fed[f - 1].url), 'from the place edwind had: brain has kept what changed');
@@ -1094,7 +1111,7 @@ test('a brain that is away is asked again more and more slowly, and what changed
   } finally { readsFail = false; }
   await followed(() => taskChanged());
   assert.equal(agenda().agenda.stale, false);
-  assert.equal(lineAt(), '  task:1    3 d. ago:   TODO [#C] Pay both invoices  work');
+  assert.equal(lineAt(), '  task:1    3 d. ago:   TODO [#C] Pay both invoices  :prv:');
   await keys('q');
 });
 

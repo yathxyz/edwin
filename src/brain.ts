@@ -20,11 +20,11 @@ const { bol, eol, lineNoB, lineStartB } = Ed;
 
 /* A row of brain-titles: ALIAS is the alias that matched when the title did not, ORG_ID the node's Org id when
    it has one, PATH the file of a note under the notes root. */
-interface BrainRow { id: string; kind: string; title: string; alias: string | null; scope: string; org_id: string | null; path: string | null }
+interface BrainRow { id: string; kind: string; title: string; alias: string | null; tags: string[]; org_id: string | null; path: string | null }
 /* A link of a node, as brain-node lists it: REL is the edge type, or its inverse name on a link that arrives. */
 interface BrainLink { rel: string; id: string; kind: string; title: string }
 interface BrainNode {
-  id: string; kind: string; title: string; body: string | null; props: Record<string, unknown> | null; scope: string; trust: string;
+  id: string; kind: string; title: string; body: string | null; props: Record<string, unknown> | null; tags: string[]; trust: string;
   identifiers: { scheme: string; value: string }[]; links: BrainLink[];
 }
 interface BrainReply { value?: unknown; error?: { condition: string; report: string } }
@@ -78,6 +78,9 @@ async function noteTitled(title: string) { const r = attached() ? await titled(t
    turns the direction of text would draw a line as another. */
 const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ').trim();
 /* A title as the text of a link: a bracket would end the link early, or start another. */
+/* The tags of a record as Org writes them, :a:b:, and '' for one that has none. */
+const tagsOf = (x: unknown): string[] => (Array.isArray(x) ? x : []).filter((t): t is string => typeof t === 'string').map(oneLine).filter(t => t);
+const tagText = (x: unknown) => { const ts = tagsOf(x); return ts.length ? `:${ts.join(':')}:` : ''; };
 const linkText = (s: string) => oneLine(s).replace(/\[/g, '(').replace(/\]/g, ')');
 /* The candidates for ROWS, in brain's order. A row goes by the alias that matched, else by its title, so the
    minibuffer's own filter keeps what brain matched. Each label names one row: where two rows share one they
@@ -93,8 +96,8 @@ function labelRows(rows: BrainRow[]) {
   });
   return { labels, by };
 }
-/* The kind, then where a note is (and its title, when the candidate is an alias) or the scope of anything else. */
-const annotation = (r: BrainRow | undefined) => (!r ? '' : r.kind.padEnd(10) + ' ' + (r.kind === 'note' ? (r.path || '') + (r.alias ? `  → ${oneLine(r.title)}` : '') : r.scope || ''));
+/* The kind, then where a note is (and its title, when the candidate is an alias) or the tags of anything else. */
+const annotation = (r: BrainRow | undefined) => (!r ? '' : r.kind.padEnd(10) + ' ' + (r.kind === 'note' ? (r.path || '') + (r.alias ? `  → ${oneLine(r.title)}` : '') : tagText(r.tags)));
 /* Typing pauses this long before brain is asked again. */
 const DEBOUNCE_MS = 120;
 /* Read a node: the candidates are brain's names for the input, asked for again as it changes (empty: the nodes
@@ -156,9 +159,9 @@ function linkLines(links: BrainLink[], first?: { rel: string; as: string }) {
   }
   return out;
 }
-/* A node that is not a file: its title, kind · scope · trust, the props that are plain values, its body, its links. */
+/* A node that is not a file: its title, kind · :tags: · trust, the props that are plain values, its body, its links. */
 function recordText(n: BrainNode) {
-  const lines = [`#+title: ${oneLine(n.title)}`, [n.kind, n.scope, n.trust].filter(x => typeof x === 'string' && x).join(' · '), ''];
+  const lines = [`#+title: ${oneLine(n.title)}`, [n.kind, tagText(n.tags), n.trust].filter(x => typeof x === 'string' && x).join(' · '), ''];
   const props = Object.entries(n.props || {}).filter(([, v]) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean');
   for (const [k, v] of props) lines.push(`${oneLine(k)}: ${oneLine(String(v))}`);
   if (props.length) lines.push('');
@@ -272,7 +275,7 @@ CMD('brain-follow', '', '', 'Open the link at point, or the first link of the li
 /* A task as brain answers it: its node with NUMBER (task:N) and who made it. On a row of the agenda WHY says
    which date put it there, and on an overdue one DAY is that date's day. */
 interface BrainTask {
-  id: string; title: string; scope: string; trust: string; revision: number; number: number | null; props: Record<string, unknown>;
+  id: string; title: string; tags: string[]; trust: string; revision: number; number: number | null; props: Record<string, unknown>;
   created_by_title?: unknown; why?: string; day?: string;
 }
 /* A line of the agenda: its text, the spans of it that have a face (start, end, face) and the task it shows. */
@@ -288,16 +291,15 @@ const AGENDA = '*Agenda*';
 /* The open states in the order the task list shows them, and the key of each state. */
 const OPEN: [string, string][] = [['next', 'Next'], ['todo', 'To do'], ['waiting', 'Waiting'], ['hold', 'Hold'], ['someday', 'Someday']];
 const STATE_KEYS: Record<string, string> = { t: 'todo', n: 'next', w: 'waiting', h: 'hold', s: 'someday', d: 'done', c: 'cancelled' };
-const SCOPES = ['pub', 'ref', 'work', 'infra'];
 const DAYS = 7;
 /* brain's largest page, and the most tasks the list shows. */
 const PAGE = 200, MOST = 2000;
-L.defvar('brain-task-scope', 'work', 'The brain scope of a task added with brain-task-add.');
+L.defvar('brain-task-tags', '', 'The tags of a task added with brain-task-add: a string of them with spaces between, "" for none.');
 
 /* A task brain holds with no title is a task still: it is shown, with none. */
 function tasksOf(x: unknown): BrainTask[] {
   return (Array.isArray(x) ? x : []).filter((t): t is BrainTask => isObj(t) && typeof t.id === 'string' && typeof t.revision === 'number')
-    .map(t => ({ ...t, title: typeof t.title === 'string' ? t.title : '', props: isObj(t.props) ? t.props : {} }));
+    .map(t => ({ ...t, title: typeof t.title === 'string' ? t.title : '', tags: tagsOf(t.tags), props: isObj(t.props) ? t.props : {} }));
 }
 const taskOf = (x: unknown): BrainTask => { const t = tasksOf([x])[0]; if (!t) signal('user-error', 'brain answered with something that is not a task'); return t; };
 const prop = (t: BrainTask, k: string) => { const v = t.props[k]; return typeof v === 'string' ? oneLine(v) : ''; };
@@ -316,18 +318,17 @@ function agendaLine(parts: [string, number][], task?: BrainTask): AgendaLine {
   return l;
 }
 /* A task's line: task:N, LABEL (why it is on this day, when it is there for one; OVER marks one that is late),
-   the time, the state, [#P], the title, :tags:, the scope, who made it when its trust is not the owner's (an
+   the time, the state, [#P], the title, :tags:, who made it when its trust is not the owner's (an
    agent's task) and, with DATES, its dates. */
 function taskLine(t: BrainTask, label: string | null, over: boolean, time: string, dates: boolean) {
-  const tags = (Array.isArray(t.props.tags) ? t.props.tags : []).filter((x): x is string => typeof x === 'string' && !!x).map(oneLine);
+  const tags = tagText(t.tags);
   const pr = prop(t, 'priority'), parts: [string, number][] = [['  ', 0], [refOfTask(t).padEnd(9), F.REF], [' ', 0]];
   if (label !== null) parts.push([label.padEnd(11), over ? F.OVER : F.LABEL], [' ', 0]);
   if (time) parts.push([time, F.TIME], [' ', 0]);
   parts.push([taskState(t).toUpperCase(), F.STATE], [' ', 0]);
   if (pr) parts.push([`[#${pr}]`, F.PRI], [' ', 0]);
   parts.push([oneLine(t.title) || '(no title)', 0]);
-  if (tags.length) parts.push(['  ', 0], [`:${tags.join(':')}:`, F.TAGS]);
-  parts.push(['  ', 0], [oneLine(String(t.scope)), F.DIM]);
+  if (tags) parts.push(['  ', 0], [tags, F.TAGS]);
   if (t.trust !== 'owner' && typeof t.created_by_title === 'string' && t.created_by_title) parts.push(['  ', 0], [`by ${oneLine(t.created_by_title)}`, F.DIM]);
   if (dates) for (const k of ['due', 'scheduled']) if (prop(t, k)) parts.push(['  ', 0], [`${k} ${prop(t, k).replace('T', ' ')}`, F.TIME]);
   return agendaLine(parts, t);
@@ -583,27 +584,36 @@ CMD('brain-task-priority', async () => { const id = taskAt().id, k = await Org.k
 CMD('brain-task-title', async () => { const t = taskAt(); return [await Ed.readMini('Title: ', oneLine(t.title)), t.id]; },
   'TITLE &optional TASK', 'Give the task at point the title TITLE (e).',
   ([title, id]: SchemeValue[]) => change({ title: given(title, 'title') }, t => oneLine(t.title), id));
-CMD('brain-task-move', async () => { const id = taskAt().id; return [await Ed.readMini('Scope: ', '', () => SCOPES, { require: true, keepOrder: true }), id]; },
-  'SCOPE &optional TASK', 'Move the task at point to the brain scope SCOPE, where the task token is cleared for it (m).',
-  ([scope, id]: SchemeValue[]) => change({ scope: given(scope, 'scope') }, t => `in ${oneLine(String(t.scope))}`, id));
+CMD('brain-task-tag', async () => { const id = taskAt().id; return [await Ed.readMini('Tags (+a -b): ', ''), id]; },
+  'TAGS &optional TASK', 'Change the tags of the task at point: TAGS is words with spaces between, where +a or a adds the tag a and -b removes the tag b (:).',
+  ([tags, id]: SchemeValue[]) => {
+    const add: string[] = [], remove: string[] = [];
+    for (const w of given(tags, 'tags').split(/\s+/)) {
+      const tag = /^[+-]/.test(w) ? w.slice(1) : w;
+      if (!tag) signal('user-error', `${w} names no tag`);
+      (w[0] === '-' ? remove : add).push(tag);
+    }
+    return change({ ...(add.length ? { add_tags: add } : {}), ...(remove.length ? { remove_tags: remove } : {}) }, t => tagText(t.tags) || 'no tags', id);
+  });
 CMD('brain-task-add', async () => {
   /* Before a title is typed for a task that cannot be added. */
   if (!attached()) signal('user-error', NO_EDWIND);
   const b = cur(), id = Org.idAtPoint(b);
   const sel = EC.stateOf(b) === 'visual' && b.mark !== null ? (([s, e]) => b.rope.slice(s, e).trim())(EC.visualRange(b, true)) : '';
   const title = await Ed.readMini('Task: ', '');
-  /* The note is named by its id alone: its title may be of a scope the task is not in. */
+  /* The note is named by its id alone: a tag may hide its title from those who can read the task. */
   return [title, [sel, id ? `[[id:${id}]]` : ''].filter(x => x).join('\n\n') || false];
-}, 'TITLE &optional BODY', 'Add a task titled TITLE to brain, in the scope brain-task-scope, with the text BODY. Interactively the title is read in the minibuffer, and the body is the Visual selection, then a link to the note at point when it has an Org id (SPC o, a in the agenda).',
+}, 'TITLE &optional BODY', 'Add a task titled TITLE to brain, with the tags of brain-task-tags and the text BODY. Interactively the title is read in the minibuffer, and the body is the Visual selection, then a link to the note at point when it has an Org id (SPC o, a in the agenda).',
   async ([title, body]: SchemeValue[]) => {
-    const scope = L.get('brain-task-scope');
-    if (typeof scope !== 'string' || !scope.trim()) signal('user-error', 'brain-task-scope is not a scope');
-    const t = taskOf(await ask('brain-task-add', { title: given(title, 'title'), scope: (scope as string).trim(), ...(typeof body === 'string' && body.trim() ? { body } : {}) }));
-    Ed.message(await refreshed(`${refOfTask(t)} added (${oneLine(String(t.scope))})`));
+    const named = L.get('brain-task-tags');
+    if (typeof named !== 'string') signal('user-error', 'brain-task-tags is not a string of tags');
+    const tags = (named as string).split(/\s+/).filter(x => x);
+    const t = taskOf(await ask('brain-task-add', { title: given(title, 'title'), ...(tags.length ? { tags } : {}), ...(typeof body === 'string' && body.trim() ? { body } : {}) }));
+    Ed.message(await refreshed(`${refOfTask(t)} added${tagText(t.tags) ? ' ' + tagText(t.tags) : ''}`));
     return false;
   });
 for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
-  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-move', 'brain-task-add']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-tag', 'brain-task-add']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 globalThis.Brain = { open, noteTitled };
 })();

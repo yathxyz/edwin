@@ -1,5 +1,5 @@
 // The note projector (server/projector.mts) against a real edwind and a loopback stand-in for brain: one record
-// per note file with the ids, titles and link names it holds and none of its text; only saved text; a file that
+// per note file with the ids, titles and link names it holds, the tags of the configuration, and none of its text; only saved text; a file that
 // goes sends an empty record; a failed request is retried and a refused one waits for the file to change; the
 // ledger survives a restart; one failing file does not hold up the rest; a file the index leaves out and an
 // empty notes directory delete nothing; plain http goes only to this host; the token is sent and never logged.
@@ -14,7 +14,7 @@ import type { TestDir, EdwindChild } from './edit-client.mts';
 
 const TOKEN = 'projector-token-for-the-tests-0123456789';
 const ENV = { EDWIND_PROJECTOR_SETTLE_MS: '50', EDWIND_PROJECTOR_RETRY_MS: '50' };
-interface Sent { path: string; scope: string; notes: Record<string, unknown>[] }
+interface Sent { path: string; tags: string[]; notes: Record<string, unknown>[] }
 const sent: Sent[] = [];
 /* What brain answers the next requests with: a status (with brain's JSON error when it is one), or a status and
    a body; 200 once they run out. A path in `broken` always gets 500. */
@@ -75,13 +75,13 @@ const withId = (id: string, title: string, more = '') => `:PROPERTIES:\n:ID: ${i
 
 before(async () => {
   url = await new Promise<string>(r => brain.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(brain.address() as AddressInfo).port}`)));
-  dir = makeDir({ brain: { url, credential: 'brain-token' } });
+  dir = makeDir({ brain: { url, credential: 'brain-token', tags: ['roam'] } });
   creds = path.join(dir.root, 'creds');
   fs.mkdirSync(creds, { mode: 0o700 });
   fs.writeFileSync(path.join(creds, 'brain-token'), TOKEN + '\n', { mode: 0o400 });
   note('alpha.org', ALPHA);
   note('journal/2026-11-10.org', '* Morning\nNo ids here, only [[id:a-file]].\n');
-  note('area/scoped.org', withId('s-file', 'Scoped', '#+brain_scope: work.notes\n'));
+  note('area/side.org', withId('s-file', 'Side'));
   note('alpha.sync-conflict-20261110-101010-ABCDEFG.org', ALPHA);
   child = await startEdwind(dir, { env: { CREDENTIALS_DIRECTORY: creds, ...ENV } });
 });
@@ -89,9 +89,9 @@ after(async () => { await stopEdwind(child); brain.close(); brain.closeAllConnec
 
 test('at start every note file is sent once: ids, titles, aliases, tags and link names, never text', async () => {
   const [alpha] = await records('alpha.org', 1);
-  assert.deepEqual(alpha, { path: 'alpha.org', scope: 'self', notes: ALPHA_NOTES });
-  assert.deepEqual(await records('journal/2026-11-10.org', 1), [{ path: 'journal/2026-11-10.org', scope: 'self', notes: [] }], 'a file without ids is an empty record');
-  assert.deepEqual(await records('area/scoped.org', 1), [{ path: 'area/scoped.org', scope: 'work.notes', notes: [{ id: 's-file', title: 'Scoped' }] }]);
+  assert.deepEqual(alpha, { path: 'alpha.org', tags: ['roam'], notes: ALPHA_NOTES });
+  assert.deepEqual(await records('journal/2026-11-10.org', 1), [{ path: 'journal/2026-11-10.org', tags: ['roam'], notes: [] }], 'a file without ids is an empty record');
+  assert.deepEqual(await records('area/side.org', 1), [{ path: 'area/side.org', tags: ['roam'], notes: [{ id: 's-file', title: 'Side' }] }]);
   await sleep(300);
   assert.equal(sent.length, 3, 'once each, and no copy of a sync conflict');
   assert.ok(auth.every(a => a === `Bearer ${TOKEN}`));
@@ -112,9 +112,9 @@ test('an edit is projected when it is saved, not before', async () => {
 });
 
 test('a file that goes sends an empty record; a renamed one is sent under its new path', async () => {
-  fs.renameSync(path.join(dir.dirs.notes, 'area/scoped.org'), path.join(dir.dirs.notes, 'area/moved.org'));
-  assert.deepEqual((await records('area/moved.org', 1))[0].notes, [{ id: 's-file', title: 'Scoped' }]);
-  assert.deepEqual((await records('area/scoped.org', 2))[1], { path: 'area/scoped.org', scope: 'self', notes: [] });
+  fs.renameSync(path.join(dir.dirs.notes, 'area/side.org'), path.join(dir.dirs.notes, 'area/moved.org'));
+  assert.deepEqual((await records('area/moved.org', 1))[0].notes, [{ id: 's-file', title: 'Side' }]);
+  assert.deepEqual((await records('area/side.org', 2))[1], { path: 'area/side.org', tags: ['roam'], notes: [] });
 });
 
 test('a failed request is retried; a refused record waits for the file to change', async () => {
@@ -190,7 +190,7 @@ test('a file the index leaves out is not a deleted one; an empty notes directory
   const d = makeDir({ brain: { url, credential: 'brain-token' } });
   fs.writeFileSync(path.join(d.dirs.notes, 'only.org'), withId('o-file', 'The only note'));
   let e = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: creds, ...ENV } });
-  await records('only.org', 1);
+  assert.deepEqual((await records('only.org', 1))[0].tags, [], 'without brain.tags a note carries only its own');
   await stopEdwind(e);
   fs.rmSync(path.join(d.dirs.notes, 'only.org'));
   e = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: creds, ...ENV } });
@@ -212,7 +212,9 @@ test('plain http goes only to this host; a brain credential is not one Scheme ca
   for (const [brainCfg, why] of [
     [{ url, credential: 'spare' }, /also a models credential/],
     [{ url: 'ftp://brain.example', credential: 'brain-token' }, /http or https/],
-    [{ url, credential: 'brain-token', scope: 'everywhere' }, /brain scope/],
+    [{ url, credential: 'brain-token', tags: 'roam' }, /brain tags/],
+    [{ url, credential: 'brain-token', tags: ['two words'] }, /brain tags/],
+    [{ url, credential: 'brain-token', tags: ['-off'] }, /brain tags/],
     [{ url, credential: 'brain-token', extra: 1 }, /unknown field/],
   ] as const) {
     const bad = makeDir({ brain: brainCfg, models: { credentials: { spare: { origin: 'https://example.invalid' } } } });

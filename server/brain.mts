@@ -5,7 +5,7 @@
 // The commands here are how a frame reads brain and changes its tasks: Edwin finds a node by name, opens it,
 // lists what links to it, shows the agenda and adds or changes a task by asking edwind, which holds the tokens,
 // so no frame ever does.
-//   brain-titles {q, kind?, limit?}    -> brain's GET /v1/titles answer: {results: [{id, kind, title, alias, scope,
+//   brain-titles {q, kind?, limit?}    -> brain's GET /v1/titles answer: {results: [{id, kind, title, alias, tags,
 //                                         org_id, path, updated_at}]}
 //   brain-node REF                     -> brain's GET /v1/nodes/REF answer: the node, its identifiers and its links
 //   brain-agenda {from, days?}         -> brain's GET /v1/agenda answer: {from, days, overdue, dated, next}
@@ -77,12 +77,16 @@ const TIMEOUT_MS = 15 * 1000;
 const ANSWER_BYTES = 4 * 1024 * 1024;
 const KIND = /^[a-z][a-z0-9_-]{0,40}$/;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
-/* The fields of a task a frame may write (brain's API §5), and those of a change to one. */
-const TASK_FIELDS = ['title', 'body', 'scope', 'state', 'priority', 'due', 'scheduled', 'recur', 'tags', 'waiting_on'];
-const SET_FIELDS = [...TASK_FIELDS, 'base_revision'];
+/* The fields of a task a frame may write (brain's API §5), and those of a change to one, which may name the
+   tags to add and to remove instead of all of them. */
+const TASK_FIELDS = ['title', 'body', 'state', 'priority', 'due', 'scheduled', 'recur', 'tags', 'waiting_on'];
+const SET_FIELDS = [...TASK_FIELDS, 'add_tags', 'remove_tags', 'base_revision'];
 /* What brain records as the session of a task written through here. */
 const SESSION = 'edwind';
 const NO_READ = 'This edwind has no brain to read (brain.readCredential is not set)';
+/* A frame loaded before brain had tags still names a scope. Dropping it would add the task open to every client
+   of brain where its user meant it kept, so the write is refused. */
+const NO_SCOPE = 'brain has no scopes any more, and this frame still names one: reload it';
 const failed = (condition: string, report: string): CallResult => ({ error: { condition, report, restarts: [], backtrace: [] } });
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
 const within = (x: unknown, lo: number, hi: number): number | null => (Number.isInteger(x) ? Math.max(lo, Math.min(hi, x as number)) : null);
@@ -247,11 +251,13 @@ export class BrainClient {
   }
   async taskAdd(fields: unknown): Promise<CallResult> {
     if (!isObj(fields) || typeof fields.title !== 'string' || !fields.title.trim()) return failed('wrong-type-argument', 'brain-task-add: the fields of a task, with a title');
+    if (Object.hasOwn(fields, 'scope')) return failed('wrong-type-argument', NO_SCOPE);
     return this.put('task-add', 'POST', 'v1/tasks', only(fields, TASK_FIELDS));
   }
   async taskSet(ref: unknown, fields: unknown): Promise<CallResult> {
     if (typeof ref !== 'string' || !ref.trim() || ref.length > 300) return failed('wrong-type-argument', 'brain-task-set: a task, as its id or task:N');
     if (!isObj(fields)) return failed('wrong-type-argument', 'brain-task-set: the fields to change');
+    if (Object.hasOwn(fields, 'scope')) return failed('wrong-type-argument', NO_SCOPE);
     return this.put('task-set', 'PATCH', 'v1/tasks/' + encodeURIComponent(ref.trim()), only(fields, SET_FIELDS));
   }
   async follow(client: Client, on: unknown): Promise<CallResult> {

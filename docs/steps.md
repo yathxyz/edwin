@@ -415,7 +415,7 @@ Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brai
 memories and references. This step is the feed: edwind tells brain what each note file holds. Edwin's own
 commands ask brain since the next step, "Nodes from brain".
 
-- **One record per note file (`server/projector.mts`).** `POST <brain>/v1/projection` with `{path, scope, notes}`.
+- **One record per note file (`server/projector.mts`).** `POST <brain>/v1/projection` with `{path, tags, notes}`.
   A note is an entry with an Org id, the file or a heading: `{id, title, aliases, tags, parent, links}`. `parent` is
   the nearest id above it; `links` are the link names written under it (`id:…`, and scheme names such as `task:12`),
   as written, and brain resolves them. No text is sent. A file without ids sends an empty record, and so does a
@@ -436,9 +436,13 @@ commands ask brain since the next step, "Nodes from brain".
   does not hold them up. A record brain refuses (400, 409, 413 with brain's own JSON error: a title that looks
   like a secret) is logged with its path and waits until the file changes; the same status from anything else
   (an error page) is a failure and is retried.
-- **Scope.** `#+brain_scope: work.notes` in a file's header; otherwise `brain.scope` (default `self`).
-- **Config.** `edit.json` `brain: {url, credential, scope}`; in NixOS `services.edwind.brain.{url, tokenFile,
-  scope}`. The token is a LoadCredential file read for each request. It is not among the credentials Scheme can
+- **Tags** (brain 0.9, 2026-11-11: brain has no scopes). `brain.tags` is a list of tags brain puts on every
+  note projected, beside the note's own Org tags; none by default. A record is open to every client of brain
+  unless one of its tags hides it, so the notes are kept to the tokens cleared for a tag by naming that tag
+  here (`["roam"]`). The list is the same for every file: no line in a file changes it.
+- **Config.** `edit.json` `brain: {url, credential, tags}`; in NixOS `services.edwind.brain.{url, tokenFile,
+  tags}`. A tag that is not one brain takes (a space, one of `" ( ) , :`, a first `+ - .`, over 64
+  characters) is refused at start. The token is a LoadCredential file read for each request. It is not among the credentials Scheme can
   name, and the config refuses a name that is. Plain http is sent only to loopback or to an address of this
   host: the request is bound to leave from the address it goes to, which the kernel allows only for an address
   the host holds, so `http://10.100.0.2:7676` works on the host that holds that address and nowhere else. (The
@@ -472,11 +476,11 @@ Emacs's names for this are not kept.
   moved off the first candidate stays on its candidate. `RET` typed ahead of the answer takes nothing from the
   names of an earlier input: brain is asked for what was typed, and the node is the one titled exactly so,
   else brain's first. A candidate is the alias that matched, else the title, annotated with the kind and then the file of
-  a note (and `→ Title` after an alias) or the scope of anything else. Two nodes with one name take their kind,
+  a note (and `→ Title` after an alias) or the tags of anything else, as Org writes them (`:a:b:`). Two nodes with one name take their kind,
   and the end of their id when the kind is shared too.
 - **Opening a node.** A note is its file (`props.sources[0]`), visited through edwind and waited for, with
   point on the entry that holds the note's `:ID:`, unfolded. Anything else is a record: `*brain: Title*` in
-  `brain-mode`, read only and in Motion state, written as Org (title, kind · scope · trust, the plain props,
+  `brain-mode`, read only and in Motion state, written as Org (title, kind · `:tags:` · trust, the plain props,
   the body, the links under a heading per relation), so `RET` (`brain-follow`) opens a link and `q` leaves.
 - **`brain-node-insert` (`SPC n r i`, `C-c n i`).** `[[id:ORG-ID][Title]]` to a note, `[[brain:UUID][Title]]` to
   anything else; `[Title](id:ORG-ID)` and `[Title](brain:UUID)` in Markdown. A Visual selection is what is
@@ -531,15 +535,15 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   a token of their own, `brain.taskCredential` (`services.edwind.brain.taskTokenFile`, the credential
   `brain-task-token`), which brain takes on its task routes only: `brain-task-add FIELDS` is `POST /v1/tasks`
   and `brain-task-set REF FIELDS` is `PATCH /v1/tasks/REF` (`REF` a node id or `task:N`). Only a task's fields
-  are passed on (`title`, `body`, `scope`, `state`, `priority`, `due`, `scheduled`, `recur`, `tags`,
-  `waiting_on`, and on a change `base_revision` and `trust`); brain checks their values, and a task is not
+  are passed on (`title`, `body`, `state`, `priority`, `due`, `scheduled`, `recur`, `tags`,
+  `waiting_on`, and on a change `add_tags`, `remove_tags` and `base_revision`); brain checks their values, and a task is not
   deleted through edwind. A write says
   `X-Brain-Session: edwind` and is sent once. With no task token the two say `brain-unavailable` in a sentence
   and send nothing. The log has `brain-read` or `brain-write` with the route's name, the status and the time,
   never a title, a query or a token.
 - **Who can write.** Every process that can open edwind's socket can call these, as it can read every note
-  file: with a task token it adds, changes and closes tasks as that token's actor, in the
-  scopes the token is cleared for. The token is not the projector's (edwind refuses that configuration) and no
+  file: with a task token it adds, changes and closes tasks as that token's actor, under the
+  tags the token is cleared for. The token is not the projector's (edwind refuses that configuration) and no
   frame holds it.
 - **`brain-agenda` (`SPC m a`, `src/brain.ts`)** asks for one key. `a` is the week: the 7 days from today
   (the frame's local day), a section `Overdue` when something is, a header for each day with what is due or
@@ -549,16 +553,17 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   `*Agenda*` in `brain-agenda-mode`: read only, in Motion state, in a window of its own below, or in a window
   that is there (the popup it is asked for from, else another). `q` closes a window that was made for the
   agenda and gives any other back what it showed. A task's line has `task:N`, the label, the state,
-  `[#P]`, the title on one line, `:tags:`, the scope, and in the list its dates; a task whose trust is not the
-  owner's (an agent made it) says `by` and who, after the scope. It is a task like any other: edwind sets no
+  `[#P]`, the title on one line, `:tags:` when it has any, and in the list its dates; a task whose trust is not the
+  owner's (an agent made it) says `by` and who, after the tags. It is a task like any other: edwind sets no
   trust. The faces come from what the line was built from, not from reading the text
   back, so a title cannot colour itself as something else.
 - **Keys there**, each on the task at point: `RET` opens its record; `t` sets the state (then `t n w h s d c`);
   `x` is done; `s` schedules and `d` sets when it is due (the date reader of `org-schedule`: nothing typed is
   today, a typed time is kept; `C-u s` and `C-u d` clear the date, so `C-u` is the prefix argument in this
-  buffer and not a scroll); `p` sets the priority (`a b c`, space for none); `e` edits the title; `m` moves it
-  to a scope (`pub`, `ref`, `work`, `infra`; brain refuses one the token is not cleared for); `a` adds a task; `r` and `g r` ask again; `q` leaves. Each has a command that takes
-  the value as an argument (`brain-task-state`, `-done`, `-schedule`, `-due`, `-priority`, `-title`, `-move`), and after it, optionally, the id of a task the agenda shows: a key that reads in the minibuffer
+  buffer and not a scroll); `p` sets the priority (`a b c`, space for none); `e` edits the title; `:` changes its
+  tags (it reads `Tags (+a -b): `: `+a` or `a` adds the tag `a`, `-b` removes `b`, and the echo area says the
+  tags the task has then; brain refuses a tag that hides and that the token is not cleared for); `a` adds a task; `r` and `g r` ask again; `q` leaves. Each has a command that takes
+  the value as an argument (`brain-task-state`, `-done`, `-schedule`, `-due`, `-priority`, `-title`, `-tag`), and after it, optionally, the id of a task the agenda shows: a key that reads in the minibuffer
   names the task it was pressed on, so the change is made to that one wherever point is when the answer comes.
   For a date or a priority `#f` is none; a value that is neither that nor text is an error and nothing is
   sent.
@@ -570,10 +575,11 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   When the change was made and the view could not be asked for again, the echo area says both, and the agenda
   takes no further change until `r` has asked again: its lines are of revisions brain has moved on from, and
   closing a repeating task from one would move it on a second time.
-- **`brain-task-add` (`SPC o`, `a` in the agenda)** reads `Task: ` and adds the task in the scope
-  `brain-task-scope` (`"work"` by default). A Visual selection is its body. When the note at point has an Org
-  id the body ends with `[[id:ORG-ID]]`: the id alone, since a note's title may be of a scope the task is not
-  in. An agenda that a window shows is asked for again.
+- **`brain-task-add` (`SPC o`, `a` in the agenda)** reads `Task: ` and adds the task with the tags
+  of `brain-task-tags`, a string of tags with spaces between (`""` by default: no tags, a task every client of
+  brain can read). The echo area says `task:N added` and the tags of the task. A Visual selection is its body.
+  When the note at point has an Org id the body ends with `[[id:ORG-ID]]`: the id alone, since a tag may hide
+  the note's title from those who can read the task. An agenda that a window shows is asked for again.
 - **The agenda follows brain** (added 2026-11-11). A task changed anywhere (the CLI, a phone, an agent,
   another frame) is in an agenda that a window shows, without `r`. The frame calls `brain-tasks-follow ON`
   with true while `*Agenda*` is in a window and with false when it no longer is (looked at after each
@@ -605,8 +611,8 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   still edited in a file (`org-todo`, `org-schedule`, `org-deadline`); they are text there, not tasks.
 
 Not in it: an agenda in no window does not follow brain: it is as brain was when it was last shown or asked
-for. No `self` tasks: the task token is not cleared for that
-scope. Editing a task's body, tags, repeat or `waiting_on`, deleting one, and showing closed tasks. A write
+for. No task under a tag the task token is not cleared for.
+Editing a task's body, repeat or `waiting_on`, deleting one, and showing closed tasks. A write
 is not retried and carries no `client_id`, so a task added while the answer was lost may be added twice by
 adding it again.
 

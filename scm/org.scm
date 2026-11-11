@@ -38,8 +38,8 @@
       '(("d" "daily" entry "* %<%H:%M> %?"
          :target (file+head "%<%Y-%m-%d>.org" "#+title: %<%Y-%m-%d>\n"))))
 
-;; A task added with brain-task-add (SPC o) goes in this scope of brain.
-(define brain-task-scope "work")
+;; A task added with brain-task-add (SPC o) carries these tags: a string of them with spaces between.
+(define brain-task-tags "")
 
 ;; Agenda and brain buffers are read only and start in Motion state.
 (set! evil-motion-state-modes (append evil-motion-state-modes '(brain-agenda-mode brain-mode)))
@@ -131,7 +131,7 @@
   "d" 'brain-task-due
   "p" 'brain-task-priority
   "e" 'brain-task-title
-  "m" 'brain-task-move
+  ":" 'brain-task-tag
   "a" 'brain-task-add
   "r" 'brain-agenda-redo
   "g r" 'brain-agenda-redo

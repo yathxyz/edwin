@@ -92,7 +92,7 @@ let
     // lib.optionalAttrs (cfg.brain.url != null) {
       brain =
         {
-          inherit (cfg.brain) url scope;
+          inherit (cfg.brain) url tags;
         }
         // lib.optionalAttrs (cfg.brain.tokenFile != null) { credential = brainCredential; }
         // lib.optionalAttrs (cfg.brain.readTokenFile != null) { readCredential = brainReadCredential; }
@@ -281,13 +281,14 @@ in
           Root-readable file holding a brain token for tasks (brain's `tasks`: taken on the task routes only).
           When set, the brain-task-add and brain-task-set commands answer, so a frame can add a task and
           change one. Every process that can open edwind's socket can then add, change, close and confirm tasks
-          as the token's actor, with its trust, in the scopes it is cleared for; it cannot delete one.
+          as the token's actor, with its trust, under the tags it is cleared for; it cannot delete one.
         '';
       };
-      scope = mkOption {
-        type = types.str;
-        default = "self";
-        description = "The brain scope of a note file that names none with `#+brain_scope:`.";
+      tags = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [ "roam" ];
+        description = "The brain tags of every note projected, beside each note's own Org tags: a tag brain hides keeps the notes to the tokens cleared for it. With none, every client of brain can read the notes' titles and links.";
       };
     };
 

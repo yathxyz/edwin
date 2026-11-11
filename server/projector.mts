@@ -38,7 +38,8 @@ const REQUEST_TIMEOUT_MS = 60 * 1000;
 const ANSWER_BYTES = 64 * 1024;
 /* brain's limits (brain_server.py): longer values are cut or left out here so one of them does not refuse the file. */
 const MAX_ID = 200, MAX_TITLE = 1000, MAX_NAME = 1000, MAX_LINK = 2048;
-export const SCOPE = /^(pub|ref|work|infra|self)(\.[a-z0-9_]+)*$/;
+/* A tag as brain takes one: up to 64 characters, none of them white space or one of " ( ) , : and the first not + - or a dot. */
+export const TAG = /^[^\s"(),:+.\-][^\s"(),:]{0,63}$/u;
 /* A link target that names something by a scheme (task:12, doi:…); `id:` links are the index's kind 'title'. */
 const SCHEMED = /^[a-z][a-z0-9-]*:\S/i;
 /* Syncthing's copies of a conflicting edit carry the ids of the file they copy. */
@@ -52,15 +53,13 @@ function refusal(text: string): boolean {
 const cut = (s: string, n: number): string => s.length <= n ? s : s.slice(0, /[\uD800-\uDBFF]/.test(s[n - 1]) ? n - 1 : n);
 
 export interface ProjectedNote { id: string; title: string; aliases?: string[]; tags?: string[]; parent?: string; links?: string[] }
-export interface ProjectedFile { path: string; scope: string; notes: ProjectedNote[] }
+export interface ProjectedFile { path: string; tags: string[]; notes: ProjectedNote[] }
 
-/* What the file ID holds for brain: REC is its parse, null when the file is gone. SCOPE is the scope of a file
-   that names none with `#+brain_scope:`. */
-export function recordOf(id: string, rec: ParseResult | null, scope: string): ProjectedFile {
-  const out: ProjectedFile = { path: id, scope, notes: [] };
+/* What the file ID holds for brain: REC is its parse, null when the file is gone. TAGS are the tags brain puts
+   on every note of the file, beside the note's own. */
+export function recordOf(id: string, rec: ParseResult | null, tags: string[]): ProjectedFile {
+  const out: ProjectedFile = { path: id, tags, notes: [] };
   if (!rec) return out;
-  const named = rec.file.props.brain_scope;
-  if (named && SCOPE.test(named)) out.scope = named;
   const byId = new Map<string, ProjectedNote>();
   const strings = (xs: string[]) => xs.filter(x => x.length <= MAX_NAME);
   const note = (orgId: string | null, title: string, tags: string[], aliases: string[], parent: string | null): string | null => {
@@ -100,7 +99,7 @@ export function recordOf(id: string, rec: ParseResult | null, scope: string): Pr
 const hashOf = (record: ProjectedFile): string => crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex');
 export class Projector {
   declare server: Server; declare log: Log; declare notes: Notes;
-  declare url: URL; declare credential: Credential; declare scope: string;
+  declare url: URL; declare credential: Credential; declare tags: string[];
   declare ledgerFile: string;
   /* path -> the hash of the record brain last took for it; `!hash` for one brain refused. */
   declare ledger: Map<string, string>;
@@ -115,7 +114,7 @@ export class Projector {
     const cfg = server.cfg.brain!;
     this.server = server; this.log = server.log; this.notes = notes;
     this.url = new URL('v1/projection', cfg.url.endsWith('/') ? cfg.url : cfg.url + '/');
-    this.credential = new Credential(cfg.credential!, this.url.origin); this.scope = cfg.scope;
+    this.credential = new Credential(cfg.credential!, this.url.origin); this.tags = cfg.tags;
     this.ledgerFile = path.join(server.cfg.stateDir, 'projector.json');
     this.ledger = new Map(); this.hashes = new WeakMap();
     this.timer = null; this.started = false; this.running = false; this.stopped = false; this.dirty = false; this.retryMs = 0; this.request = null; this.failed = null;
@@ -142,7 +141,7 @@ export class Projector {
   }
   hash(id: string, rec: ParseResult): string {
     let h = this.hashes.get(rec);
-    if (!h) { h = hashOf(recordOf(id, rec, this.scope)); this.hashes.set(rec, h); }
+    if (!h) { h = hashOf(recordOf(id, rec, this.tags)); this.hashes.set(rec, h); }
     return h;
   }
   /* Whether the note file ID is gone: neither in the index nor on disk. A file the index leaves out (too
@@ -183,7 +182,7 @@ export class Projector {
           /* The index may have moved on while the last request was out. */
           const e = this.notes.files.get(id);
           if (e ? !this.saved(id, e) : !this.gone(id)) continue;
-          const record = recordOf(id, e ? e.rec : null, this.scope);
+          const record = recordOf(id, e ? e.rec : null, this.tags);
           at = id;
           const status = await this.send(record);
           this.retryMs = 0;
