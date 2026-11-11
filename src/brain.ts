@@ -273,7 +273,9 @@ interface BrainTask {
 /* A line of the agenda: its text, the spans of it that have a face (start, end, face) and the task it shows. */
 interface AgendaLine { text: string; spans: [number, number, number][]; task?: BrainTask }
 type AgendaView = 'week' | 'list';
-interface Agenda { view: AgendaView; lines: AgendaLine[]; win: EdWinConfig | null }
+/* OWN: the window was made for the agenda, so q closes it. STALE: a change went to brain and the view could
+   not be asked for again, so its lines are not what brain has. */
+interface Agenda { view: AgendaView; lines: AgendaLine[]; win: EdWinConfig | null; own: boolean; stale: boolean }
 interface AgendaLex { ver: number; from: number; to: number; cls: Uint8Array; names: string[] }
 const AGENDA = '*Agenda*';
 /* The open states in the order the task list shows them, and the key of each state. */
@@ -357,6 +359,8 @@ async function listView(): Promise<{ lines: AgendaLine[]; today: number }> {
     const v = await ask('brain-tasks', { state: 'open', limit: PAGE, offset }), page = isObj(v) && Array.isArray(v.tasks) ? v.tasks : [];
     all.push(...tasksOf(page)); more = page.length >= PAGE;
   }
+  /* A last page that is full does not say that more follow it. */
+  if (more) { const v = await ask('brain-tasks', { state: 'open', limit: 1, offset: MOST }); more = isObj(v) && Array.isArray(v.tasks) && v.tasks.length > 0; }
   const groups = new Map<string, BrainTask[]>(OPEN.map(([st]) => [st, []]));
   for (const t of all) { const st = taskState(t); if (!groups.has(st)) groups.set(st, []); groups.get(st)!.push(t); }
   const lines = [agendaLine([[`Open tasks (${all.length}${more ? ', and more that are not shown' : ''})`, F.TITLE]])];
@@ -377,7 +381,7 @@ async function fillAgenda(view: AgendaView, keep: boolean) {
   const was = keep && old ? lineNoB(b, b.pt) - 1 : -1, held = was >= 0 && old!.lines[was] ? old!.lines[was].task : undefined;
   b.mode = 'brain-agenda-mode'; b.readOnly = true; b.evilState = 'motion';
   b.text = built.lines.map(l => l.text).join('\n') + '\n';
-  b.agenda = { view, lines: built.lines, win: old ? old.win : null };
+  b.agenda = { view, lines: built.lines, win: old ? old.win : null, own: old ? old.own : false, stale: false };
   b.modified = false; b.undo = []; b.redo = [];
   let line = built.today >= 0 ? built.today : Math.max(0, built.lines.findIndex(l => l.task));
   if (was >= 0) {
@@ -392,19 +396,28 @@ async function fillAgenda(view: AgendaView, keep: boolean) {
   b._balx = undefined;
   return b;
 }
-/* Show VIEW. The agenda takes a window of its own below, and a popup window left from a jump out of it is reused. */
+/* Show VIEW. The agenda takes a window of its own below, or one that is there: the popup window it is asked
+   for from, else another window. The window is its own when it was made for it, now or earlier (a record
+   opened from the agenda is shown in the agenda's window): q closes that one, and gives any other window back
+   what it showed. */
 async function showAgenda(view: AgendaView) {
-  const b = await fillAgenda(view, false), w = Ed.windowFor(b);
-  if (w) Ed.selectWindow(w);
-  else { (b.agenda as Agenda).win = Ed.winConfig(); if (E.sel!.popup && Ed.windowList().length > 1) Ed.setWindowBuffer(b); else Ed.popToBuffer(b, true); }
+  const b = await fillAgenda(view, false), ag = b.agenda as Agenda, shown = Ed.windowFor(b);
+  if (shown) { Ed.selectWindow(shown); return; }
+  const sel = E.sel!, before = Ed.windowList().length;
+  ag.win = Ed.winConfig();
+  let w = sel;
+  if (sel.popup && before > 1) Ed.setWindowBuffer(b); else w = Ed.popToBuffer(b, true);
+  ag.own = Ed.windowList().length > before || w.prev.includes(b);
 }
 /* The agenda that is shown, asked for again. What was done is said either way: SAID alone, or with why the
-   agenda still shows what it did. */
+   agenda still shows what it did. Its lines are then of revisions brain has moved on from, and a change made
+   from one would be made twice (a task that repeats, closed again, moves on again), so the agenda takes no
+   change until it is asked for again. */
 async function refreshed(said: string) {
   const b = Ed.getBuffer(AGENDA);
   if (!b || b.mode !== 'brain-agenda-mode' || !b.agenda || !Ed.windowFor(b)) return said;
   try { await fillAgenda((b.agenda as Agenda).view, true); Ed.scheduleRender(); return said; }
-  catch (e) { return `${said}; the agenda is not refreshed: ${Ed.errorText(e)}`; }
+  catch (e) { (b.agenda as Agenda).stale = true; return `${said}; the agenda is not refreshed (r asks again): ${Ed.errorText(e)}`; }
 }
 const prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {
@@ -456,7 +469,8 @@ const brief = (x: unknown) => { const t = oneLine(typeof x === 'string' ? x : x 
    shows, so what changed in brain since is kept, and where it changed one of FIELDS too, brain takes this one
    and says so (`clashes`). The echo area says what SAY makes of the task brain answers, and what was replaced. */
 async function change(fields: Record<string, unknown>, say: (t: BrainTask) => string, id?: SchemeValue) {
-  const t = taskFor(id);
+  const t = taskFor(id), b = Ed.getBuffer(AGENDA);
+  if (b && b.agenda && (b.agenda as Agenda).stale) signal('user-error', 'The agenda does not show the last change: r asks brain again');
   const v = await ask('brain-task-set', t.id, { ...fields, base_revision: t.revision }), now = taskOf(v);
   const clashes = (isObj(v) && Array.isArray(v.clashes) ? v.clashes : []).filter(isObj);
   const replaced = clashes.length ? `; replaced what had changed since: ${clashes.map(c => `${brief(c.field)} was ${brief(c.was)}`).join(', ')}` : '';
@@ -474,10 +488,10 @@ CMD('brain-agenda', async () => [await Org.keyOf('Agenda: [a] agenda  [t] all op
   'KEY', 'Show brain\'s tasks: with KEY "a" the agenda of the week from today (what is overdue, each day, the next actions), with "t" every open task by state (SPC m a).',
   async ([k]: SchemeValue[]) => { await showAgenda(String(k)[0] === 't' ? 'list' : 'week'); return false; });
 CMD('brain-agenda-redo', '', '', 'Ask brain again for what the agenda shows (r, g r).', async () => { await fillAgenda(agendaOf(cur()).view, true); return false; });
-CMD('brain-agenda-quit', '', '', 'Leave the agenda: close its window when it was opened for it, else bring the windows back (q).', () => {
+CMD('brain-agenda-quit', '', '', 'Leave the agenda: close its window when it was opened for it, else bring back the windows as they were (q).', () => {
   const b = cur(), ag = agendaOf(b), w = Ed.windowFor(b), win = ag.win;
   ag.win = null;
-  if (w && w.popup && Ed.windowList().length > 1) { Ed.deleteWindow(w); return false; }
+  if (w && ag.own && w.popup && Ed.windowList().length > 1) { Ed.deleteWindow(w); return false; }
   if (win) { try { Ed.restoreWinConfig(win); return false; } catch (e) { /* the windows are not those any more */ } }
   return L.call('quit-window', []);
 });

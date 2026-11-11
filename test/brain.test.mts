@@ -143,6 +143,8 @@ function tasksRoute(method: string, u: URL, auth: string | undefined, session: u
   return send(200, { ...taskView(t), clashes });
 }
 const asked: { url: string; auth: string | undefined }[] = [];
+/* While set, brain answers no question about tasks: a write is taken and the view after it is not given. */
+let readsFail = false;
 const brain = http.createServer((req, res) => {
   let sent = '';
   req.setEncoding('utf8'); req.on('data', d => { sent += d; });
@@ -150,6 +152,7 @@ const brain = http.createServer((req, res) => {
     const u = new URL(req.url!, 'http://brain');
     asked.push({ url: req.url!, auth: req.headers.authorization });
     const send = (status: number, body: unknown, ms = 0) => setTimeout(() => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }, ms);
+    if (readsFail && req.method === 'GET' && (u.pathname === '/v1/agenda' || u.pathname === '/v1/tasks')) return send(503, { error: 'brain is away' });
     if (u.pathname === '/v1/agenda' || u.pathname === '/v1/tasks' || u.pathname.startsWith('/v1/tasks/')) return tasksRoute(req.method!, u, req.headers.authorization, req.headers['x-brain-session'], sent ? JSON.parse(sent) : {}, send);
     if (req.method !== 'GET') return send(404, { error: 'no such route' });
     if (u.pathname === '/v1/titles') return send(200, { results: titles(u.searchParams.get('q') || '', u.searchParams.get('kind')).slice(0, Number(u.searchParams.get('limit'))) }, u.searchParams.get('q') === 'al' ? SLOW_MS : 0);
@@ -673,6 +676,19 @@ test('SPC m a t: every open task by state, in brain’s order, asked for a page 
   assert.deepEqual(asked.slice(n).map(a => a.url), ['/v1/tasks?limit=200&offset=0&state=open', '/v1/tasks?limit=200&offset=200&state=open']);
   assert.equal(body()[0], 'Open tasks (206)'); assert.ok(body().includes('Hold (200)'));
   assert.equal(lineAt(), '  task:3    NEXT (proposal) Write the report  work  due 2026-11-12', 'point stays on its task');
+  // Exactly as many as are shown: one more question says that nothing follows the last full page.
+  for (let k = 0; k < 1794; k++) TASKS.push(task(1000 + k, `More ${k}`, 'pub', { state: 'hold' }));
+  const m = asked.length, then = agenda().agenda;
+  await keys('r');
+  await until(() => agenda().agenda !== then, 'the list again');
+  assert.equal(asked[asked.length - 1].url, '/v1/tasks?limit=1&offset=2000&state=open');
+  assert.equal(asked.length - m, 11);
+  assert.equal(body()[0], 'Open tasks (2000)');
+  TASKS.push(task(5000, 'One too many', 'pub', { state: 'hold' }));
+  const last = agenda().agenda;
+  await keys('r');
+  await until(() => agenda().agenda !== last, 'the list again');
+  assert.equal(body()[0], 'Open tasks (2000, and more that are not shown)');
   await keys('q');
 });
 
@@ -787,6 +803,54 @@ test('a prompt changes the task it was opened on, only #f clears a field, and a 
   await until(() => body().includes('  task:6    SOMEDAY Learn  the cello  pub'), `the title on one line: ${JSON.stringify(body())}`);
   assert.ok(body().includes('  task:4    NEXT (no title)  ref  scheduled 2026-11-14 00:30'), JSON.stringify(body()));
   await keys('q');
+});
+
+test('after a change the agenda could not show, it takes no change until it is asked for again', async () => {
+  await showTasks('a');
+  onTask(5);
+  readsFail = true;
+  try {
+    await saying('task:5: done; it repeats, scheduled 2026-11-15; the agenda is not refreshed (r asks again): brain answered 503', () => keys('x'));
+    assert.equal(lineAt(), '  task:5    Sched. 2x:  WAITING Water the plants  pub', 'the line is the old one');
+    const w = written.length;
+    // The same key again would close the next occurrence too.
+    await saying('The agenda does not show the last change: r asks brain again', () => keys('x'));
+    await saying('The agenda does not show the last change: r asks brain again', () => pick('p', 'a'));
+    assert.equal(written.length, w);
+    assert.equal(taskN(5).props.scheduled, '2026-11-15');
+  } finally { readsFail = false; }
+  const was = agenda().agenda;
+  await keys('r');
+  await until(() => agenda().agenda !== was, 'the agenda again');
+  onTask(5); await saying('task:5: priority A', () => pick('p', 'a'));
+  await keys('q');
+});
+
+test('q closes a window made for the agenda, and gives a window the agenda took back what it showed', async () => {
+  await visit('host.org');
+  // One window that is not a popup: the one left from an earlier case may have been made as one.
+  Ed.deleteOtherWindows(); E.sel.popup = false;
+  await showTasks('a');
+  assert.equal(Ed.windowList().length, 2);
+  // A record opened from the agenda is in the agenda's window, and the agenda asked for from there has it back.
+  onTask(4); await keys('RET'); await until(() => cur().name.startsWith('*brain: '), 'the record');
+  await keys('SPC m a'); await until(() => E.prompt, 'the key prompt'); await keys('t');
+  await until(() => cur().name === '*Agenda*', 'the agenda');
+  assert.equal(Ed.windowList().length, 2);
+  await keys('q');
+  assert.equal(Ed.windowList().length, 1, 'its own window is closed');
+  assert.equal(cur().id, 'host.org');
+
+  // A popup window that shows something else: the agenda takes it, and q gives it back.
+  const side = Ed.popToBuffer(Ed.getBuffer('alpha.org'), false);
+  assert.ok(side.popup); assert.equal(Ed.windowList().length, 2);
+  await keys('SPC m a'); await until(() => E.prompt, 'the key prompt'); await keys('a');
+  await until(() => cur().name === '*Agenda*', 'the agenda');
+  assert.equal(E.sel, side, 'the agenda is in the window that was there');
+  await keys('q');
+  assert.deepEqual(Ed.windowList().map((w: EdwinCore) => [w.buffer.id, w.popup]), [['host.org', false], ['alpha.org', true]], 'the window is not closed, and shows what it did');
+  assert.equal(cur().id, 'host.org');
+  Ed.deleteOtherWindows();
 });
 
 test('SPC o adds a task in brain-task-scope: the selection is its body, and the note at point is named by its id alone', async () => {

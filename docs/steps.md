@@ -538,8 +538,10 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   (the frame's local day), a section `Overdue` when something is, a header for each day with what is due or
   scheduled on it (`Due:`, `Scheduled:`, and the time when the value has one), then `Next`, the next actions
   with no date. `t` is every open task, under `Next`, `To do`, `Waiting`, `Hold`, `Someday`, in brain's order
-  inside each, asked for 200 at a time up to 2,000. The buffer is `*Agenda*` in `brain-agenda-mode`: read
-  only, in Motion state, in a window of its own below. A task's line has `task:N`, the label, the state,
+  inside each, asked for 200 at a time up to 2,000 (the first line says when more follow). The buffer is
+  `*Agenda*` in `brain-agenda-mode`: read only, in Motion state, in a window of its own below, or in a window
+  that is there (the popup it is asked for from, else another). `q` closes a window that was made for the
+  agenda and gives any other back what it showed. A task's line has `task:N`, the label, the state,
   `[#P]`, the title on one line, `:tags:`, the scope, and in the list its dates; a task whose trust is not the
   owner's is marked `(proposal)`. The faces come from what the line was built from, not from reading the text
   back, so a title cannot colour itself as something else.
@@ -557,8 +559,11 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
 - **A change is made against the revision the line shows** (`base_revision`): brain keeps what changed in the
   task since and writes only the field that was changed here; where both changed that field brain takes this
   one and the echo area says what it replaced (`clashes`). The view is then asked for again, with point on the
-  same task in every window that shows it. What brain refuses is a user error in brain's words, and nothing changes. A repeating task that
-  is done moves to its next date, as brain does it, and the echo area says so.
+  same task in every window that shows it. What brain refuses is a user error in brain's words, and nothing
+  changes. A repeating task that is done moves to its next date, as brain does it, and the echo area says so.
+  When the change was made and the view could not be asked for again, the echo area says both, and the agenda
+  takes no further change until `r` has asked again: its lines are of revisions brain has moved on from, and
+  closing a repeating task from one would move it on a second time.
 - **`brain-task-add` (`SPC o`, `a` in the agenda)** reads `Task: ` and adds the task in the scope
   `brain-task-scope` (`"work"` by default). A Visual selection is its body. When the note at point has an Org
   id the body ends with `[[id:ORG-ID]]`: the id alone, since a note's title may be of a scope the task is not
