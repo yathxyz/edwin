@@ -538,7 +538,7 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   and send nothing. The log has `brain-read` or `brain-write` with the route's name, the status and the time,
   never a title, a query or a token.
 - **Who can write.** Every process that can open edwind's socket can call these, as it can read every note
-  file: with a task token it adds, changes, closes and confirms tasks as that token's actor, with its trust, in the
+  file: with a task token it adds, changes and closes tasks as that token's actor, in the
   scopes the token is cleared for. The token is not the projector's (edwind refuses that configuration) and no
   frame holds it.
 - **`brain-agenda` (`SPC m a`, `src/brain.ts`)** asks for one key. `a` is the week: the 7 days from today
@@ -550,16 +550,15 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   that is there (the popup it is asked for from, else another). `q` closes a window that was made for the
   agenda and gives any other back what it showed. A task's line has `task:N`, the label, the state,
   `[#P]`, the title on one line, `:tags:`, the scope, and in the list its dates; a task whose trust is not the
-  owner's is marked `(proposal)`. The faces come from what the line was built from, not from reading the text
+  owner's (an agent made it) says `by` and who, after the scope. It is a task like any other: edwind sets no
+  trust. The faces come from what the line was built from, not from reading the text
   back, so a title cannot colour itself as something else.
 - **Keys there**, each on the task at point: `RET` opens its record; `t` sets the state (then `t n w h s d c`);
   `x` is done; `s` schedules and `d` sets when it is due (the date reader of `org-schedule`: nothing typed is
   today, a typed time is kept; `C-u s` and `C-u d` clear the date, so `C-u` is the prefix argument in this
   buffer and not a scroll); `p` sets the priority (`a b c`, space for none); `e` edits the title; `m` moves it
-  to a scope (`pub`, `ref`, `work`, `infra`; brain refuses one the token is not cleared for); `c` confirms a
-  proposal (trust `owner`); `a` adds a task; `r` and `g r` ask again; `q` leaves. Each has a command that takes
-  the value as an argument (`brain-task-state`, `-done`, `-schedule`, `-due`, `-priority`, `-title`, `-move`,
-  `-confirm`), and after it, optionally, the id of a task the agenda shows: a key that reads in the minibuffer
+  to a scope (`pub`, `ref`, `work`, `infra`; brain refuses one the token is not cleared for); `a` adds a task; `r` and `g r` ask again; `q` leaves. Each has a command that takes
+  the value as an argument (`brain-task-state`, `-done`, `-schedule`, `-due`, `-priority`, `-title`, `-move`), and after it, optionally, the id of a task the agenda shows: a key that reads in the minibuffer
   names the task it was pressed on, so the change is made to that one wherever point is when the answer comes.
   For a date or a priority `#f` is none; a value that is neither that nor text is an error and nothing is
   sent.

@@ -132,7 +132,6 @@
   "p" 'brain-task-priority
   "e" 'brain-task-title
   "m" 'brain-task-move
-  "c" 'brain-task-confirm
   "a" 'brain-task-add
   "r" 'brain-agenda-redo
   "g r" 'brain-agenda-redo

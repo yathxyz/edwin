@@ -143,7 +143,7 @@ const FACES: Record<string, DispFaceSpec> = {
   /* The agenda of brain's tasks (brain.ts CSS) */
   'ba-title': { w: 700, fg: 'fn' }, 'ba-head': { w: 700, fg: 'fg' }, 'ba-today': { w: 700, fg: 'kw' }, 'ba-ref': { fg: 'dim' }, 'ba-dim': { fg: 'dim' },
   'ba-label': { fg: 'co' }, 'ba-time': { fg: 'co' }, 'ba-over': { fg: 'rb1', w: 600 }, 'ba-state': { fg: ['org-todo', 'rb1'], w: 700 }, 'ba-pri': { fg: 'kw', w: 600 },
-  'ba-tags': { fg: 'dim', bg: ['org-tag-bg', TAG_BG] }, 'ba-proposal': { fg: 'rb1', i: 1 },
+  'ba-tags': { fg: 'dim', bg: ['org-tag-bg', TAG_BG] },
 };
 const NAMED: Record<string, string> = { black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000', blue: '#0000ff', yellow: '#ffff00', cyan: '#00ffff', magenta: '#ff00ff',
   gray: '#808080', grey: '#808080', orange: '#ffa500', purple: '#800080', pink: '#ffc0cb', brown: '#a52a2a' };

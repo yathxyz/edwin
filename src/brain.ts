@@ -269,11 +269,11 @@ CMD('brain-follow', '', '', 'Open the link at point, or the first link of the li
 });
 
 /* ---------- tasks ---------- */
-/* A task as brain answers it: its node with NUMBER (task:N). On a row of the agenda WHY says which date put it
-   there, and on an overdue one DAY is that date's day. */
+/* A task as brain answers it: its node with NUMBER (task:N) and who made it. On a row of the agenda WHY says
+   which date put it there, and on an overdue one DAY is that date's day. */
 interface BrainTask {
   id: string; title: string; scope: string; trust: string; revision: number; number: number | null; props: Record<string, unknown>;
-  why?: string; day?: string;
+  created_by_title?: unknown; why?: string; day?: string;
 }
 /* A line of the agenda: its text, the spans of it that have a face (start, end, face) and the task it shows. */
 interface AgendaLine { text: string; spans: [number, number, number][]; task?: BrainTask }
@@ -308,16 +308,16 @@ const timeOf = (v: string) => { const m = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})(?::\
 const dayNumber = (ymd: string) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000 : NaN; };
 
 /* The faces of an agenda buffer. */
-const AF = ['', 'ba-title', 'ba-head', 'ba-today', 'ba-ref', 'ba-label', 'ba-over', 'ba-time', 'ba-state', 'ba-pri', 'ba-tags', 'ba-dim', 'ba-proposal'];
-const F = { TITLE: 1, HEAD: 2, TODAY: 3, REF: 4, LABEL: 5, OVER: 6, TIME: 7, STATE: 8, PRI: 9, TAGS: 10, DIM: 11, PROPOSAL: 12 };
+const AF = ['', 'ba-title', 'ba-head', 'ba-today', 'ba-ref', 'ba-label', 'ba-over', 'ba-time', 'ba-state', 'ba-pri', 'ba-tags', 'ba-dim'];
+const F = { TITLE: 1, HEAD: 2, TODAY: 3, REF: 4, LABEL: 5, OVER: 6, TIME: 7, STATE: 8, PRI: 9, TAGS: 10, DIM: 11 };
 function agendaLine(parts: [string, number][], task?: BrainTask): AgendaLine {
   const l: AgendaLine = { text: '', spans: [], task };
   for (const [text, face] of parts) { if (face && text) l.spans.push([l.text.length, l.text.length + text.length, face]); l.text += text; }
   return l;
 }
 /* A task's line: task:N, LABEL (why it is on this day, when it is there for one; OVER marks one that is late),
-   the time, the state, [#P], a mark on a proposal (a task whose trust is not the owner's), the title, :tags:,
-   the scope and, with DATES, its dates. */
+   the time, the state, [#P], the title, :tags:, the scope, who made it when its trust is not the owner's (an
+   agent's task) and, with DATES, its dates. */
 function taskLine(t: BrainTask, label: string | null, over: boolean, time: string, dates: boolean) {
   const tags = (Array.isArray(t.props.tags) ? t.props.tags : []).filter((x): x is string => typeof x === 'string' && !!x).map(oneLine);
   const pr = prop(t, 'priority'), parts: [string, number][] = [['  ', 0], [refOfTask(t).padEnd(9), F.REF], [' ', 0]];
@@ -325,10 +325,10 @@ function taskLine(t: BrainTask, label: string | null, over: boolean, time: strin
   if (time) parts.push([time, F.TIME], [' ', 0]);
   parts.push([taskState(t).toUpperCase(), F.STATE], [' ', 0]);
   if (pr) parts.push([`[#${pr}]`, F.PRI], [' ', 0]);
-  if (t.trust !== 'owner') parts.push(['(proposal)', F.PROPOSAL], [' ', 0]);
   parts.push([oneLine(t.title) || '(no title)', 0]);
   if (tags.length) parts.push(['  ', 0], [`:${tags.join(':')}:`, F.TAGS]);
   parts.push(['  ', 0], [oneLine(String(t.scope)), F.DIM]);
+  if (t.trust !== 'owner' && typeof t.created_by_title === 'string' && t.created_by_title) parts.push(['  ', 0], [`by ${oneLine(t.created_by_title)}`, F.DIM]);
   if (dates) for (const k of ['due', 'scheduled']) if (prop(t, k)) parts.push(['  ', 0], [`${k} ${prop(t, k).replace('T', ' ')}`, F.TIME]);
   return agendaLine(parts, t);
 }
@@ -402,7 +402,7 @@ async function fillAgenda(view: AgendaView, keep: boolean) {
   b.pt = lineStartB(b, line + 1);
   /* A window that is not the selected one keeps a point of its own, which would be a place in the old text. */
   for (const w of Ed.windowList()) if (w.buffer === b) w.pt = b.pt;
-  /* The same text can be other lines: a proposal confirmed, whose title said so already. */
+  /* The same text can have other faces: what a title said can now be a field. */
   b._balx = undefined;
   return b;
 }
@@ -516,7 +516,6 @@ Ed.host.page.addStyle('brain-css', `
 .text .ba-state { color: var(--org-todo, var(--rb1)); font-weight: 700; }
 .text .ba-pri { color: var(--kw); font-weight: 600; }
 .text .ba-tags { color: var(--dim); background: var(--org-tag-bg, rgb(127 127 127 / 0.12)); border-radius: 3px; }
-.text .ba-proposal { color: var(--rb1); font-style: italic; }
 `);
 
 Ed.MODE_NAMES['brain-agenda-mode'] = 'Agenda';
@@ -587,11 +586,6 @@ CMD('brain-task-title', async () => { const t = taskAt(); return [await Ed.readM
 CMD('brain-task-move', async () => { const id = taskAt().id; return [await Ed.readMini('Scope: ', '', () => SCOPES, { require: true, keepOrder: true }), id]; },
   'SCOPE &optional TASK', 'Move the task at point to the brain scope SCOPE, where the task token is cleared for it (m).',
   ([scope, id]: SchemeValue[]) => change({ scope: given(scope, 'scope') }, t => `in ${oneLine(String(t.scope))}`, id));
-CMD('brain-task-confirm', '', '', 'Confirm the task at point, an agent\'s proposal: it becomes the owner\'s (c).', () => {
-  const t = taskAt();
-  if (t.trust === 'owner') signal('user-error', `${refOfTask(t)} is not a proposal`);
-  return change({ trust: 'owner' }, now => (now.trust === 'owner' ? 'confirmed' : `still ${brief(now.trust)}`));
-});
 CMD('brain-task-add', async () => {
   /* Before a title is typed for a task that cannot be added. */
   if (!attached()) signal('user-error', NO_EDWIND);
@@ -609,7 +603,7 @@ CMD('brain-task-add', async () => {
     return false;
   });
 for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
-  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-move', 'brain-task-confirm', 'brain-task-add']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-move', 'brain-task-add']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 globalThis.Brain = { open, noteTitled };
 })();

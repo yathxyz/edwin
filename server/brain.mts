@@ -79,7 +79,7 @@ const KIND = /^[a-z][a-z0-9_-]{0,40}$/;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 /* The fields of a task a frame may write (brain's API §5), and those of a change to one. */
 const TASK_FIELDS = ['title', 'body', 'scope', 'state', 'priority', 'due', 'scheduled', 'recur', 'tags', 'waiting_on'];
-const SET_FIELDS = [...TASK_FIELDS, 'base_revision', 'trust'];
+const SET_FIELDS = [...TASK_FIELDS, 'base_revision'];
 /* What brain records as the session of a task written through here. */
 const SESSION = 'edwind';
 const NO_READ = 'This edwind has no brain to read (brain.readCredential is not set)';

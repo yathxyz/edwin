@@ -91,7 +91,7 @@ function resetTasks() {
   written.length = 0;
 }
 const taskN = (n: number) => TASKS.find(t => t.number === n)!;
-const taskView = (t: Task) => ({ id: t.id, kind: 'task', title: t.title, body: t.body, props: t.props, scope: t.scope, trust: t.trust, revision: t.revision, number: t.number, updated_at: '2026-11-10T08:00:00Z' });
+const taskView = (t: Task) => ({ id: t.id, kind: 'task', title: t.title, body: t.body, props: t.props, scope: t.scope, trust: t.trust, revision: t.revision, number: t.number, created_by_title: t.trust === 'owner' ? 'Yanni' : 'agents@test', updated_at: '2026-11-10T08:00:00Z' });
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const plusDays = (day: string, n: number) => new Date(Date.parse(day.slice(0, 10) + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
 /* brain's PATCH: with base_revision a field left as it was then is not written, and one that changed on both
@@ -102,7 +102,7 @@ function change(t: Task, fields: Record<string, unknown>) {
     if (k === 'base_revision') continue;
     const was = fieldsOf(t)[k];
     if (base) { if (same(v, base[k])) continue; if (!same(was, base[k])) clashes.push({ field: k, was: was ?? null, base: base[k] ?? null, now: v }); }
-    if (k === 'title' || k === 'scope' || k === 'trust') t[k] = String(v); else if (k === 'body') t.body = v as string | null; else if (v === null) delete t.props[k]; else t.props[k] = v;
+    if (k === 'title' || k === 'scope') t[k] = String(v); else if (k === 'body') t.body = v as string | null; else if (v === null) delete t.props[k]; else t.props[k] = v;
   }
   if (t.props.state === 'done' && t.props.recur) { t.props.state = 'todo'; for (const k of ['due', 'scheduled']) if (typeof t.props[k] === 'string') t.props[k] = plusDays(t.props[k] as string, 7); }
   t.revision++; t.history.set(t.revision, fieldsOf(t));
@@ -659,7 +659,7 @@ test('edwind reads tasks with the read token and writes them with the task token
   assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Quiet-title-words', body: 'Quiet-body-words', scope: 'pub', priority: 'B', tags: ['x'] } });
   const set = await sync.call({ cmd: 'brain-task-set', args: [taskN(8).id, { state: 'next', due: null, base_revision: 1, trust: 'owner', deleted: true, expect_revision: 7, set_props: { other: 1 }, props: {} }] });
   assert.equal(set.value.props.state, 'next'); assert.deepEqual(set.value.clashes, []);
-  assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/tasks/${taskN(8).id}`, auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { state: 'next', due: null, base_revision: 1, trust: 'owner' } }, 'a task is not deleted through edwind');
+  assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/tasks/${taskN(8).id}`, auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { state: 'next', due: null, base_revision: 1 } }, 'a task is not deleted through edwind, and its trust is not set');
   await sync.call({ cmd: 'brain-task-set', args: ['task:8', { priority: 'A' }] });
   assert.equal(asked[asked.length - 1].url, '/v1/tasks/task%3A8', 'a reference is one path segment');
 
@@ -704,7 +704,7 @@ test('SPC m a a: the week from today, what is overdue first and the undated next
     '  task:2    Scheduled:  14:30 TODO Call the plumber  :home:phone:  work',
     'Wednesday  11 November 2026',
     'Thursday   12 November 2026',
-    '  task:3    Due:        NEXT (proposal) Write the report  work',
+    '  task:3    Due:        NEXT Write the report  work  by agents@test',
     'Friday     13 November 2026',
     'Saturday   14 November 2026',
     'Sunday     15 November 2026',
@@ -715,8 +715,8 @@ test('SPC m a a: the week from today, what is overdue first and the undated next
   assert.equal(lineAt(), 'Tuesday    10 November 2026', 'point is on today');
   assert.equal(asked[asked.length - 1].url, '/v1/agenda?from=2026-11-10&days=7');
   const at = (s: string) => classAt(b, b.text.indexOf(s));
-  assert.deepEqual(['Agenda for', 'Overdue', '3 d. ago:', 'Tuesday', 'Wednesday', 'Scheduled:', '14:30', 'TODO', '[#A]', '(proposal)', ':home:', 'Pay the'].map(at),
-    ['ba-title', 'ba-head', 'ba-over', 'ba-today', 'ba-head', 'ba-label', 'ba-time', 'ba-state', 'ba-pri', 'ba-proposal', 'ba-tags', '']);
+  assert.deepEqual(['Agenda for', 'Overdue', '3 d. ago:', 'Tuesday', 'Wednesday', 'Scheduled:', '14:30', 'TODO', '[#A]', 'by agents@test', ':home:', 'Pay the'].map(at),
+    ['ba-title', 'ba-head', 'ba-over', 'ba-today', 'ba-head', 'ba-label', 'ba-time', 'ba-state', 'ba-pri', 'ba-dim', 'ba-tags', '']);
   assert.equal(Ed.windowList().length, 2, 'the agenda has a window of its own');
   await saying('No task on this line', () => keys('x'));
   assert.equal(written.length, 0);
@@ -729,7 +729,7 @@ test('SPC m a t: every open task by state, in brain’s order, asked for a page 
   assert.equal(cur().text, [
     'Open tasks (6)',
     'Next (2)',
-    '  task:3    NEXT (proposal) Write the report  work  due 2026-11-12',
+    '  task:3    NEXT Write the report  work  by agents@test  due 2026-11-12',
     '  task:4    NEXT Read the paper  ref',
     'To do (2)',
     '  task:1    TODO [#A] Pay the invoice  work  due 2026-11-07',
@@ -739,14 +739,14 @@ test('SPC m a t: every open task by state, in brain’s order, asked for a page 
     'Someday (1)',
     '  task:6    SOMEDAY Learn the cello  pub',
     ''].join('\n'));
-  assert.equal(lineAt(), '  task:3    NEXT (proposal) Write the report  work  due 2026-11-12', 'point is on the first task');
+  assert.equal(lineAt(), '  task:3    NEXT Write the report  work  by agents@test  due 2026-11-12', 'point is on the first task');
   for (let k = 0; k < 200; k++) TASKS.push(task(100 + k, `Filler ${k}`, 'pub', { state: 'hold' }));
   const n = asked.length, was = agenda().agenda;
   await keys('r');
   await until(() => agenda().agenda !== was, 'the list again');
   assert.deepEqual(asked.slice(n).map(a => a.url), ['/v1/tasks?limit=200&offset=0&state=open', '/v1/tasks?limit=200&offset=200&state=open']);
   assert.equal(body()[0], 'Open tasks (206)'); assert.ok(body().includes('Hold (200)'));
-  assert.equal(lineAt(), '  task:3    NEXT (proposal) Write the report  work  due 2026-11-12', 'point stays on its task');
+  assert.equal(lineAt(), '  task:3    NEXT Write the report  work  by agents@test  due 2026-11-12', 'point stays on its task');
   // Exactly as many as are shown: one more question says that nothing follows the last full page.
   for (let k = 0; k < 1794; k++) TASKS.push(task(1000 + k, `More ${k}`, 'pub', { state: 'hold' }));
   const m = asked.length, then = agenda().agenda;
@@ -805,7 +805,7 @@ test('RET opens the task’s record; t, x, s, d and p change the task at point a
   await keys('q');
 });
 
-test('e, m and c: a new title, another scope, a proposal confirmed; what brain refuses is said in its words', async () => {
+test('e and m: a new title, another scope; what brain refuses is said in its words', async () => {
   await showTasks('t');
   onTask(4);
   await keys('e'); await until(() => E.mini, 'the minibuffer');
@@ -822,12 +822,6 @@ test('e, m and c: a new title, another scope, a proposal confirmed; what brain r
   await saying('brain: scope infra is outside this token', () => answer('m', 'infra'));
   assert.equal(taskN(4).scope, 'pub'); assert.equal(agenda().text, shown, 'a refusal changes nothing');
 
-  onTask(3); await saying('task:3: confirmed', () => keys('c'));
-  assert.deepEqual(lastWrite().body, { trust: 'owner', base_revision: 2 });
-  assert.equal(lineAt(), '  task:3    NEXT Write the report  work  due 2026-11-12', 'it is a proposal no longer');
-  const w = written.length;
-  await saying('task:3 is not a proposal', () => keys('c'));
-  assert.equal(written.length, w);
   await keys('q');
 });
 
@@ -992,8 +986,8 @@ test('an agenda in a window follows brain: a task changed elsewhere is in it wit
   const n = asked.length;
   await followed(() => { change(taskN(3), { due: '2026-11-13' }); change(taskN(2), { state: 'done' }); taskChanged(); });
   assert.ok(!body().some(l => l.includes('Call the plumber')), 'what was closed is gone');
-  assert.equal(body()[body().indexOf('Friday     13 November 2026') + 1], '  task:3    Due:        NEXT (proposal) Write the report  work');
-  assert.equal(lineAt(), '  task:3    Due:        NEXT (proposal) Write the report  work', 'point is on its task');
+  assert.equal(body()[body().indexOf('Friday     13 November 2026') + 1], '  task:3    Due:        NEXT Write the report  work  by agents@test');
+  assert.equal(lineAt(), '  task:3    Due:        NEXT Write the report  work  by agents@test', 'point is on its task');
   assert.deepEqual(asked.slice(n).map(x => x.url), ['/v1/agenda?from=2026-11-10&days=7'], 'the agenda is asked for once');
   assert.equal(agenda().modified, false); assert.equal(agenda().readOnly, true);
   // In a window that is not the selected one, while the minibuffer reads: both are left alone.
@@ -1001,7 +995,7 @@ test('an agenda in a window follows brain: a task changed elsewhere is in it wit
   await keys('SPC n r f'); await until(() => E.mini, 'the minibuffer');
   const mini = E.mini;
   await followed(() => { change(taskN(3), { state: 'todo', priority: 'B' }); change(taskN(4), { title: 'Read the other paper' }); taskChanged(); });
-  assert.equal(lineIn(shown), '  task:3    Due:        TODO [#B] (proposal) Write the report  work', 'the window’s point is on its task');
+  assert.equal(lineIn(shown), '  task:3    Due:        TODO [#B] Write the report  work  by agents@test', 'the window’s point is on its task');
   assert.ok(body().includes('  task:4    NEXT Read the other paper  ref'));
   assert.equal(E.mini, mini, 'the minibuffer reads on');
   await keys('C-g');
