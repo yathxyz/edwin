@@ -891,11 +891,19 @@ async function openLink(target: string) {
   target = target.trim();
   if ((m = /^brain:(.+)$/.exec(target))) { await Brain.open(m[1].trim()); return; }
   if ((m = /^id:(.+)$/.exec(target))) {
-    /* An id that a file here holds is followed here; brain knows the others, where there is an edwind to ask it. */
     const id = m[1].trim();
     await ensureIndex();
     const file = fileOfId(id);
-    if (!file && served()) { await Brain.open('org-id:' + id); return; }
+    if (served()) {
+      /* The notes are edwind's. An id in one of its buffers that is open here is followed at once. Any other
+         is brain's to find, also when a file of this machine holds it: that file may be a copy of a note, and
+         a note is edwind's file. The file here is followed only when brain has no such note, or cannot be
+         asked, and the echo area says which. */
+      const held = file ? sharedOf(file) : null;
+      if (held) { Ed.setWindowBuffer(held); gotoId(held, id); return; }
+      try { await Brain.open('org-id:' + id); return; }
+      catch (e) { if (!file) throw e; Ed.message(`${Ed.errorText(e)}: following the id in ${Ed.fileLabel(file)}`); }
+    }
     if (!file) signal('user-error', `Cannot find entry with ID "${id}"`);
     const b = await Ed.visit(file!);
     if (b instanceof Ed.Buffer) gotoId(b, id);
@@ -1089,6 +1097,12 @@ function buildIds(ix: OrgIndex) {
   ix.ids = ids;
 }
 const fileOfId = (id: string) => (ORG.ix && ORG.ix.ids && ORG.ix.ids.get(id)) || null;
+/* The open buffer of edwind's that the index read FILE from; null when it read a file of this machine, or a
+   buffer of its own. */
+function sharedOf(file: string) {
+  const f = ORG.ix && ORG.ix.files.get(file), b = f && f.bufId !== undefined ? E.buffers.find(x => x.id === f.bufId) : null;
+  return b && b.shared ? b : null;
+}
 /* Point of B on the entry whose :ID: is ID, unfolded: its headline, or the top of the file for the file's own
    drawer, for the id: of a Markdown file's front matter and for an id the text does not hold. */
 function gotoId(b: EdBuffer, id: string | null) {

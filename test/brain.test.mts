@@ -37,7 +37,12 @@ const STAND_1: Node = { id: id(8, 'a1'), kind: 'memory', title: 'Standup', scope
 const STAND_2: Node = { id: id(8, 'a2'), kind: 'memory', title: 'Standup', scope: 'self' };
 const EXACT: Node = { id: id(8, 'b1'), kind: 'reference', title: 'Note', scope: 'ref' };
 const WIP: Node = { id: id(8, 'b2'), kind: 'reference', title: '[WIP] Roadmap', scope: 'ref' };
-const NODES = [ALPHA, SECTION, BETA, DEEP, TASK, MEET_NOTE, MEET_TASK, STAND_1, STAND_2, EXACT, WIP];
+/* FAR is a note no case opens before the one that follows a link to it; brain still has VANISHED and MISLAID,
+   whose file and directory are gone. */
+const FAR: Node = { id: id(8, 'c1'), kind: 'note', title: 'Faraway', scope: 'self', org_id: 'far-id', path: 'far/away.org' };
+const VANISHED: Node = { id: id(8, 'c2'), kind: 'note', title: 'Vanished', scope: 'self', org_id: 'vanished-id', path: 'vanished.org' };
+const MISLAID: Node = { id: id(8, 'c3'), kind: 'note', title: 'Mislaid', scope: 'self', org_id: 'mislaid-id', path: 'nowhere/mislaid.org' };
+const NODES = [ALPHA, SECTION, BETA, DEEP, TASK, MEET_NOTE, MEET_TASK, STAND_1, STAND_2, EXACT, WIP, FAR, VANISHED, MISLAID];
 ALPHA.links = [['linked from', BETA.id], ['linked from', TASK.id], ['links_to', SECTION.id]];
 TASK.links = [['about', ALPHA.id]];
 const byId = (i: string) => NODES.find(n => n.id === i)!;
@@ -209,6 +214,7 @@ Under the section.
 :END:
 `;
 const DEEP_ORG = '#+title: Deep file\n\n* First\n** Deep heading\n:PROPERTIES:\n:ID: deep-id\n:END:\nDown here.\n* Last\n';
+const FAR_ORG = ':PROPERTIES:\n:ID: far-id\n:END:\n#+title: Faraway\n\nThe note as edwind has it.\n';
 
 let dir: TestDir, child: EdwindChild, creds: string, url: string, Ed: EdwinCore, E: EdwinCore, L: EdwinCore, sync: EdwinCore;
 const note = (p: string, text: string) => { fs.mkdirSync(path.dirname(path.join(dir.dirs.notes, p)), { recursive: true }); fs.writeFileSync(path.join(dir.dirs.notes, p), text); };
@@ -260,6 +266,7 @@ before(async () => {
   note('sub/beta.md', '---\nid: b-file\ntitle: Beta\n---\n\nSee [Alpha](id:a-file).\n');
   note('deep/only.org', DEEP_ORG);
   note('host.org', '#+title: Host\n\n');
+  note('far/away.org', FAR_ORG);
   note('page.md', '# Page\n\n');
   child = await startEdwind(dir, { env: { CREDENTIALS_DIRECTORY: creds } });
   const host = createHost({ storage: memoryStorage(), workers: false });
@@ -549,6 +556,44 @@ test('an id: link opens a file here at once, and one only brain knows through br
   await until(() => cur().id === 'sub/beta.md', 'the note of the title');
   await visit('host.org'); b.pt = b.text.indexOf('[[roam:No such') + 3;
   await assert.rejects(Ed.callInteractively(L.intern('org-open-at-point')), /No note titled "No such title"/);
+});
+
+test('an id: link to a note opens edwind’s file though a file of this frame holds the id; that file is followed when brain has no such note', async () => {
+  // This frame's own store has a copy of a note, and a file of its own: the index finds both ids here.
+  Ed.Store.set('copy.org', FAR_ORG.replace('as edwind has it', 'as a copy has it'));
+  Ed.Store.set('own.org', ':PROPERTIES:\n:ID: only-here\n:END:\n#+title: Own\n');
+  try {
+    const b = await visit('host.org');
+    b.pt = b.text.length; Ed.insertText(b, '\n[[id:far-id][Far]] [[id:only-here][Own]]\n');
+    assert.equal(Ed.getBuffer('far/away.org'), null, 'no buffer of edwind’s holds the id');
+    b.pt = b.text.indexOf('[[id:far-id') + 3;
+    await Ed.callInteractively(L.intern('org-open-at-point'));
+    await until(() => cur().id === 'far/away.org', 'edwind’s file of the note');
+    assert.equal(asked[asked.length - 1].url, '/v1/nodes/org-id%3Afar-id');
+    assert.match(cur().text, /as edwind has it/); assert.equal(Ed.getBuffer('copy.org'), null, 'the copy is not opened');
+    // Open, it is followed at once: brain is not asked again.
+    const known = asked.length;
+    await visit('host.org'); b.pt = b.text.indexOf('[[id:far-id') + 3;
+    await Ed.callInteractively(L.intern('org-open-at-point'));
+    await until(() => cur().id === 'far/away.org', 'the open file');
+    assert.equal(asked.length, known);
+    // An id brain has no note for is followed in the file here that holds it, and the echo area says so.
+    await visit('host.org'); b.pt = b.text.indexOf('[[id:only-here') + 3;
+    await Ed.callInteractively(L.intern('org-open-at-point'));
+    await until(() => cur().id === 'own.org', 'the file here');
+    assert.equal(asked[asked.length - 1].url, '/v1/nodes/org-id%3Aonly-here');
+    assert.match(messages(), /brain: .*: following the id in own\.org/);
+  } finally { Ed.Store.del('copy.org'); Ed.Store.del('own.org'); }
+});
+
+test('a note whose file is gone is not made again, empty: opening it says the file is not there', async () => {
+  const b = await visit('host.org'), buffers = E.buffers.length;
+  for (const [n, where] of [[VANISHED, 'vanished.org'], [MISLAID, 'nowhere/mislaid.org']] as [Node, string][]) {
+    await assert.rejects(async () => L.call('brain-node-find', [n.id]), new RegExp(`brain has the note "${n.title}" in ${where.replace('.', '\\.')}, and that file is not there`));
+    assert.equal(cur(), b); assert.equal(E.buffers.length, buffers, 'no buffer is made');
+    assert.ok(!fs.existsSync(path.join(dir.dirs.notes, where)));
+  }
+  assert.ok(!fs.existsSync(path.join(dir.dirs.notes, 'nowhere')), 'nor its directory');
 });
 
 test('a daily is made on disk through edwind and visited; a second visit makes nothing', async () => {

@@ -171,6 +171,10 @@ function recordText(n: BrainNode) {
 async function open(ref: string): Promise<EdBuffer | false> {
   const n = await node(ref), src = n.kind === 'note' && n.props && Array.isArray(n.props.sources) ? n.props.sources[0] : null;
   if (typeof src === 'string' && src) {
+    /* brain has a note until the projector has read that its file is gone. A visit would make the file
+       again, empty, so edwind is asked first whether it is there. */
+    const at = await reply('fs-stat', { path: src });
+    if (at.error || !isObj(at.value) || !at.value.entry) signal('user-error', `brain has the note "${oneLine(n.title)}" in ${src}, and that file is not there${at.error ? ` (${at.error.report})` : ''}`);
     const b = await Org.visitNote(src);
     if (!(b instanceof Ed.Buffer)) return false;
     Org.gotoId(b, orgId(n));

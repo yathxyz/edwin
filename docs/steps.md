@@ -493,10 +493,17 @@ Emacs's names for this are not kept.
   heading per other relation. It follows point into another note 200 ms after point rests. A note brain does
   not know, and a brain that does not answer, are said in that window and not signalled, or every cursor move
   through such a note would be an error.
-- **Links (`openLink` in `src/org.ts`).** `brain:UUID` opens that node. `id:ID` is followed here when a file
-  the frame holds has the id (`org.ts` keeps id to file for the buffers and the local store), and otherwise
-  asked of brain as `org-id:ID`. `roam:Title` and a bare `[[Title]]` are the note whose title or alias is that
-  text, whatever the case, as brain has it: with no brain they find nothing.
+- **Links (`openLink` in `src/org.ts`).** `brain:UUID` opens that node. `id:ID`: `org.ts` keeps id to file
+  for the buffers and the local store. Where there is no edwind, a file there with the id is followed. Where
+  the notes are edwind's, an id in one of edwind's buffers that is open is followed at once, and any other is
+  asked of brain as `org-id:ID`, also when a file of the frame's own machine holds it (changed 2026-11-11):
+  the desktop program attached to an edwind indexes its own files too, and one of them may be a copy of a
+  note, or edwind's path of a note, which is no file there. Only when brain has no such note, or cannot be
+  asked, is the file there followed, and the echo area says why. `roam:Title` and a bare `[[Title]]` are the
+  note whose title or alias is that text, whatever the case, as brain has it: with no brain they find nothing.
+- **A note whose file is gone** (added 2026-11-11). brain has a note until the projector has read that its
+  file is gone. Opening one asked edwind for the file, which made it again as an empty buffer. Edwin now asks
+  edwind first whether the file is there (`fs-stat`) and says that it is not, naming the note and the file.
 - **Where there is no brain** (a plain browser, an edwind with no `readCredential`, offline) the three commands
   say so in a sentence and do nothing else; `id:` links to files the frame holds and the dailies work. The directories moved with the names: new notes go to the notes root where they went to `roam/`, and
   dailies to `daily/` where they went to `roam/daily/`, as the notes are laid out on disk; a file store from
