@@ -182,7 +182,9 @@ export interface DisplayMsg { t: 'display'; buf: string; how: string }
 export interface ImageMsg { t: 'image'; gen: number; forms: string[] }
 export interface VarMsg { t: 'var'; name: string; value: unknown }
 export interface NotesMsg { t: 'notes'; gen: number }
+/* A task changed in brain (brain.mts, brain-tasks-follow): that one did, and nothing of which or how. */
+export interface TasksMsg { t: 'tasks' }
 export interface AskMsg { t: 'ask'; rid: string; kind: string; prompt: string; init?: unknown; table?: unknown }
-export type ServerMessage = WelcomeMsg | ErrorMsg | PingMsg | PongMsg | ResultMsg | OpenedMsg | SnapMsg | ChunkMsg | MetaMsg | MovedMsg | KilledMsg | AckMsg | EditsMsg | SelOutMsg | EchoMsg | DisplayMsg | ImageMsg | VarMsg | NotesMsg | AskMsg;
+export type ServerMessage = WelcomeMsg | ErrorMsg | PingMsg | PongMsg | ResultMsg | OpenedMsg | SnapMsg | ChunkMsg | MetaMsg | MovedMsg | KilledMsg | AckMsg | EditsMsg | SelOutMsg | EchoMsg | DisplayMsg | ImageMsg | VarMsg | NotesMsg | TasksMsg | AskMsg;
 /* What Client.send takes: a §7 message, or a module's own (sample.text, …). */
 export type OutMessage = ServerMessage | WireMessage;

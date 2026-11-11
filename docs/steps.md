@@ -568,6 +568,28 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   `brain-task-scope` (`"work"` by default). A Visual selection is its body. When the note at point has an Org
   id the body ends with `[[id:ORG-ID]]`: the id alone, since a note's title may be of a scope the task is not
   in. An agenda that a window shows is asked for again.
+- **The agenda follows brain** (added 2026-11-11). A task changed anywhere (the CLI, a phone, an agent,
+  another frame) is in an agenda that a window shows, without `r`. The frame calls `brain-tasks-follow ON`
+  with true while `*Agenda*` is in a window and with false when it no longer is (looked at after each
+  command), and again on every new connection. edwind follows brain's feed of changes for the clients that
+  asked (`TaskFeed`, `server/brain.mts`), with the read token: one follower for all of them, started by the
+  first and ended when the last one stops or disconnects, which drops the request brain holds. It takes its
+  place with `GET /v1/changes?after=now` and then asks `after=CURSOR&kind=task&limit=200&wait=50`, a request
+  brain answers when a task changed or after 50 s; edwind gives it 65 s. Requests start at least 1 s apart.
+  When brain does not answer, the wait doubles from 1 s to 60 s; the cursor is kept through an outage or a
+  5xx, so what changed meanwhile is in the first answer after it, and a refusal or an answer that is not
+  brain's makes edwind take a new place. A watcher is sent `{t: 'tasks'}` when the answer has a change, and
+  once after every outage: that a task changed, with no id, title or body, and not what brain said of it. The
+  log has `brain-read` with `changes`, the status and the time; a failure is logged once until brain answers
+  again. The command's value is whether edwind has its place in the feed; with no read token it is
+  `brain-unavailable` and nothing is followed. The frame asks edwind to follow before it asks for the agenda,
+  so no change falls between the two. On `tasks` it asks for the agenda again once 300 ms have passed without
+  another, as `r` does: point stays on its task in every window, and the selected window and the minibuffer are
+  not touched. An answer to an earlier question than the one the buffer shows is dropped. When the agenda
+  cannot be asked for, the view is left as it is, the echo area says so once, and the agenda takes no change
+  until it has been asked for again (by `r`, or by the next change). A change made here comes back through
+  the feed too, so the agenda is asked for a second time after it. A frame that is not attached, and one whose
+  edwind has no read token, follow nothing: `r` asks again.
 - **What went.** The agenda built from files (`org-agenda`, `org-agenda-list`, `org-todo-list`, the
   `org-agenda-*` commands and `org-agenda-mode`, `org-agenda-files`, `org-agenda-start-on-weekday`,
   `org-deadline-warning-days`, `org-super-agenda-groups`), capture into files (`org-capture`,
@@ -576,8 +598,8 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   states and dates. The index keeps ids and tags. A headline's TODO keyword, `SCHEDULED:` and `DEADLINE:` are
   still edited in a file (`org-todo`, `org-schedule`, `org-deadline`); they are text there, not tasks.
 
-Not in it: following brain's change feed (`/v1/changes`): the view is as brain was when it was opened, asked
-for again with `r` and after each change made here. No `self` tasks: the task token is not cleared for that
+Not in it: an agenda in no window does not follow brain: it is as brain was when it was last shown or asked
+for. No `self` tasks: the task token is not cleared for that
 scope. Editing a task's body, tags, repeat or `waiting_on`, deleting one, and showing closed tasks. A write
 is not retried and carries no `client_id`, so a task added while the answer was lost may be added twice by
 adding it again.

@@ -4,12 +4,13 @@
    note at point, shows the agenda and the open tasks, and adds and changes a task.
 
    A frame holds no token: it asks edwind (server/brain.mts), with the commands brain-titles, brain-node,
-   brain-agenda, brain-tasks, brain-task-add and brain-task-set. So there is a brain only where Edwin is
-   attached to an edwind that reads one; everywhere else the commands say why not, in a sentence.
+   brain-agenda, brain-tasks, brain-task-add, brain-task-set and brain-tasks-follow. So there is a brain only
+   where Edwin is attached to an edwind that reads one; everywhere else the commands say why not, in a sentence.
 
    A note opens as its file, with point on its entry. Anything else opens as a record: a read-only buffer in
    brain-mode, written as Org so its links are links. The backlinks of the note at point are such a buffer too,
-   in a side window that follows point. The agenda is a read-only buffer in brain-agenda-mode, a line a task. */
+   in a side window that follows point. The agenda is a read-only buffer in brain-agenda-mode, a line a task;
+   while a window shows it, it follows brain: a task changed anywhere is in it without r. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, EC = globalThis.EvilCore;
@@ -273,9 +274,11 @@ interface BrainTask {
 /* A line of the agenda: its text, the spans of it that have a face (start, end, face) and the task it shows. */
 interface AgendaLine { text: string; spans: [number, number, number][]; task?: BrainTask }
 type AgendaView = 'week' | 'list';
-/* OWN: the window was made for the agenda, so q closes it. STALE: a change went to brain and the view could
-   not be asked for again, so its lines are not what brain has. */
-interface Agenda { view: AgendaView; lines: AgendaLine[]; win: EdWinConfig | null; own: boolean; stale: boolean }
+/* OWN: the window was made for the agenda, so q closes it. STALE: a task changed in brain and the view could
+   not be asked for again, so its lines are not what brain has. ASKED: which question to brain it answers,
+   counted in `fills`. */
+interface Agenda { view: AgendaView; lines: AgendaLine[]; win: EdWinConfig | null; own: boolean; stale: boolean; asked: number }
+let fills = 0;
 interface AgendaLex { ver: number; from: number; to: number; cls: Uint8Array; names: string[] }
 const AGENDA = '*Agenda*';
 /* The open states in the order the task list shows them, and the key of each state. */
@@ -376,12 +379,15 @@ async function listView(): Promise<{ lines: AgendaLine[]; today: number }> {
    the buffer as it was. With KEEP point stays on its task where the new view has it, else on its line; without,
    it goes to today's line, or the first task. */
 async function fillAgenda(view: AgendaView, keep: boolean) {
-  const built = view === 'list' ? await listView() : await weekView();
+  const mine = ++fills, built = view === 'list' ? await listView() : await weekView();
   const b = Ed.getBufferCreate(AGENDA), old = b.mode === 'brain-agenda-mode' ? b.agenda as Agenda | undefined : undefined;
+  /* The agenda can be asked for again while brain answers (it follows brain, below): an answer to an earlier
+     question than the one the buffer shows is not written over it. */
+  if (old && mine < old.asked) return b;
   const was = keep && old ? lineNoB(b, b.pt) - 1 : -1, held = was >= 0 && old!.lines[was] ? old!.lines[was].task : undefined;
   b.mode = 'brain-agenda-mode'; b.readOnly = true; b.evilState = 'motion';
   b.text = built.lines.map(l => l.text).join('\n') + '\n';
-  b.agenda = { view, lines: built.lines, win: old ? old.win : null, own: old ? old.own : false, stale: false };
+  b.agenda = { view, lines: built.lines, win: old ? old.win : null, own: old ? old.own : false, stale: false, asked: mine };
   b.modified = false; b.undo = []; b.redo = [];
   let line = built.today >= 0 ? built.today : Math.max(0, built.lines.findIndex(l => l.task));
   if (was >= 0) {
@@ -401,6 +407,8 @@ async function fillAgenda(view: AgendaView, keep: boolean) {
    opened from the agenda is shown in the agenda's window): q closes that one, and gives any other window back
    what it showed. */
 async function showAgenda(view: AgendaView) {
+  /* edwind follows brain's tasks before brain is asked for them, so no change falls between the two. */
+  await watch(true);
   const b = await fillAgenda(view, false), ag = b.agenda as Agenda, shown = Ed.windowFor(b);
   if (shown) { Ed.selectWindow(shown); return; }
   const sel = E.sel!, before = Ed.windowList().length;
@@ -418,6 +426,65 @@ async function refreshed(said: string) {
   if (!b || b.mode !== 'brain-agenda-mode' || !b.agenda || !Ed.windowFor(b)) return said;
   try { await fillAgenda((b.agenda as Agenda).view, true); Ed.scheduleRender(); return said; }
   catch (e) { (b.agenda as Agenda).stale = true; return `${said}; the agenda is not refreshed (r asks again): ${Ed.errorText(e)}`; }
+}
+/* The agenda follows brain. While a window shows it, edwind is asked to say when a task changed in brain
+   (brain-tasks-follow): from the CLI, a phone, another frame, or here. It says only that one did, and the
+   agenda is then asked for again as r asks, once the changes have rested for LIVE_MS: point stays on its task
+   in every window, and the selected window and the minibuffer are left alone. An agenda that cannot be asked
+   for is left as it is and takes no change until it can (STALE); that is said once. Without an edwind, or with
+   one that has no brain to read, nothing follows and r asks again, as before. */
+const LIVE_MS = 300;
+/* WATCHING: what edwind was last told. DEAF: it could not follow, and is not asked again on this connection. */
+let watching = false, deaf = false, listening = false, liveTimer: ReturnType<typeof setTimeout> | undefined;
+let asking = false, again = false, liveFailed = false;
+const agendaShown = () => { const b = Ed.getBuffer(AGENDA); return b && b.mode === 'brain-agenda-mode' && b.agenda && Ed.windowFor(b) ? b : null; };
+async function live() {
+  if (asking) { again = true; return; }
+  asking = true;
+  try {
+    do {
+      again = false;
+      const b = agendaShown();
+      if (!b) break;
+      try { await fillAgenda((b.agenda as Agenda).view, true); liveFailed = false; }
+      catch (e) {
+        if (b.agenda) (b.agenda as Agenda).stale = true;
+        if (!liveFailed) { liveFailed = true; Ed.message(`The agenda could not follow a change in brain (r asks again): ${Ed.errorText(e)}`); }
+      }
+      Ed.scheduleRender();
+    } while (again);
+  } finally { asking = false; }
+}
+function soon() { clearTimeout(liveTimer); liveTimer = setTimeout(() => { void live(); }, LIVE_MS); }
+/* Tell edwind whether this frame watches the tasks. True when it now follows them for it. */
+async function watch(on: boolean): Promise<boolean> {
+  if (on === watching || !attached() || (on && deaf)) return false;
+  if (!listening) {
+    listening = true;
+    Ed.sync.on('tasks', soon);
+    /* A connection is a new client to edwind, which does not follow for it yet: it is asked again, and so is
+       the agenda, for what changed while there was none. */
+    Ed.sync.on('state', state => {
+      watching = false;
+      if (state !== 'online') return;
+      deaf = false;
+      if (agendaShown()) void watch(true).then(soon);
+    });
+  }
+  watching = on;
+  const r = await Ed.sync.call({ cmd: 'brain-tasks-follow', args: [on] });
+  if (on && r.error) { deaf = true; watching = false; }
+  return on && !r.error;
+}
+{
+  const prev = H.postCommand;
+  H.postCommand = (def, b, failed) => {
+    if (prev) prev(def, b, failed);
+    const shown = !!agendaShown();
+    if (shown === watching) return;
+    /* Shown some other way than asked for: what changed before edwind followed is not in it. */
+    if (shown) void watch(true).then(follows => { if (follows) soon(); }); else void watch(false);
+  };
 }
 const prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {

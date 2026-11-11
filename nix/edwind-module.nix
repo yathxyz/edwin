@@ -269,8 +269,9 @@ in
         description = ''
           Root-readable file holding a read-only brain token (brain's `readOnly`). When set, the brain-titles,
           brain-node, brain-agenda and brain-tasks commands answer, so a frame can find a node by name, open
-          it and show the agenda. What the token is cleared for is what every process that can open edwind's
-          socket can read.
+          it and show the agenda, and edwind follows brain's feed of changes with it while a frame shows the
+          agenda (brain-tasks-follow). What the token is cleared for is what every process that can open
+          edwind's socket can read.
         '';
       };
       taskTokenFile = mkOption {

@@ -37,8 +37,10 @@ type SyncDisplayMsg = { t: 'display'; buf: string; how: string };
 type SyncImageMsg = { t: 'image'; gen: number; forms: string[] };
 type SyncVarMsg = { t: 'var'; name: string; value: unknown };
 type SyncAskMsg = { t: 'ask'; rid: string; kind: string; prompt: string; init?: unknown; table?: unknown };
+/* A task changed in brain (edwind's brain-tasks-follow; brain.ts asks for it and listens). */
+type SyncTasksMsg = { t: 'tasks' };
 type SyncServerMsg = SyncWelcomeMsg | SyncPingMsg | SyncErrorMsg | SyncResultMsg | SyncOpenedMsg | SyncSnapMsg | SyncChunkMsg | SyncMetaMsg | SyncMovedMsg
-  | SyncKilledMsg | SyncAckMsg | SyncEditsMsg | SyncSelMsg | SyncEchoMsg | SyncDisplayMsg | SyncImageMsg | SyncVarMsg | SyncAskMsg;
+  | SyncKilledMsg | SyncAckMsg | SyncEditsMsg | SyncSelMsg | SyncEchoMsg | SyncDisplayMsg | SyncImageMsg | SyncVarMsg | SyncAskMsg | SyncTasksMsg;
 /* a message to edwind */
 type SyncOut = { t: string; [k: string]: unknown };
 /* the answer to a call, save or revert: the result frame without t and rid */
@@ -240,6 +242,7 @@ function dispatch(msg: SyncServerMsg) {
     case 'var': try { L.set(String(msg.name), fromJSON(msg.value)); } catch (e) { Ed.message(`var ${msg.name}: ${Ed.errorText(e)}`); } return;
     case 'image': return onImage(msg);
     case 'display': return onDisplay(msg);
+    case 'tasks': sync.emit('tasks'); return;
     default: return;   // R7.4
   }
 }

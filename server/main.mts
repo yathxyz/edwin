@@ -186,6 +186,7 @@ export class Server {
   declare handlers: Map<string, MessageHandler>;
   declare modules: ServerModule[];
   declare statusProviders: StatusProvider[];
+  declare disconnects: ((client: Client) => void)[];
   declare started: number;
   declare image: ImageLog;
   /* Set by start(). */
@@ -213,6 +214,8 @@ export class Server {
     this.commands = new Map(); this.handlers = new Map(); this.modules = [];
     /* status (R15.11): each provider returns fields merged into the `status` command's value. */
     this.statusProviders = [];
+    /* Told each client that disconnected (onDisconnect). */
+    this.disconnects = [];
     this.started = Date.now();
     fs.mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(cfg.configDir, { recursive: true, mode: 0o700 });
@@ -243,6 +246,8 @@ export class Server {
   defineCommand(name: string, fn: CommandFn) { this.commands.set(name, fn); }
   /* A handler for message type T from any client: FN(client, msg), may return a promise. */
   onMessage(t: string, fn: MessageHandler) { this.handlers.set(t, fn); }
+  /* FN(client) when a client's connection closed, for a module that keeps something per client. */
+  onDisconnect(fn: (client: Client) => void) { this.disconnects.push(fn); }
   /* The `status` command (R15.11): what a client shows of edwind's health.
      Modules add fields through statusProviders (notes: notesExists, notesGen; models: sample, models;
      threads: loopLagP95Ms, ackP95Ms). */

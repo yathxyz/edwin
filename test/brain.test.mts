@@ -145,13 +145,39 @@ function tasksRoute(method: string, u: URL, auth: string | undefined, session: u
 const asked: { url: string; auth: string | undefined }[] = [];
 /* While set, brain answers no question about tasks: a write is taken and the view after it is not given. */
 let readsFail = false;
+/* brain's feed of changes (GET /v1/changes), as edwind follows it. What it was asked is in `fed`, not in
+   `asked`, with how many other questions came before it. The feed has a change when a case says so
+   (taskChanged), not when a task is written, so a case that counts brain's questions counts its own. A question
+   with `wait` and nothing to answer is held until there is, as brain holds it. */
+const fed: { url: string; auth: string | undefined; before: number; at: number }[] = [];
+const held = new Set<() => void>();
+/* What a change in the feed says of its task, which edwind has no use for and passes on to nobody. */
+const FEED_TITLE = 'Feed-only-title-words';
+let feedAt = 100, feedAway = false;
+function feedRoute(u: URL, auth: string | undefined, res: http.ServerResponse, send: Send) {
+  const after = u.searchParams.get('after');
+  const answer = () => {
+    if (feedAway) return send(503, { error: 'brain is away' });
+    if (auth !== `Bearer ${TOKEN}`) return send(403, { error: 'this token does not read' });
+    if (after === 'now') return send(200, { changes: [], cursor: String(feedAt) });
+    const node = { id: taskN(1).id, kind: 'task', title: FEED_TITLE, props: {}, scope: 'work', trust: 'owner', revision: 9, deleted_at: null, updated_at: '2026-11-10T08:00:00Z', number: 1 };
+    send(200, Number(after) < feedAt ? { changes: [{ cursor: String(feedAt), op: 'update', at: '2026-11-10T08:00:00Z', node }], cursor: String(feedAt) } : { changes: [], cursor: after });
+  };
+  if (feedAway || after === 'now' || Number(after) < feedAt || !u.searchParams.get('wait')) return answer();
+  held.add(answer); res.on('close', () => held.delete(answer));
+}
+const answerHeld = () => { for (const answer of [...held]) { held.delete(answer); answer(); } };
+/* A task changed in brain, from anywhere. */
+function taskChanged() { feedAt++; answerHeld(); }
+function feedIsAway(away: boolean) { feedAway = away; answerHeld(); }
 const brain = http.createServer((req, res) => {
   let sent = '';
   req.setEncoding('utf8'); req.on('data', d => { sent += d; });
   req.on('end', () => {
     const u = new URL(req.url!, 'http://brain');
-    asked.push({ url: req.url!, auth: req.headers.authorization });
     const send = (status: number, body: unknown, ms = 0) => setTimeout(() => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); }, ms);
+    if (u.pathname === '/v1/changes') { fed.push({ url: req.url!, auth: req.headers.authorization, before: asked.length, at: Date.now() }); return feedRoute(u, req.headers.authorization, res, send); }
+    asked.push({ url: req.url!, auth: req.headers.authorization });
     if (readsFail && req.method === 'GET' && (u.pathname === '/v1/agenda' || u.pathname === '/v1/tasks')) return send(503, { error: 'brain is away' });
     if (u.pathname === '/v1/agenda' || u.pathname === '/v1/tasks' || u.pathname.startsWith('/v1/tasks/')) return tasksRoute(req.method!, u, req.headers.authorization, req.headers['x-brain-session'], sent ? JSON.parse(sent) : {}, send);
     if (req.method !== 'GET') return send(404, { error: 'no such route' });
@@ -902,9 +928,154 @@ test('a in the agenda adds a task, and an agenda that is shown follows a task ad
   assert.equal(agenda().text, text);
 });
 
+/* The agenda's window, with another one selected. */
+function agendaAside() { const shown = Ed.windowFor(agenda()); Ed.selectWindow(Ed.windowList().find((w: EdwinCore) => w.buffer !== agenda())); return shown; }
+const lineIn = (w: EdwinCore): string => body()[Ed.lineNoB(agenda(), w.pt) - 1];
+/* The agenda is asked for again, with no key: what it then shows. */
+async function followed(what: () => unknown) { const was = agenda().agenda; await what(); await until(() => agenda().agenda !== was, 'the agenda follows brain'); }
+const FOLLOW = '/v1/changes?after=100&kind=task&limit=200&wait=50';
+
+test('an agenda in a window follows brain: a task changed elsewhere is in it without r, and point stays on its task', async () => {
+  const f = fed.length, a = asked.length;
+  await showTasks('a');
+  assert.equal(fed[f].url, '/v1/changes?after=now'); assert.equal(fed[f].auth, `Bearer ${TOKEN}`, 'the read token');
+  assert.equal(fed[f].before, a, 'edwind has its place in the feed before the agenda is asked for');
+  await until(() => held.size === 1, 'edwind asks what changes');
+  assert.equal(fed.length, f + 2); assert.equal(fed[f + 1].url, FOLLOW); assert.equal(fed[f + 1].auth, `Bearer ${TOKEN}`);
+  // From the CLI, say: the task at point moves a day on, and another is closed.
+  onTask(3);
+  const n = asked.length;
+  await followed(() => { change(taskN(3), { due: '2026-11-13' }); change(taskN(2), { state: 'done' }); taskChanged(); });
+  assert.ok(!body().some(l => l.includes('Call the plumber')), 'what was closed is gone');
+  assert.equal(body()[body().indexOf('Friday     13 November 2026') + 1], '  task:3    Due:        NEXT (proposal) Write the report  work');
+  assert.equal(lineAt(), '  task:3    Due:        NEXT (proposal) Write the report  work', 'point is on its task');
+  assert.deepEqual(asked.slice(n).map(x => x.url), ['/v1/agenda?from=2026-11-10&days=7'], 'the agenda is asked for once');
+  assert.equal(agenda().modified, false); assert.equal(agenda().readOnly, true);
+  // In a window that is not the selected one, while the minibuffer reads: both are left alone.
+  const shown = agendaAside();
+  await keys('SPC n r f'); await until(() => E.mini, 'the minibuffer');
+  const mini = E.mini;
+  await followed(() => { change(taskN(3), { state: 'todo', priority: 'B' }); change(taskN(4), { title: 'Read the other paper' }); taskChanged(); });
+  assert.equal(lineIn(shown), '  task:3    Due:        TODO [#B] (proposal) Write the report  work', 'the window’s point is on its task');
+  assert.ok(body().includes('  task:4    NEXT Read the other paper  ref'));
+  assert.equal(E.mini, mini, 'the minibuffer reads on');
+  await keys('C-g');
+  assert.equal(cur().id, 'host.org', 'and the selected window is the one it was');
+  // Changes that come together are one question.
+  const m = asked.length;
+  await followed(async () => { change(taskN(6), { state: 'next' }); taskChanged(); await until(() => held.size === 1, 'edwind asks again'); change(taskN(6), { priority: 'C' }); taskChanged(); });
+  await sleep(600);
+  assert.ok(asked.length - m <= 2, `${asked.length - m} questions for two changes`);
+  assert.ok(body().includes('  task:6    NEXT [#C] Learn the cello  pub'));
+  // The task at point is gone: point stays on its line.
+  const at = Ed.lineNoB(agenda(), shown.pt);
+  await followed(() => { change(taskN(3), { state: 'cancelled' }); taskChanged(); });
+  assert.equal(Ed.lineNoB(agenda(), shown.pt), at);
+  Ed.selectWindow(shown); await keys('q');
+});
+
+test('edwind follows brain only while an agenda is shown, once for every frame that shows one', async () => {
+  await visit('host.org');
+  await until(() => held.size === 0, 'no question is held with no agenda in a window');
+  // No agenda: edwind asks the feed nothing, whatever changes.
+  const f = fed.length;
+  taskChanged(); await sleep(1200);
+  assert.equal(fed.length, f, 'the feed is not asked');
+  // Another client watches, then this frame: one follower, with one place in the feed.
+  const cl = new EditClient(dir.cfg.socket); await cl.connect(); assert.equal((await cl.hello()).t, 'welcome');
+  assert.equal((await cl.call('brain-tasks-follow', [true])).value, true);
+  assert.equal(fed.length, f + 1); assert.equal(fed[f].url, '/v1/changes?after=now');
+  await showTasks('a');
+  await until(() => held.size === 1, 'edwind asks what changes');
+  assert.deepEqual(fed.slice(f).map(x => x.url), ['/v1/changes?after=now', `/v1/changes?after=${feedAt}&kind=task&limit=200&wait=50`]);
+  await followed(() => { change(taskN(4), { title: 'Read both papers' }); taskChanged(); });
+  assert.deepEqual(await cl.next(x => x.t === 'tasks'), { t: 'tasks' }, 'a watcher is told that tasks changed, and nothing of them');
+  // One stops watching: the other is still told, and it is not.
+  assert.equal((await cl.call('brain-tasks-follow', [false])).value, false);
+  await followed(() => { change(taskN(4), { title: 'Read no paper' }); taskChanged(); });
+  assert.ok(body().includes('  task:4    NEXT Read no paper  ref'));
+  await until(() => held.size === 1, 'edwind asks again');
+  // The agenda leaves its window: the frame stops watching, and edwind drops the question brain holds.
+  await keys('q');
+  await until(() => held.size === 0, 'the question is dropped');
+  const g = fed.length, text = agenda().text;
+  change(taskN(4), { title: 'Unseen change' }); taskChanged(); await sleep(1200);
+  assert.equal(fed.length, g); assert.equal(agenda().text, text, 'an agenda in no window is left as it is');
+  assert.ok(!cl.queue.some(x => x.t === 'tasks'), 'the client that stopped was told nothing more');
+  // The last watcher leaves by disconnecting.
+  assert.equal((await cl.call('brain-tasks-follow', [true])).value, true);
+  await until(() => held.size === 1, 'edwind asks what changes');
+  cl.close();
+  await until(() => held.size === 0, 'the question is dropped with the connection');
+  // An agenda shown some other way than asked for is followed too, and asked for again.
+  const w = Ed.windowFor(cur());
+  await followed(async () => { await keys('M-x'); await type('switch-to-buffer\n'); await until(() => E.mini && /buffer/i.test(E.mini.prompt), 'the buffer prompt'); await type('*Agenda*\n'); });
+  assert.ok(body().includes('  task:4    NEXT Unseen change  ref'));
+  // A new connection is a new client to edwind: the frame asks it to follow again, and asks for the agenda.
+  const h = fed.length;
+  await followed(() => { change(taskN(4), { title: 'Changed while away' }); sync.sock.close(); });
+  assert.ok(body().includes('  task:4    NEXT Changed while away  ref'));
+  await until(() => held.size === 1, 'edwind asks what changes');
+  assert.equal(fed[h].url, '/v1/changes?after=now');
+  assert.equal(Ed.windowFor(agenda()), w); await keys('q');
+  await until(() => held.size === 0, 'the question is dropped');
+});
+
+test('a brain that is away is asked again more and more slowly, and what changed meanwhile is shown when it is back', async () => {
+  await showTasks('a');
+  await until(() => held.size === 1, 'edwind asks what changes');
+  const f = fed.length, warned = () => child.logs.split('\n').filter(l => l.includes('"what":"changes"') && !l.includes('"ms"')).length, w = warned();
+  onTask(1);
+  const t = Date.now();
+  feedIsAway(true);
+  change(taskN(1), { priority: 'C' }); feedAt++;
+  await until(() => fed.length === f + 1, 'another question');
+  feedIsAway(false);
+  await followed(() => {});
+  assert.equal(lineAt(), '  task:1    3 d. ago:   TODO [#C] Pay the invoice  work');
+  const again = fed.slice(f);
+  assert.equal(again.length, 2, 'brain was asked twice in all');
+  assert.ok(again.every(x => x.url === fed[f - 1].url), 'from the place edwind had: brain has kept what changed');
+  const gaps = [again[0].at - t, again[1].at - again[0].at];
+  assert.ok(gaps[0] >= 900 && gaps[1] >= 1900, `the wait doubles: ${gaps}`);
+  assert.equal(warned(), w + 1, 'the log says once that brain did not answer');
+  // The agenda's own question fails: the view is left as it is, takes no change, and that is said once.
+  const text = agenda().text, from = messages().length;
+  readsFail = true;
+  try {
+    change(taskN(1), { title: 'Pay both invoices' });
+    taskChanged();
+    await until(() => agenda().agenda.stale, 'the agenda is known not to show brain’s tasks');
+    const q = asked.length;
+    taskChanged();
+    await until(() => asked.length > q, 'the agenda is asked for again'); await sleep(100);
+    assert.equal(agenda().text, text);
+    assert.equal(messages().slice(from).split('The agenda could not follow a change in brain (r asks again): brain answered 503').length, 2, 'said once');
+    await saying('The agenda does not show the last change: r asks brain again', () => keys('x'));
+  } finally { readsFail = false; }
+  await followed(() => taskChanged());
+  assert.equal(agenda().agenda.stale, false);
+  assert.equal(lineAt(), '  task:1    3 d. ago:   TODO [#C] Pay both invoices  work');
+  await keys('q');
+});
+
+test('an edwind with no brain to read follows nothing, and an agenda there is as it was', async () => {
+  const d = makeDir({ brain: { url, credential: 'brain-token' } }), c = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: makeCreds(d) } });
+  try {
+    const f = fed.length, cl = new EditClient(d.cfg.socket); await cl.connect(); assert.equal((await cl.hello()).t, 'welcome');
+    const m = await cl.call('brain-tasks-follow', [true]);
+    assert.equal(m.error.condition, 'brain-unavailable'); assert.match(m.error.report, /no brain to read/);
+    assert.equal((await cl.call('brain-tasks-follow', [false])).value, false);
+    cl.close(); await sleep(300);
+    assert.equal(fed.length, f, 'brain is asked nothing');
+  } finally { await stopEdwind(c); fs.rmSync(d.root, { recursive: true, force: true }); }
+});
+
 test('nothing typed or looked up reached edwind’s log, and offline the commands say so', async () => {
   assert.ok(!child.logs.includes(TOKEN));
   assert.ok(!child.logs.includes(TASK_TOKEN));
+  assert.ok(child.logs.includes('"what":"changes"'), 'the feed is in the log by its name');
+  for (const fromFeed of [FEED_TITLE, 'after=', 'wait=', taskN(1).id]) assert.ok(!child.logs.includes(fromFeed), `${fromFeed} is not in the log`);
   for (const typed of ['Brand new idea', 'Other new idea', 'standup', 'meeting', 'First letter', 'deep-id', 'zebra-query-text', 'Buy milk', 'Follow this up', 'Under the section', 'invoice', 'plumber', 'twice', '2026-11-13'])
     assert.ok(!child.logs.includes(typed), `${typed} is not in the log`);
   await visit('host.org');

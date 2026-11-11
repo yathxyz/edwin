@@ -98,6 +98,7 @@ export class Client {
     this.closed = true; clearTimeout(this.helloTimer); clearInterval(this.pinger);
     this.server.buffers.detachAll(this);
     this.server.clients.delete(this);
+    for (const fn of this.server.disconnects) { try { fn(this); } catch (e) { this.log.error('client', { cid: this.cid, error: String((e as Error).stack || e) }); } }
     this.log.info('client', { event: 'disconnect', cid: this.cid, kind: this.kind });
   }
   fail(e: any): void { this.log.error('client', { cid: this.cid, error: e.stack || String(e) }); this.destroy(); } // any: whatever a data handler threw

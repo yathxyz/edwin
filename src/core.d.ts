@@ -1653,6 +1653,8 @@ interface EdSyncApi {
   close(id: string): unknown;
   shutdown(): void;
   call(opts: { cmd?: string; form?: string; args?: unknown[]; buf?: string; ctx?: unknown }): Promise<EdServerReply>;
+  /* FN is called on EV: 'state' with the new state, 'tasks' when a task changed in brain. The result removes it. */
+  on(ev: string, fn: (...args: unknown[]) => unknown): () => void;
   save(b: EdBuffer | string): Promise<EdServerReply>;
   revert(b: EdBuffer | string): Promise<EdServerReply>;
   anchorAdd(buf: EdBuffer | string, pos: number, label: string, id?: string): Promise<unknown>;
