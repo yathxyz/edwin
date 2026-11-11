@@ -498,20 +498,84 @@ Emacs's names for this are not kept.
   asked of brain as `org-id:ID`. `roam:Title` and a bare `[[Title]]` are the note whose title or alias is that
   text, whatever the case, as brain has it: with no brain they find nothing.
 - **Where there is no brain** (a plain browser, an edwind with no `readCredential`, offline) the three commands
-  say so in a sentence and do nothing else; `id:` links to files the frame holds, the agenda and the dailies
-  work. The directories moved with the names: new notes go to the notes root where they went to `roam/`, and
+  say so in a sentence and do nothing else; `id:` links to files the frame holds and the dailies work. The directories moved with the names: new notes go to the notes root where they went to `roam/`, and
   dailies to `daily/` where they went to `roam/daily/`, as the notes are laid out on disk; a file store from
   before keeps its old files where they are.
 - **What went.** `org-roam-node-find`, `-insert` and `-random`, `org-roam-buffer-toggle`, the `org-roam-backlinks`
   primitive, `org-roam-mode`, the `org-roam-dailies-*` names, and the frame's index of nodes, titles and links;
-  it keeps headlines, tags and ids, which the agenda and `id:` links need. `org-roam-directory` is
+  it keeps tags and ids, which tag completion and `id:` links need. `org-roam-directory` is
   `note-directory` and `org-roam-capture-templates` is `note-capture-templates`; an init file that names the
   old ones has to be changed.
 
 Not in it: a Markdown `[[wiki link]]` still goes to `wiki-follow-function` (the page's opener), not to brain;
-a random node; completing a link's title while typing it; and a record is read only (brain's tasks and
-memories are changed where they are made). A new note is in brain once the projector has sent its file, a
+a random node; completing a link's title while typing it; and a record is read only (a task is changed from
+the agenda, see "Tasks from brain"; a memory where it is made). A new note is in brain once the projector has sent its file, a
 moment after the save, so it is not a candidate before that.
+
+## Tasks from brain (done)
+
+Asked 2026-11-10: the tasks are brain's, so that the phone, the agents and Edwin work on one list. Edwin's
+agenda was built from the TODO headlines of Org files and its capture wrote new ones into them; both are gone,
+and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edwind. Emacs's names are not kept.
+
+- **edwind asks for the frame (`server/brain.mts`).** Two commands read, with the read token
+  (`brain.readCredential`): `brain-agenda {from, days?}` is brain's `GET /v1/agenda` (`from` a day, `days` 1 to
+  366, 7 by default) and `brain-tasks {state?, q?, tag?, limit?, offset?}` its `GET /v1/tasks`. Two write, with
+  a token of their own, `brain.taskCredential` (`services.edwind.brain.taskTokenFile`, the credential
+  `brain-task-token`), which brain takes on its task routes only: `brain-task-add FIELDS` is `POST /v1/tasks`
+  and `brain-task-set REF FIELDS` is `PATCH /v1/tasks/REF` (`REF` a node id or `task:N`). Only a task's fields
+  are passed on (`title`, `body`, `scope`, `state`, `priority`, `due`, `scheduled`, `recur`, `tags`,
+  `waiting_on`, and on a change `base_revision` and `trust`); brain checks their values, and a task is not
+  deleted through edwind. A write says
+  `X-Brain-Session: edwind` and is sent once. With no task token the two say `brain-unavailable` in a sentence
+  and send nothing. The log has `brain-read` or `brain-write` with the route's name, the status and the time,
+  never a title, a query or a token.
+- **Who can write.** Every process that can open edwind's socket can call these, as it can read every note
+  file: with a task token it adds, changes, closes and confirms tasks as that token's actor, with its trust, in the
+  scopes the token is cleared for. The token is not the projector's (edwind refuses that configuration) and no
+  frame holds it.
+- **`brain-agenda` (`SPC m a`, `src/brain.ts`)** asks for one key. `a` is the week: the 7 days from today
+  (the frame's local day), a section `Overdue` when something is, a header for each day with what is due or
+  scheduled on it (`Due:`, `Scheduled:`, and the time when the value has one), then `Next`, the next actions
+  with no date. `t` is every open task, under `Next`, `To do`, `Waiting`, `Hold`, `Someday`, in brain's order
+  inside each, asked for 200 at a time up to 2,000. The buffer is `*Agenda*` in `brain-agenda-mode`: read
+  only, in Motion state, in a window of its own below. A task's line has `task:N`, the label, the state,
+  `[#P]`, the title on one line, `:tags:`, the scope, and in the list its dates; a task whose trust is not the
+  owner's is marked `(proposal)`. The faces come from what the line was built from, not from reading the text
+  back, so a title cannot colour itself as something else.
+- **Keys there**, each on the task at point: `RET` opens its record; `t` sets the state (then `t n w h s d c`);
+  `x` is done; `s` schedules and `d` sets when it is due (the date reader of `org-schedule`: nothing typed is
+  today, a typed time is kept; `C-u s` and `C-u d` clear the date, so `C-u` is the prefix argument in this
+  buffer and not a scroll); `p` sets the priority (`a b c`, space for none); `e` edits the title; `m` moves it
+  to a scope (`pub`, `ref`, `work`, `infra`; brain refuses one the token is not cleared for); `c` confirms a
+  proposal (trust `owner`); `a` adds a task; `r` and `g r` ask again; `q` leaves. Each has a command that takes
+  the value as an argument (`brain-task-state`, `-done`, `-schedule`, `-due`, `-priority`, `-title`, `-move`,
+  `-confirm`), and after it, optionally, the id of a task the agenda shows: a key that reads in the minibuffer
+  names the task it was pressed on, so the change is made to that one wherever point is when the answer comes.
+  For a date or a priority `#f` is none; a value that is neither that nor text is an error and nothing is
+  sent.
+- **A change is made against the revision the line shows** (`base_revision`): brain keeps what changed in the
+  task since and writes only the field that was changed here; where both changed that field brain takes this
+  one and the echo area says what it replaced (`clashes`). The view is then asked for again, with point on the
+  same task in every window that shows it. What brain refuses is a user error in brain's words, and nothing changes. A repeating task that
+  is done moves to its next date, as brain does it, and the echo area says so.
+- **`brain-task-add` (`SPC o`, `a` in the agenda)** reads `Task: ` and adds the task in the scope
+  `brain-task-scope` (`"work"` by default). A Visual selection is its body. When the note at point has an Org
+  id the body ends with `[[id:ORG-ID]]`: the id alone, since a note's title may be of a scope the task is not
+  in. An agenda that a window shows is asked for again.
+- **What went.** The agenda built from files (`org-agenda`, `org-agenda-list`, `org-todo-list`, the
+  `org-agenda-*` commands and `org-agenda-mode`, `org-agenda-files`, `org-agenda-start-on-weekday`,
+  `org-deadline-warning-days`, `org-super-agenda-groups`), capture into files (`org-capture`,
+  `org-capture-finalize`, `org-capture-kill`, `org-capture-templates`, `org-capture-after-finalize-hook`,
+  `org-directory`), and what the frame's index kept for them: the headlines of every file with their TODO
+  states and dates. The index keeps ids and tags. A headline's TODO keyword, `SCHEDULED:` and `DEADLINE:` are
+  still edited in a file (`org-todo`, `org-schedule`, `org-deadline`); they are text there, not tasks.
+
+Not in it: following brain's change feed (`/v1/changes`): the view is as brain was when it was opened, asked
+for again with `r` and after each change made here. No `self` tasks: the task token is not cleared for that
+scope. Editing a task's body, tags, repeat or `waiting_on`, deleting one, and showing closed tasks. A write
+is not retried and carries no `client_id`, so a task added while the answer was lost may be added twice by
+adding it again.
 
 ## Dired: directories as buffers (done)
 

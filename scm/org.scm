@@ -1,6 +1,7 @@
-;;; org.scm: Org mode as the desktop init-org.el sets it up: keywords, capture and note
-;;; templates, the agenda groups, and the evil-org keys.  The commands live in org.ts, which
-;;; loads after this file, so the variables are defined here and leader keys go in init.scm.
+;;; org.scm: Org mode as the desktop init-org.el sets it up: keywords, the note and daily
+;;; templates, and the evil-org keys; and the keys of brain's buffers.  The commands live in
+;;; org.ts and brain.ts, which load after this file, so the variables are defined here and
+;;; leader keys go in init.scm.
 
 ;; The task keywords come from the one table of notes-syntax.scm (R10.2), shared with markdown-mode and the
 ;; notes index: ((sequence "TODO(t)" "NEXT(n)" "WAITING(w@/!)" "HOLD(h@/!)" "SOMEDAY(s)" "|" "DONE(d!)"
@@ -11,23 +12,10 @@
 (define org-modern-star "◉○◈◇✳")
 (define org-hide-emphasis-markers #t)
 (define org-tags-column -77)
-(define org-deadline-warning-days 14)
-(define org-directory "")
-(define org-agenda-files #f)
-
-;; Capture: %? is where point ends up, %U the inactive timestamp, %i the selection, %a a link back.
-(define org-capture-templates
-      '(("i" "Inbox" entry (file+headline "inbox.org" "Inbox")
-         "** %?\n:PROPERTIES:\n:CREATED: %U\n:END:\n%i\n%a\n" :empty-lines 1)
-        ("t" "TODO" entry (file+headline "todo.org" "Inbox")
-         "** TODO %?\n:PROPERTIES:\n:CREATED: %U\n:END:\n%i\n%a\n" :empty-lines 1)
-        ("p" "Public TODO" entry (file "public/inbox.org")
-         "* TODO %?\n:PROPERTIES:\n:ID: %(org-id-new)\n:CREATED: %U\n:END:\n%i\n%a\n" :empty-lines 1)
-        ("r" "Reading" entry (file+headline "readlist.org" "Inbox")
-         "** TODO %?\n:PROPERTIES:\n:CREATED: %U\n:END:\n%i\n%a\n" :empty-lines 1)))
 
 ;; New notes (brain-node-find, brain-node-insert) go in the notes root, named by a timestamp and the
 ;; slug of the title; the dailies go under daily/.  Both directories are relative to the notes root.
+;; In a template %? is where point ends up, %U the inactive timestamp, %<...> a strftime format.
 (define note-directory "")
 (define dailies-directory "daily/")
 (define note-capture-templates
@@ -50,20 +38,12 @@
       '(("d" "daily" entry "* %<%H:%M> %?"
          :target (file+head "%<%Y-%m-%d>.org" "#+title: %<%Y-%m-%d>\n"))))
 
-;; The agenda groups, org-super-agenda style: an item goes to the first group that takes it.
-(define org-super-agenda-groups
-      '((:name "Overdue" :deadline past :scheduled past :order 0)
-        (:name "Today" :deadline today :scheduled today :order 1)
-        (:name "Deadlines" :deadline future :order 2)
-        (:name "Scheduled" :scheduled future :order 3)
-        (:name "Next" :todo "NEXT" :order 4)
-        (:name "To do" :todo "TODO" :order 5)
-        (:name "Waiting" :todo ("WAITING" "HOLD") :order 6)
-        (:name "Someday" :todo "SOMEDAY" :order 9)))
+;; A task added with brain-task-add (SPC o) goes in this scope of brain.
+(define brain-task-scope "work")
 
 ;; Agenda and brain buffers are read only and start in Motion state.
-(set! evil-motion-state-modes (append evil-motion-state-modes '(org-agenda-mode brain-mode)))
-(define org-agenda-mode-map (make-sparse-keymap "org-agenda-mode-map"))
+(set! evil-motion-state-modes (append evil-motion-state-modes '(brain-agenda-mode brain-mode)))
+(define brain-agenda-mode-map (make-sparse-keymap "brain-agenda-mode-map"))
 (define brain-mode-map (make-sparse-keymap "brain-mode-map"))
 (define markdown-mode-map (make-sparse-keymap "markdown-mode-map"))
 
@@ -91,7 +71,6 @@
 
 (define-key org-mode-map "C-c C-t" 'org-todo-select)
 (define-key org-mode-map "C-c C-c" 'org-ctrl-c-ctrl-c)
-(define-key org-mode-map "C-c C-k" 'org-capture-kill)
 (define-key org-mode-map "C-c C-l" 'org-insert-link)
 (define-key org-mode-map "C-c C-o" 'org-open-at-point)
 (define-key org-mode-map "C-c C-s" 'org-schedule)
@@ -141,13 +120,23 @@
 (define-key markdown-mode-map "C-c n l" 'brain-backlinks)
 (define-key markdown-mode-map "C-c n i" 'brain-node-insert)
 
-(evil-define-key 'motion 'org-agenda-mode
-  "RET" 'org-agenda-switch-to
-  "TAB" 'org-agenda-goto
-  "t" 'org-agenda-todo
-  "r" 'org-agenda-redo
-  "g r" 'org-agenda-redo
-  "q" 'org-agenda-quit)
+;; The agenda of brain's tasks: each key changes the task at point, in brain.
+;; C-u is the prefix argument here, not a scroll: C-u s and C-u d clear a date.
+(evil-define-key 'motion 'brain-agenda-mode
+  "C-u" 'universal-argument
+  "RET" 'brain-agenda-open
+  "t" 'brain-task-state
+  "x" 'brain-task-done
+  "s" 'brain-task-schedule
+  "d" 'brain-task-due
+  "p" 'brain-task-priority
+  "e" 'brain-task-title
+  "m" 'brain-task-move
+  "c" 'brain-task-confirm
+  "a" 'brain-task-add
+  "r" 'brain-agenda-redo
+  "g r" 'brain-agenda-redo
+  "q" 'brain-agenda-quit)
 (evil-define-key 'motion 'brain-mode
   "RET" 'brain-follow
   "q" 'quit-window)

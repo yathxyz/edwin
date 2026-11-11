@@ -141,7 +141,7 @@ test('no page objects exist in this process: the core reached none to boot (R4.1
 });
 
 test('Org commands exist after boot (R9.1: boot runs after every file)', () => {
-  for (const c of ['org-todo', 'org-agenda', 'org-capture', 'dailies-goto-today', 'brain-node-find', 'org-cycle'])
+  for (const c of ['org-todo', 'org-schedule', 'brain-agenda', 'brain-task-add', 'dailies-goto-today', 'brain-node-find', 'org-cycle'])
     assert.ok(ed.L.isCommand(ed.L.intern(c)), c);
 });
 
@@ -170,6 +170,14 @@ test('with no edwind there is no brain: its commands say so, and id: links and d
   for (let i = 0; i < 200 && ed.E.current.name === 'held.org'; i++) await new Promise(r => setTimeout(r, 5));
   assert.match(ed.Ed.Store.get(`daily/${day}.org`), new RegExp(`^:PROPERTIES:\\n:ID: [0-9a-f-]{36}\\n:END:\\n#\\+title: ${day}\\n\\* \\d\\d:\\d\\d \\n$`));
   assert.match(lineAt(), /^\* \d\d:\d\d $/);
+  // Tasks are brain's alone: no agenda is made, and no title is asked for.
+  const count = () => messages().split('No brain here').length, n = count();
+  await ed.keys('SPC m a a');
+  for (let i = 0; i < 200 && count() === n; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(count(), n + 1); assert.equal(ed.Ed.getBuffer('*Agenda*'), null);
+  await ed.keys('SPC o');
+  assert.equal(ed.E.mini, null, 'no title is asked for'); assert.equal(count(), n + 2);
+  for (const c of ['org-agenda', 'org-capture', 'org-todo-list', 'org-capture-finalize']) assert.ok(!ed.L.isCommand(ed.L.intern(c)), `${c} is gone`);
 });
 
 test('index.html fetches the shipped Scheme from scm/ and carries none of its own', async () => {

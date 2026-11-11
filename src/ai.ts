@@ -866,8 +866,6 @@ CMD('gptel-send', '', '', 'Send the chat up to point (in a gptel buffer) or the 
   return false;
 });
 CMD('gptel-abort', '', '', 'Abort the gptel request running in this buffer (or any running request).', () => {
-  /* C-c C-k is also org-capture-kill: in a capture buffer with no request of its own, it drops the capture. */
-  if (!active.get(cur()) && cur().capture && L.isCommand(intern('org-capture-kill'))) return Ed.callInteractively(intern('org-capture-kill'));
   const st = active.get(cur()) || [...active.values()][0];
   if (!st) { Ed.message('gptel: nothing to abort'); return false; }
   st.ctl.abort(); return false;

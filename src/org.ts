@@ -1,10 +1,10 @@
-/* Org mode for Edwin: the parts of Org, org-modern, evil-org, org-super-agenda and org-capture that
-   the desktop configuration uses every day, and new notes and dailies made from templates. Finding a
-   node, linking to one and listing what links to it ask brain (brain.ts). Buffers are rendered through the span
+/* Org mode for Edwin: the parts of Org, org-modern and evil-org that the desktop configuration uses
+   every day, and new notes and dailies made from templates. Finding a node, linking to one, listing what
+   links to it, and the agenda and its tasks ask brain (brain.ts). Buffers are rendered through the span
    mechanism of renderBuffer: hooks.lexSeg classifies the shown segment only (a class per character
    and hidden markers), and b.folds lists the hidden ranges that TAB cycling makes. Headlines are
    found by searching the rope for the next or previous line that starts with stars, never by
-   scanning the whole buffer on a key. The index the agenda reads is built by a pure job function
+   scanning the whole buffer on a key. The index of ids and tags is built by a pure job function
    that runs in the worker pool when it offers EdPool.run, else on the main thread. */
 (function () {
 'use strict';
@@ -12,11 +12,11 @@ const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, EC = globalT
 const { intern, signal, truthy, listOf, arr, NIL, Sym } = L;
 const { D, CMD } = L;
 const cur = () => E.current;
-const { bol, eol, lineNoB, lineStartB, lineCountB } = Ed;
+const { bol, eol, lineNoB, lineStartB } = Ed;
 const str = (x: SchemeValue) => { if (typeof x !== 'string') signal('wrong-type-argument', 'expected a string, got', x); return x as string; };
 const num = (x: SchemeValue) => { if (typeof x !== 'number') signal('wrong-type-argument', 'expected an integer, got', x); return Math.trunc(x as number); };
 const sval = (x: SchemeValue) => x instanceof Sym ? x.name : typeof x === 'string' ? x : x === true ? 't' : x === false ? '' : String(x);
-/* One key picks an entry, as org-mks does for the capture templates and the agenda views. */
+/* One key picks an entry, as org-mks does for the note templates. */
 const keyOf = async (prompt: string, keys: string[]) => { const c = await Ed.readChar(prompt); const k = L.chr(c) ?? String(c); if (!keys.includes(k)) signal('user-error', `Invalid key ${k}`); return k; };
 
 /* ---------- variables (org.scm sets the real defaults; these keep the code working without it) ---------- */
@@ -24,13 +24,7 @@ L.defvar('org-todo-keywords', L.read('((sequence "TODO(t)" "NEXT(n)" "WAITING(w)
 L.defvar('org-ellipsis', ' [...]', 'What a folded headline ends with.');
 L.defvar('org-modern-star', '◉○◈◇✳', 'Bullets shown for the last star of a headline, one per level, cycling.');
 L.defvar('org-hide-emphasis-markers', true, 'Non-#f hides the markers of *bold* /italic/ =code= ~verbatim~ text.');
-L.defvar('org-directory', '', 'Directory of the Org files, relative to the store (empty: the store itself).');
-L.defvar('org-agenda-files', false, '#f: every .org file in the store, else a list of file names.');
 L.defvar('org-tags-column', -77, 'Column where tags end (negative: right-aligned to that column).');
-L.defvar('org-agenda-start-on-weekday', 1, 'Day the week agenda starts on, 0 Sunday to 6 Saturday; #f starts it today.');
-L.defvar('org-deadline-warning-days', 14, 'Days ahead that a deadline appears in the agenda.');
-L.defvar('org-super-agenda-groups', NIL, 'Groups of the agenda: a list of plists with :name and selectors.');
-L.defvar('org-capture-templates', NIL, 'Capture templates: (KEY DESCRIPTION entry TARGET TEMPLATE . OPTIONS).');
 L.defvar('note-directory', '', 'Directory new notes are made in, relative to the notes root (empty: the root itself).');
 L.defvar('note-capture-templates', NIL, 'New-note templates: (KEY DESCRIPTION plain TEMPLATE (file+head FILE HEAD)).');
 L.defvar('dailies-directory', 'daily/', 'Directory of the dailies, relative to the notes root.');
@@ -38,11 +32,9 @@ L.defvar('dailies-capture-templates', NIL, 'Daily note templates: (KEY DESCRIPTI
 L.defvar('org-after-todo-state-change-hook', NIL, 'Procedures of no arguments called after org-todo changes a state; they read org-state and org-last-state.');
 L.defvar('org-state', false, 'The new TODO state (a string, or #f for none) while org-after-todo-state-change-hook runs.');
 L.defvar('org-last-state', false, 'The previous TODO state (a string, or #f) while org-after-todo-state-change-hook runs.');
-L.defvar('org-capture-after-finalize-hook', NIL, 'Procedures called after a capture is stored.');
 L.defvar('after-save-hook', NIL, 'Procedures called after a buffer is saved.');
-Ed.MODE_NAMES['markdown-mode'] = 'Markdown'; Ed.MODE_NAMES['org-agenda-mode'] = 'Org Agenda';
-for (const mode of ['markdown-mode', 'org-agenda-mode'])
-  CMD(mode, '', '', `Switch the current buffer to ${Ed.MODE_NAMES[mode]} mode.`, () => Ed.switchMajorMode(cur(), mode));
+Ed.MODE_NAMES['markdown-mode'] = 'Markdown';
+CMD('markdown-mode', '', '', 'Switch the current buffer to Markdown mode.', () => Ed.switchMajorMode(cur(), 'markdown-mode'));
 H.modeFor = name => /\.org$/i.test(name) ? 'org-mode' : /\.(md|markdown)$/i.test(name) ? 'markdown-mode' : null;
 H.ellipsis = () => String(L.get('org-ellipsis') ?? '...');
 /* brain.ts writes its buffers (a record, the backlinks) as Org, so they are drawn and their links followed as Org. */
@@ -81,7 +73,6 @@ const ymd = (d: Date) => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getD
 const hm = (d: Date) => `${p2(d.getHours())}:${p2(d.getMinutes())}`;
 const fromYmd = (s: string) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
 const addDays = (d: Date, n: number) => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() + n); return x; };
-const dayDiff = (a: string, b: string) => Math.round(((fromYmd(a) as unknown as number) - (fromYmd(b) as unknown as number)) / 86400000);
 /* <2026-10-11 Sat 10:00> or [2026-10-11 Sat]: active or inactive, with or without the time. */
 function stamp(d: Date, active: boolean, withTime: boolean) {
   const s = `${ymd(d)} ${DAYS[d.getDay()]}${withTime ? ' ' + hm(d) : ''}`;
@@ -105,8 +96,6 @@ function strftime(f: string, d: Date) {
     }
   });
 }
-/* The ISO week number, for the agenda header. */
-function isoWeek(d: Date) { const x = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); const day = x.getUTCDay() || 7; x.setUTCDate(x.getUTCDate() + 4 - day); const y0 = new Date(Date.UTC(x.getUTCFullYear(), 0, 1)); return Math.ceil((((x as unknown as number) - (y0 as unknown as number)) / 86400000 + 1) / 7); }
 /* org-read-date, the usual part: empty for today, 2026-10-11, 10-11, 11 (this month or next), +3d +2w +1m,
    today tomorrow yesterday, a weekday name (the next one), each with an optional HH:MM. */
 function parseDate(input: string, base?: Date) {
@@ -298,7 +287,7 @@ function keepingFolds<T>(b: EdBuffer, s: number, e: number, fn: () => T): T {
 }
 /* Edits move or remove folds: one before a fold shifts it, one inside unfolds it. New lines put right
    after a fold stay outside it, as an Org overlay does not grow at its end (o below a folded headline,
-   a capture filed under one). A fold whose headline the edit destroyed (x on its star) is removed. */
+   a heading added under one). A fold whose headline the edit destroyed (x on its star) is removed. */
 const prevEdited = H.edited;
 H.edited = b => {
   if (prevEdited) prevEdited(b);
@@ -458,11 +447,9 @@ for (const n of ['evil-close-fold', 'evil-open-fold', 'evil-open-fold-rec', 'evi
 /* Class names: oh hidden (display none), ohs hidden star (blank), obN bullet star, olN headline text per
    level, ot/od todo and done keywords, ox done headline text, og tags, ots timestamp, osd planning keyword,
    obb oit ocd ovb oul ost emphasis, okw #+keyword line, oti title, obd block delimiter, osb/oqb block body,
-   olk link, ocb/ocx checkbox, odr drawer, opr priority, ocm comment, oli list bullet, otb table, ohr rule,
-   and the agenda's oad/oat date, oag group, oac category, oaw/oao label. */
+   olk link, ocb/ocx checkbox, odr drawer, opr priority, ocm comment, oli list bullet, otb table, ohr rule. */
 const ON = ['', 'oh', 'ohs', 'ob1', 'ob2', 'ob3', 'ob4', 'ob5', 'ol1', 'ol2', 'ol3', 'ol4', 'ol5', 'ot', 'od', 'ox', 'og', 'ots', 'osd',
-  'obb', 'oit', 'ocd', 'ovb', 'oul', 'ost', 'okw', 'oti', 'obd', 'osb', 'oqb', 'olk', 'ocb', 'ocx', 'odr', 'opr', 'ocm', 'oli', 'otb', 'ohr',
-  'oad', 'oat', 'oag', 'oac', 'oaw', 'oao'];
+  'obb', 'oit', 'ocd', 'ovb', 'oul', 'ost', 'okw', 'oti', 'obd', 'osb', 'oqb', 'olk', 'ocb', 'ocx', 'odr', 'opr', 'ocm', 'oli', 'otb', 'ohr'];
 const OC: Record<string, number> = {}; ON.forEach((nm, i) => { if (nm) OC[nm] = i; });
 const TS_RE = /[<[]\d{4}-\d{2}-\d{2}(?: [^\s>\]]{1,3}\.?)?(?: \d{1,2}:\d{2}(?:-\d{1,2}:\d{2})?)?(?: [+.]+\d+[hdwmy])?(?: -\d+[hdwmy])?[>\]]/g;
 const EM: Record<string, string> = { '*': 'obb', '/': 'oit', '_': 'oul', '=': 'ocd', '~': 'ovb', '+': 'ost' };
@@ -616,40 +603,12 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
   }
   return cls;
 }
-/* The agenda buffer: day headers, group names, categories, labels, keywords and tags. */
-function lexAgendaSeg(b: EdBuffer, from: number, to: number, seg: string) {
-  const n = seg.length, cls = new Uint8Array(n), kw = todoKeywords(), ag = (b.agenda || {}) as Partial<OrgAgenda>;
-  const fill = (a: number, z: number, c: number) => { for (let k = a; k < z; k++) cls[k] = c; };
-  let ls = 0;
-  while (ls < n) {
-    let le = seg.indexOf('\n', ls); if (le < 0) le = n;
-    const line = seg.slice(ls, le);
-    let m;
-    if (from + ls === 0) fill(ls, le, OC.oti);
-    else if (/^\S/.test(line)) fill(ls, le, line === ag.todayHeader ? OC.oat : OC.oad);
-    else if (/^ \S/.test(line)) fill(ls, le, OC.oag);
-    else if ((m = /^  (\S+:)\s+/.exec(line))) {
-      fill(ls + 2, ls + 2 + m[1].length, OC.oac);
-      let k = m[0].length;
-      const lab = /^((?:Scheduled|Deadline|Sched\. \d+x|In +-?\d+ d\.|\d+ d\. ago|Closed):)\s+/.exec(line.slice(k));
-      if (lab) { fill(ls + k, ls + k + lab[1].length, /^(Sched\.|\d+ d\. ago)/.test(lab[1]) ? OC.oao : OC.oaw); k += lab[0].length; }
-      const tm = /^(\d{1,2}:\d{2}(?:-\d{1,2}:\d{2})?)\s+/.exec(line.slice(k));
-      if (tm) { fill(ls + k, ls + k + tm[1].length, OC.ots); k += tm[0].length; }
-      for (const w of kw.all) if (line.startsWith(w, k) && (line[k + w.length] === ' ' || k + w.length === line.length)) { fill(ls + k, ls + k + w.length, kw.done.includes(w) ? OC.od : OC.ot); k += w.length; break; }
-      const tg = /\s+(:[\w@#%:]+:)\s*$/.exec(line);
-      if (tg && tg.index >= k) fill(ls + tg.index + 1, ls + tg.index + 1 + tg[1].length, OC.og);
-    }
-    ls = le + 1;
-  }
-  return cls;
-}
 H.lexSeg = (b, from, to, seg) => {
-  const agenda = b.mode === 'org-agenda-mode';
-  if (!agenda && !isOutline(b)) return null;
+  if (!isOutline(b)) return null;
   /* The classes also depend on the mode (Org or Markdown) and on org-hide-emphasis-markers. */
   const c = b._olx as OrgLex | undefined, kw = L.get('org-todo-keywords'), fv = b._foldVer || 0, mode = b.mode, he = truthy(L.get('org-hide-emphasis-markers'));
   if (c && c.ver === b.ver && c.from === from && c.to === to && c.fv === fv && c.kw === kw && c.mode === mode && c.he === he) return c;
-  const cls = agenda ? lexAgendaSeg(b, from, to, seg as string) : lexOrgSeg(b, from, to, seg as string);
+  const cls = lexOrgSeg(b, from, to, seg as string);
   return b._olx = { ver: b.ver, from, to, fv, kw, mode, he, cls, names: ON };
 };
 
@@ -910,9 +869,8 @@ function atSrcBlock(b: EdBuffer, ls: number) {
   }
   return false;
 }
-CMD('org-ctrl-c-ctrl-c', '', '', 'Do what the context asks: finish a capture, run the source block at point, toggle a checkbox, set the tags of a headline (C-c C-c).', () => {
+CMD('org-ctrl-c-ctrl-c', '', '', 'Do what the context asks: run the source block at point, toggle a checkbox, set the tags of a headline (C-c C-c).', () => {
   const b = cur(), ls = bol(b.rope, b.pt);
-  if (b.capture) return L.call('org-capture-finalize', []);
   if (atSrcBlock(b, ls) && L.get('babel-execute-src-block') !== undefined) return L.call('call-interactively', [intern('babel-execute-src-block')]);
   if (itemAt(b, ls) && itemAt(b, ls)!.box !== undefined) { toggleCheckbox(b, ls, false); return false; }
   if (levelAt(b, ls)) return L.call('org-set-tags-command', []);
@@ -1028,7 +986,7 @@ function tagsInBuffer(b: EdBuffer) {
   const out = new Set<string>(), re = /^\*+\s.*?\s(:[\w@#%:]+:)\s*$/gm; let m;
   const t = b.text;
   while ((m = re.exec(t))) for (const x of m[1].split(':')) if (x) out.add(x);
-  if (ORG.ix) for (const f of ORG.ix.files.values()) for (const e of f.entries) for (const x of e.tags) out.add(x);
+  if (ORG.ix) for (const f of ORG.ix.files.values()) for (const x of f.tags) out.add(x);
   return [...out].sort();
 }
 function setTags(b: EdBuffer, hs: number, tags: SchemeValue) {
@@ -1051,19 +1009,14 @@ CMD('org-set-tags-command', async () => {
 }, 'TAGS', 'Set the tags of the headline at point, given as :a:b: or a b (C-c C-q).', ([tags]: SchemeValue[]) => { const b = cur(); setTags(b, headlineOrError(b), tags); return false; });
 D('org-get-tags', '', 'The tags of the headline at point as a list of strings.', () => { const b = cur(), hs = headlineBefore(b, b.pt); return hs === null ? NIL : listOf(headingInfo(b, hs).tagList); });
 
-/* ---------- the index: headlines, planning, tags and ids of every Org file ----------
+/* ---------- the index: the ids and headline tags of every Org and Markdown file ----------
    orgParseFile is pure: its source is shipped to the worker pool (EdPool.define), so it uses nothing
-   from the page. ITEM is {file, text, keywords, done} or {file, buf} (a buffer mirror for ctx.buffer). */
+   from the page. ITEM is {file, text} or {file, buf} (a buffer mirror for ctx.buffer). */
 function orgParseFile(item: OrgParseItem, ctx?: { buffer?: (id: string | number) => unknown } | null): OrgParsed {
   const file = item.file, text = item.text != null ? item.text : (ctx && ctx.buffer ? ctx.buffer(item.buf!) as string : '');
   const md = /\.(md|markdown)$/i.test(file), star = md ? '#' : '*';
-  const kwAll = item.keywords || ['TODO', 'NEXT', 'WAITING', 'HOLD', 'SOMEDAY', 'DONE', 'CANCELLED'], kwDone = item.done || ['DONE', 'CANCELLED'];
-  const TS = /[<[](\d{4}-\d{2}-\d{2})(?: [^\s>\]]{1,3}\.?)?(?: (\d{1,2}:\d{2})(?:-\d{1,2}:\d{2})?)?(?: [+.]+(\d+)([hdwmy]))?(?: -\d+[hdwmy])?[>\]]/g;
-  /* The repeater (+1w, ++1d, .+1m) of a timestamp match, or null. */
-  const rep = (t: RegExpExecArray) => t[3] && +t[3] > 0 ? { n: +t[3], u: t[4] } : null;
-  const category = file.replace(/^.*\//, '').replace(/\.[^.]+$/, '');
-  const entries: OrgEntry[] = [];
-  let title: string | null = null, id: string | null = null, tags: string[] = [], cur: OrgEntry | null = null, inFront = false, lineNo = 0, i = 0;
+  const ids: string[] = [], tags = new Set<string>();
+  let inFront = false, lineNo = 0, i = 0;
   const n = text.length;
   while (i <= n) {
     let j = text.indexOf('\n', i); if (j < 0) j = n;
@@ -1072,36 +1025,16 @@ function orgParseFile(item: OrgParseItem, ctx?: { buffer?: (id: string | number)
     if (lineNo === 1 && md && /^---\s*$/.test(line)) inFront = true;
     else if (inFront) {
       if (/^---\s*$/.test(line)) inFront = false;
-      else if ((m = /^title:\s*(.+?)\s*$/.exec(line))) title = m[1].replace(/^["']|["']$/g, '');
-      else if ((m = /^id:\s*(\S+)/.exec(line))) id = m[1];
-      else if ((m = /^tags:\s*\[?(.*?)\]?\s*$/.exec(line))) tags = m[1].split(/[\s,]+/).map(s => s.replace(/^["']|["']$/g, '')).filter(Boolean);
+      else if ((m = /^id:\s*(\S+)/.exec(line))) ids.push(m[1]);
     }
     else if (line[0] === star && /^[*#]+[ \t]/.test(line)) {
-      let k = 0; while (line[k] === star) k++;
-      let rest = line.slice(k).trim(), todo: string | null = null, priority: string | null = null, etags: string[] = [];
-      for (const w of kwAll) if (rest.startsWith(w) && (rest[w.length] === ' ' || rest.length === w.length)) { todo = w; rest = rest.slice(w.length).trim(); break; }
-      if ((m = /^\[#([A-Z0-9])\]\s*/.exec(rest))) { priority = m[1]; rest = rest.slice(m[0].length); }
-      if ((m = /\s+(:[\w@#%:]+:)\s*$/.exec(rest)) || (m = /^(:[\w@#%:]+:)$/.exec(rest))) { etags = m[1].split(':').filter(Boolean); rest = rest.slice(0, m.index).trim(); }
-      cur = { file, pos: i, line: lineNo, level: k, todo, done: !!todo && kwDone.includes(todo), title: rest, tags: etags, priority, scheduled: null, deadline: null, closed: null, ts: [], id: null, category };
-      entries.push(cur);
+      if ((m = /\s(:[\w@#%:]+:)\s*$/.exec(line))) for (const t of m[1].split(':')) if (t) tags.add(t);
     }
-    else if (!md && (m = /^#\+(\w+):\s*(.*?)\s*$/.exec(line)) && !cur) {
-      const key = m[1].toLowerCase();
-      if (key === 'title') title = m[2]; else if (key === 'filetags') tags = m[2].split(':').filter(Boolean); else if (key === 'category') { /* file category */ }
-    }
-    else if ((m = /^\s*:ID:\s+(\S+)/.exec(line))) { if (cur) cur.id = m[1]; else if (!id) id = m[1]; }
-    else if (cur && /^\s*(SCHEDULED|DEADLINE|CLOSED):/.test(line)) {
-      const re = /(SCHEDULED|DEADLINE|CLOSED):\s*([<[][^>\]\n]*[>\]])/g;
-      while ((m = re.exec(line))) { TS.lastIndex = 0; const t = TS.exec(m[2]); if (t) cur[m[1].toLowerCase() as 'scheduled' | 'deadline' | 'closed'] = { date: t[1], time: t[2] || null, rep: rep(t) }; }
-    }
-    else if (cur && !/^\s*[:#]/.test(line)) {
-      TS.lastIndex = 0;
-      while ((m = TS.exec(line))) if (m[0][0] === '<') cur.ts.push({ date: m[1], time: m[2] || null, rep: rep(m) });
-    }
+    else if ((m = /^\s*:ID:\s+(\S+)/.exec(line))) ids.push(m[1]);
     if (j >= n) break;
     i = j + 1;
   }
-  return { file, title: title || category, id, tags, entries };
+  return { file, ids, tags: [...tags] };
 }
 if (globalThis.EdPool && EdPool.define) { try { EdPool.define('org-parse', orgParseFile, []); ORG.poolJob = true; } catch (e) { ORG.poolJob = false; } }
 function indexDirty() { if (ORG.ix) ORG.ix.dirty = true; }
@@ -1109,32 +1042,32 @@ function indexDirty() { if (ORG.ix) ORG.ix.dirty = true; }
 function indexSources() {
   const out = new Map<string, { file: string; b?: EdBuffer }>();
   for (const f of Ed.Store.list()) if (/\.(org|md|markdown)$/i.test(f)) out.set(f, { file: f });
-  for (const b of E.buffers) if (isOutline(b) && !b.capture && (b.file || /\.(org|md)$/i.test(b.name))) out.set(b.file || b.name, { file: b.file || b.name, b });
+  for (const b of E.buffers) if (isOutline(b) && (b.file || /\.(org|md)$/i.test(b.name))) out.set(b.file || b.name, { file: b.file || b.name, b });
   return [...out.values()];
 }
 function refreshIndex() {
   const ix: OrgIndex = ORG.ix || (ORG.ix = { files: new Map(), dirty: true, built: 0 });
   if (ix.promise) return ix.promise;
-  const kw = todoKeywords(), items: OrgParseItem[] = [], keep = new Map<string, OrgFileIx>(), bufs: EdBuffer[] = [];
+  const items: OrgParseItem[] = [], keep = new Map<string, OrgFileIx>(), bufs: EdBuffer[] = [];
   const pool = !!(globalThis.EdPool && EdPool.run as unknown && EdPool.map as unknown && ORG.poolJob);
   for (const src of indexSources()) {
     const old = ix.files.get(src.file);
     if (src.b) {
-      if (old && old.bufId === src.b.id && old.ver === src.b.ver && old.kw === kw) { keep.set(src.file, old); continue; }
-      items.push(pool ? { file: src.file, buf: src.b.id, keywords: kw.all, done: kw.done } : { file: src.file, text: src.b.text, keywords: kw.all, done: kw.done });
+      if (old && old.bufId === src.b.id && old.ver === src.b.ver) { keep.set(src.file, old); continue; }
+      items.push(pool ? { file: src.file, buf: src.b.id } : { file: src.file, text: src.b.text });
       bufs.push(src.b); items[items.length - 1].meta = { bufId: src.b.id, ver: src.b.ver };
     } else {
       const text = Ed.Store.get(src.file) ?? '';
-      if (old && old.src === text && old.kw === kw) { keep.set(src.file, old); continue; }
-      items.push({ file: src.file, text, keywords: kw.all, done: kw.done }); items[items.length - 1].meta = { src: text };
+      if (old && old.src === text) { keep.set(src.file, old); continue; }
+      items.push({ file: src.file, text }); items[items.length - 1].meta = { src: text };
     }
   }
   const run = async () => {
     let results: OrgFileIx[] | null = null;
-    const plain = items.map(({ file, text, buf, keywords, done }) => ({ file, text, buf, keywords, done }));
+    const plain = items.map(({ file, text, buf }) => ({ file, text, buf }));
     if (items.length && pool) { try { results = await EdPool.map<OrgFileIx>('org-parse', plain, { buffers: bufs }); if (!Array.isArray(results) || results.length !== items.length) results = null; } catch (e) { results = null; } }
     if (!results) { const ctx = { buffer: (id: string | number) => { const b = E.buffers.find(x => x.id === id); return b ? b.text : ''; } }; results = plain.map(it => orgParseFile(it, ctx)); }
-    results.forEach((res, i) => { Object.assign(res, items[i].meta); res.kw = kw; keep.set(items[i].file, res); });
+    results.forEach((res, i) => { Object.assign(res, items[i].meta); keep.set(items[i].file, res); });
     ix.files = keep; ix.dirty = false; ix.built = Date.now();
     buildIds(ix);
   };
@@ -1152,7 +1085,7 @@ function scheduleRefresh() {
    them is followed without asking anyone. */
 function buildIds(ix: OrgIndex) {
   const ids = new Map<string, string>();
-  for (const f of ix.files.values()) { if (f.id) ids.set(f.id, f.file); for (const e of f.entries) if (e.id) ids.set(e.id, f.file); }
+  for (const f of ix.files.values()) for (const id of f.ids) ids.set(id, f.file);
   ix.ids = ids;
 }
 const fileOfId = (id: string) => (ORG.ix && ORG.ix.ids && ORG.ix.ids.get(id)) || null;
@@ -1311,286 +1244,7 @@ D('org-id-get', '', 'The :ID: of the entry at point, or #f.', () => {
   return f && f.id ? f.id : false;
 });
 
-/* ---------- the agenda ---------- */
-const lst = (v: SchemeValue) => (v instanceof L.Pair || v === NIL ? arr(v) : [v]).map(sval);
-function plistToObj(pl: SchemeValue) { const o: Record<string, SchemeValue> = {}, a = arr(pl); for (let i = 0; i + 1 < a.length; i += 2) if (a[i] instanceof Sym) o[(a[i] as SchemeSym).name.replace(/^:/, '')] = a[i + 1]; return o; }
-function groupSpecs() { return arr(L.get('org-super-agenda-groups') ?? NIL).map(plistToObj).filter(g => Object.keys(g).length); }
-function inAgendaFiles(file: string) {
-  const v = L.get('org-agenda-files');
-  if (!v || v === NIL) return true;
-  return arr(v).some(x => { const s = sval(x); return file === s || (s.endsWith('/') && file.startsWith(s)); });
-}
-function agendaEntries(ix: OrgIndex) {
-  const out: OrgAgendaEntry[] = [];
-  for (const f of ix.files.values()) if (/\.org$/i.test(f.file) && inAgendaFiles(f.file)) for (const e of f.entries) out.push({ ...e, fileTags: f.tags, allTags: [...f.tags, ...e.tags] });
-  return out;
-}
-/* org-super-agenda: the selectors of a group are ORed; an item goes to the first group that takes it. */
-function selectorMatch(g: Record<string, SchemeValue>, it: OrgAgendaItem, today: string) {
-  const e = it.entry, checks: boolean[] = [];
-  const when = (v: SchemeValue, d: OrgTs | null) => { const s = sval(v); if (!d) return false; if (s === 't') return true; const k = dayDiff(d.date, today); return s === 'past' ? k < 0 : s === 'today' ? k === 0 : s === 'future' ? k > 0 : false; };
-  if ('deadline' in g) checks.push(when(g.deadline, e.deadline));
-  if ('scheduled' in g) checks.push(when(g.scheduled, e.scheduled));
-  if ('todo' in g) checks.push(g.todo === true || sval(g.todo) === 't' ? !!e.todo && !e.done : lst(g.todo).includes(e.todo as string));
-  if ('tag' in g) checks.push(lst(g.tag).some(t => (e.allTags || e.tags).includes(t)));
-  if ('file' in g) checks.push(lst(g.file).some(f => e.file === f || e.file.endsWith('/' + f)));
-  if ('category' in g) checks.push(lst(g.category).includes(e.category));
-  if ('priority' in g) checks.push(lst(g.priority).includes(e.priority as string));
-  if ('regexp' in g) checks.push(lst(g.regexp).some(re => { try { return new RegExp(re).test(e.title); } catch (x) { return false; } }));
-  if ('anything' in g) checks.push(true);
-  return checks.some(Boolean);
-}
-function groupItems(items: OrgAgendaItem[], specs: Record<string, SchemeValue>[], today: string) {
-  const groups = specs.map((g): OrgGroup => ({ name: g.name ? sval(g.name) : 'Group', items: [], order: typeof g.order === 'number' ? g.order : 0, spec: g }));
-  const rest: OrgAgendaItem[] = [];
-  for (const it of items) {
-    let placed = false;
-    for (const g of groups) if (selectorMatch(g.spec!, it, today)) { if (!truthy(g.spec!.discard)) g.items.push(it); placed = true; break; }
-    if (!placed) rest.push(it);
-  }
-  const out = groups.filter(g => g.items.length);
-  if (rest.length) out.push({ name: 'Other items', items: rest, order: 0 });
-  return out.map((g, i) => [g, i] as [OrgGroup, number]).sort((a, b) => a[0].order - b[0].order || a[1] - b[1]).map(x => x[0]);
-}
-function agendaLine(it: OrgAgendaItem) {
-  const e = it.entry, cat = (e.category + ':').padEnd(11), label = (it.label || '').padEnd(12), time = it.time ? it.time + ' ' : '';
-  return `  ${cat} ${label} ${time}${e.todo ? e.todo + ' ' : ''}${e.priority ? '[#' + e.priority + '] ' : ''}${e.title}${e.tags.length ? '  :' + e.tags.join(':') + ':' : ''}`;
-}
-/* Times sort as minutes: 9:00 before 10:00. */
-const minutes = (t: string | null | undefined) => { if (!t) return 1e9; const k = t.indexOf(':'); return +t.slice(0, k) * 60 + +t.slice(k + 1); };
-const sortItems = (its: OrgAgendaItem[]) => its.sort((a, b) => a.sort - b.sort || (b.over || 0) - (a.over || 0) || minutes(a.time) - minutes(b.time) || a.entry.file.localeCompare(b.entry.file) || a.entry.line - b.entry.line);
-/* Whether the day DS is the timestamp T's date or, with a repeater, one of its later occurrences. */
-function occursOn(t: OrgTs, ds: string) {
-  const k = dayDiff(ds, t.date);
-  if (k === 0) return true;
-  if (!t.rep || k < 0) return false;
-  const { n, u } = t.rep;
-  if (u === 'h' || u === 'd') return k % n === 0;
-  if (u === 'w') return k % (7 * n) === 0;
-  const a = fromYmd(t.date)!, d = fromYmd(ds)!;
-  if (a.getDate() !== d.getDate()) return false;
-  const months = (d.getFullYear() - a.getFullYear()) * 12 + d.getMonth() - a.getMonth();
-  return u === 'm' ? months % n === 0 : months % 12 === 0 && (months / 12) % n === 0;
-}
-/* The day line, as org-agenda-format-date-aligned writes it: Mondays carry the ISO week. */
-const dayHeader = (day: Date) => `${DAYS_LONG[day.getDay()].padEnd(10)} ${String(day.getDate()).padStart(2)} ${MONTHS[day.getMonth()]} ${day.getFullYear()}${day.getDay() === 1 ? ' W' + p2(isoWeek(day)) : ''}`;
-function weekView(ix: OrgIndex, today: Date) {
-  /* The week starts on org-agenda-start-on-weekday (Monday by default; #f starts it today). */
-  const wd = L.get('org-agenda-start-on-weekday'), start = typeof wd === 'number' ? addDays(today, -((today.getDay() - wd + 7) % 7)) : today;
-  const entries = agendaEntries(ix), lines = [`Week-agenda (W${p2(isoWeek(start))}):`], items: OrgViewItem[] = [], specs = groupSpecs(), warn = Number(L.get('org-deadline-warning-days')) || 14;
-  const todayYmd = ymd(today);
-  let todayHeader = '';
-  for (let k = 0; k < 7; k++) {
-    const day = addDays(start, k), ds = ymd(day), its: OrgAgendaItem[] = [], isToday = ds === todayYmd, future = ds > todayYmd;
-    const header = dayHeader(day);
-    if (isToday) todayHeader = header;
-    for (const e of entries) {
-      if (e.scheduled) {
-        const d = dayDiff(ds, e.scheduled.date);
-        if (d === 0 || (future && occursOn(e.scheduled, ds))) its.push({ entry: e, label: 'Scheduled:', time: e.scheduled.time, sort: 1 });
-        else if (isToday && d > 0 && !e.done) its.push({ entry: e, label: `Sched. ${d}x:`, sort: 0, over: d });
-      }
-      if (e.deadline) {
-        const d = dayDiff(e.deadline.date, ds);
-        if (d === 0 || (future && occursOn(e.deadline, ds))) its.push({ entry: e, label: 'Deadline:', time: e.deadline.time, sort: 1 });
-        else if (isToday && !e.done) { if (d < 0) its.push({ entry: e, label: `${-d} d. ago:`, sort: 0, over: -d }); else if (d <= warn) its.push({ entry: e, label: `In ${d} d.:`, sort: 2 }); }
-      }
-      for (const t of e.ts) if (occursOn(t, ds)) its.push({ entry: e, label: '', time: t.time, sort: 1 });
-    }
-    sortItems(its);
-    lines.push(header);
-    if (specs.length && its.length) for (const g of groupItems(its, specs, todayYmd)) { lines.push(' ' + g.name); for (const it of g.items) { items.push({ line: lines.length, it }); lines.push(agendaLine(it)); } }
-    else for (const it of its) { items.push({ line: lines.length, it }); lines.push(agendaLine(it)); }
-  }
-  return { lines, items, todayHeader };
-}
-function todoView(ix: OrgIndex, today: Date) {
-  const lines = ['Global list of TODO items of type: ALL'], items: OrgViewItem[] = [], specs = groupSpecs();
-  const its = agendaEntries(ix).filter(e => e.todo && !e.done).map(e => ({ entry: e, label: '', sort: 0 }));
-  if (specs.length) for (const g of groupItems(its, specs, ymd(today))) { lines.push(' ' + g.name); for (const it of g.items) { items.push({ line: lines.length, it }); lines.push(agendaLine(it)); } }
-  else for (const it of its) { items.push({ line: lines.length, it }); lines.push(agendaLine(it)); }
-  return { lines, items, todayHeader: '' };
-}
-async function showAgenda(view: string, keepLine?: number) {
-  await refreshIndex();
-  const today = ORG.now(), built = view === 'todo' ? todoView(ORG.ix!, today) : weekView(ORG.ix!, today);
-  const b = Ed.getBufferCreate('*Org Agenda*');
-  b.mode = 'org-agenda-mode'; b.readOnly = true; b.evilState = 'motion';
-  b.text = built.lines.join('\n') + '\n';
-  b.agenda = { view, items: built.items, byLine: new Map(built.items.map(x => [x.line, x.it])), todayHeader: built.todayHeader, win: b.agenda ? (b.agenda as OrgAgenda).win : null };
-  b.modified = false; b.undo = []; b.redo = [];
-  /* Point goes to today's line when the view shows it, as in Org, else to the first item. */
-  const todayLine = built.todayHeader ? built.lines.indexOf(built.todayHeader) : -1;
-  const first = todayLine >= 0 ? todayLine : built.items.length ? built.items[0].line : 0;
-  b.pt = lineStartB(b, (keepLine && keepLine <= lineCountB(b) ? keepLine : first + 1));
-  /* The agenda takes a window of its own below, and a popup window left from a jump out of it is reused. */
-  if (!Ed.windowFor(b)) { (b.agenda as OrgAgenda).win = Ed.winConfig(); if (E.sel!.popup && Ed.windowList().length > 1) Ed.setWindowBuffer(b); else Ed.popToBuffer(b, true); }
-  else Ed.selectWindow(Ed.windowFor(b)!);
-  return b;
-}
-CMD('org-agenda', async () => [await keyOf('Agenda command: [a] Agenda for current week  [t] List of all TODO entries ', ['a', 't'])],
-  'KEY', 'Show the agenda: a for the week (overdue items first on today), t for the TODO list (SPC m a).', async ([k]: SchemeValue[]) => {
-  await showAgenda(String(k)[0] === 't' ? 'todo' : 'week'); return false;
-});
-CMD('org-agenda-list', '', '', 'Show the agenda of the week (from org-agenda-start-on-weekday).', async () => { await showAgenda('week'); return false; });
-CMD('org-todo-list', '', '', 'Show every TODO entry, grouped.', async () => { await showAgenda('todo'); return false; });
-function agendaItemAt(b: EdBuffer) { if (!b.agenda) signal('user-error', 'Not in the agenda'); const it = (b.agenda as OrgAgenda).byLine.get(lineNoB(b, b.pt) - 1); if (!it) signal('user-error', 'No item at point'); return it!; }
-/* Find the entry's headline in buffer B again: at its indexed position when the line still matches, else by title. */
-function locateEntry(b: OrgOutline, e: OrgEntry) {
-  const r = b.rope;
-  if (e.pos < r.length && levelAt(b, e.pos) && headingInfo(b, e.pos).title === e.title) return e.pos;
-  for (let h = nextHeadline(b, 0); h >= 0; h = nextHeadline(b, eol(r, h) + 1)) if (headingInfo(b, h).title === e.title) return h;
-  return Math.min(e.pos, r.length);
-}
-function gotoEntry(e: OrgEntry, other: boolean) {
-  const ab = cur();
-  let b = E.buffers.find(x => x.file === e.file);
-  if (!b) { b = L.call('find-file', [e.file]) as EdBuffer; if (other) { Ed.setWindowBuffer(ab); } }
-  const pos = locateEntry(b, e);
-  if (other) Ed.popToBuffer(b, true); else Ed.setWindowBuffer(b);
-  b.pt = pos; reveal(b, pos); E.recenter = 'center';
-  try { L.call('pulse-line', []); } catch (x) { /* no pulse */ }
-  return b;
-}
-CMD('org-agenda-switch-to', '', '', 'Go to the entry at point in its file (RET).', () => { gotoEntry(agendaItemAt(cur()).entry, false); return false; });
-CMD('org-agenda-goto', '', '', 'Show the entry at point in another window (TAB).', () => { gotoEntry(agendaItemAt(cur()).entry, true); return false; });
-CMD('org-agenda-todo', '', '', 'Cycle the TODO state of the entry at point, in its file (t).', async () => {
-  const b = cur(), it = agendaItemAt(b), e = it.entry, kw = todoKeywords();
-  const i = e.todo ? kw.all.indexOf(e.todo) : -1, next = i + 1 < kw.all.length ? kw.all[i + 1] : null;
-  const vb = E.buffers.find(x => x.file === e.file);
-  if (vb) { const pos = locateEntry(vb, e); withBuffer(vb, () => setTodo(vb, pos, next)); }
-  else {
-    const text = Ed.Store.get(e.file) ?? '';
-    const tb = { rope: new globalThis.Rope(text), mode: 'org-mode' };
-    const pos = locateEntry(tb, e), info = headingInfo(tb, pos);
-    let a = pos + info.textStart, z = a; if (info.todo) { z = a + info.todo.length; while (text[z] === ' ') z++; }
-    Ed.Store.set(e.file, text.slice(0, a) + (next ? next + ' ' : '') + text.slice(z));
-    indexDirty();
-  }
-  await showAgenda((b.agenda as OrgAgenda).view, lineNoB(b, b.pt));
-  Ed.message(next ? `TODO state: ${next}` : 'TODO state removed');
-  return false;
-});
-CMD('org-agenda-redo', '', '', 'Rebuild the agenda from the files (r).', async () => { const b = cur(); if (!b.agenda) signal('user-error', 'Not in the agenda'); await showAgenda((b.agenda as OrgAgenda).view, lineNoB(b, b.pt)); return false; });
-CMD('org-agenda-quit', '', '', 'Leave the agenda: close its window when it was opened for it, else bring the windows back (q).', () => {
-  const b = cur(), w = Ed.windowFor(b), win = (b.agenda && (b.agenda as OrgAgenda).win) as EdWinConfig | null | undefined;
-  if (b.agenda) (b.agenda as OrgAgenda).win = null;
-  if (w && w.popup && Ed.windowList().length > 1) { Ed.deleteWindow(w); return false; }
-  if (win) { try { Ed.restoreWinConfig(win); return false; } catch (e) { /* fall through */ } }
-  return L.call('quit-window', []);
-});
-L.alias('org-agenda-exit', 'org-agenda-quit');
-for (const n of ['org-agenda-switch-to', 'org-agenda-goto', 'org-agenda-todo', 'org-agenda-redo', 'org-agenda-quit', 'org-agenda']) L.put(intern(n), 'evil-repeat', intern('abort'));
-
-/* ---------- capture ---------- */
-function captureTemplates() {
-  return arr(L.get('org-capture-templates') ?? NIL).map(t => {
-    const a = arr(t); if (a.length < 5) return null;
-    const o: OrgCaptureTemplate = { key: String(a[0]), desc: String(a[1]), type: sval(a[2]), target: arr(a[3]).map(x => sval(x)), template: String(a[4]) };
-    for (let i = 5; i + 1 < a.length; i += 2) if (a[i] instanceof Sym) o[(a[i] as SchemeSym).name.replace(/^:/, '')] = a[i + 1];
-    return o;
-  }).filter(Boolean) as OrgCaptureTemplate[];
-}
-/* %? %U %u %T %t %i %a %x %<fmt> %(sexp) %^{Prompt}: the escapes the templates use. */
-async function expandTemplate(tpl: string, ctx: { initial?: SchemeValue; annotation?: string; file?: string }, now?: Date) {
-  now = now || ORG.now();
-  const re = /%(\?|U|u|T|t|i|a|n|f|F|x|<([^>]+)>|\(|\^\{([^}]*)\})/g;
-  let out = '', cursor = -1, i = 0, m;
-  while ((m = re.exec(tpl))) {
-    out += tpl.slice(i, m.index); i = m.index + m[0].length;
-    const c = m[1];
-    if (c === '?') cursor = out.length;
-    else if (c === 'U') out += stamp(now, false, true); else if (c === 'u') out += stamp(now, false, false);
-    else if (c === 'T') out += stamp(now, true, true); else if (c === 't') out += stamp(now, true, false);
-    else if (c === 'i') out += ctx.initial || ''; else if (c === 'a') out += ctx.annotation || '';
-    else if (c === 'f' || c === 'F') out += ctx.file || ''; else if (c === 'x') out += E.killRing[0] || '';
-    else if (c === 'n') out += '';
-    else if (c[0] === '<') out += strftime(m[2], now);
-    else if (c === '(') {
-      let depth = 0, k = m.index + 1;
-      for (; k < tpl.length; k++) { if (tpl[k] === '(') depth++; else if (tpl[k] === ')') { depth--; if (!depth) break; } }
-      let v; try { v = L.evalText(tpl.slice(m.index + 1, k + 1)); } catch (e) { v = ''; }
-      out += v === false || v === undefined || v === L.UNSPEC ? '' : L.pr(v, false);
-      i = k + 1; re.lastIndex = i;
-    }
-    else if (c[0] === '^') out += await Ed.readMini(m[3] + ': ', '', null, { kind: 'org-capture-prompt' });
-  }
-  out += tpl.slice(i);
-  return { text: out, cursor: cursor < 0 ? out.length : cursor };
-}
-function captureAnnotation(b: EdBuffer) {
-  if (!b || b.minibuf || b.capture) return '';
-  if (isOrg(b) && b.file) { const hs = headlineBefore(b, b.pt); if (hs !== null) { const t = headingInfo(b, hs).title; return `[[file:${b.file}::*${t}][${t}]]`; } return `[[file:${b.file}][${b.file}]]`; }
-  if (b.file) return `[[file:${b.file}::${lineNoB(b, b.pt)}][${b.file}]]`;
-  return '';
-}
-function orgFile(name: string) { const dir = String(L.get('org-directory') || ''); return !dir || name.includes('/') ? name : dir.replace(/\/?$/, '/') + name; }
-/* Put ENTRY into FILE under HEADLINE (made when missing), or at the end: in the visiting buffer when there is one, else in the store. */
-function storeEntry(file: string, headline: string | null, entry: string, tpl: OrgCaptureTemplate) {
-  const vb = E.buffers.find(x => x.file === file);
-  const text = vb ? vb.text : (Ed.Store.get(file) ?? '');
-  const tb = { rope: new globalThis.Rope(text), mode: 'org-mode' };
-  const pad = '\n'.repeat(typeof tpl['empty-lines'] === 'number' ? tpl['empty-lines'] : 0);
-  const ops: { pos: number; ins: string }[] = [];
-  let pos = text.length;
-  if (headline) {
-    let hs = -1;
-    for (let h = nextHeadline(tb, 0); h >= 0; h = nextHeadline(tb, eol(tb.rope, h) + 1)) if (headingInfo(tb, h).title === headline) { hs = h; break; }
-    if (hs >= 0) pos = subtreeEnd(tb, hs);
-    else { const add = (text.length && !text.endsWith('\n') ? '\n' : '') + `* ${headline}\n`; ops.push({ pos: text.length, ins: add }); pos = text.length + add.length; }
-  }
-  const before = pos === text.length && ops.length ? ops[0].ins : text.slice(0, pos);
-  const ins = (before.length && !before.endsWith('\n') ? '\n' : '') + pad + entry + pad;
-  ops.push({ pos, ins: ins.replace(/\n+$/, '\n') });
-  let out = text;
-  for (const op of ops.slice().reverse()) out = out.slice(0, op.pos) + op.ins + out.slice(op.pos);
-  if (vb) {
-    const pt = vb.pt;
-    let shift = 0;
-    for (const op of ops) { Ed.replaceText(vb, op.pos + shift, op.pos + shift, op.ins); shift += op.ins.length; }
-    vb.pt = Math.min(pt, vb.rope.length);
-    withBuffer(vb, () => L.call('save-buffer', []));
-  } else Ed.Store.set(file, out);
-  indexDirty();
-}
-CMD('org-capture', async () => {
-  const ts = captureTemplates(); if (!ts.length) signal('user-error', 'No org-capture-templates');
-  const b = cur(); let initial = '';
-  if (EC.stateOf(b) === 'visual' && b.mark !== null) { const [s, e] = EC.visualRange(b, true); initial = b.rope.slice(s, e); }
-  const k = await keyOf('Capture template: ' + ts.map(t => `[${t.key}] ${t.desc}`).join('  ') + ' ', ts.map(t => t.key));
-  return [k, initial];
-}, 'KEY &optional INITIAL', 'Write a note in a *Capture* buffer with the template KEY; C-c C-c files it, C-c C-k drops it (SPC o).', async ([key, initial]: SchemeValue[]) => {
-  const tpl = captureTemplates().find(t => t.key === String(key)); if (!tpl) signal('user-error', `No capture template ${key}`);
-  const origin = cur();
-  const { text, cursor } = await expandTemplate(tpl!.template, { initial: initial || '', annotation: captureAnnotation(origin), file: origin.file || '' });
-  const win = Ed.winConfig();
-  const b = Ed.getBufferCreate('*Capture*');
-  b.mode = 'org-mode'; b.readOnly = false; b.evilState = undefined; b.folds = [];
-  b.text = text; b.pt = cursor; b.modified = false; b.undo = []; b.redo = [];
-  b.capture = { tpl, win };
-  Ed.popToBuffer(b, true);
-  Ed.message('Capture buffer.  Finish C-c C-c, abort C-c C-k.');
-  return false;
-});
-function endCapture(b: EdBuffer) {
-  const win = b.capture!.win; b.capture = null;
-  withBuffer(b, () => L.call('kill-buffer', [b]));
-  try { Ed.restoreWinConfig(win); } catch (e) { /* windows changed meanwhile */ }
-}
-CMD('org-capture-finalize', '', '', 'File the capture buffer into its target and close it (C-c C-c).', () => {
-  const b = cur(); if (!b.capture) signal('user-error', 'This does not seem to be a capture buffer for Org mode');
-  const { tpl } = b.capture as { tpl: OrgCaptureTemplate }, entry = b.text.replace(/\s+$/, '') + '\n';
-  const [kind, fileArg, headline] = tpl.target, file = orgFile(fileArg);
-  storeEntry(file, kind === 'file+headline' ? headline : null, entry, tpl);
-  endCapture(b);
-  try { L.runHook('org-capture-after-finalize-hook'); } catch (e) { Ed.reportError(e); }
-  Ed.message(`Capture stored in ${file}`); return false;
-});
-CMD('org-capture-kill', '', '', 'Drop the capture buffer (C-c C-k).', () => {
-  const b = cur(); if (!b.capture) signal('user-error', 'This does not seem to be a capture buffer for Org mode');
-  endCapture(b); Ed.message('Capture aborted'); return false;
-});
-for (const n of ['org-capture', 'org-capture-finalize', 'org-capture-kill', 'dailies-goto-today', 'dailies-goto-date', 'org-id-get-create']) L.put(intern(n), 'evil-repeat', intern('abort'));
+for (const n of ['dailies-goto-today', 'dailies-goto-date', 'org-id-get-create']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 /* ---------- saving: after-save-hook, and the indexes follow the files ---------- */
 for (const name of ['save-buffer', 'write-file']) {
@@ -1644,18 +1298,12 @@ const CSS = `
 .text .otb { color: var(--co); }
 .text .ohr { color: var(--rule); }
 .text .oe { color: var(--dim); }
-.text .oad { font-weight: 700; color: var(--fg); }
-.text .oat { font-weight: 700; color: var(--kw); }
-.text .oag { font-weight: 700; color: var(--fn); }
-.text .oac { color: var(--dim); }
-.text .oaw { color: var(--co); }
-.text .oao { color: var(--rb1); font-weight: 600; }
 `;
 Ed.host.page.addStyle('org-css', CSS);
 
 globalThis.Org = { ORG, parseFile: orgParseFile, refreshIndex, ensureIndex, index: () => ORG.ix, ON, OC, lexSeg: H.lexSeg, parseDate, stamp, strftime, slugOf, todoKeywords,
-  headlineBefore, nextHeadline, prevHeadline, subtreeEnd, entryEnd, children, headingInfo, levelAt, foldsOf, addFold, removeFolds, reveal, isHidden, groupItems, weekView, todoView, expandTemplate, uuid,
-  linkAt, openLink, idAtPoint, gotoId, createNote, visitNote,
+  headlineBefore, nextHeadline, prevHeadline, subtreeEnd, entryEnd, children, headingInfo, levelAt, foldsOf, addFold, removeFolds, reveal, isHidden, uuid,
+  linkAt, openLink, idAtPoint, gotoId, createNote, visitNote, readDate, keyOf,
   /* The class name of each character of the segment FROM..TO of B, for tests. */
   classesOf(b: EdBuffer, from: number, to: number) { const seg = b.rope.slice(from, to); const r = H.lexSeg!(b, from, to, seg) as OrgLex | null; return r ? Array.from(r.cls, c => ON[c]) : null; } };
 /* the keyword sets of org-todo-keywords */
@@ -1675,17 +1323,12 @@ interface OrgState {
   ix?: OrgIndex;
   refreshTimer?: number;
 }
-/* the index: orgParseFile's records */
-interface OrgTs { date: string; time: string | null; rep: { n: number; u: string } | null }
-interface OrgEntry {
-  file: string; pos: number; line: number; level: number; todo: string | null; done: boolean; title: string; tags: string[];
-  priority: string | null; scheduled: OrgTs | null; deadline: OrgTs | null; closed: OrgTs | null; ts: OrgTs[]; id: string | null; category: string;
-}
-interface OrgParsed { file: string; title: string; id: string | null; tags: string[]; entries: OrgEntry[] }
+/* the index: orgParseFile's record of a file, every :ID: in it and the tags of its headlines */
+interface OrgParsed { file: string; ids: string[]; tags: string[] }
 /* an indexed file: the parse, and what it was parsed from */
-interface OrgFileIx extends OrgParsed { bufId?: number | string; ver?: number; src?: string; kw?: OrgKeywords }
+interface OrgFileIx extends OrgParsed { bufId?: number | string; ver?: number; src?: string }
 interface OrgParseItem {
-  file: string; text?: string; buf?: number | string; keywords?: string[]; done?: string[];
+  file: string; text?: string; buf?: number | string;
   meta?: { bufId?: number | string; ver?: number; src?: string };
 }
 interface OrgIndex {
@@ -1697,13 +1340,4 @@ interface OrgIndex {
   ids?: Map<string, string>;
 }
 interface OrgNoteTemplate { key: string; desc: string; type: string; template: string; file: string; head: string }
-/* a capture template: its fields, and the options after the template by name */
-interface OrgCaptureTemplate { key: string; desc: string; type: string; target: string[]; template: string; [opt: string]: SchemeValue }
-/* the agenda */
-interface OrgAgendaEntry extends OrgEntry { fileTags: string[]; allTags: string[] }
-interface OrgAgendaItem { entry: OrgAgendaEntry; label: string; time?: string | null; sort: number; over?: number }
-interface OrgGroup { name: string; items: OrgAgendaItem[]; order: number; spec?: Record<string, SchemeValue> }
-interface OrgViewItem { line: number; it: OrgAgendaItem }
-/* b.agenda of the *Org Agenda* buffer */
-interface OrgAgenda { view: string; items: OrgViewItem[]; byLine: Map<number, OrgAgendaItem>; todayHeader: string; win: EdWinConfig | null }
 })();

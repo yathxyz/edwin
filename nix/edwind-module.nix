@@ -62,11 +62,13 @@ let
     ) "openai-api-key:${cfg.models.openai.apiKeyFile}"
     ++ lib.optional (cfg.brain.tokenFile != null) "${brainCredential}:${cfg.brain.tokenFile}"
     ++ lib.optional (cfg.brain.readTokenFile != null) "${brainReadCredential}:${cfg.brain.readTokenFile}"
+    ++ lib.optional (cfg.brain.taskTokenFile != null) "${brainTaskCredential}:${cfg.brain.taskTokenFile}"
     ++ lib.mapAttrsToList (name: c: "${name}:${c.file}") cfg.credentials;
-  # brain's tokens, the projector's (server/projector.mts) and the reader's (server/brain.mts): not among the
-  # credentials Scheme can name.
+  # brain's tokens, the projector's (server/projector.mts) and the two the brain-* commands read and write tasks
+  # with (server/brain.mts): not among the credentials Scheme can name.
   brainCredential = "brain-token";
   brainReadCredential = "brain-read-token";
+  brainTaskCredential = "brain-task-token";
 
   editJson = json.generate "edwind.json" (
     {
@@ -93,7 +95,8 @@ let
           inherit (cfg.brain) url scope;
         }
         // lib.optionalAttrs (cfg.brain.tokenFile != null) { credential = brainCredential; }
-        // lib.optionalAttrs (cfg.brain.readTokenFile != null) { readCredential = brainReadCredential; };
+        // lib.optionalAttrs (cfg.brain.readTokenFile != null) { readCredential = brainReadCredential; }
+        // lib.optionalAttrs (cfg.brain.taskTokenFile != null) { taskCredential = brainTaskCredential; };
     }
     // lib.optionalAttrs (cfg.hubSocket != null) { inherit (cfg) hubSocket; }
   );
@@ -247,7 +250,8 @@ in
         example = "http://10.100.0.2:7676";
         description = ''
           Where brain listens. Plain http is sent only to an address of this host. With `tokenFile`, edwind
-          is the note projector; with `readTokenFile`, Edwin finds and opens brain's nodes through it.
+          is the note projector; with `readTokenFile`, Edwin finds and opens brain's nodes and shows its
+          agenda through it; with `taskTokenFile`, Edwin adds and changes brain's tasks through it.
         '';
       };
       tokenFile = mkOption {
@@ -263,9 +267,20 @@ in
         type = types.nullOr types.path;
         default = null;
         description = ''
-          Root-readable file holding a read-only brain token (brain's `readOnly`). When set, the brain-titles
-          and brain-node commands answer, so a frame can find a node by name and open it. What the token is
-          cleared for is what every process that can open edwind's socket can read.
+          Root-readable file holding a read-only brain token (brain's `readOnly`). When set, the brain-titles,
+          brain-node, brain-agenda and brain-tasks commands answer, so a frame can find a node by name, open
+          it and show the agenda. What the token is cleared for is what every process that can open edwind's
+          socket can read.
+        '';
+      };
+      taskTokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Root-readable file holding a brain token for tasks (brain's `tasks`: taken on the task routes only).
+          When set, the brain-task-add and brain-task-set commands answer, so a frame can add a task and
+          change one. Every process that can open edwind's socket can then add, change, close and confirm tasks
+          as the token's actor, with its trust, in the scopes it is cleared for; it cannot delete one.
         '';
       };
       scope = mkOption {
@@ -363,12 +378,20 @@ in
         {
           assertion =
             cfg.brain.url == null
-            || !(cfg.credentials ? ${brainCredential} || cfg.credentials ? ${brainReadCredential});
-          message = "services.edwind.credentials: ${brainCredential} and ${brainReadCredential} are brain's when services.edwind.brain.url is set.";
+            || !(
+              cfg.credentials ? ${brainCredential}
+              || cfg.credentials ? ${brainReadCredential}
+              || cfg.credentials ? ${brainTaskCredential}
+            );
+          message = "services.edwind.credentials: ${brainCredential}, ${brainReadCredential} and ${brainTaskCredential} are brain's when services.edwind.brain.url is set.";
         }
         {
-          assertion = cfg.brain.url == null || cfg.brain.tokenFile != null || cfg.brain.readTokenFile != null;
-          message = "services.edwind.brain.url needs brain.tokenFile (to project notes) or brain.readTokenFile (to read).";
+          assertion =
+            cfg.brain.url == null
+            || cfg.brain.tokenFile != null
+            || cfg.brain.readTokenFile != null
+            || cfg.brain.taskTokenFile != null;
+          message = "services.edwind.brain.url needs brain.tokenFile (to project notes), brain.readTokenFile (to read) or brain.taskTokenFile (to write tasks).";
         }
         {
           assertion = lib.all isName (lib.attrNames cfg.credentials);

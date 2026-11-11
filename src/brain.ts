@@ -1,20 +1,21 @@
-/* Nodes from brain (docs/steps.md, "Nodes from brain"). brain is the graph that holds what the notes are (their
-   Org ids, titles, aliases and links, sent by edwind's projector) beside tasks, memories and references. Here
-   Edwin finds a node by name, links to one, opens one and lists what links to the note at point.
+/* Nodes and tasks from brain (docs/steps.md, "Nodes from brain" and "Tasks from brain"). brain is the graph that
+   holds what the notes are (their Org ids, titles, aliases and links, sent by edwind's projector) beside tasks,
+   memories and references. Here Edwin finds a node by name, links to one, opens one, lists what links to the
+   note at point, shows the agenda and the open tasks, and adds and changes a task.
 
-   A frame holds no token: it asks edwind (server/brain.mts), with the commands brain-titles and brain-node.
-   So there is a brain only where Edwin is attached to an edwind that reads one; everywhere else the commands
-   say why not, in a sentence.
+   A frame holds no token: it asks edwind (server/brain.mts), with the commands brain-titles, brain-node,
+   brain-agenda, brain-tasks, brain-task-add and brain-task-set. So there is a brain only where Edwin is
+   attached to an edwind that reads one; everywhere else the commands say why not, in a sentence.
 
    A note opens as its file, with point on its entry. Anything else opens as a record: a read-only buffer in
    brain-mode, written as Org so its links are links. The backlinks of the note at point are such a buffer too,
-   in a side window that follows point. */
+   in a side window that follows point. The agenda is a read-only buffer in brain-agenda-mode, a line a task. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, EC = globalThis.EvilCore;
 const { intern, signal, CMD } = L;
 const cur = () => E.current;
-const { bol, eol } = Ed;
+const { bol, eol, lineNoB, lineStartB } = Ed;
 
 /* A row of brain-titles: ALIAS is the alias that matched when the title did not, ORG_ID the node's Org id when
    it has one, PATH the file of a note under the notes root. */
@@ -29,16 +30,17 @@ interface BrainReply { value?: unknown; error?: { condition: string; report: str
 
 /* ---------- asking ---------- */
 const attached = () => !!(Ed.sync && Ed.sync.started);
+const NO_EDWIND = 'No brain here: this Edwin is not attached to edwind';
 /* One question to brain, through edwind. The answer, or why there is none: edwind's own words when it has
    some (no token to read with, brain unreachable, brain's refusal). */
-async function reply(cmd: string, arg: unknown): Promise<BrainReply> {
-  if (!attached()) return { error: { condition: 'brain-unavailable', report: 'No brain here: this Edwin is not attached to edwind' } };
-  const r = await Ed.sync.call({ cmd, args: [arg] });
+async function reply(cmd: string, ...args: unknown[]): Promise<BrainReply> {
+  if (!attached()) return { error: { condition: 'brain-unavailable', report: NO_EDWIND } };
+  const r = await Ed.sync.call({ cmd, args });
   if (!r.error) return { value: r.value };
   return { error: { condition: r.error.condition, report: r.error.condition === 'offline' ? 'Not connected to edwind' : r.error.report || r.error.condition } };
 }
-async function ask(cmd: string, arg: unknown): Promise<unknown> {
-  const r = await reply(cmd, arg);
+async function ask(cmd: string, ...args: unknown[]): Promise<unknown> {
+  const r = await reply(cmd, ...args);
   if (r.error) signal('user-error', r.error.report);
   return r.value;
 }
@@ -71,8 +73,9 @@ const orgId = (n: BrainNode) => { const i = n.identifiers.find(x => x.scheme ===
 async function noteTitled(title: string) { const r = attached() ? await titled(title, 'note') : null; return r ? r.id : null; }
 
 /* ---------- reading a node in the minibuffer ---------- */
-/* A title on one line: a line break or a control character would break a candidate or a heading. */
-const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
+/* A title on one line: a line break or a control character would break a candidate or a heading, and one that
+   turns the direction of text would draw a line as another. */
+const oneLine = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ').trim();
 /* A title as the text of a link: a bracket would end the link early, or start another. */
 const linkText = (s: string) => oneLine(s).replace(/\[/g, '(').replace(/\]/g, ')');
 /* The candidates for ROWS, in brain's order. A row goes by the alias that matched, else by its title, so the
@@ -259,7 +262,269 @@ CMD('brain-follow', '', '', 'Open the link at point, or the first link of the li
   if (b.name === BACKLINKS) { const ws = Ed.windowList().filter(w => w.buffer !== b), w = ws.find(x => !x.popup) || ws[0]; if (w) Ed.selectWindow(w); }
   await Org.openLink(lk!.target); return false;
 });
-for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow']) L.put(intern(n), 'evil-repeat', intern('abort'));
+
+/* ---------- tasks ---------- */
+/* A task as brain answers it: its node with NUMBER (task:N). On a row of the agenda WHY says which date put it
+   there, and on an overdue one DAY is that date's day. */
+interface BrainTask {
+  id: string; title: string; scope: string; trust: string; revision: number; number: number | null; props: Record<string, unknown>;
+  why?: string; day?: string;
+}
+/* A line of the agenda: its text, the spans of it that have a face (start, end, face) and the task it shows. */
+interface AgendaLine { text: string; spans: [number, number, number][]; task?: BrainTask }
+type AgendaView = 'week' | 'list';
+interface Agenda { view: AgendaView; lines: AgendaLine[]; win: EdWinConfig | null }
+interface AgendaLex { ver: number; from: number; to: number; cls: Uint8Array; names: string[] }
+const AGENDA = '*Agenda*';
+/* The open states in the order the task list shows them, and the key of each state. */
+const OPEN: [string, string][] = [['next', 'Next'], ['todo', 'To do'], ['waiting', 'Waiting'], ['hold', 'Hold'], ['someday', 'Someday']];
+const STATE_KEYS: Record<string, string> = { t: 'todo', n: 'next', w: 'waiting', h: 'hold', s: 'someday', d: 'done', c: 'cancelled' };
+const SCOPES = ['pub', 'ref', 'work', 'infra'];
+const DAYS = 7;
+/* brain's largest page, and the most tasks the list shows. */
+const PAGE = 200, MOST = 2000;
+L.defvar('brain-task-scope', 'work', 'The brain scope of a task added with brain-task-add.');
+
+/* A task brain holds with no title is a task still: it is shown, with none. */
+function tasksOf(x: unknown): BrainTask[] {
+  return (Array.isArray(x) ? x : []).filter((t): t is BrainTask => isObj(t) && typeof t.id === 'string' && typeof t.revision === 'number')
+    .map(t => ({ ...t, title: typeof t.title === 'string' ? t.title : '', props: isObj(t.props) ? t.props : {} }));
+}
+const taskOf = (x: unknown): BrainTask => { const t = tasksOf([x])[0]; if (!t) signal('user-error', 'brain answered with something that is not a task'); return t; };
+const prop = (t: BrainTask, k: string) => { const v = t.props[k]; return typeof v === 'string' ? oneLine(v) : ''; };
+const taskState = (t: BrainTask) => prop(t, 'state') || 'todo';
+const refOfTask = (t: BrainTask) => (typeof t.number === 'number' ? `task:${t.number}` : 'task');
+/* The time of day of a due or scheduled value, as it is written (with its offset when it has one); '' for a day. */
+const timeOf = (v: string) => { const m = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})(?::\d{2})?(Z|[+-]\d{2}:\d{2})?$/.exec(v); return m ? m[1] + (m[2] || '') : ''; };
+const dayNumber = (ymd: string) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) / 86400000 : NaN; };
+
+/* The faces of an agenda buffer. */
+const AF = ['', 'ba-title', 'ba-head', 'ba-today', 'ba-ref', 'ba-label', 'ba-over', 'ba-time', 'ba-state', 'ba-pri', 'ba-tags', 'ba-dim', 'ba-proposal'];
+const F = { TITLE: 1, HEAD: 2, TODAY: 3, REF: 4, LABEL: 5, OVER: 6, TIME: 7, STATE: 8, PRI: 9, TAGS: 10, DIM: 11, PROPOSAL: 12 };
+function agendaLine(parts: [string, number][], task?: BrainTask): AgendaLine {
+  const l: AgendaLine = { text: '', spans: [], task };
+  for (const [text, face] of parts) { if (face && text) l.spans.push([l.text.length, l.text.length + text.length, face]); l.text += text; }
+  return l;
+}
+/* A task's line: task:N, LABEL (why it is on this day, when it is there for one; OVER marks one that is late),
+   the time, the state, [#P], a mark on a proposal (a task whose trust is not the owner's), the title, :tags:,
+   the scope and, with DATES, its dates. */
+function taskLine(t: BrainTask, label: string | null, over: boolean, time: string, dates: boolean) {
+  const tags = (Array.isArray(t.props.tags) ? t.props.tags : []).filter((x): x is string => typeof x === 'string' && !!x).map(oneLine);
+  const pr = prop(t, 'priority'), parts: [string, number][] = [['  ', 0], [refOfTask(t).padEnd(9), F.REF], [' ', 0]];
+  if (label !== null) parts.push([label.padEnd(11), over ? F.OVER : F.LABEL], [' ', 0]);
+  if (time) parts.push([time, F.TIME], [' ', 0]);
+  parts.push([taskState(t).toUpperCase(), F.STATE], [' ', 0]);
+  if (pr) parts.push([`[#${pr}]`, F.PRI], [' ', 0]);
+  if (t.trust !== 'owner') parts.push(['(proposal)', F.PROPOSAL], [' ', 0]);
+  parts.push([oneLine(t.title) || '(no title)', 0]);
+  if (tags.length) parts.push(['  ', 0], [`:${tags.join(':')}:`, F.TAGS]);
+  parts.push(['  ', 0], [oneLine(String(t.scope)), F.DIM]);
+  if (dates) for (const k of ['due', 'scheduled']) if (prop(t, k)) parts.push(['  ', 0], [`${k} ${prop(t, k).replace('T', ' ')}`, F.TIME]);
+  return agendaLine(parts, t);
+}
+const dayHeader = (d: Date) => `${Org.strftime('%A', d).padEnd(10)} ${Org.strftime('%e %B %Y', d)}`;
+/* The week from today: what is overdue, then each day with what is due or scheduled on it, then the next
+   actions with no date. TODAY is the line of today's header. */
+async function weekView(): Promise<{ lines: AgendaLine[]; today: number }> {
+  const now = Org.ORG.now(), from = Org.strftime('%F', now);
+  const v = await ask('brain-agenda', { from, days: DAYS }), a = isObj(v) ? v : {};
+  const lines = [agendaLine([[`Agenda for ${DAYS} days from ${from}`, F.TITLE]])];
+  const overdue = tasksOf(a.overdue);
+  if (overdue.length) lines.push(agendaLine([['Overdue', F.HEAD]]));
+  for (const t of overdue) {
+    const n = dayNumber(from) - dayNumber(t.day || ''), late = isNaN(n) ? '' : String(n);
+    lines.push(taskLine(t, t.why === 'scheduled' ? `Sched. ${late}x:` : `${late} d. ago:`, true, '', false));
+  }
+  const byDay = new Map<string, BrainTask[]>();
+  for (const d of Array.isArray(a.dated) ? a.dated : []) if (isObj(d) && typeof d.date === 'string') byDay.set(d.date, tasksOf(d.tasks));
+  const today = lines.length;
+  for (let k = 0; k < DAYS; k++) {
+    const day = new Date(now.getFullYear(), now.getMonth(), now.getDate() + k);
+    lines.push(agendaLine([[dayHeader(day), k ? F.HEAD : F.TODAY]]));
+    for (const t of byDay.get(Org.strftime('%F', day)) || []) lines.push(taskLine(t, t.why === 'scheduled' ? 'Scheduled:' : 'Due:', false, timeOf(prop(t, t.why === 'scheduled' ? 'scheduled' : 'due')), false));
+  }
+  const next = tasksOf(a.next);
+  if (next.length) lines.push(agendaLine([['Next', F.HEAD]]));
+  for (const t of next) lines.push(taskLine(t, null, false, '', false));
+  return { lines, today };
+}
+/* Every open task, by state, in brain's order within one: asked for a page at a time. */
+async function listView(): Promise<{ lines: AgendaLine[]; today: number }> {
+  const all: BrainTask[] = [];
+  let more = true;
+  for (let offset = 0; more && offset < MOST; offset += PAGE) {
+    const v = await ask('brain-tasks', { state: 'open', limit: PAGE, offset }), page = isObj(v) && Array.isArray(v.tasks) ? v.tasks : [];
+    all.push(...tasksOf(page)); more = page.length >= PAGE;
+  }
+  const groups = new Map<string, BrainTask[]>(OPEN.map(([st]) => [st, []]));
+  for (const t of all) { const st = taskState(t); if (!groups.has(st)) groups.set(st, []); groups.get(st)!.push(t); }
+  const lines = [agendaLine([[`Open tasks (${all.length}${more ? ', and more that are not shown' : ''})`, F.TITLE]])];
+  const names = new Map(OPEN);
+  for (const [st, ts] of groups) {
+    if (!ts.length) continue;
+    lines.push(agendaLine([[`${names.get(st) || st} (${ts.length})`, F.HEAD]]));
+    for (const t of ts) lines.push(taskLine(t, null, false, '', true));
+  }
+  return { lines, today: -1 };
+}
+/* Ask brain and write VIEW into the agenda buffer. brain is asked first, so a brain that cannot answer leaves
+   the buffer as it was. With KEEP point stays on its task where the new view has it, else on its line; without,
+   it goes to today's line, or the first task. */
+async function fillAgenda(view: AgendaView, keep: boolean) {
+  const built = view === 'list' ? await listView() : await weekView();
+  const b = Ed.getBufferCreate(AGENDA), old = b.mode === 'brain-agenda-mode' ? b.agenda as Agenda | undefined : undefined;
+  const was = keep && old ? lineNoB(b, b.pt) - 1 : -1, held = was >= 0 && old!.lines[was] ? old!.lines[was].task : undefined;
+  b.mode = 'brain-agenda-mode'; b.readOnly = true; b.evilState = 'motion';
+  b.text = built.lines.map(l => l.text).join('\n') + '\n';
+  b.agenda = { view, lines: built.lines, win: old ? old.win : null };
+  b.modified = false; b.undo = []; b.redo = [];
+  let line = built.today >= 0 ? built.today : Math.max(0, built.lines.findIndex(l => l.task));
+  if (was >= 0) {
+    /* The task's line nearest to where it was: a task can be on two days. */
+    const same = held ? built.lines.map((l, i) => (l.task && l.task.id === held.id ? i : -1)).filter(i => i >= 0) : [];
+    line = same.length ? same.reduce((x, y) => (Math.abs(y - was) < Math.abs(x - was) ? y : x)) : Math.min(was, built.lines.length - 1);
+  }
+  b.pt = lineStartB(b, line + 1);
+  /* A window that is not the selected one keeps a point of its own, which would be a place in the old text. */
+  for (const w of Ed.windowList()) if (w.buffer === b) w.pt = b.pt;
+  /* The same text can be other lines: a proposal confirmed, whose title said so already. */
+  b._balx = undefined;
+  return b;
+}
+/* Show VIEW. The agenda takes a window of its own below, and a popup window left from a jump out of it is reused. */
+async function showAgenda(view: AgendaView) {
+  const b = await fillAgenda(view, false), w = Ed.windowFor(b);
+  if (w) Ed.selectWindow(w);
+  else { (b.agenda as Agenda).win = Ed.winConfig(); if (E.sel!.popup && Ed.windowList().length > 1) Ed.setWindowBuffer(b); else Ed.popToBuffer(b, true); }
+}
+/* The agenda that is shown, asked for again. What was done is said either way: SAID alone, or with why the
+   agenda still shows what it did. */
+async function refreshed(said: string) {
+  const b = Ed.getBuffer(AGENDA);
+  if (!b || b.mode !== 'brain-agenda-mode' || !b.agenda || !Ed.windowFor(b)) return said;
+  try { await fillAgenda((b.agenda as Agenda).view, true); Ed.scheduleRender(); return said; }
+  catch (e) { return `${said}; the agenda is not refreshed: ${Ed.errorText(e)}`; }
+}
+const prevLexSeg = H.lexSeg;
+H.lexSeg = (b, from, to, seg) => {
+  if (b.mode !== 'brain-agenda-mode' || !b.agenda) return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
+  const c = b._balx as AgendaLex | undefined;
+  if (c && c.ver === b.ver && c.from === from && c.to === to) return c;
+  const lines = (b.agenda as Agenda).lines, text = seg as string, cls = new Uint8Array(text.length);
+  /* The segment starts at FROM, which need not start a line: OFF is where its first line starts, from FROM. */
+  let n = lineNoB(b, from) - 1, off = lineStartB(b, n + 1) - from;
+  for (; off < text.length && n < lines.length; n++) {
+    for (const [s, e, face] of lines[n].spans) cls.fill(face, Math.max(0, off + s), Math.max(0, Math.min(text.length, off + e)));
+    off += lines[n].text.length + 1;
+  }
+  return b._balx = { ver: b.ver, from, to, cls, names: AF };
+};
+Ed.host.page.addStyle('brain-css', `
+.text .ba-title { font-weight: 700; color: var(--fn); }
+.text .ba-head { font-weight: 700; color: var(--fg); }
+.text .ba-today { font-weight: 700; color: var(--kw); }
+.text .ba-ref { color: var(--dim); }
+.text .ba-dim { color: var(--dim); }
+.text .ba-label { color: var(--co); }
+.text .ba-time { color: var(--co); }
+.text .ba-over { color: var(--rb1); font-weight: 600; }
+.text .ba-state { color: var(--org-todo, var(--rb1)); font-weight: 700; }
+.text .ba-pri { color: var(--kw); font-weight: 600; }
+.text .ba-tags { color: var(--dim); background: var(--org-tag-bg, rgb(127 127 127 / 0.12)); border-radius: 3px; }
+.text .ba-proposal { color: var(--rb1); font-style: italic; }
+`);
+
+Ed.MODE_NAMES['brain-agenda-mode'] = 'Agenda';
+const agendaOf = (b: EdBuffer) => { if (b.mode !== 'brain-agenda-mode' || !b.agenda) signal('user-error', 'Not in the agenda'); return b.agenda as Agenda; };
+function taskAt(): BrainTask {
+  const b = cur(), l = agendaOf(b).lines[lineNoB(b, b.pt) - 1];
+  if (!l || !l.task) signal('user-error', 'No task on this line');
+  return l.task!;
+}
+/* The task a command changes: the agenda's task whose id is ID, else the one at point. A command that reads
+   in the minibuffer names the task that was at point before it read, since point can move meanwhile. */
+function taskFor(id: SchemeValue): BrainTask {
+  if (typeof id !== 'string' || !id) return taskAt();
+  const b = Ed.getBuffer(AGENDA), l = b && b.mode === 'brain-agenda-mode' && b.agenda ? (b.agenda as Agenda).lines.find(x => x.task && x.task.id === id) : null;
+  if (!l) signal('user-error', 'The agenda does not show that task any more');
+  return l!.task!;
+}
+const given = (x: SchemeValue, what: string) => { const t = typeof x === 'string' ? x.trim() : ''; if (!t) signal('user-error', `No ${what}`); return t; };
+const brief = (x: unknown) => { const t = oneLine(typeof x === 'string' ? x : x === null || x === undefined ? 'nothing' : JSON.stringify(x)); return t.length > 60 ? t.slice(0, 60) + '…' : t; };
+/* Change the task ID names, or the one at point: FIELDS go to brain as a change to the revision its line
+   shows, so what changed in brain since is kept, and where it changed one of FIELDS too, brain takes this one
+   and says so (`clashes`). The echo area says what SAY makes of the task brain answers, and what was replaced. */
+async function change(fields: Record<string, unknown>, say: (t: BrainTask) => string, id?: SchemeValue) {
+  const t = taskFor(id);
+  const v = await ask('brain-task-set', t.id, { ...fields, base_revision: t.revision }), now = taskOf(v);
+  const clashes = (isObj(v) && Array.isArray(v.clashes) ? v.clashes : []).filter(isObj);
+  const replaced = clashes.length ? `; replaced what had changed since: ${clashes.map(c => `${brief(c.field)} was ${brief(c.was)}`).join(', ')}` : '';
+  Ed.message(await refreshed(`${refOfTask(now)}: ${say(now)}${replaced}`));
+  return false;
+}
+/* C-u before the key, not a count. */
+const prefixed = () => Array.isArray(E.prefixArg);
+/* A date read in the minibuffer as brain takes it: a day, or a day and a time when one was typed. */
+async function readWhen(prompt: string) { const d = await Org.readDate(prompt, ''); return Org.strftime(d.time ? '%FT%H:%M' : '%F', d.date); }
+/* A field's value as brain takes it: the text, or null (the field is cleared) for #f. */
+const orNull = (x: SchemeValue, what: string) => { if (x === false) return null; return given(x, what); };
+
+CMD('brain-agenda', async () => [await Org.keyOf('Agenda: [a] agenda  [t] all open tasks ', ['a', 't'])],
+  'KEY', 'Show brain\'s tasks: with KEY "a" the agenda of the week from today (what is overdue, each day, the next actions), with "t" every open task by state (SPC m a).',
+  async ([k]: SchemeValue[]) => { await showAgenda(String(k)[0] === 't' ? 'list' : 'week'); return false; });
+CMD('brain-agenda-redo', '', '', 'Ask brain again for what the agenda shows (r, g r).', async () => { await fillAgenda(agendaOf(cur()).view, true); return false; });
+CMD('brain-agenda-quit', '', '', 'Leave the agenda: close its window when it was opened for it, else bring the windows back (q).', () => {
+  const b = cur(), ag = agendaOf(b), w = Ed.windowFor(b), win = ag.win;
+  ag.win = null;
+  if (w && w.popup && Ed.windowList().length > 1) { Ed.deleteWindow(w); return false; }
+  if (win) { try { Ed.restoreWinConfig(win); return false; } catch (e) { /* the windows are not those any more */ } }
+  return L.call('quit-window', []);
+});
+CMD('brain-agenda-open', '', '', 'Open the record of the task at point (RET).', async () => { await open(taskAt().id); return false; });
+/* TASK in the commands below is the id of a task the agenda shows, for the task at point when it is not given. */
+CMD('brain-task-state', async () => { const id = taskAt().id; return [STATE_KEYS[await Org.keyOf('State: [t]odo [n]ext [w]aiting [h]old [s]omeday [d]one [c]ancelled ', Object.keys(STATE_KEYS))], id]; },
+  'STATE &optional TASK', 'Set the state of the task at point: todo, next, waiting, hold, someday, done or cancelled (t).',
+  ([st, id]: SchemeValue[]) => change({ state: given(st, 'state') }, t => taskState(t), id));
+CMD('brain-task-done', '', '', 'Close the task at point as done. A task that repeats moves to its next date instead (x).',
+  () => change({ state: 'done' }, t => (taskState(t) === 'done' ? 'done' : `done; it repeats, ${['due', 'scheduled'].filter(k => prop(t, k)).map(k => `${k} ${prop(t, k).replace('T', ' ')}`).join(', ') || taskState(t)}`)));
+for (const [name, field, key, prompt] of [['brain-task-schedule', 'scheduled', 's', 'Schedule on'], ['brain-task-due', 'due', 'd', 'Due on']]) {
+  CMD(name, async () => { const id = taskAt().id; return [prefixed() ? false : await readWhen(`${prompt} (default today): `), id]; },
+    'WHEN &optional TASK', `Set when the task at point is ${field}: WHEN is a day (2026-10-20) or a day and a time (2026-10-20T10:00), read in the minibuffer, today by default. With WHEN #f, or C-u, it has none (${key}).`,
+    ([w, id]: SchemeValue[]) => change({ [field]: orNull(w, 'date') }, t => (prop(t, field) ? `${field} ${prop(t, field).replace('T', ' ')}` : `not ${field}`), id));
+}
+CMD('brain-task-priority', async () => { const id = taskAt().id, k = await Org.keyOf('Priority: [a] [b] [c], space for none ', ['a', 'b', 'c', 'A', 'B', 'C', ' ']); return [k === ' ' ? false : k.toUpperCase(), id]; },
+  'PRIORITY &optional TASK', 'Set the priority of the task at point: "A", "B" or "C", or #f for none (p).',
+  ([pr, id]: SchemeValue[]) => change({ priority: orNull(pr, 'priority') }, t => (prop(t, 'priority') ? `priority ${prop(t, 'priority')}` : 'no priority'), id));
+CMD('brain-task-title', async () => { const t = taskAt(); return [await Ed.readMini('Title: ', oneLine(t.title)), t.id]; },
+  'TITLE &optional TASK', 'Give the task at point the title TITLE (e).',
+  ([title, id]: SchemeValue[]) => change({ title: given(title, 'title') }, t => oneLine(t.title), id));
+CMD('brain-task-move', async () => { const id = taskAt().id; return [await Ed.readMini('Scope: ', '', () => SCOPES, { require: true, keepOrder: true }), id]; },
+  'SCOPE &optional TASK', 'Move the task at point to the brain scope SCOPE, where the task token is cleared for it (m).',
+  ([scope, id]: SchemeValue[]) => change({ scope: given(scope, 'scope') }, t => `in ${oneLine(String(t.scope))}`, id));
+CMD('brain-task-confirm', '', '', 'Confirm the task at point, an agent\'s proposal: it becomes the owner\'s (c).', () => {
+  const t = taskAt();
+  if (t.trust === 'owner') signal('user-error', `${refOfTask(t)} is not a proposal`);
+  return change({ trust: 'owner' }, now => (now.trust === 'owner' ? 'confirmed' : `still ${brief(now.trust)}`));
+});
+CMD('brain-task-add', async () => {
+  /* Before a title is typed for a task that cannot be added. */
+  if (!attached()) signal('user-error', NO_EDWIND);
+  const b = cur(), id = Org.idAtPoint(b);
+  const sel = EC.stateOf(b) === 'visual' && b.mark !== null ? (([s, e]) => b.rope.slice(s, e).trim())(EC.visualRange(b, true)) : '';
+  const title = await Ed.readMini('Task: ', '');
+  /* The note is named by its id alone: its title may be of a scope the task is not in. */
+  return [title, [sel, id ? `[[id:${id}]]` : ''].filter(x => x).join('\n\n') || false];
+}, 'TITLE &optional BODY', 'Add a task titled TITLE to brain, in the scope brain-task-scope, with the text BODY. Interactively the title is read in the minibuffer, and the body is the Visual selection, then a link to the note at point when it has an Org id (SPC o, a in the agenda).',
+  async ([title, body]: SchemeValue[]) => {
+    const scope = L.get('brain-task-scope');
+    if (typeof scope !== 'string' || !scope.trim()) signal('user-error', 'brain-task-scope is not a scope');
+    const t = taskOf(await ask('brain-task-add', { title: given(title, 'title'), scope: (scope as string).trim(), ...(typeof body === 'string' && body.trim() ? { body } : {}) }));
+    Ed.message(await refreshed(`${refOfTask(t)} added (${oneLine(String(t.scope))})`));
+    return false;
+  });
+for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
+  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-move', 'brain-task-confirm', 'brain-task-add']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 globalThis.Brain = { open, noteTitled };
 })();

@@ -846,10 +846,8 @@ interface EdBuffer extends SchemeForeign {
   folds?: EdFold[] | null;
   _foldVer?: number;
   _foldPre?: number[] | null;
-  agenda?: unknown;
   /* a directory listing (dired.ts) */
   dired?: unknown;
-  capture?: { tpl: unknown; win: EdWinConfig } | null;
   _cycle?: unknown;
   _gcycle?: unknown;
   _olx?: unknown;
@@ -861,8 +859,10 @@ interface EdBuffer extends SchemeForeign {
   /* pool.ts: the word index and running jobs */
   _wix?: { src: string; ver: number; ix: EdWordIndex; busy: boolean } | null;
   _jobs?: Map<number | symbol, number>;
-  /* brain.ts: what a brain buffer shows */
+  /* brain.ts: what a brain buffer shows, and the agenda's lines and their classes */
   brain?: unknown;
+  agenda?: unknown;
+  _balx?: unknown;
   /* ai.ts */
   _avail?: unknown;
   gptel?: unknown;
@@ -2084,6 +2084,11 @@ interface OrgApi extends EdModuleExports {
   gotoId(b: EdBuffer, id: string | null): void;
   createNote(title: string): Promise<{ id: string; file: string; cursor: number }>;
   visitNote(rel: string): EdBuffer | null | Promise<EdBuffer | null | false>;
+  /* the clock (a test sets it), dates as text, a date and a key read in the minibuffer */
+  ORG: { now(): Date };
+  strftime(format: string, d: Date): string;
+  readDate(prompt: string, def?: string): Promise<{ date: Date; time: string | null }>;
+  keyOf(prompt: string, keys: string[]): Promise<string>;
 }
 /* brain.ts, as org.ts follows links with it: open a node of brain by its reference, and the reference of the
    note with a title or alias (null with none, and where there is no edwind to ask). */

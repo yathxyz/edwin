@@ -202,9 +202,11 @@ in
   # retries, refusals, the ledger across a restart, and where the token may go.
   edit-projector = suite "projector" [ "projector.test.mts" ];
 
-  # Nodes from brain (server/brain.mts, src/brain.ts): a served Edwin against a real edwind and a stand-in for
-  # brain. The read token is sent and never logged, nor is what was asked; finding, linking and opening a node;
-  # the backlinks window; id: and title links; a new note and a daily made on disk through edwind.
+  # Nodes and tasks from brain (server/brain.mts, src/brain.ts): a served Edwin against a real edwind and a
+  # stand-in for brain. The read token is sent and never logged, nor is what was asked; finding, linking and
+  # opening a node; the backlinks window; id: and title links; a new note and a daily made on disk through
+  # edwind. Tasks are read with the read token and written with the task token, a task's fields only; the
+  # agenda's two views, its keys, what brain replaced and what it refused; a new task from a selection.
   edit-brain = suite "brain" [ "brain.test.mts" ];
 
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved
@@ -264,6 +266,11 @@ in
           notesDir = "/home/alice/notes";
           hubSocket = "/run/hub/hub.sock";
           models.anthropic.apiKeyFile = "/run/secrets/anthropic";
+          brain = {
+            url = "http://127.0.0.1:7676";
+            readTokenFile = "/run/secrets/brain-read";
+            taskTokenFile = "/run/secrets/brain-task";
+          };
           credentials.search = {
             file = "/run/secrets/search";
             origin = "https://search.example";
@@ -297,6 +304,8 @@ in
         user = "alice";
         creds = [
           "anthropic-api-key:/run/secrets/anthropic"
+          "brain-read-token:/run/secrets/brain-read"
+          "brain-task-token:/run/secrets/brain-task"
           "search:/run/secrets/search"
         ];
         readOnly = [

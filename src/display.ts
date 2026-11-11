@@ -140,7 +140,10 @@ const FACES: Record<string, DispFaceSpec> = {
   /* Dired (dired.ts CSS) */
   'dired-header': { w: 700, fg: 'fg' }, 'dired-dim': { fg: 'dim' }, 'dired-dir': { fg: 'fn', w: 600 }, 'dired-link': { fg: 'st' },
   'dired-mark': { fg: 'co', w: 700 }, 'dired-marked': { fg: 'co', w: 600 }, 'dired-flag': { fg: 'rb1', w: 700 }, 'dired-flagged': { fg: 'rb1', w: 600 },
-  oad: { w: 700, fg: 'fg' }, oat: { w: 700, fg: 'kw' }, oag: { w: 700, fg: 'fn' }, oac: { fg: 'dim' }, oaw: { fg: 'co' }, oao: { fg: 'rb1', w: 600 },
+  /* The agenda of brain's tasks (brain.ts CSS) */
+  'ba-title': { w: 700, fg: 'fn' }, 'ba-head': { w: 700, fg: 'fg' }, 'ba-today': { w: 700, fg: 'kw' }, 'ba-ref': { fg: 'dim' }, 'ba-dim': { fg: 'dim' },
+  'ba-label': { fg: 'co' }, 'ba-time': { fg: 'co' }, 'ba-over': { fg: 'rb1', w: 600 }, 'ba-state': { fg: ['org-todo', 'rb1'], w: 700 }, 'ba-pri': { fg: 'kw', w: 600 },
+  'ba-tags': { fg: 'dim', bg: ['org-tag-bg', TAG_BG] }, 'ba-proposal': { fg: 'rb1', i: 1 },
 };
 const NAMED: Record<string, string> = { black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000', blue: '#0000ff', yellow: '#ffff00', cyan: '#00ffff', magenta: '#ff00ff',
   gray: '#808080', grey: '#808080', orange: '#ffa500', purple: '#800080', pink: '#ffc0cb', brown: '#a52a2a' };

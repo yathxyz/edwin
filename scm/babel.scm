@@ -7,7 +7,7 @@
 ;; need the commands to know that they run in edwind.
 ;;
 ;; A block runs only on an explicit command (C-c C-c, babel-execute-buffer, or babel-run from wb eval or an
-;; agent), never on open, save, export or agenda build (R14.15). The commands are declared (:where 'server),
+;; agent), never on open, save or export (R14.15). The commands are declared (:where 'server),
 ;; so a frame sends them to edwind (§4.6), and shell blocks run in a card-less hub PTY (R4.44).
 ;;
 ;; Note environments (decision 4 of HYPERNOTES.md, the R4.15 amendment): the forms of a scheme block are

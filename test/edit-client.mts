@@ -80,7 +80,7 @@ export function startEdwind(dir: TestDir, { nodeArgs, env = {} }: StartOptions =
     const deadline = Date.now() + 15000;
     child.once('exit', code => { if (!child.ready) reject(new Error(`edwind exited with ${code}: ${child.logs}`)); });
     const poll = () => {
-      if (child.ready) return;
+      if (child.ready || child.exitCode !== null || child.signalCode) return;
       const s = net.connect(dir.cfg.socket);
       s.once('connect', () => { s.destroy(); child.ready = true; resolve(child); });
       s.once('error', () => { if (Date.now() > deadline) reject(new Error(`edwind did not listen: ${child.logs}`)); else setTimeout(poll, 50); });
