@@ -4,10 +4,9 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import net from 'node:net';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { makeDir, startEdwind, stopEdwind, EditClient, EDWIN } from './edit-client.mts';
+import { makeDir, startEdwind, stopEdwind, EditClient, EDWIN, transport } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
 import { rng, randOp } from './ot-sim.mts';
 import type { EditOp, OTModule } from './ot-sim.mts';
@@ -24,27 +23,6 @@ const note = (name: string, text: string) => { fs.writeFileSync(path.join(dir.di
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function until(pred: () => unknown, what = 'condition', ms = 8000) { const t0 = Date.now(); while (!pred()) { if (Date.now() - t0 > ms) throw new Error(`timeout waiting for ${what}`); await sleep(10); } }
 const settled = (b: EdwinCore) => until(() => !b.inflight && !b.queue.length && !b.sync.opening, `${b.name} settled`);
-/* A WebSocket-like object over the unix socket: onopen/onmessage/onclose/onerror, send(text), close(). */
-interface FakeSocket {
-  onopen: (() => void) | null;
-  onmessage: ((e: { data: string }) => void) | null;
-  onclose: (() => void) | null;
-  onerror: ((e: Error) => void) | null;
-  send(str: string): void;
-  close(): void;
-}
-function transport(sockPath: string) {
-  return () => {
-    const s = net.connect(sockPath); s.setEncoding('utf8');
-    const ws: FakeSocket = { onopen: null, onmessage: null, onclose: null, onerror: null, send: str => { s.write(str + '\n'); }, close: () => s.destroy() };
-    let buf = '';
-    s.on('connect', () => ws.onopen && ws.onopen());
-    s.on('data', d => { buf += d; let i: number; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line && ws.onmessage) ws.onmessage({ data: line }); } });
-    s.on('close', () => ws.onclose && ws.onclose());
-    s.on('error', e => ws.onerror && ws.onerror(e));
-    return ws;
-  };
-}
 async function client(opts?: ClientOptions) { const c = new EditClient(dir.cfg.socket, opts); await c.connect(); const w = await c.hello(); assert.equal(w.t, 'welcome'); return c; }
 const feed = async (keys: string[]) => { for (const k of keys) Ed.feedKey(k); await Ed.whenIdle(); };
 const keys = (s: string) => feed(Ed.kbd(s).split(' '));

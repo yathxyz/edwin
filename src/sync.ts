@@ -903,6 +903,9 @@ async function bootServed({ sources, transport, device, cid, pending }: { source
   if (host.kind === 'browser') { host.pageStorage = host.storage; host.storage = memoryStorage(); }
   const notServer = L.D<SchemeProcedure>('%image-server?', '', '#f: this runtime is a frame (sync.js).', () => false); notServer.where = 'both';
   Ed.boot({ served: true });
+  /* gptel's commands are edwind's (scm/gptel.scm): they replace the page's own (ai.ts), which a served frame
+     cannot use, having neither the artifact runtime nor a key in the browser (R12.2). */
+  if (host.config('gptel.scm') !== null) { try { L.evalText("(require 'gptel)"); } catch (e) { Ed.message(`Error in gptel.scm: ${Ed.errorText(e)}`); } }
   Ed.hooks.serverCommand = serverCommand;
   Ed.hooks.evalServer = evalServer;
   Ed.hooks.visit = visit;

@@ -37,6 +37,7 @@ pub const SCM: &[(&str, &str)] = &[
     ("debug.scm", include_str!("../../scm/debug.scm")),
     ("emacs.scm", include_str!("../../scm/emacs.scm")),
     ("evil.scm", include_str!("../../scm/evil.scm")),
+    ("gptel.scm", include_str!("../../scm/gptel.scm")),
     ("init.scm", include_str!("../../scm/init.scm")),
     ("markdown.scm", include_str!("../../scm/markdown.scm")),
     ("models.scm", include_str!("../../scm/models.scm")),

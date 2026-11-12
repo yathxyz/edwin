@@ -165,3 +165,25 @@ export class EditClient {
   form(form: string): Promise<Msg> { return this.request({ t: 'call', form, ctx: {} }); }
   close(): void { this.closed = true; this.sock.end(); this.sock.destroy(); for (const w of this.waiters.splice(0)) w.reject(new Error('client closed')); }
 }
+
+/* A WebSocket-like object over the unix socket: onopen/onmessage/onclose/onerror, send(text), close(). */
+export interface FakeSocket {
+  onopen: (() => void) | null;
+  onmessage: ((e: { data: string }) => void) | null;
+  onclose: (() => void) | null;
+  onerror: ((e: Error) => void) | null;
+  send(str: string): void;
+  close(): void;
+}
+export function transport(sockPath: string) {
+  return () => {
+    const s = net.connect(sockPath); s.setEncoding('utf8');
+    const ws: FakeSocket = { onopen: null, onmessage: null, onclose: null, onerror: null, send: str => { s.write(str + '\n'); }, close: () => s.destroy() };
+    let buf = '';
+    s.on('connect', () => ws.onopen && ws.onopen());
+    s.on('data', d => { buf += d; let i: number; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line && ws.onmessage) ws.onmessage({ data: line }); } });
+    s.on('close', () => ws.onclose && ws.onclose());
+    s.on('error', e => ws.onerror && ws.onerror(e));
+    return ws;
+  };
+}

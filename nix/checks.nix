@@ -167,6 +167,10 @@ in
   # image replication, server commands and ask, anchors, server-only stubs.
   edit-frame = suite "frame" [ "frame.test.mts" ];
 
+  # The console page's frame (console/index.html): booted with the Scheme the page fetches and driven by keys,
+  # against a real edwind and a loopback provider: the pi and gptel keys run in edwind.
+  edit-console = suite "console" [ "console.test.mts" ];
+
   # The Lisp machine (E2, §4.6–§4.9): threads, held buffers, ask and answer, interrupt, timers, server
   # commands; the debugger, the inspector, introspection and the primitive registry.
   edit-lisp = suite "lisp" [

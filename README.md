@@ -115,7 +115,8 @@ edit.sock client.
   `read_buffer`, `edit_buffer` and `eval_scheme` (both ask first: C-c RET allows, C-c C-k denies), `grep_notes`.
   `pi-steer` adds to a running agent, `pi-abort` stops it, `pi-model` changes backend and tier mid-session (pi-ai
   converts the conversation, tool calls included), `pi-forget` drops it. Sessions are saved in
-  `stateDir/pi/NAME.json` (0600). gptel's commands stay as they were, one-shot, on the same model layer.
+  `stateDir/pi/NAME.json` (0600). gptel's commands stay as they were, one-shot, on the same model layer; they are
+  in `scm/gptel.scm`, which a served frame loads, so `SPC g j`, `C-c i` and Org's C-c RET run them in edwind.
 - **Image generations and safe mode** (`server/image.mts`): Edwin's image is the shipped Scheme (read-only, in the
   package) plus `init.scm` plus the image log replayed on top, so a snapshot is a copy of `image.jsonl`, not a heap
   dump. `stateDir/generations/` holds the copies (`<id>.jsonl`, `index.jsonl`); one is made at every start that

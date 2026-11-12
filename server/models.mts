@@ -5,7 +5,7 @@
 // Backends are objects in the gptel style (R12.1): a name, a kind (the two kinds the spec names,
 // `anthropic` for the Messages API and `openai` for any compatible chat-completions endpoint), an endpoint
 // URL, the models it lists, its tiers and, optionally, a credential. The default backend `anthropic` comes
-// from edit.json `models` (R12.3, §15.2); scm/models.scm adds the Scheme constructors and gptel-send.
+// from edit.json `models` (R12.3, §15.2); scm/models.scm adds the Scheme constructors and gptel-request, scm/gptel.scm the commands.
 //
 // The wire formats are pi-ai's (@earendil-works/pi-ai, server/package.json): each kind maps to one of its
 // APIs (PI_API), loaded on the first request. Edwin keeps what is its own: backends, tiers, the gate, the
@@ -153,6 +153,8 @@ export const MAX_REDIRECTS = 5;
 export const CREDENTIAL_NAME = /^[a-z0-9-]{1,32}$/;   // the names nix/module.nix accepts
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCM_FILE = path.join(HERE, '..', 'scm', 'models.scm');
+/* gptel's commands, which frames load as well (scm/gptel.scm). */
+const COMMANDS_FILE = path.join(HERE, '..', 'scm', 'gptel.scm');
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const KINDS: Record<BackendKind, KindInfo> = {
   anthropic: { endpoint: '/v1/messages', images: true },
@@ -858,6 +860,7 @@ export class Models {
     L.defvar('gptel-tiers', jsonToScheme(S, (this.backends.get(DEFAULT_BACKEND) || { tiers: DEFAULT_TIERS }).tiers || DEFAULT_TIERS), 'Alist of tier name to model for the default backend (R12.6).');
     L.defvar('gptel-backend', DEFAULT_BACKEND, 'Name of the backend gptel uses.');
     L.evalText(fs.readFileSync(SCM_FILE, 'utf8'));
+    L.evalText(fs.readFileSync(COMMANDS_FILE, 'utf8'));
     /* The frame-side default names no server backend: point gptel at the configured one (R12.3). */
     const cur = L.get('gptel-backend');
     if (!this.backends.has(cur instanceof S.Sym ? cur.name : String(cur))) L.set('gptel-backend', DEFAULT_BACKEND);

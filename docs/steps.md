@@ -233,7 +233,10 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   the `cancelled` condition; four requests run at once and the rest queue (R12.13). One usage line per request,
   success or failure, goes to the log and `stateDir/usage.jsonl`; `model-usage` sums them. The server rebinds
   `gptel-make-anthropic`, `gptel-make-openai`, `gptel-backends` and `gptel-send` that `ai.ts` defines for
-  frames, since those use `fetch` and browser-stored keys (R14.4). Not in E2: Edwin's built-in tools for gptel
+  frames, since those use `fetch` and browser-stored keys (R14.4). The commands (`gptel-send`, `gptel-abort`,
+  `model-usage`) are in `scm/gptel.scm`, which a served frame loads after its own files, so its keys for
+  `gptel-send` (`SPC g j`, `C-c i`, Org's `C-c RET`) run edwind's and not `ai.ts`'s; the rest of `ai.ts`
+  (`gptel`, the menus, presets, rewrite) is still the page's own and works in the artifact only. Not in E2: Edwin's built-in tools for gptel
   and the confirmation flow (R12.10–R12.12), `gptel`, `gptel-rewrite` and presets (R12.9) on the server; a
   backend defined in `init.scm` runs before the module loads (define it after, or on feature `models`).
   Thread batches carry an undo group (`undo: {g: "thread-…"}`) so gptel output undoes like any writer's.
@@ -304,7 +307,8 @@ shown except on the point's line), anchors, `key:: value` fields, priorities; ta
 table in `scm/notes-syntax.scm` shared with Org (`notes-set-task-keywords!` changes both); commands
 `markdown-outline-enter` (the first RET on an empty item outdents; at level 0 it ends the list),
 `markdown-demote`/`promote`, `markdown-todo-cycle` (`C-c C-t`, `S-<right>`/`S-<left>`), folding, `]] [[ gj gk`,
-`wiki-follow`, `wiki-copy-ref`, `wiki-capf`, `journal-today`, imenu, `markdown-unlinked-mentions` (server).
+`wiki-follow`, `wiki-copy-ref`, `wiki-capf`, `journal-today`, imenu, `markdown-unlinked-mentions` (server,
+`C-c C-u`; `C-c C-m` is `C-c RET`, which sends a chat).
 Font-lock is incremental: 0.6 ms median per keystroke on a 10,000-line page (budget 2 ms).
 
 Migration (R8.16–R8.20, Q3): with the flag on, a page node without `buf` is migrated once on load to

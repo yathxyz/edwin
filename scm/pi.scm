@@ -118,11 +118,19 @@ model. :confirm #t asks in the chat before each call."
 ;; ---------- commands ----------
 
 (define-command (pi)
-  "Visit the chat note pi/NAME.md of the default session (pi-default-session) and go to its end."
+  "Visit the chat note pi/NAME.md of the default session (pi-default-session)."
   (interactive)
-  (find-file (string-append "pi/" pi-default-session ".md"))
-  (when (= (point-min) (point-max)) (insert "## You\n\n"))
-  (goto-char (point-max)))
+  (find-file (string-append "pi/" pi-default-session ".md")))
+
+;; A chat note under pi/ opens ready to type in: an empty one gets its first heading, and point goes to the
+;; end. This is a find-file-hook, not the end of the command, because in a served frame find-file returns
+;; before the note has arrived, and what followed it ran in the buffer the user was in.
+(define (pi--open-chat)
+  (let ((file (or (buffer-file-name) "")))
+    (when (and (string-suffix? ".md" file) (or (string-prefix? "pi/" file) (string-search-forward "/pi/" file 0)))
+      (when (= (point-min) (point-max)) (insert "## You\n\n"))
+      (goto-char (point-max)))))
+(add-hook! 'find-file-hook pi--open-chat)
 
 (define-command (pi-send)
   "Send the text after the last \"## You\" heading to this note's pi session; the answer streams in below it.

@@ -191,7 +191,8 @@ a URL or [label](target) through org-open-at-point."
 (define-key markdown-mode-map "C-c C-w" 'wiki-copy-ref)
 (define-key markdown-mode-map "C-c C-f" 'wiki-follow)
 (define-key markdown-mode-map "C-c C-j" 'journal-today)
-(define-key markdown-mode-map "C-c C-m" 'markdown-unlinked-mentions)
+;; Not C-c C-m: that is C-c RET, the key that sends a chat (pi.scm).
+(define-key markdown-mode-map "C-c C-u" 'markdown-unlinked-mentions)
 (for-each (lambda (c) (put c 'evil-repeat 'abort))
           '(markdown-tab markdown-ret wiki-follow markdown-follow-ref wiki-copy-ref wiki-capf journal-today
             markdown-unlinked-mentions markdown-todo-cycle markdown-todo-cycle-backward))
