@@ -198,7 +198,7 @@ test('console/manifest.json: the runtime in the order console/index.html loads i
   for (const f of m.files) assert.ok(existsSync(new URL('../' + f.replace(/\.js$/, '.ts'), import.meta.url)), f);
   for (const f of m.scm) assert.ok(existsSync(new URL('../' + f, import.meta.url)), f);
   const page = JSON.parse(/const SCM = (\[[^\]]*\])/.exec(html)![1].replace(/'/g, '"'));
-  for (const name of page) assert.ok(m.scm.includes(`scm/${name}.scm`), name + ': the console page loads it');
+  assert.deepEqual(page.map((name: string) => `scm/${name}.scm`), m.scm, 'the console page loads the Scheme the manifest names');
 });
 
 test('persistent tables flush through the host when the process suspends', async () => {
