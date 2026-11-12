@@ -226,7 +226,8 @@ Choices E2 made where the spec left one open, and where it had to deviate:
   kinds, the ones the spec names (`anthropic`: Messages API, `x-api-key`; `openai`: chat completions, bearer);
   the default backend `anthropic` (until 2026-10-19 named `workbench`) is `models.anthropic` of `edit.json`, its models the tier values; a backend
   without a credential is usable only on a loopback origin (a local model server). The key is read from
-  `$CREDENTIALS_DIRECTORY/NAME` at request time and never stored on the handle; `http-request` takes `:method
+  `$CREDENTIALS_DIRECTORY/NAME` at request time and never stored on the handle, and that directory is on the
+  refusal list, so no client opens a credential file as a buffer; `http-request` takes `:method
   :headers :body :credential :credential-header :timeout :on-chunk`, retries 429/503/529 three times
   (`retry-after`, else 1 s doubling) under a 10 min deadline covering the tool rounds (at most 8). `sample`
   runs on a background thread per stream (`by {kind: "web", cid, device, tab}`), `cancel` interrupts it with

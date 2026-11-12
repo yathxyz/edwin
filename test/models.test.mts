@@ -171,6 +171,20 @@ test('R14.7, R16.15: credential handles print as their name and never give up, c
   c.close();
 });
 
+test('R14.6: a credential file is not a buffer: no client visits one, by the protocol or from Scheme', async () => {
+  const c = await client({ kind: 'frame' });
+  const file = path.join(creds, 'anthropic-api-key');
+  const opened = await c.open(file);
+  assert.equal(opened.error?.code, 'refused_path', JSON.stringify(opened.error)); assert.equal(opened.text, null);
+  assert.equal((await c.call('visit-id', [file])).code, 'refused_path');
+  /* From Scheme in edwind, find-file gets none of its text either. */
+  const s = await client();
+  const r = await s.form(`(begin (find-file ${JSON.stringify(file)}) (let ((text (buffer-string))) (kill-buffer (current-buffer)) text))`);
+  assert.ok(!JSON.stringify(r).includes(KEY), 'no key from find-file');
+  assert.equal(await value(s, '(credential-available? (credential "anthropic-api-key"))'), '#t', 'edwind itself still reads it');
+  c.close(); s.close();
+});
+
 test('R14.4, R16.19: http-request binds a credential to its origin; same-origin redirects keep the header, cross-origin ones fail', async () => {
   const c = await client();
   const n0 = B.requests.length;

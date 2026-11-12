@@ -207,7 +207,10 @@ export class Server {
   declare anchors: Anchors | null;
   constructor(cfg: Config, log: Log) {
     this.cfg = cfg; this.log = log; this.build = BUILD; this.boot = randomId(8); this.clients = new Set(); this.stopping = false;
-    this.auth = new Authority(cfg);
+    /* The credential files are edwind's to read and nobody's to visit: a buffer of one would hand a key to every
+       frame, and to a model through pi's tools (R14.6). */
+    const credentials = modelsModule.credentialsDirectory();
+    this.auth = new Authority(credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg);
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */
