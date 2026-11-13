@@ -1,6 +1,6 @@
-// For tests/terminal.rs: an edwind on a fresh directory with one note, a.md. Prints {socket, notes}; on a
-// line from stdin, prints a.md as edwind and the disk have it, the notes edwind opened and the directory commands
-// it ran, stops edwind and exits.
+// For tests/terminal.rs and tests/gui.rs: an edwind on a fresh directory with one note, a.md. Prints {socket,
+// notes}; on a line from stdin, prints a.md as edwind and the disk have it, the notes edwind opened and the
+// directory commands it ran, stops edwind and exits.
 import fs from 'node:fs';
 import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from '../../test/edit-client.mts';

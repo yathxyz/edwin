@@ -3,10 +3,10 @@
    up, and the marks (m, d) choose what D, R and C act on. Deletes are permanent and nothing is ever overwritten.
    The files are those of a backend: edwind's commands fs-list, fs-stat, fs-delete, fs-copy, fs-mkdir and
    rename-file in served mode (server/fs.mts, with its refusals), and the desktop program's own directories
-   (host.files.tree). Attached to edwind, the desktop program has both: the notes directory is edwind's, every
-   other one its own, and a rename or copy stays within the backend of the listing it starts from. A browser
-   that keeps its files in its own storage has no directories: there find-file offers the recent files as
-   before. */
+   (host.files.tree). Attached to edwind (edwinclient), the desktop program has both: the notes directory is
+   edwind's, every other one its own, and a rename or copy stays within the backend of the listing it starts
+   from. A browser that keeps its files in its own storage has no directories: there find-file offers the
+   recent files as before. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;

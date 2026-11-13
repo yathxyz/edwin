@@ -379,14 +379,15 @@ cards that are not files still complete. The address suite (now Workbench's `tes
 ## Step DT3: attach anywhere (done)
 
 A desktop frame attaches to an edwind on another machine, ex44's in particular, so its notes (and what ex44's
-edwind does with them) are edited from the laptop with the laptop's own editor; and `edwin -a` starts the user's
-own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
+edwind does with them) are edited from the laptop with the laptop's own editor; and `-a` starts the user's own
+edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon. Both are edwinclient's since 2026-11-13
+("edwin and edwinclient", below).
 
-- **`--remote HOST[:SOCKET]`** attaches through ssh: `edwin -g --remote ex44 journal.md`. The program runs
+- **`--remote HOST[:SOCKET]`** attaches through ssh: `edwinclient -c --remote ex44 journal.md`. The program runs
   `ssh -o BatchMode=yes -W SOCKET ssh://HOST` (SOCKET is Workbench's, `/run/workbench-edit/edit.sock`, unless
   given) with ssh's standard input and output on one end of a socket pair, so the rest of the program sees one more
   Unix socket and the protocol is unchanged. HOST is anything ssh takes (`user@host`, `host:port`, a `Host` of
-  `~/.ssh/config`). BatchMode: ssh never asks on the terminal edwin holds, so keys come from the agent (or a
+  `~/.ssh/config`). BatchMode: ssh never asks on the terminal the frame holds, so keys come from the agent (or a
   ControlMaster connection, which also makes each connection cheap). edwind's socket directory is mode 0700, so the
   ssh user is the one `services.workbench.user` names; OpenSSH forwards Unix sockets by default
   (`AllowStreamLocalForwarding`). `EDWIN_SOCKET=ssh://ex44/run/workbench-edit/edit.sock` makes the remote
@@ -397,13 +398,14 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   machine (DT1).
 - **The connection.** The start waits up to 30 s for the remote edwind to answer (a ping before hello, which
   draws an error reply and proves the whole path) and otherwise exits with status 1 and ssh's reason ("Could not
-  resolve hostname", "open failed: connect failed"). After that, a dropped connection is retried while the
+  resolve hostname", "open failed: connect failed"), before the terminal or a window is taken. After that, a dropped connection is retried while the
   editor runs, as the browser's frames retry: the frame keeps its replica, edits wait in its queue, and ssh's
   reason goes in the log (`~/.local/state/edwin/edwin.log`). Remote latency touches only acknowledgements.
-- **`-a`, `--start-daemon`.** When no edwind answers on `$EDWIN_SOCKET`, the user's socket or Workbench's,
-  edwin runs `edwin-daemon` beside it (DT4), waits up to 10 s for `$XDG_RUNTIME_DIR/edwin/edit.sock`, and
-  attaches. The daemon outlives the frame. Without `edwin-daemon` (a cargo build), or if it fails, edwin says so
-  and edits on its own. `EDITOR="edwin -a"` gives every commit message the same buffers as the window.
+- **`-a`, `--start-daemon`.** When no edwind answers on `$EDWIN_SOCKET` or the user's socket, edwinclient runs
+  `edwin-daemon` beside the program (DT4), waits up to 10 s for `$XDG_RUNTIME_DIR/edwin/edit.sock`, and attaches.
+  The daemon outlives the frame. Without `edwin-daemon` (a cargo build), or if it fails, edwinclient says why and
+  exits with status 1 (until 2026-11-13 it edited on its own). `EDITOR="edwinclient -a"` gives every commit
+  message the same buffers as the window.
 - **Checked by** `remote_notes_go_through_ssh` (through `tests/fake-ssh`, which joins ssh's standard streams to
   the socket here; also the failure message) and `dash_a_starts_the_daemon_and_attaches` (a stand-in
   `edwin-daemon` beside a copy of the binary; the frame shows in edwind's log); by hand through a real OpenSSH
@@ -413,6 +415,48 @@ own edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon.
   `x-workbench-proxy-secret` header and `publicOrigin`), so a desktop client would need the proxy's own login;
   ssh reaches the same edwind with the user's keys and no new credential. Starting an edwind on the remote host
   (`-a` is local only), and one frame attached to two edwinds at once (`sync.ts` holds one connection per runtime).
+
+## edwin and edwinclient (done)
+
+Asked 2026-11-13: "edwin should be like emacs, edwinclient should be like emacsclient." Until then every `edwin`
+attached by itself to the first edwind that answered, and `--standalone` or `EDWIN_NO_ATTACH` kept it apart. The
+split is in Edwin itself, on every host, and the terminal stays the default of both programs.
+
+- **One program, two names.** `edwinclient` is `edwin` run under that name (the last part of `argv[0]`). The
+  package installs `bin/edwinclient` as a link to `edwin`; a cargo build gets it with
+  `ln -s edwin target/release/edwinclient`. `edwin-daemon` is looked for beside the real file, so a link finds it.
+- **edwin is emacs.** It never attaches: `$EDWIN_SOCKET` and the user's socket are not asked, its init file is
+  `~/.config/edwin/init.scm`, every file is its own (DT1), and its start restores the snapshot. It keeps `-nw`
+  (`-t`, `--no-window`), `-g`, `--geometry`, `-R`, `+LINE`, `-`, `--daemon` and `--fg-daemon`. `--standalone`,
+  `--socket`, `--remote`, `-a` and `EDWIN_NO_ATTACH` are gone; given one of edwinclient's options, edwin says it is
+  edwinclient's. `programs.edwin.defaultEditor` still sets `EDITOR=edwin`, the editor that never waits on a daemon.
+- **edwinclient is emacsclient.** It always attaches: to the edwind `--socket PATH` or `--remote HOST:SOCKET`
+  names, else to the first of `$EDWIN_SOCKET` and `$XDG_RUNTIME_DIR/edwin/edit.sock` that answers. Its frame is the
+  one DT1, DT3 and DT4 describe (notes are edwind's, every other file its own, a cold start). The edwind is found
+  before anything is drawn: when none answers, edwinclient says so in one line, naming the sockets it tried and
+  `edwin --daemon` or `-a`, and exits with status 1 without taking the terminal or opening a window. It never
+  edits on its own. `-a` (`--start-daemon`) starts the user's edwind when none answers (DT3), and when that fails
+  says why and exits with status 1; it has nothing to start for an edwind that `--socket` or `--remote` names.
+  `-t` (`-nw`, `--tty`) asks for a terminal frame, the default, and `-c` (`--create-frame`) for a window, which
+  `--geometry` sizes; `-g` is edwin's.
+- **`-e`, `--eval`.** The arguments after it are Scheme forms, not files. edwinclient says hello as a client of
+  kind `cli` (device `edwinclient`) and sends the forms as `call`s, one after another; a cli client's failing form
+  answers with its error at once instead of waiting in the debugger. Each value goes to standard output as `write`
+  prints it, one line a form. The first error goes to standard error and ends the run with status 1; the forms
+  after it are not sent. No frame is made and the terminal is not touched. It works with `--socket`, `--remote`
+  and `-a`. A definitional form sent this way (`define`, `set!`, `define-key`, `add-hook!`, ...) enters edwind's
+  image log, as `cli@edwinclient`, and reaches every frame, as one typed in a frame does.
+- **Not taken from emacsclient:** reusing a frame that exists, and `-n` (`--no-wait`). Every edwinclient is a frame
+  of its own and blocks until it ends, as `$EDITOR` wants. What an `-e` form writes to its output port is not
+  printed, only its value.
+- **Checked by** the pseudo-terminal suite: `edwin_never_attaches` (an edwind answers on both sockets; the user's
+  init binds a key, the note is written to the disk, and edwind opens nothing for edwin),
+  `edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone` (also `-a` without `edwin-daemon`),
+  `eval_prints_values_and_stops_at_an_error` (a definition read back by a second edwinclient),
+  `help_version_and_bad_options_need_no_terminal`, and DT1's and DT3's attached tests, which run edwinclient now.
+  The window suite's `edwinclient_c_is_a_frame_of_edwind_in_a_window` needs Xvfb, as DT2's tests do. By hand on
+  ex44 with the package and a throwaway home: `edwin --daemon`, `edwinclient -e` (the definition was in the image
+  log as `cli`), `edwinclient` with no daemon, and `edwin` beside the running daemon (edwind saw no connection).
 
 ## Notes into brain: the projector (done)
 
@@ -739,7 +783,7 @@ The flake builds Edwin on its own, as Emacs ships `emacs`, `emacs --daemon` and 
 
 | Output | What |
 |---|---|
-| `packages.edwin` (`nix run .#edwin -- FILE`) | `bin/edwin` (terminal, `-g` window), `bin/edwin-daemon`, `bin/edwind` (`nix/edwin.nix`) |
+| `packages.edwin` (`nix run .#edwin -- FILE`) | `bin/edwin` (terminal, `-g` window), `bin/edwinclient`, `bin/edwin-daemon`, `bin/edwind` (`nix/edwin.nix`) |
 | `packages.edwind` (`nix run .#edwind -- --config F`) | edwind alone (`nix/edwind.nix`); the workbench package links it for `services.workbench.edit` |
 | `nixosModules.edwin` | `programs.edwin.enable`, `.daemon.enable` (edwind as a systemd user service), `.daemon.notesDir`, `.defaultEditor` |
 
@@ -747,10 +791,11 @@ The flake builds Edwin on its own, as Emacs ships `emacs`, `emacs --daemon` and 
   which the user service runs) on `$XDG_RUNTIME_DIR/edwin/edit.sock`. Its config is `EDWIND_CONFIG` when set,
   else one written at each start: notes in `EDWIN_NOTES_DIR` (`~/notes`), state in `~/.local/state/edwin/edwind`,
   the user's Scheme in `~/.config/edwin`, the log (background start) in `~/.local/state/edwin/edwind.log`.
-- **The client.** There is no separate client: every `edwin` and `edwin -g` attaches to the first edwind that
-  answers on `--socket`, `$EDWIN_SOCKET` or `$XDG_RUNTIME_DIR/edwin/edit.sock` (until 2026-10-19 also
-  Workbench's `/run/workbench-edit/edit.sock`), so notes are shared between frames and with the browser. Files outside the notes directory stay
-  the program's own (DT1). `--standalone` never attaches.
+- **The client.** `edwinclient` and `edwinclient -c` attach to the edwind `--socket` or `--remote` names, else
+  the first that answers on `$EDWIN_SOCKET` or `$XDG_RUNTIME_DIR/edwin/edit.sock` (until 2026-10-19 also
+  Workbench's `/run/workbench-edit/edit.sock`), so notes are shared between frames and with the browser. Files
+  outside the notes directory stay the program's own (DT1). Until 2026-11-13 there was no separate client: every
+  `edwin` attached by itself, and `--standalone` kept one apart ("edwin and edwinclient", above).
 - **The build.** The prebuilt V8 (`librusty_v8` 130.0.1) is a fixed-output fetch handed to the `v8` crate as
   `RUSTY_V8_ARCHIVE`, so the build runs offline. The window's libraries (libxkbcommon, Wayland, Vulkan, libGL, X11)
   are added to the binary's RPATH, as winit and wgpu open them at run time. The check phase runs the
@@ -822,7 +867,7 @@ images, a menubar, smooth scrolling, opening the window while the snapshot resto
 
 ## Step DT1: `edwin` in a terminal (done)
 
-`edwin [-nw] [-R] [--standalone | --socket PATH] [+LINE] [FILE]...` is Edwin as a terminal program, meant to stand
+`edwin [-nw] [-R] [+LINE] [FILE]...` is Edwin as a terminal program, meant to stand
 in for Vim or Neovim, `$EDITOR` included. `native` is a Rust crate (its own Cargo workspace, so V8 stays out
 of the Workbench crates and their Nix build) that embeds V8 (the `v8` crate, 130.0.1, prebuilt) and carries every
 source it runs: the unchanged core in `src/`, the shipped Scheme in `scm/`, and `native/js/`. Rust is only the
@@ -868,11 +913,10 @@ Build and run (the prebuilt V8 is downloaded by the `v8` crate's build script, o
   200×50 terminal: 155 ms without the snapshot (75 compiling the core, 77 evaluating the Scheme), 40 ms with it
   (`EDWIN_TRACE=1` logs the steps, `EDWIN_NO_SNAPSHOT=1` starts cold). The binary is 37.6 MB: V8, the 5.2 MB
   snapshot and ICU's data (for `\p{...}` in regular expressions).
-- **edwind.** When an edwind answers (`--socket PATH`, else `$EDWIN_SOCKET`, else, until 2026-10-19, the
-  service's `/run/workbench-edit/edit.sock`; `--standalone` or `EDWIN_NO_ATTACH=1` never attach), `edwin` boots served
-  (`Ed.bootServed`), so its image, commands and user init are edwind's. Notes under edwind's notes directory are
-  opened through edwind, shared with the browser's frames; every other file stays the program's own, so a commit
-  message never needs edwind's write permission. Quitting waits (up to 5 s) until edwind has acknowledged every
+- **edwind.** A frame attached to an edwind (`edwinclient` since 2026-11-13; until then any `edwin` that found one
+  answering) boots served (`Ed.bootServed`), so its image, commands and user init are edwind's. Notes under
+  edwind's notes directory are opened through edwind, shared with the browser's frames; every other file stays the
+  program's own, so a commit message never needs edwind's write permission. Quitting waits (up to 5 s) until edwind has acknowledged every
   edit. An attached start is cold (the snapshot holds a standalone boot).
 
 Core changes for DT1: `host.files` behind `Store` (and shipped config never read from the working directory);

@@ -1,4 +1,5 @@
-//! edwin: Edwin's JavaScript core on embedded V8, in a terminal (DT1) or a window (DT2, `--gui`).
+//! edwin: Edwin's JavaScript core on embedded V8, in a terminal (DT1) or a window (DT2, `--gui`); under the name
+//! edwinclient, a frame of an edwind, as emacsclient is of an Emacs daemon.
 //!
 //! The Rust side is the host's floor: the files, the terminal or the window, signals, edwind's socket and the
 //! event loop. Everything Edwin is runs as JavaScript: native/js/prelude.ts, host-native.ts, term.ts and
@@ -16,6 +17,7 @@ mod snapshot;
 mod sources;
 mod sys;
 
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// ICU's data, for V8's \p{...} classes and Unicode case folding (build.rs finds it).
@@ -32,12 +34,9 @@ fn main() {
     // edwin-daemon beside this program, which the package installs with edwind.
     if let Some(a) = std::env::args()
         .nth(1)
-        .filter(|a| a == "--daemon" || a == "--fg-daemon")
+        .filter(|a| !is_client() && (a == "--daemon" || a == "--fg-daemon"))
     {
-        let daemon = std::env::current_exe()
-            .ok()
-            .and_then(|e| Some(e.parent()?.join("edwin-daemon")));
-        match daemon.filter(|d| d.exists()) {
+        match daemon_program() {
             Some(d) => {
                 let mut cmd = std::process::Command::new(d);
                 if a == "--fg-daemon" {
@@ -62,6 +61,29 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Whether the program runs as edwinclient: its name, as the package's link bin/edwinclient to edwin gives it.
+fn is_client() -> bool {
+    std::env::args_os()
+        .next()
+        .is_some_and(|a| Path::new(&a).file_name() == Some("edwinclient".as_ref()))
+}
+
+fn name() -> &'static str {
+    if is_client() {
+        "edwinclient"
+    } else {
+        "edwin"
+    }
+}
+
+/// edwin-daemon beside this program (the real file: a link named edwinclient leads here too).
+fn daemon_program() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| Some(e.parent()?.join("edwin-daemon")))
+        .filter(|d| d.exists())
+}
+
 /// The socket of the user's own edwind (`edwin --daemon`): $XDG_RUNTIME_DIR/edwin/edit.sock.
 fn user_socket() -> Option<String> {
     std::env::var("XDG_RUNTIME_DIR")
@@ -70,111 +92,147 @@ fn user_socket() -> Option<String> {
         .map(|d| format!("{d}/edwin/edit.sock"))
 }
 
-fn option_args() -> Vec<String> {
-    std::env::args().skip(1).take_while(|a| a != "--").collect()
+/// The command line as far as this file acts on it before V8 starts. main.ts reads it again, files and all, and
+/// is the one that reports what is wrong with it.
+struct Args {
+    /// A window (edwin -g, edwinclient -c; the last of those and the terminal's options wins), and its size in
+    /// cells (--geometry=COLSxROWS).
+    window: bool,
+    size: (u32, u32),
+    /// edwinclient: the edwind --socket or --remote names, as an address sys::sock_open takes; -a.
+    named: Option<String>,
+    start: bool,
+    /// --help, --version or a usage error: main.ts answers, and no edwind, terminal or window is opened.
+    answer: bool,
 }
 
-/// Whether the program may attach at all (not --standalone, EDWIN_NO_ATTACH, --help or --version).
-fn may_attach(args: &[String]) -> bool {
-    !(args
-        .iter()
-        .any(|a| a == "--standalone" || a == "--help" || a == "-h" || a == "--version")
-        || std::env::var_os("EDWIN_NO_ATTACH").is_some())
-}
-
-/// Whether main.ts will attach to edwind, whose boot (Ed.bootServed) the snapshot cannot hold: the same
-/// choice main.ts makes (--standalone, --socket, --remote, EDWIN_NO_ATTACH, EDWIN_SOCKET, the user's daemon). A remote edwind (ssh) is not tried here: asking for one counts as attaching.
-fn will_attach() -> bool {
-    let args = option_args();
-    if !may_attach(&args) {
-        return false;
+fn args(client: bool) -> Args {
+    let mut o = Args {
+        window: false,
+        size: (100, 36),
+        named: None,
+        start: false,
+        answer: false,
+    };
+    let mut named = 0;
+    let mut naming = |o: &mut Args, k: &str, v: &str| {
+        named += 1;
+        if v.is_empty() || named > 1 {
+            o.answer = true;
+        } else if k == "--remote" {
+            o.named = Some(remote_address(v));
+        } else {
+            o.named = Some(v.to_string());
+        }
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--" => break,
+            "-h" | "--help" | "--version" => o.answer = true,
+            "-R" | "--read-only" | "-" => {}
+            "-g" | "--gui" if !client => o.window = true,
+            "-nw" | "--no-window" | "-t" if !client => o.window = false,
+            "-c" | "--create-frame" if client => o.window = true,
+            "-t" | "-nw" | "--tty" if client => o.window = false,
+            "-a" | "--start-daemon" if client => o.start = true,
+            "--socket" | "--remote" if client => {
+                let v = it.next().unwrap_or_default();
+                naming(&mut o, &a, &v);
+            }
+            // The rest are forms, evaluated with no frame.
+            "-e" | "--eval" if client => {
+                o.window = false;
+                if it.next().is_none() {
+                    o.answer = true;
+                }
+                break;
+            }
+            _ => match a.split_once('=') {
+                Some((k @ ("--socket" | "--remote"), v)) if client => naming(&mut o, k, v),
+                Some(("--geometry", g)) => match g
+                    .split_once('x')
+                    .and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?)))
+                {
+                    Some(size) => o.size = size,
+                    None => o.answer = true,
+                },
+                _ => o.answer |= a.starts_with('-') && a.len() > 1,
+            },
+        }
     }
-    if args.iter().any(|a| {
-        a == "--socket"
-            || a.starts_with("--socket=")
-            || a == "--remote"
-            || a.starts_with("--remote=")
-    }) {
-        return true;
+    o.window &= !o.answer;
+    o
+}
+
+/// --remote HOST:SOCKET as the address sys::sock_open takes: ssh://HOST/SOCKET.
+fn remote_address(r: &str) -> String {
+    match r.find(":/") {
+        Some(i) => format!("{}{}{}", sys::SSH_PREFIX, &r[..i], &r[i + 1..]),
+        None => format!("{}{r}", sys::SSH_PREFIX),
+    }
+}
+
+/// How long edwinclient waits for a remote edwind (ssh) to answer.
+const REMOTE_MS: u32 = 30000;
+
+/// edwinclient's edwind: the one --socket or --remote names, else the first of $EDWIN_SOCKET and the user's socket
+/// that answers. With -a, when none does, the user's own is started first, as `emacsclient -a ''` starts an Emacs
+/// daemon. Nothing is drawn before this answers, and the connection it opens is the frame's first.
+fn attach(a: &Args) -> Result<(String, u32), String> {
+    let open = |p: &str| {
+        sys::sock_open(p, p.starts_with(sys::SSH_PREFIX).then_some(REMOTE_MS))
+            .map(|id| (p.to_string(), id))
+            .map_err(|e| format!("cannot attach to edwind at {p}: {e}"))
+    };
+    if let Some(p) = &a.named {
+        return open(p);
     }
     let env = std::env::var("EDWIN_SOCKET").ok().filter(|s| !s.is_empty());
-    if env
-        .as_deref()
-        .is_some_and(|s| s.starts_with(sys::SSH_PREFIX))
-    {
-        return true;
+    let mut tried: Vec<String> = Vec::new();
+    for p in env.into_iter().chain(user_socket()) {
+        if tried.contains(&p) {
+            continue;
+        }
+        match open(&p) {
+            Ok(c) => return Ok(c),
+            // A remote edwind was asked for by name: why it did not answer is the answer.
+            Err(e) if p.starts_with(sys::SSH_PREFIX) => return Err(e),
+            Err(_) => tried.push(p),
+        }
     }
-    let mut cands: Vec<String> = env.into_iter().collect();
-    cands.extend(user_socket());
-    cands
-        .iter()
-        .any(|p| std::os::unix::net::UnixStream::connect(p).is_ok())
-}
-
-/// `-a` (`--start-daemon`): when no edwind answers, start the user's (edwin-daemon beside this program) and wait
-/// for its socket, as `emacsclient -a ''` starts an Emacs daemon. When that fails, edwin edits on its own.
-fn start_daemon_if_asked() {
-    let args = option_args();
-    if !args.iter().any(|a| a == "-a" || a == "--start-daemon")
-        || !may_attach(&args)
-        || will_attach()
-    {
-        return;
+    if !a.start {
+        return Err(if tried.is_empty() {
+            "no edwind to attach to: neither EDWIN_SOCKET nor XDG_RUNTIME_DIR is set (or give --socket PATH)".into()
+        } else {
+            format!(
+                "no edwind answers at {}; start one with `edwin --daemon`, or give -a",
+                tried.join(" or ")
+            )
+        });
     }
-    let Some(sock) = user_socket() else {
-        eprintln!("edwin: -a needs XDG_RUNTIME_DIR for the daemon's socket; editing on its own");
-        return;
-    };
-    let daemon = std::env::current_exe()
-        .ok()
-        .and_then(|e| Some(e.parent()?.join("edwin-daemon")))
-        .filter(|d| d.exists());
-    let Some(daemon) = daemon else {
-        eprintln!("edwin: -a needs edwin-daemon beside edwin (the Nix package installs it); editing on its own");
-        return;
-    };
+    // -a: the user's own edwind, started as `edwin --daemon` starts it (it outlives the frame).
+    let sock = user_socket().ok_or("-a needs XDG_RUNTIME_DIR for the daemon's socket")?;
+    let daemon = daemon_program()
+        .ok_or("-a needs edwin-daemon beside the edwin program (the Nix package installs it)")?;
     match std::process::Command::new(daemon)
         .stdin(std::process::Stdio::null())
         .status()
     {
         Ok(st) if st.success() => {}
-        Ok(_) => return eprintln!("edwin: edwin-daemon failed; editing on its own"),
-        Err(e) => return eprintln!("edwin: cannot run edwin-daemon: {e}; editing on its own"),
+        Ok(st) => return Err(format!("edwin-daemon failed ({st})")),
+        Err(e) => return Err(format!("cannot run edwin-daemon: {e}")),
     }
     let end = Instant::now() + std::time::Duration::from_secs(10);
     while Instant::now() < end {
-        if std::os::unix::net::UnixStream::connect(&sock).is_ok() {
-            return;
+        if let Ok(c) = open(&sock) {
+            return Ok(c);
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    eprintln!("edwin: edwind did not answer on {sock} (its log: ~/.local/state/edwin/edwind.log); editing on its own");
-}
-
-/// Whether the program was asked for a window (`-g`, `--gui`; `-nw` after them asks for the terminal again).
-/// Whether a window was asked for (-g, --gui; the last of those and -nw, -t wins) and its size in cells
-/// (--geometry=COLSxROWS).
-fn window_args() -> (bool, (u32, u32)) {
-    let (mut gui, mut size) = (false, (100, 36));
-    for a in std::env::args().skip(1).take_while(|a| a != "--") {
-        match a.as_str() {
-            "-g" | "--gui" => gui = true,
-            "-nw" | "--no-window" | "-t" => gui = false,
-            // These print and leave; no window for them.
-            "-h" | "--help" | "--version" => return (false, size),
-            _ => {
-                if let Some((c, r)) = a
-                    .strip_prefix("--geometry=")
-                    .and_then(|g| g.split_once('x'))
-                {
-                    if let (Ok(c), Ok(r)) = (c.parse(), r.parse()) {
-                        size = (c, r);
-                    }
-                }
-            }
-        }
-    }
-    (gui, size)
+    Err(format!(
+        "the edwind -a started did not answer on {sock} (its log: ~/.local/state/edwin/edwind.log)"
+    ))
 }
 
 #[cfg(feature = "gui")]
@@ -184,16 +242,15 @@ type Window = Option<()>;
 
 /// Opens the window when one was asked for. Without one the program runs in the terminal, as asked by -nw:
 /// when no display answers it says so and goes on there, if it has a terminal.
-fn open_window() -> Result<Window, i32> {
-    let (gui, size) = window_args();
-    if !gui {
+fn open_window(a: &Args) -> Result<Window, i32> {
+    if !a.window {
         return Ok(None);
     }
     #[cfg(feature = "gui")]
     {
         let why = match gui::unavailable() {
             Some(why) => why,
-            None => match gui::Gui::open(size) {
+            None => match gui::Gui::open(a.size) {
                 Ok(g) => return Ok(Some(g)),
                 Err(e) => e,
             },
@@ -202,7 +259,6 @@ fn open_window() -> Result<Window, i32> {
     }
     #[cfg(not(feature = "gui"))]
     {
-        let _ = size;
         fallback("this edwin was built without the window (the gui feature)")
     }
 }
@@ -218,7 +274,8 @@ fn fallback(why: &str) -> Result<Window, i32> {
         fd >= 0 && libc::close(fd) == 0
     };
     eprintln!(
-        "edwin: cannot open a window: {why}{}",
+        "{}: cannot open a window: {why}{}",
+        name(),
         if tty { "; using the terminal" } else { "" }
     );
     if tty {
@@ -229,16 +286,32 @@ fn fallback(why: &str) -> Result<Window, i32> {
 }
 
 fn run() -> i32 {
+    let client = is_client();
+    let args = args(client);
+    if client {
+        let edwind = if args.answer {
+            None
+        } else {
+            match attach(&args) {
+                Ok(c) => Some(c),
+                Err(why) => {
+                    eprintln!("edwinclient: {why}");
+                    return 1;
+                }
+            }
+        };
+        natives::set_client(edwind);
+    }
     snapshot::init_v8(&ICU_DATA.0);
     natives::start_clock(Instant::now());
     sys::install_signals();
-    start_daemon_if_asked();
-    let restore = std::env::var_os("EDWIN_NO_SNAPSHOT").is_none() && !will_attach();
+    // The snapshot holds edwin's own boot; edwinclient's is edwind's (Ed.bootServed), so it starts cold.
+    let restore = std::env::var_os("EDWIN_NO_SNAPSHOT").is_none() && !client;
     let mut params = v8::CreateParams::default().external_references(&**natives::external_refs());
     if restore {
         params = params.snapshot_blob(&SNAPSHOT.0[..]);
     }
-    let window = match open_window() {
+    let window = match open_window(&args) {
         Ok(w) => w,
         Err(code) => return code,
     };

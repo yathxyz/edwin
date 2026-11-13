@@ -1,5 +1,5 @@
 //! edwin in a window (DT2), on a virtual X display: keys and the mouse as a person sends them (xdotool), the
-//! close button, and the keystroke-to-screen latency budget.
+//! close button, the keystroke-to-screen latency budget, and edwinclient -c.
 //!
 //! Each test starts its own Xvfb. Without Xvfb or xdotool, or without a GPU adapter (lavapipe will do), the tests
 //! say so and pass.
@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod common;
 
 const BIN: &str = env!("CARGO_BIN_EXE_edwin");
 
@@ -80,7 +82,7 @@ impl Drop for Display {
     }
 }
 
-/// edwin --gui in DIR on display D.
+/// edwin --gui (or edwinclient -c) in DIR on display D.
 struct Edwin<'a> {
     d: &'a Display,
     child: Child,
@@ -90,11 +92,23 @@ struct Edwin<'a> {
 }
 
 impl<'a> Edwin<'a> {
-    /// Runs edwin with ARGS and waits for its window; None when no window could open here (no GPU adapter).
+    /// Runs edwin --gui with ARGS and waits for its window; None when no window could open here (no GPU adapter).
     fn open(d: &'a Display, dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Option<Edwin<'a>> {
+        Edwin::open_program(d, dir, BIN, "--gui", args, env)
+    }
+
+    /// PROGRAM with FLAG (the one asking for a window) and ARGS, as open.
+    fn open_program(
+        d: &'a Display,
+        dir: &Path,
+        program: &str,
+        flag: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Option<Edwin<'a>> {
         let log = dir.join("stderr.log");
-        let child = Command::new(BIN)
-            .arg("--gui")
+        let child = Command::new(program)
+            .arg(flag)
             .args(args)
             .current_dir(dir)
             .env("DISPLAY", &d.name)
@@ -102,7 +116,8 @@ impl<'a> Edwin<'a> {
             .env("HOME", dir)
             .env("XDG_STATE_HOME", dir.join("state"))
             .env("XDG_CONFIG_HOME", dir.join("config"))
-            .env("EDWIN_NO_ATTACH", "1")
+            .env_remove("EDWIN_SOCKET")
+            .env_remove("XDG_RUNTIME_DIR")
             .env("EDWIN_TRACE", "1")
             .envs(env.iter().copied())
             .stdin(Stdio::null())
@@ -290,6 +305,34 @@ fn the_close_button_asks_about_changes() {
     e.typed("y");
     assert_eq!(e.exit(), 0);
     assert_eq!(read(dir.join("a.txt")), "onetwo\n");
+}
+
+/// edwinclient -c: a frame of edwind in a window of its own; what is typed in it reaches edwind's note.
+#[test]
+fn edwinclient_c_is_a_frame_of_edwind_in_a_window() {
+    if !common::have_node() {
+        return;
+    }
+    let Some(d) = Display::start("client") else {
+        return;
+    };
+    let up = common::EdwindUp::start();
+    let dir = workdir("client");
+    let c = common::client(&dir);
+    let note = format!("{}/a.md", up.notes);
+    let Some(mut e) =
+        Edwin::open_program(&d, &dir, &c, "-c", &["--socket", &up.socket, &note], &[])
+    else {
+        return;
+    };
+    e.settle();
+    e.typed("Gotyped in the window").key("Escape");
+    e.typed(":wq").key("Return");
+    assert_eq!(e.exit(), 0, "{}", e.stderr());
+    assert_eq!(
+        up.finish(),
+        r##"{"server":"# Shared page\ntyped in the window\n","disk":"# Shared page\ntyped in the window\n","opened":["a.md"]}"##
+    );
 }
 
 /// The budget (docs/steps.md, step DT2): from a key's arrival to the frame's present, on a 200x50 window full of

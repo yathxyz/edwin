@@ -2,8 +2,9 @@
 
 Edwin is an Emacs-like editor with Evil keys and Org, scripted in its own Scheme. It runs in a terminal, in a
 window and in a web page. **edwind**, its text daemon, is one Node service that owns every text buffer on the
-host; `edwin` and the frames of a web page attach to it, as `emacsclient` frames attach to `emacs --daemon`.
-Workbench is one such page: its page cards are Edwin frames.
+host; `edwinclient` and the frames of a web page attach to it, as `emacsclient` frames attach to
+`emacs --daemon`, while `edwin` is the editor on its own, as `emacs` is. Workbench is one such page: its page
+cards are Edwin frames.
 
 The design and the decisions are in the doc "Edwin as Workbench's text daemon" (decided 2026-10-12): edwind
 replaces the notes index and `sample` of M5 (M5-W1, M5-W2), pages are files in `notesDir`, markdown-mode comes
@@ -16,7 +17,7 @@ live there: the board's block addresses against `scm/address.scm` (`edit-address
 repository's checks too.
 
 ```sh
-nix build .#edwin           # bin/edwin (terminal, -g window), bin/edwin-daemon, bin/edwind
+nix build .#edwin           # bin/edwin (terminal, -g window), bin/edwinclient, bin/edwin-daemon, bin/edwind
 nix build .#edwin-web       # the frame runtime a page serves: index.html, manifest.json, src/*.js, scm/*.scm
 nix flake check -L          # the suites below, the type check (edwin-typecheck) and programs.edwin
 (cd tools && npm ci)        # without nix: typescript, @types/node and fast-check for tsc and the OT suite
@@ -95,8 +96,9 @@ edit.sock client.
 - **Edwin's own defaults**: `socket` defaults to `$XDG_RUNTIME_DIR/edwin/edit.sock` (where `edwin --daemon`
   listens; required when that is unset) and `stateDir` to `~/.local/state/edwin/edwind`, no longer Workbench's
   paths. The default backend is named `anthropic`, like the `models.anthropic` it comes from (it was
-  `workbench`). The build id comes from `EDWIND_BUILD`. A CLI writer is labelled by its session alone. `edwin`
-  no longer falls back to Workbench's socket, and `--remote` must name the socket (`HOST:/PATH`).
+  `workbench`). The build id comes from `EDWIND_BUILD`. A CLI writer is labelled by its session alone. The
+  desktop client (`edwinclient` since 2026-11-13) no longer falls back to Workbench's socket, and `--remote` must
+  name the socket (`HOST:/PATH`).
 - **`edwin-web` ships `manifest.json`**: the runtime's scripts and Scheme sources in load order, with `api` 1,
   so a page that hosts frames reads the list from the runtime it serves instead of keeping its own copy.
   `api` changes only when a page has to load the runtime differently.
@@ -135,5 +137,5 @@ edit.sock client.
 
 ## Build steps
 
-What each step built (E0-E4, DT0-DT4, Hypernotes H1) and the choices it made where the spec left one open or
-had to deviate are in [docs/steps.md](docs/steps.md).
+What each step built (E0-E4, DT0-DT4, edwin and edwinclient, Hypernotes H1) and the choices it made where the
+spec left one open or had to deviate are in [docs/steps.md](docs/steps.md).

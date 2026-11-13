@@ -1359,8 +1359,8 @@ interface EdHooks {
      no directories), and show NAME when it is a directory (null: it is not one, visit it) */
   readFileName?: ((prompt: string) => Promise<string> | null) | null;
   findDirectory?: ((name: string) => unknown) | null;
-  /* the desktop program attached to edwind (native/js/main.ts): PATH is the notes directory or under it, so
-     its files are edwind's and not the program's own */
+  /* edwinclient, the desktop program attached to edwind (native/js/main.ts): PATH is the notes directory or
+     under it, so its files are edwind's and not the program's own */
   servedPath?: ((path: string) => boolean) | null;
   /* the files offered by find-file, and the file visits (stack.ts) */
   recentFiles?: (() => string[]) | null;
@@ -2142,6 +2142,10 @@ interface EdNatives {
   /* why remote socket id closed (ssh's last line), or null */
   sockError(id: number): string | null;
   sockClose(id: number): void;
+  /* edwinclient (the program under that name), and the edwind main.rs attached it to with the connection it
+     opened: null when main.ts is to answer first (--help, --version, a usage error) */
+  client(): boolean;
+  edwind(): [address: string, id: number] | null;
   /* the window: its size and theme (null in a terminal), the model as JSON, an action, the clipboard */
   guiSize(): { cols: number; rows: number; theme?: 'light' | 'dark' } | null;
   guiDraw(json: string): void;
@@ -2279,7 +2283,7 @@ declare var __native: EdNativeLoop;
 declare var EdNativeHost: EdNativeHostModule;
 declare var EdTerm: EdTermApi;
 declare var EdGui: EdGuiApi;
-/* boot.ts: how far the startup got (the snapshot holds 'booted'), the core files; main.ts: attach to edwind */
+/* boot.ts: how far the startup got (the snapshot holds 'booted'), the core files; main.ts: edwinclient's boot is edwind's */
 declare var EdBooted: 'loaded' | 'booted' | undefined;
 declare var EdBootAttach: boolean | undefined;
 declare var EdNativeFiles: string[] | undefined;

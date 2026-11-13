@@ -1,5 +1,6 @@
 //! edwin in a pseudo-terminal: the Vim criteria (exit statuses, $EDITOR use), files as the disk has them,
-//! the terminal's events, signals, the cold start beside the snapshot, and attaching to edwind.
+//! the terminal's events, signals, the cold start beside the snapshot; edwin never attaching to edwind, and
+//! edwinclient, which always does.
 //!
 //! Each test runs the binary on a pty in its own directory, answers the terminal queries as a terminal
 //! would (DA1, background colour), types keys and waits for the exit status.
@@ -8,6 +9,9 @@ use std::ffi::CString;
 use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+mod common;
+use common::{client, have_node, EdwindUp};
 
 const BIN: &str = env!("CARGO_BIN_EXE_edwin");
 
@@ -37,7 +41,6 @@ impl Pty {
                 "XDG_CONFIG_HOME".into(),
                 dir.join("config").display().to_string(),
             ),
-            ("EDWIN_NO_ATTACH".into(), "1".into()),
             ("TERM".into(), "xterm-256color".into()),
             ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
         ];
@@ -500,6 +503,54 @@ fn help_version_and_bad_options_need_no_terminal() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("unknown option --frobnicate"));
+    // edwin never attaches: edwinclient's options, and the removed --standalone, are unknown to it.
+    for opt in ["--socket=/x", "--remote", "-a", "--standalone"] {
+        let o = std::process::Command::new(BIN).arg(opt).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{opt}");
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains(&format!(
+                "unknown option {opt} (edwin never attaches to edwind; edwinclient does)"
+            )),
+            "{err}"
+        );
+    }
+    // edwinclient answers these with no edwind to attach to; -g is edwin's.
+    let d = workdir("client-help");
+    let c = client(&d);
+    let o = std::process::Command::new(&c)
+        .arg("--help")
+        .env_remove("EDWIN_SOCKET")
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    assert!(String::from_utf8_lossy(&o.stdout).starts_with("Usage: edwinclient"));
+    for (args, said) in [
+        (
+            &["-g"][..],
+            "edwinclient: unknown option -g (edwinclient --help lists them)",
+        ),
+        (&["-e"][..], "edwinclient: -e needs a form"),
+        (&["--socket"][..], "edwinclient: --socket needs a path"),
+        (
+            &["--socket=/a", "--remote", "h:/b"][..],
+            "give one of them once",
+        ),
+    ] {
+        let o = std::process::Command::new(&c)
+            .args(args)
+            .env_remove("EDWIN_SOCKET")
+            .env_remove("XDG_RUNTIME_DIR")
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains(said),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
 }
 
 #[test]
@@ -598,79 +649,127 @@ fn the_user_init_runs_and_settings_persist() {
     assert_eq!(read(d.join("p.txt")), "a\nb\nd\n");
 }
 
-fn have_node() -> bool {
-    let ok = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_ok();
-    if !ok {
-        eprintln!("skipped: no node");
+/// edwin is the editor on its own, as emacs is: an edwind answering on $EDWIN_SOCKET and on the user's socket is
+/// not asked, the note is the disk's file, and the user's own init.scm runs.
+#[test]
+fn edwin_never_attaches() {
+    if !have_node() {
+        return;
     }
-    ok
+    let up = EdwindUp::start();
+    let d = workdir("never");
+    std::fs::create_dir_all(d.join("run/edwin")).unwrap();
+    std::os::unix::fs::symlink(&up.socket, d.join("run/edwin/edit.sock")).unwrap();
+    std::fs::create_dir_all(d.join("config/edwin")).unwrap();
+    std::fs::write(
+        d.join("config/edwin/init.scm"),
+        "(define-key evil-normal-state-map \"Q\" 'evil-quit-all-with-error-code)\n",
+    )
+    .unwrap();
+    let b = Path::new(&up.notes).join("b.md");
+    std::fs::write(&b, "b\n").unwrap();
+    let run = d.join("run");
+    let mut t = Pty::spawn(
+        &d,
+        &[b.to_str().unwrap()],
+        &[
+            ("EDWIN_SOCKET", &up.socket),
+            ("XDG_RUNTIME_DIR", run.to_str().unwrap()),
+        ],
+    );
+    t.ready().keys("Aedited").esc().keys(":w\rQ");
+    assert_eq!(t.exit(), 1, "the user's init.scm did not bind Q");
+    assert_eq!(read(&b), "bedited\n");
+    // edwind opened only a.md, for the helper: nothing of edwin's.
+    let after = up.finish();
+    assert!(after.ends_with(r#""opened":["a.md"]}"#), "edwind: {after}");
 }
 
-/// A child killed when dropped, so a failing assertion does not leave edwind running (and the test hanging).
-struct Helper(std::process::Child);
-impl Drop for Helper {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+/// edwinclient with no edwind to attach to says so on one line and exits 1, without taking the terminal or
+/// editing on its own; -a without edwin-daemon beside the program says why it cannot start one.
+#[test]
+fn edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone() {
+    let d = workdir("no-edwind");
+    let c = client(&d);
+    let (run, missing) = (d.join("run"), d.join("missing.sock"));
+    std::fs::create_dir_all(&run).unwrap();
+    let env = [
+        ("XDG_RUNTIME_DIR", run.to_str().unwrap()),
+        ("EDWIN_SOCKET", missing.to_str().unwrap()),
+    ];
+    let mut t = Pty::spawn_program(&d, &c, &["a.txt"], &env);
+    assert_eq!(t.exit(), 1);
+    t.pump(200);
+    let said = format!(
+        "edwinclient: no edwind answers at {} or {}/edwin/edit.sock; start one with `edwin --daemon`, or give -a",
+        missing.display(),
+        run.display()
+    );
+    assert!(contains(&t.out, said.as_bytes()), "{:?}", tail(&t.out));
+    assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
+    assert!(!d.join("a.txt").exists());
+    let mut t = Pty::spawn_program(&d, &c, &["-a", "-c", "a.txt"], &env);
+    assert_eq!(t.exit(), 1);
+    t.pump(200);
+    assert!(
+        contains(
+            &t.out,
+            b"edwinclient: -a needs edwin-daemon beside the edwin program"
+        ),
+        "{:?}",
+        tail(&t.out)
+    );
+    assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
+}
+
+/// edwinclient -e: each form evaluated in edwind as a client of kind cli and its value printed, with no terminal;
+/// a definition stays in edwind's image for the next client; the first error ends the run with status 1.
+#[test]
+fn eval_prints_values_and_stops_at_an_error() {
+    if !have_node() {
+        return;
     }
-}
-
-/// tests/edwind-up.mts: an edwind with one note, a.md. Its socket and notes directory; a line to its standard
-/// input makes it print a.md as edwind and the disk have it, and stop.
-struct EdwindUp {
-    node: Helper,
-    lines: std::io::Lines<std::io::BufReader<std::process::ChildStdout>>,
-    socket: String,
-    notes: String,
-}
-
-impl EdwindUp {
-    fn start() -> EdwindUp {
-        use std::io::BufRead;
-        let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/edwind-up.mts");
-        let mut node = Helper(
-            std::process::Command::new("node")
-                .arg(&helper)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap(),
-        );
-        let mut lines = std::io::BufReader::new(node.0.stdout.take().unwrap()).lines();
-        let info = lines.next().unwrap().unwrap();
-        let field = |k: &str| {
-            info.split(&format!("\"{k}\":\""))
-                .nth(1)
-                .unwrap()
-                .split('"')
-                .next()
-                .unwrap()
-                .to_string()
-        };
-        let (socket, notes) = (field("socket"), field("notes"));
-        EdwindUp {
-            node,
-            lines,
-            socket,
-            notes,
+    let up = EdwindUp::start();
+    let d = workdir("eval");
+    let c = client(&d);
+    let run = |args: &[&str]| {
+        let mut cmd = std::process::Command::new(&c);
+        cmd.arg("--socket")
+            .arg(&up.socket)
+            .args(args)
+            .current_dir(&d)
+            .env_clear()
+            .env("HOME", &d)
+            .env("PATH", std::env::var("PATH").unwrap_or_default());
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+                libc::setsid();
+                Ok(())
+            });
         }
-    }
-    /// a.md as edwind and the disk have it, as JSON; edwind stops.
-    fn finish(mut self) -> String {
-        use std::io::Write;
-        writeln!(self.node.0.stdin.as_mut().unwrap(), "done").unwrap();
-        let after = self.lines.next().unwrap().unwrap();
-        let _ = self.node.0.wait();
-        after
-    }
+        let o = cmd.output().unwrap();
+        let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        (o.status.code(), text(&o.stdout), text(&o.stderr))
+    };
+    let (code, out, err) = run(&["-e", "(+ 1 2)", "\"two\"", "(define edwinclient-test 41)"]);
+    assert_eq!(code, Some(0), "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out:?}");
+    assert_eq!(lines[..2], ["3", "\"two\""]);
+    let (code, out, err) = run(&["--eval", "(+ edwinclient-test 1)", "(car 5)", "(+ 1 1)"]);
+    assert_eq!(code, Some(1));
+    assert_eq!(out, "42\n");
+    assert!(
+        err.starts_with("edwinclient: ") && err.lines().count() == 1,
+        "{err:?}"
+    );
+    up.finish();
 }
 
 /// Attaching to edwind needs Node and edwind's test harness (test/edit-client.mts); skipped without node.
 #[test]
-fn attached_notes_go_through_edwind_and_other_files_stay_local() {
+fn edwinclient_notes_go_through_edwind_and_other_files_stay_local() {
     if !have_node() {
         return;
     }
@@ -680,10 +779,12 @@ fn attached_notes_go_through_edwind_and_other_files_stay_local() {
     std::fs::write(d.join("local.txt"), "local\n").unwrap();
     // The note named through a link to the notes directory and a dot segment: still edwind's note.
     std::os::unix::fs::symlink(&notes, d.join("notes-link")).unwrap();
-    let mut t = Pty::spawn(
+    let c = client(&d);
+    let mut t = Pty::spawn_program(
         &d,
+        &c,
         &["--socket", &socket, "./notes-link/./a.md", "local.txt"],
-        &[("EDWIN_NO_ATTACH", "")],
+        &[],
     );
     t.ready();
     t.pump(500);
@@ -698,11 +799,7 @@ fn attached_notes_go_through_edwind_and_other_files_stay_local() {
     // A save edwind refuses keeps the program open, as Vim stays when :wq cannot write; :q! still leaves.
     let b = Path::new(&notes).join("b.md");
     std::fs::write(&b, "b\n").unwrap();
-    let mut t = Pty::spawn(
-        &d,
-        &["--socket", &socket, "./notes-link/b.md"],
-        &[("EDWIN_NO_ATTACH", "")],
-    );
+    let mut t = Pty::spawn_program(&d, &c, &["--socket", &socket, "./notes-link/b.md"], &[]);
     t.ready();
     t.pump(500);
     t.keys("Gonot written").esc();
@@ -712,7 +809,7 @@ fn attached_notes_go_through_edwind_and_other_files_stay_local() {
     t.keys(":wq\r");
     t.pump(1500);
     t.reap(false);
-    assert!(t.status.is_none(), "edwin quit after a refused save");
+    assert!(t.status.is_none(), "edwinclient quit after a refused save");
     assert!(
         contains(&t.out, b"not quitting"),
         "screen tail: {:?}",
@@ -726,10 +823,9 @@ fn attached_notes_go_through_edwind_and_other_files_stay_local() {
     );
 }
 
-/// The Node options the helpers need here (Node 22 runs .mts files only with --experimental-strip-types).
-/// Attached, dired asks edwind about the notes directory and lists every other directory itself.
+/// In edwinclient, dired asks edwind about the notes directory and lists every other directory itself.
 #[test]
-fn attached_dired_asks_edwind_about_the_notes_only() {
+fn edwinclient_dired_asks_edwind_about_the_notes_only() {
     if !have_node() {
         return;
     }
@@ -737,11 +833,8 @@ fn attached_dired_asks_edwind_about_the_notes_only() {
     let (socket, notes) = (up.socket.clone(), up.notes.clone());
     let d = workdir("attach-dired");
     std::fs::write(d.join("local.txt"), "local\n").unwrap();
-    let mut t = Pty::spawn(
-        &d,
-        &["--socket", &socket, "local.txt"],
-        &[("EDWIN_NO_ATTACH", "")],
-    );
+    let c = client(&d);
+    let mut t = Pty::spawn_program(&d, &c, &["--socket", &socket, "local.txt"], &[]);
     t.ready();
     t.pump(500);
     // The program's own directory: the rename is done here.
@@ -780,6 +873,7 @@ fn attached_dired_asks_edwind_about_the_notes_only() {
     );
 }
 
+/// The Node options the helpers need here (Node 22 runs .mts files only with --experimental-strip-types).
 fn node_options() -> String {
     std::env::var("NODE_OPTIONS").unwrap_or_default()
 }
@@ -800,14 +894,12 @@ fn remote_notes_go_through_ssh() {
     let here = format!("{}/here.md", up.notes);
     std::fs::write(&here, "here\n").unwrap();
     // A note is named as it is under the remote notes directory; ./local.txt is a file on this machine.
-    let mut t = Pty::spawn(
+    let c = client(&d);
+    let mut t = Pty::spawn_program(
         &d,
+        &c,
         &["--remote", &remote, "a.md", "./local.txt", &here],
-        &[
-            ("EDWIN_NO_ATTACH", ""),
-            ("EDWIN_SSH", ssh),
-            ("NODE_OPTIONS", &node_options()),
-        ],
+        &[("EDWIN_SSH", ssh), ("NODE_OPTIONS", &node_options())],
     );
     t.ready();
     t.pump(500);
@@ -823,33 +915,30 @@ fn remote_notes_go_through_ssh() {
     assert_eq!(t.exit(), 0);
     assert_eq!(read(d.join("local.txt")), "localedited\n");
     assert!(!d.join("a.md").exists(), "the note was written here");
-    // ssh's reason when it cannot connect, and exit status 1.
-    let mut t = Pty::spawn(
+    // ssh's reason when it cannot connect, and exit status 1, before the terminal is taken.
+    let mut t = Pty::spawn_program(
         &d,
+        &c,
         &["--remote", "unreachable:/run/edwind.sock", "a.md"],
-        &[
-            ("EDWIN_NO_ATTACH", ""),
-            ("EDWIN_SSH", ssh),
-            ("NODE_OPTIONS", &node_options()),
-        ],
+        &[("EDWIN_SSH", ssh), ("NODE_OPTIONS", &node_options())],
     );
     assert_eq!(t.exit(), 1);
+    t.pump(200);
+    assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
     assert!(
         contains(&t.out, b"Could not resolve hostname unreachable"),
         "screen tail: {:?}",
         tail(&t.out)
     );
     // An address without a socket names no edwind there.
-    let mut t = Pty::spawn(
+    let mut t = Pty::spawn_program(
         &d,
+        &c,
         &["--remote", "box", "a.md"],
-        &[
-            ("EDWIN_NO_ATTACH", ""),
-            ("EDWIN_SSH", ssh),
-            ("NODE_OPTIONS", &node_options()),
-        ],
+        &[("EDWIN_SSH", ssh), ("NODE_OPTIONS", &node_options())],
     );
     assert_eq!(t.exit(), 1);
+    t.pump(200);
     assert!(
         contains(&t.out, b"names no socket"),
         "screen tail: {:?}",
@@ -861,7 +950,7 @@ fn remote_notes_go_through_ssh() {
     );
 }
 
-/// -a: no edwind answers, so edwin starts the user's (edwin-daemon beside the program; here one that runs
+/// edwinclient -a: no edwind answers, so it starts the user's (edwin-daemon beside the program; here one that runs
 /// tests/edwind-at.mts) and attaches to it, as emacsclient -a '' does.
 #[test]
 fn dash_a_starts_the_daemon_and_attaches() {
@@ -872,6 +961,7 @@ fn dash_a_starts_the_daemon_and_attaches() {
     let bin = d.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::copy(BIN, bin.join("edwin")).unwrap();
+    std::os::unix::fs::symlink("edwin", bin.join("edwinclient")).unwrap();
     let helper = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/edwind-at.mts");
     let (run, notes, pidfile) = (d.join("run"), d.join("notes"), d.join("edwind.pid"));
     std::fs::create_dir_all(&notes).unwrap();
@@ -891,10 +981,9 @@ fn dash_a_starts_the_daemon_and_attaches() {
     std::fs::create_dir_all(&run).unwrap();
     let mut t = Pty::spawn_program(
         &d,
-        bin.join("edwin").to_str().unwrap(),
+        bin.join("edwinclient").to_str().unwrap(),
         &["-a", "notes/a.md"],
         &[
-            ("EDWIN_NO_ATTACH", ""),
             ("XDG_RUNTIME_DIR", run.to_str().unwrap()),
             ("NODE_OPTIONS", &node_options()),
         ],

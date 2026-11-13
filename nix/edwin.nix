@@ -1,6 +1,7 @@
 # edwin, Edwin on the desktop (native/, DT1 and DT2): the terminal program (`edwin`, `edwin -nw`), the
-# window (`edwin -g`), and the user's own daemon (`edwin --daemon`, which runs edwind through edwin-daemon), as
-# Emacs ships emacs, emacs --daemon and emacsclient. Each edwin attaches to a running edwind by itself.
+# window (`edwin -g`), the user's own daemon (`edwin --daemon`, which runs edwind through edwin-daemon), and its
+# client (`edwinclient`, a link to edwin, which is the client by that name), as Emacs ships emacs,
+# emacs --daemon and emacsclient. edwin never attaches to an edwind; edwinclient always does.
 {
   lib,
   rustPlatform,
@@ -39,8 +40,8 @@ let
     libxrandr
     libxi
   ];
-  # edwin --daemon: edwind for this user on $XDG_RUNTIME_DIR/edwin/edit.sock, where every edwin looks first
-  # after $EDWIN_SOCKET. The config is EDWIND_CONFIG when set, else one made at each start from
+  # edwin --daemon: edwind for this user on $XDG_RUNTIME_DIR/edwin/edit.sock, where edwinclient looks after
+  # $EDWIN_SOCKET. The config is EDWIND_CONFIG when set, else one made at each start from
   # EDWIN_NOTES_DIR (~/notes): state in ~/.local/state/edwin/edwind, the user's Scheme in ~/.config/edwin.
   # In the background unless --fg (what a systemd user service runs).
   daemon = writeShellScript "edwin-daemon" ''
@@ -105,7 +106,7 @@ rustPlatform.buildRustPackage {
     test -f "$EDWIN_ICU_DATA"
   '';
 
-  # The pseudo-terminal suite (the edwind attach test runs node on test/) and the window's unit tests,
+  # The pseudo-terminal suite (edwinclient's tests run node on test/) and the window's unit tests,
   # which skip without a GPU adapter; tests/gui.rs skips without Xvfb and xdotool.
   nativeCheckInputs = [ nodejs ];
   # The window's renders need a font (and a GPU adapter, which the sandbox lacks, so they skip after it).
@@ -114,6 +115,7 @@ rustPlatform.buildRustPackage {
   '';
 
   postInstall = ''
+    ln -s edwin $out/bin/edwinclient
     ln -s ${daemon} $out/bin/edwin-daemon
     ln -s ${edwind}/bin/edwind $out/bin/edwind
   '';
@@ -123,7 +125,7 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "Edwin on the desktop: a terminal editor and $EDITOR, a window, and a daemon its frames share";
+    description = "Edwin on the desktop: a terminal editor and $EDITOR, a window, and a daemon whose frames edwinclient opens";
     mainProgram = "edwin";
     platforms = [ "x86_64-linux" ];
   };

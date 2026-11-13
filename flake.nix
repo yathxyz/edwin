@@ -9,7 +9,7 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       edwind = pkgs.callPackage ./nix/edwind.nix { };
-      # Edwin on the desktop: edwin (terminal and window), edwin --daemon and edwind (nix/edwin.nix).
+      # Edwin on the desktop: edwin (terminal and window), edwin --daemon, edwinclient and edwind (nix/edwin.nix).
       edwin = pkgs.callPackage ./nix/edwin.nix { inherit edwind; };
       # The frame runtime a web page serves (nix/web.nix): Workbench serves it at /edwin/.
       edwin-web = pkgs.callPackage ./nix/web.nix { };

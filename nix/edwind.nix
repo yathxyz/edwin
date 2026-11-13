@@ -56,7 +56,7 @@ stdenv.mkDerivation {
     chmod 555 $out/bin/edwin-front
   '';
   meta = {
-    description = "edwind, Edwin's text daemon: shared buffers and the Lisp machine for every edwin";
+    description = "edwind, Edwin's text daemon: shared buffers and the Lisp machine for every Edwin frame";
     mainProgram = "edwind";
     platforms = lib.platforms.linux;
   };

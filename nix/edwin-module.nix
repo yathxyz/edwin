@@ -1,6 +1,6 @@
 # programs.edwin: Edwin on a NixOS desktop, as services.emacs is for Emacs. The edwin package on the path, and
-# optionally edwind as a systemd user service (edwin --fg-daemon), so every edwin and `edwin -g` the user starts
-# is a frame of the same buffers, and EDITOR=edwin.
+# optionally edwind as a systemd user service (edwin --fg-daemon), so every edwinclient and `edwinclient -c` the
+# user starts is a frame of the same buffers, and EDITOR=edwin.
 self:
 {
   config,
@@ -19,7 +19,7 @@ let
 in
 {
   options.programs.edwin = {
-    enable = mkEnableOption "Edwin on the desktop (edwin, edwin -g, edwin --daemon)";
+    enable = mkEnableOption "Edwin on the desktop (edwin, edwin -g, edwin --daemon, edwinclient)";
     package = mkOption {
       type = types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.edwin;
@@ -42,7 +42,7 @@ in
     defaultEditor = mkOption {
       type = types.bool;
       default = false;
-      description = "Set EDITOR and VISUAL to edwin (a terminal frame that attaches to the daemon when it runs).";
+      description = "Set EDITOR and VISUAL to edwin (the editor on its own, in the terminal, which never waits on a daemon).";
     };
   };
 

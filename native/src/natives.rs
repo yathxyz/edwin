@@ -576,6 +576,41 @@ fn sock_close(
     sys::sock_close(id);
 }
 
+/* ---------- edwinclient: main.rs found its edwind before V8 started ---------- */
+thread_local! {
+    static CLIENT: Cell<bool> = const { Cell::new(false) };
+    static EDWIND: std::cell::RefCell<Option<(String, u32)>> = const { std::cell::RefCell::new(None) };
+}
+/// The program runs as edwinclient; EDWIND is the edwind it attached to and the connection it opened (none
+/// when main.ts is to answer first: --help, --version, a usage error).
+pub fn set_client(edwind: Option<(String, u32)>) {
+    CLIENT.with(|c| c.set(true));
+    EDWIND.with(|e| *e.borrow_mut() = edwind);
+}
+/// Whether the program runs as edwinclient.
+fn client(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(v8::Boolean::new(scope, CLIENT.with(|c| c.get())).into());
+}
+/// [address, connection] of edwinclient's edwind, or null.
+fn edwind(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    match EDWIND.with(|e| e.borrow().clone()) {
+        Some((addr, id)) => {
+            let a: v8::Local<v8::Value> = v8::String::new(scope, &addr).unwrap().into();
+            let i: v8::Local<v8::Value> = v8::Integer::new_from_unsigned(scope, id).into();
+            rv.set(v8::Array::new_with_elements(scope, &[a, i]).into());
+        }
+        None => rv.set_null(),
+    }
+}
+
 /* ---------- the window (DT2): through the bridge, so this file needs no graphics library ---------- */
 /// {cols, rows, theme} of the open window, or null when the program runs in a terminal.
 fn gui_size(
@@ -658,7 +693,7 @@ macro_rules! natives {
             "remove" remove, "mkdirs" mkdirs, "lstat" lstat, "rename" rename, "copyTree" copy_tree, "removeDir" remove_dir, "readStdin" read_stdin, "ttyOpen" tty_open, "ttyClose" tty_close,
             "ttyWrite" tty_write, "ttyFlush" tty_flush, "ttySize" tty_size, "suspend" suspend, "exit" exit,
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
-            "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard
+            "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind
         )
     };
 }

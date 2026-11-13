@@ -1,91 +1,146 @@
 /* edwin, the program: Edwin in a terminal (DT1), as a Vim or Emacs would run, and a usable $EDITOR; or in a
-   window of its own (DT2, --gui).
+   window of its own (DT2, --gui). Under the name edwinclient it is a frame of an edwind, as emacsclient is of an
+   Emacs daemon; edwin never attaches to one.
 
-     edwin [-nw | -g] [-R] [-a] [--standalone | --socket PATH | --remote HOST:SOCKET] [+LINE] [FILE | -]...
+     edwin [-nw | -g] [-R] [+LINE] [FILE | -]...
+     edwinclient [-t | -c] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [+LINE] [FILE | -]...
+     edwinclient [-a] [--socket PATH | --remote HOST:SOCKET] -e FORM...
 
    The core runs as a model frame (display.ts) drawn by term.ts, or by the window (gui.ts and the Rust side's
    gui/, which opened it before this file runs: N.guiSize() says so). Files are read and written directly
-   (host-native.ts); when an edwind answers on its socket, the notes under its notes directory are opened
-   through it instead, shared with the browser's frames. --remote HOST:SOCKET attaches to the edwind on another machine
-   through ssh (DT3); its notes are then named as they are under its notes directory. The process ends with the status the user asked
-   for: :q, :wq, ZZ and C-x C-c give 0, :cq gives 1 (or its argument), so git commit and sudoedit can tell
-   an abort. C-z suspends to the shell; fg resumes (in the window, C-z iconifies it). */
+   (host-native.ts). edwinclient's edwind is the one main.rs attached to before anything was drawn (N.edwind()); the
+   notes under its notes directory are opened through it, shared with the browser's frames. Through --remote
+   HOST:SOCKET it is the edwind on another machine, reached through ssh (DT3); its notes are then named as they are
+   under its notes directory. -e evaluates each FORM in edwind and prints its value, with no frame. The process
+   ends with the status the user asked for: :q, :wq, ZZ and C-x C-c give 0, :cq gives 1 (or its argument), so git
+   commit and sudoedit can tell an abort. C-z suspends to the shell; fg resumes (in the window, C-z iconifies it). */
 (function () {
 'use strict';
 const N = globalThis.__n, H = globalThis.EdNativeHost, T = globalThis.EdTerm;
-/* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); socket: --socket's path; remote:
-   --remote's HOST:SOCKET. */
-interface MainOpts { files: string[]; line: number | null; readOnly: boolean; standalone: boolean; socket: string | null; remote: string | null; stdin: boolean; help: boolean; version: boolean }
-const VERSION = 'edwin DT3';
-const USAGE = `Usage: edwin [OPTION]... [+LINE] [FILE]...
-Edit FILEs in Edwin, in this terminal or in a window.
+const client = N.client(), NAME = client ? 'edwinclient' : 'edwin';
+/* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); files: the FORMs after -e. */
+interface MainOpts { files: string[]; line: number | null; readOnly: boolean; eval: boolean; stdin: boolean; help: boolean; version: boolean }
+const VERSION = `${NAME} DT3`;
+const LEAVE = `Leave with :q (or :wq, ZZ, C-x C-c); :cq leaves with exit status 1.
+C-z suspends to the shell.`;
+const USAGE = client ? `Usage: edwinclient [OPTION]... [+LINE] [FILE]...
+       edwinclient [OPTION]... -e FORM...
+Edit FILEs in a frame of edwind, Edwin's daemon (edwin --daemon), in this terminal or in a window.
 
-  -nw, --no-window   use this terminal (the default)
-  -g, --gui          open a window (EDWIN_FONT="Family 11" sets its font)
+  -t, -nw, --tty     a frame in this terminal (the default)
+  -c, --create-frame a frame in a window of its own (EDWIN_FONT="Family 11" sets its font)
   --geometry=COLSxROWS  the window's first size in characters (100x36)
+  -e, --eval         the arguments that follow are Scheme forms: evaluate each in edwind and print its value
   -R, --read-only    visit the files read-only
-  --standalone       never attach to edwind
-  --socket PATH      attach to the edwind listening on PATH
-  --remote HOST:SOCKET  attach through ssh to the edwind listening on SOCKET on HOST; FILEs are then
-                     its notes, by their names under its notes directory
-  -a, --start-daemon start your own edwind (edwin --daemon) when none answers, then attach to it
-  --daemon           start your own edwind in the background (--fg-daemon: in the foreground); each edwin
-                     then attaches to it, as emacsclient does to emacs --daemon
+  --socket PATH      the edwind listening on PATH
+  --remote HOST:SOCKET  the edwind listening on SOCKET on HOST, through ssh; FILEs are then its notes, by
+                     their names under its notes directory
+  -a, --start-daemon start your own edwind (edwin --daemon) when none answers
   +LINE, +           start on line LINE of the first file (+ alone: its last line)
   -                  edit what arrives on standard input
   -h, --help         show this text;  --version  show the version
 
-Leave with :q (or :wq, ZZ, C-x C-c); :cq leaves with exit status 1.
-C-z suspends to the shell. Your init file is ~/.config/edwin/init.scm.
+Without --socket or --remote the edwind is the one on $EDWIN_SOCKET, else on $XDG_RUNTIME_DIR/edwin/edit.sock;
+when none answers edwinclient says so and exits with status 1. Notes under edwind's notes directory are its
+buffers, shared with its other frames; every other file is this frame's own.
+${LEAVE} edwind's init file is the one that runs.
+` : `Usage: edwin [OPTION]... [+LINE] [FILE]...
+Edit FILEs in Edwin, in this terminal or in a window. edwin never attaches to edwind; edwinclient does.
+
+  -nw, -t, --no-window  use this terminal (the default)
+  -g, --gui          open a window (EDWIN_FONT="Family 11" sets its font)
+  --geometry=COLSxROWS  the window's first size in characters (100x36)
+  -R, --read-only    visit the files read-only
+  --daemon           start your own edwind in the background (--fg-daemon: in the foreground), for
+                     edwinclient to attach to, as emacsclient does to emacs --daemon
+  +LINE, +           start on line LINE of the first file (+ alone: its last line)
+  -                  edit what arrives on standard input
+  -h, --help         show this text;  --version  show the version
+
+${LEAVE} Your init file is ~/.config/edwin/init.scm.
 `;
 const ESC_MS = Number(N.env('EDWIN_ESC_MS')) || 25;     // how long a lone ESC waits for the rest of a sequence
 const FENCE_MS = 60;                                     // how long the first draw waits for the terminal's replies
 const DRAIN_MS = 5000;                                   // how long quitting waits for edwind to confirm edits
-const REMOTE_MS = 30000;                                 // how long the start waits for a remote edwind to answer
 /* EDWIN_TRACE=1 logs how long each startup step took (in the log file, as console does). */
 const trace = N.env('EDWIN_TRACE') ? ((what: string) => console.log(`startup ${what} ${N.now().toFixed(1)} ms`)) : () => {};
 trace('main');
 
+/* main.rs read the same command line before V8 started, and acted on it only when this finds nothing wrong. */
 function parseArgs(argv: string[]) {
-  const o: MainOpts = { files: [], line: null, readOnly: false, standalone: false, socket: null, remote: null, stdin: false, help: false, version: false };
-  let opts = true;
-  for (const a of argv) {
-    if (opts && a === '--') { opts = false; continue; }
-    if (opts && (a === '-h' || a === '--help')) o.help = true;
-    else if (opts && a === '--version') o.version = true;
-    else if (opts && (a === '-nw' || a === '--no-window' || a === '-t' || a === '-g' || a === '--gui')) { /* main.rs chose */ }
-    else if (opts && /^--geometry=\d+x\d+$/.test(a)) { /* main.rs sized the window */ }
-    else if (opts && (a === '-R' || a === '--read-only')) o.readOnly = true;
-    else if (opts && a === '--standalone') o.standalone = true;
-    else if (opts && (a === '-a' || a === '--start-daemon')) { /* main.rs started it */ }
-    else if (opts && a.startsWith('--socket=')) o.socket = a.slice(9);
-    else if (opts && a === '--socket') o.socket = '';
-    else if (o.socket === '') o.socket = a;
-    else if (opts && a.startsWith('--remote=')) o.remote = a.slice(9);
-    else if (opts && a === '--remote') o.remote = '';
-    else if (o.remote === '') o.remote = a;
-    else if (opts && a === '-') o.stdin = true;
-    else if (opts && /^\+\d*$/.test(a)) o.line = a === '+' ? Infinity : Number(a.slice(1));
-    else if (opts && a.startsWith('-') && a.length > 1) throw new Error(`unknown option ${a} (edwin --help lists them)`);
+  const o: MainOpts = { files: [], line: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
+  let opts = true, named = 0;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (!opts || o.eval) { o.files.push(a); continue; }
+    if (a === '--') opts = false;
+    else if (a === '-h' || a === '--help') o.help = true;
+    else if (a === '--version') o.version = true;
+    else if (/^--geometry=\d+x\d+$/.test(a)) { /* main.rs sized the window */ }
+    else if (a === '-R' || a === '--read-only') o.readOnly = true;
+    else if (a === '-') o.stdin = true;
+    else if (/^\+\d*$/.test(a)) o.line = a === '+' ? Infinity : Number(a.slice(1));
+    else if (!client && ['-nw', '--no-window', '-t', '-g', '--gui'].includes(a)) { /* main.rs chose */ }
+    else if (client && ['-t', '-nw', '--tty', '-c', '--create-frame', '-a', '--start-daemon'].includes(a)) { /* main.rs chose, or started it */ }
+    else if (client && (a === '-e' || a === '--eval')) o.eval = true;
+    else if (client && /^--(socket|remote)(=|$)/.test(a)) {
+      const v = a.includes('=') ? a.slice(a.indexOf('=') + 1) : argv[++i];
+      if (!v) throw new Error(`${a.replace(/=.*/, '')} needs ${a.startsWith('--socket') ? 'a path' : 'a host'}`);
+      if (++named > 1) throw new Error('--socket and --remote name one edwind; give one of them once');
+    }
+    else if (a.startsWith('-') && a.length > 1) {
+      const theirs = !client && /^(-a|-c|-e|--(standalone|socket|remote|start-daemon|create-frame|eval)(=.*)?)$/.test(a);
+      throw new Error(`unknown option ${a} (${theirs ? 'edwin never attaches to edwind; edwinclient does' : NAME + ' --help lists them'})`);
+    }
     else o.files.push(a);
   }
-  if (o.socket === '') throw new Error('--socket needs a path');
-  if (o.remote === '') throw new Error('--remote needs a host');
-  if (o.remote !== null && o.socket !== null) throw new Error('--remote and --socket name two edwinds; give one');
+  if (o.eval && !o.files.length && !o.help && !o.version) throw new Error('-e needs a form');
   return o;
 }
 
 let opts: MainOpts;
-try { opts = parseArgs(N.args()); } catch (e) { N.eprint('edwin: ' + e.message + '\n'); N.exit(2); return; }
+try { opts = parseArgs(N.args()); } catch (e) { N.eprint(`${NAME}: ${e.message}\n`); N.exit(2); return; }
 if (opts.help) { N.print(USAGE); N.exit(0); return; }
 if (opts.version) { N.print(VERSION + '\n'); N.exit(0); return; }
+/* edwinclient's edwind: main.rs attached to it, or said why not and left. */
+const edwind = client ? N.edwind() : null;
+if (client && !edwind) { N.eprint('edwinclient: no edwind was attached\n'); N.exit(70); return; }
+if (opts.eval) { evaluate(opts.files, edwind!); return; }
+
+/* edwinclient -e: each form in turn, as a client of kind cli, whose failing form gives its error at once (a frame's
+   would wait in the debugger). Its printed value goes to stdout, one line a form; the first error ends the run
+   with status 1. A definitional form enters edwind's image log as one typed in a frame does. */
+function evaluate(forms: string[], [, id]: [string, number]) {
+  let n = 0, done = false;
+  const send = (m: object) => N.sockSend(id, JSON.stringify(m));
+  const end = (code: number, why?: string) => { if (done) return; done = true; if (why) N.eprint(`edwinclient: ${why}\n`); N.exit(code); };
+  const next = () => { if (n === forms.length) end(0); else send({ t: 'call', rid: 'e' + n, form: forms[n], ctx: {} }); };
+  globalThis.__native.handlers.sock = (sid, line) => {
+    if (sid !== id || done) return;
+    if (line === null) { end(1, 'edwind closed the connection' + (N.sockError(id) ? ': ' + N.sockError(id) : '')); return; }
+    const m: { t: string; rid?: string; msg?: string; value?: unknown; error?: { report: string } } = JSON.parse(line);
+    if (m.t === 'ping') send({ t: 'pong', rid: m.rid });
+    else if (m.t === 'welcome') next();
+    else if (m.t === 'error') end(1, m.msg || 'edwind refused the request');
+    else if (m.t === 'result' && m.rid === 'e' + n) {
+      if (m.error) { end(1, m.error.report); return; }
+      N.print(String(m.value) + '\n');
+      n++; next();
+    }
+  };
+  globalThis.__native.handlers.signal = name => {
+    const code = ({ HUP: 1, INT: 130, QUIT: 131, TERM: 143 } as Record<string, number>)[name];
+    if (code) end(code);
+  };
+  send({ t: 'hello', proto: 1, cid: crypto.randomUUID().replace(/-/g, ''), kind: 'cli', device: 'edwinclient', caps: {} });
+}
 
 /* Standard input as a buffer (edwin -), read before the terminal is taken. */
 const stdinText = opts.stdin ? N.readStdin() : null;
-/* The window main.rs opened (edwin --gui), else the terminal. */
+/* The window main.rs opened (edwin -g, edwinclient -c), else the terminal. */
 const gui = N.guiSize() !== null;
 if (gui) N.load('native/gui');
-if (!gui && !N.ttyOpen()) { N.eprint('edwin: no terminal to draw on (/dev/tty)\n'); N.exit(1); return; }
+if (!gui && !N.ttyOpen()) { N.eprint(`${NAME}: no terminal to draw on (/dev/tty)\n`); N.exit(1); return; }
 const screen = gui ? globalThis.EdGui.screen() : null;
 
 /* ---------- the terminal ---------- */
@@ -110,32 +165,12 @@ let fenceDone: (() => void) | null = null;
 const fence = new Promise<void>(r => { fenceDone = r; setTimeout(r, gui ? 0 : FENCE_MS); });
 if (!gui) { out(enc!.enter()); N.ttyFlush(); }
 
-/* --remote HOST:SOCKET as the socket address the native side takes: ssh://HOST/SOCKET. */
-const remoteAddress = (r: string) => { const i = r.indexOf(':/'); return 'ssh://' + (i < 0 ? r : r.slice(0, i) + r.slice(i + 1)); };
 const isRemote = (p: string) => p.startsWith('ssh://');
-/* The connection that proved a remote edwind answers, kept for the first connection of the boot (one ssh). */
-let probeId: number | null = null;
-function edwindSocket() {
-  if (N.env('EDWIN_NO_ATTACH')) return null;
-  if (opts.standalone) return null;
-  const user = envOf('XDG_RUNTIME_DIR') ? envOf('XDG_RUNTIME_DIR') + '/edwin/edit.sock' : '';   // edwin --daemon's
-  const named = opts.remote !== null ? remoteAddress(opts.remote) : opts.socket;
-  const cands = named ? [named] : [envOf('EDWIN_SOCKET'), user].filter(Boolean);
-  for (const p of cands) {
-    try {
-      if (isRemote(p)) { probeId = N.sockOpen(p, REMOTE_MS); return p; }
-      const id = N.sockOpen(p); N.sockClose(id); return p;
-    } catch (e) { if (named || isRemote(p)) throw new Error(`cannot attach to edwind at ${e.message}`); /* "PATH: why" */ }
-  }
-  return null;
-}
+/* The connection main.rs opened to edwind: the first of the boot (for a remote edwind, the one ssh). */
+let firstId: number | null = edwind ? edwind[1] : null;
 
-/* ---------- the core: in the startup snapshot already (boot.ts), or loaded now ---------- */
-let sock: string | null = null;
-try { sock = edwindSocket(); } catch (e) { if (!gui) { out(enc!.leave()); N.ttyFlush(); N.ttyClose(); } N.eprint('edwin: ' + e.message + '\n'); N.exit(1); return; }
-/* The shell restores the snapshot only when no edwind answered; one that answers since is not used. */
-if (!globalThis.EdBooted) { globalThis.EdBootAttach = !!sock; N.load('native/boot'); trace('core loaded'); }
-else sock = null;
+/* ---------- the core: in the startup snapshot already (boot.ts, edwin's), or loaded now (edwinclient's) ---------- */
+if (!globalThis.EdBooted) { globalThis.EdBootAttach = client; N.load('native/boot'); trace('core loaded'); }
 const host = globalThis.EdHost;
 host.init!();
 globalThis.__native.thaw();
@@ -159,7 +194,7 @@ async function quit(code: number) {
   }
   try { host.suspend!(); } catch (e) { console.error(e); }
   leaveTerminal();
-  if (attached && attached.unconfirmed) N.eprint(`edwin: edwind had not confirmed ${attached.unconfirmed} edit(s) when edwin quit\n`);
+  if (attached && attached.unconfirmed) N.eprint(`edwinclient: edwind had not confirmed ${attached.unconfirmed} edit(s) when edwinclient quit\n`);
   N.exit(code);
 }
 Ed.hooks.killEmacs = code => { quit(code); };
@@ -228,7 +263,7 @@ globalThis.__native.handlers.signal = name => {
   }
 };
 
-/* ---------- edwind: attach when one answers ---------- */
+/* ---------- edwind: edwinclient's frame is one of its clients ---------- */
 let attached: { socket: string; unconfirmed: number } | null = null;
 const sockets = new Map<number, EdTransport>();
 globalThis.__native.handlers.sock = (id, line) => {
@@ -247,7 +282,7 @@ globalThis.__native.handlers.sock = (id, line) => {
 const transport = (path: string) => (): EdTransport => {
   const ws: EdTransport = { onopen: null, onmessage: null, onclose: null, onerror: null, readyState: 0 };
   let id: number;
-  try { if (probeId !== null) { id = probeId; probeId = null; } else id = N.sockOpen(path); } catch (e) { setTimeout(() => { if (ws.onerror) ws.onerror(e); if (ws.onclose) ws.onclose({ code: 1006 }); }, 0); return ws; }
+  try { if (firstId !== null) { id = firstId; firstId = null; } else id = N.sockOpen(path); } catch (e) { setTimeout(() => { if (ws.onerror) ws.onerror(e); if (ws.onclose) ws.onclose({ code: 1006 }); }, 0); return ws; }
   sockets.set(id, ws);
   ws.send = s => N.sockSend(id, s);
   ws.close = () => { sockets.delete(id); N.sockClose(id); ws.readyState = 3; };
@@ -283,7 +318,8 @@ const remoteNote = (name: string) => remote && notesRoot && !/^(\/|~|\.\.?(\/|$)
 async function start() {
   Ed.reloadPersistent();
   L.set('load-path', L.listOf(host.loadPath));
-  if (sock) {
+  if (edwind) {
+    const sock = edwind[0];
     remote = isRemote(sock);
     await Ed.bootServed({ transport: transport(sock), device: gui ? 'window' : 'terminal' });
     attached = { socket: sock, unconfirmed: 0 };
@@ -336,5 +372,5 @@ async function start() {
   Ed.render();
   if (N.env('EDWIN_TRACE')) setTimeout(() => trace('first draw'), 0);
 }
-start().catch(e => { console.error(e); leaveTerminal(); N.eprint('edwin: ' + (e && e.stack || e) + '\n'); N.exit(70); });
+start().catch(e => { console.error(e); leaveTerminal(); N.eprint(`${NAME}: ` + (e && e.stack || e) + '\n'); N.exit(70); });
 })();
