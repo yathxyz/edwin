@@ -736,7 +736,10 @@ fn edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone() {
     let listener = std::os::unix::net::UnixListener::bind(&mute).unwrap();
     std::thread::spawn(move || listener.incoming().for_each(drop));
     let mute = mute.to_str().unwrap();
-    for args in [&["--socket", mute, "a.txt"][..], &["--socket", mute, "-e", "1"]] {
+    for args in [
+        &["--socket", mute, "a.txt"][..],
+        &["--socket", mute, "-e", "1"],
+    ] {
         let mut t = Pty::spawn_program(&d, &c, args, &env);
         assert_eq!(t.exit(), 1, "{args:?}");
         t.pump(200);
