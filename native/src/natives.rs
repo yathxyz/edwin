@@ -536,12 +536,7 @@ fn sock_open(
     mut rv: v8::ReturnValue,
 ) {
     let p = arg_str(scope, &args, 0);
-    // A second argument (ms) waits for a remote edwind to answer before returning.
-    let wait = args
-        .get(1)
-        .is_number()
-        .then(|| args.get(1).uint32_value(scope).unwrap_or(0));
-    match sys::sock_open(&p, wait) {
+    match sys::sock_open(&p, None) {
         Ok(id) => rv.set(v8::Integer::new(scope, id as i32).into()),
         Err(e) => throw(scope, &format!("{p}: {e}")),
     }

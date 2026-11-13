@@ -515,6 +515,19 @@ fn help_version_and_bad_options_need_no_terminal() {
             "{err}"
         );
     }
+    let o = std::process::Command::new(BIN)
+        .args(["-g", "--geometry=99999999999x1"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--geometry wants COLSxROWS"));
+    // An argument that is not UTF-8 is a usage error, not a crash.
+    let o = std::process::Command::new(BIN)
+        .arg(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"\xff"))
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("edwin: not UTF-8"));
     // edwinclient answers these with no edwind to attach to; -g is edwin's.
     let d = workdir("client-help");
     let c = client(&d);
@@ -532,6 +545,16 @@ fn help_version_and_bad_options_need_no_terminal() {
             "edwinclient: unknown option -g (edwinclient --help lists them)",
         ),
         (&["-e"][..], "edwinclient: -e needs a form"),
+        (&["a.txt", "-e"][..], "edwinclient: -e needs a form"),
+        // main.rs reads --geometry as main.ts does: neither a sign nor a number past a u32.
+        (
+            &["--geometry=+5x5", "a.txt"][..],
+            "edwinclient: --geometry wants COLSxROWS, not +5x5",
+        ),
+        (
+            &["-c", "--geometry=99999999999x1", "a.txt"][..],
+            "edwinclient: --geometry wants COLSxROWS, not 99999999999x1",
+        ),
         (&["--socket"][..], "edwinclient: --socket needs a path"),
         (
             &["--socket=/a", "--remote", "h:/b"][..],
@@ -708,6 +731,34 @@ fn edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone() {
     assert!(contains(&t.out, said.as_bytes()), "{:?}", tail(&t.out));
     assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
     assert!(!d.join("a.txt").exists());
+    // A socket that accepts but is no edwind (it closes each connection unanswered) does not answer either.
+    let mute = d.join("mute.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&mute).unwrap();
+    std::thread::spawn(move || listener.incoming().for_each(drop));
+    let mute = mute.to_str().unwrap();
+    for args in [&["--socket", mute, "a.txt"][..], &["--socket", mute, "-e", "1"]] {
+        let mut t = Pty::spawn_program(&d, &c, args, &env);
+        assert_eq!(t.exit(), 1, "{args:?}");
+        t.pump(200);
+        let said = format!(
+            "edwinclient: cannot attach to edwind at {mute}: it closed the connection without answering"
+        );
+        assert!(contains(&t.out, said.as_bytes()), "{:?}", tail(&t.out));
+        assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
+    }
+    // Neither socket is known: the message says how to have one.
+    let o = std::process::Command::new(&c)
+        .arg("a.txt")
+        .env_remove("EDWIN_SOCKET")
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("start one with `edwin --daemon`"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     let mut t = Pty::spawn_program(&d, &c, &["-a", "-c", "a.txt"], &env);
     assert_eq!(t.exit(), 1);
     t.pump(200);
@@ -951,7 +1002,9 @@ fn remote_notes_go_through_ssh() {
 }
 
 /// edwinclient -a: no edwind answers, so it starts the user's (edwin-daemon beside the program; here one that runs
-/// tests/edwind-at.mts) and attaches to it, as emacsclient -a '' does.
+/// tests/edwind-at.mts) and attaches to it, as emacsclient -a '' does. When edwin-daemon refuses because an edwind
+/// started meanwhile answers (BEATEN: the stand-in starts one and fails, as the real one does when another
+/// edwinclient -a was first), edwinclient attaches to that one.
 #[test]
 fn dash_a_starts_the_daemon_and_attaches() {
     if !have_node() {
@@ -967,10 +1020,11 @@ fn dash_a_starts_the_daemon_and_attaches() {
     std::fs::create_dir_all(&notes).unwrap();
     std::fs::write(notes.join("a.md"), "# Mine\n").unwrap();
     let script = format!(
-        "#!/bin/sh\nmkdir -p -m 700 \"$XDG_RUNTIME_DIR/edwin\"\nnohup node {} \"$XDG_RUNTIME_DIR/edwin/edit.sock\" {} {} </dev/null >/dev/null 2>&1 &\n",
+        "#!/bin/sh\nmkdir -p -m 700 \"$XDG_RUNTIME_DIR/edwin\"\nnohup node {} \"$XDG_RUNTIME_DIR/edwin/edit.sock\" {} {p} </dev/null >/dev/null 2>&1 &\n\
+         [ -z \"$BEATEN\" ] && exit 0\nwhile [ ! -s {p} ]; do sleep 0.05; done\necho 'edwin: an edwind already runs' >&2; exit 1\n",
         helper.display(),
         notes.display(),
-        pidfile.display()
+        p = pidfile.display()
     );
     std::fs::write(bin.join("edwin-daemon"), script).unwrap();
     std::fs::set_permissions(
@@ -1019,4 +1073,28 @@ fn dash_a_starts_the_daemon_and_attaches() {
         log.contains(r#""kind":"frame","device":"terminal""#),
         "edwind log: {log}"
     );
+    std::fs::remove_file(&pidfile).unwrap();
+    let o = std::process::Command::new(bin.join("edwinclient"))
+        .args(["-a", "-e", "(+ 1 2)"])
+        .current_dir(&d)
+        .env_clear()
+        .env("HOME", &d)
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("XDG_RUNTIME_DIR", &run)
+        .env("NODE_OPTIONS", node_options())
+        .env("BEATEN", "1")
+        .output()
+        .unwrap();
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if pid > 0 {
+        // SAFETY: a signal to the helper this test started.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("an edwind already runs"), "{err}");
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "3\n");
 }

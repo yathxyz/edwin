@@ -2136,8 +2136,7 @@ interface EdNatives {
   /* stop until SIGCONT */
   suspend(): void;
   exit(code: number): void;
-  /* waitMs: wait that long for a remote (ssh://) edwind to answer before returning */
-  sockOpen(path: string, waitMs?: number): number;
+  sockOpen(path: string): number;
   sockSend(id: number, s: string): void;
   /* why remote socket id closed (ssh's last line), or null */
   sockError(id: number): string | null;

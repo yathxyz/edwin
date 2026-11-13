@@ -135,7 +135,13 @@ impl<'a> Edwin<'a> {
         let deadline = Instant::now() + Duration::from_secs(20);
         while e.win.is_empty() {
             if let Ok(Some(_)) = e.child.try_wait() {
-                eprintln!("no window here: {}", e.stderr());
+                // No window can open here (no GPU adapter): skipped. Any other early end is a failure.
+                let err = e.stderr();
+                assert!(
+                    err.contains("cannot open a window"),
+                    "{program} ended before its window appeared: {err}"
+                );
+                eprintln!("no window here: {err}");
                 return None;
             }
             assert!(

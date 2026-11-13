@@ -311,24 +311,30 @@ pub const SSH_PREFIX: &str = "ssh://";
 
 /// Open edwind's socket at PATH. A remote one runs `ssh -W SOCKET DEST` with its standard input and output on
 /// one end of a socket pair, so the rest of this file sees one more Unix socket. With WAIT (ms) this returns once
-/// edwind has answered through it, or fails with ssh's reason; without, the connection is made while the loop
-/// runs and a failure is a close (sock_error says why).
+/// edwind has answered through it, or fails with the reason (ssh's, for a remote one); without, a remote
+/// connection is made while the loop runs and a failure is a close (sock_error says why).
 pub fn sock_open(path: &str, wait: Option<u32>) -> Result<u32, String> {
-    let (stream, ssh) = match path.strip_prefix(SSH_PREFIX) {
+    let (stream, mut ssh) = match path.strip_prefix(SSH_PREFIX) {
         Some(spec) => {
-            let (stream, mut ssh) = ssh_spawn(spec)?;
-            if let Some(ms) = wait {
-                if let Err(e) = ssh_probe(&stream, ms) {
-                    let why = if e.is_empty() { ssh.reason() } else { e };
-                    let _ = ssh.child.kill();
-                    let _ = ssh.child.wait();
-                    return Err(why);
-                }
-            }
+            let (stream, ssh) = ssh_spawn(spec)?;
             (stream, Some(ssh))
         }
         None => (UnixStream::connect(path).map_err(|e| e.to_string())?, None),
     };
+    if let Some(ms) = wait {
+        if let Err(e) = probe(&stream, ms) {
+            return Err(match &mut ssh {
+                Some(ssh) => {
+                    let why = if e.is_empty() { ssh.reason() } else { e };
+                    let _ = ssh.child.kill();
+                    let _ = ssh.child.wait();
+                    why
+                }
+                None if e.is_empty() => "it closed the connection without answering".into(),
+                None => e,
+            });
+        }
+    }
     stream.set_nonblocking(true).map_err(|e| e.to_string())?;
     Ok(ST.with(|st| {
         let mut st = st.borrow_mut();
@@ -402,10 +408,10 @@ fn ssh_spawn(spec: &str) -> Result<(UnixStream, Ssh), String> {
     Ok((ours, Ssh { child, stderr }))
 }
 
-/// Wait up to MS for edwind to answer through ssh: a ping before hello draws an error reply, which proves the
-/// whole path and leaves the connection as new (edwind takes hello next). Err("") when ssh gave up (its reason
-/// is in its standard error), else what went wrong here.
-fn ssh_probe(stream: &UnixStream, ms: u32) -> Result<(), String> {
+/// Wait up to MS for edwind to answer (through ssh, for a remote one): a ping before hello draws an error reply,
+/// which proves the whole path and leaves the connection as new (edwind takes hello next). Err("") when the
+/// other end closed (ssh gave up: its reason is in its standard error), else what went wrong here.
+fn probe(stream: &UnixStream, ms: u32) -> Result<(), String> {
     let mut s = stream;
     s.write_all(b"{\"t\":\"ping\",\"rid\":\"edwin-probe\"}\n")
         .map_err(|_| String::new())?;

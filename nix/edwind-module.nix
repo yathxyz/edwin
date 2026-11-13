@@ -1,8 +1,8 @@
 # services.edwind: edwind as a system service, the server counterpart of programs.edwin's user daemon. One
-# edwind owns a notes directory and serves every client on its socket: edwin and `edwin -g` (locally or over
-# ssh), Workbench's wb-web and wb, and edwin-front (services.edwind.front, edwin-web on its own origin). Clients
-# that need it order themselves after edwind.service; edwind needs none of them (without hubSocket, only processes
-# are unavailable).
+# edwind owns a notes directory and serves every client on its socket: edwinclient and `edwinclient -c` (locally
+# or over ssh), Workbench's wb-web and wb, and edwin-front (services.edwind.front, edwin-web on its own origin).
+# Clients that need it order themselves after edwind.service; edwind needs none of them (without hubSocket, only
+# processes are unavailable).
 self:
 {
   config,

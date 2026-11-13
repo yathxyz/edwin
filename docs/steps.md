@@ -383,10 +383,10 @@ edwind does with them) are edited from the laptop with the laptop's own editor; 
 edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon. Both are edwinclient's since 2026-11-13
 ("edwin and edwinclient", below).
 
-- **`--remote HOST[:SOCKET]`** attaches through ssh: `edwinclient -c --remote ex44 journal.md`. The program runs
-  `ssh -o BatchMode=yes -W SOCKET ssh://HOST` (SOCKET is Workbench's, `/run/workbench-edit/edit.sock`, unless
-  given) with ssh's standard input and output on one end of a socket pair, so the rest of the program sees one more
-  Unix socket and the protocol is unchanged. HOST is anything ssh takes (`user@host`, `host:port`, a `Host` of
+- **`--remote HOST:SOCKET`** attaches through ssh:
+  `edwinclient -c --remote ex44:/run/workbench-edit/edit.sock journal.md`. The program runs
+  `ssh -o BatchMode=yes -W SOCKET ssh://HOST` with ssh's standard input and output on one end of a socket pair, so
+  the rest of the program sees one more Unix socket and the protocol is unchanged. HOST is anything ssh takes (`user@host`, `host:port`, a `Host` of
   `~/.ssh/config`). BatchMode: ssh never asks on the terminal the frame holds, so keys come from the agent (or a
   ControlMaster connection, which also makes each connection cheap). edwind's socket directory is mode 0700, so the
   ssh user is the one `services.workbench.user` names; OpenSSH forwards Unix sockets by default
@@ -397,7 +397,7 @@ edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon. Both ar
   here, and so is a full path, even when this machine has a notes directory at the same path. Inside, a full path under the remote notes directory is a note there; other names are files on this
   machine (DT1).
 - **The connection.** The start waits up to 30 s for the remote edwind to answer (a ping before hello, which
-  draws an error reply and proves the whole path) and otherwise exits with status 1 and ssh's reason ("Could not
+  draws an error reply and proves the whole path; since 2026-11-13 a local edwind is asked the same way) and otherwise exits with status 1 and ssh's reason ("Could not
   resolve hostname", "open failed: connect failed"), before the terminal or a window is taken. After that, a dropped connection is retried while the
   editor runs, as the browser's frames retry: the frame keeps its replica, edits wait in its queue, and ssh's
   reason goes in the log (`~/.local/state/edwin/edwin.log`). Remote latency touches only acknowledgements.
@@ -431,29 +431,39 @@ split is in Edwin itself, on every host, and the terminal stays the default of b
   `--socket`, `--remote`, `-a` and `EDWIN_NO_ATTACH` are gone; given one of edwinclient's options, edwin says it is
   edwinclient's. `programs.edwin.defaultEditor` still sets `EDITOR=edwin`, the editor that never waits on a daemon.
 - **edwinclient is emacsclient.** It always attaches: to the edwind `--socket PATH` or `--remote HOST:SOCKET`
-  names, else to the first of `$EDWIN_SOCKET` and `$XDG_RUNTIME_DIR/edwin/edit.sock` that answers. Its frame is the
-  one DT1, DT3 and DT4 describe (notes are edwind's, every other file its own, a cold start). The edwind is found
-  before anything is drawn: when none answers, edwinclient says so in one line, naming the sockets it tried and
-  `edwin --daemon` or `-a`, and exits with status 1 without taking the terminal or opening a window. It never
-  edits on its own. `-a` (`--start-daemon`) starts the user's edwind when none answers (DT3), and when that fails
-  says why and exits with status 1; it has nothing to start for an edwind that `--socket` or `--remote` names.
+  names, else to the first of `$EDWIN_SOCKET` and `$XDG_RUNTIME_DIR/edwin/edit.sock` that answers; a remote
+  `$EDWIN_SOCKET` (`ssh://…`) that does not answer ends the search with ssh's reason, as `--remote` would. Its frame
+  is the one DT1, DT3 and DT4 describe (notes are edwind's, every other file its own, a cold start). The edwind is
+  found before anything is drawn: it answers DT3's ping within 30 s, local or remote, so a socket that accepts and
+  says nothing, or closes, is no edwind. When none answers, edwinclient says so in one line and exits
+  with status 1 without taking the terminal or opening a window: an edwind `--socket` or `--remote` names, with
+  why; else the sockets it tried and `edwin --daemon` or `-a` (with neither variable set, `--socket` or
+  `XDG_RUNTIME_DIR` and `edwin --daemon`). It never edits on its own. `-a` (`--start-daemon`) starts the user's
+  edwind when none answers (DT3), and when that fails says why and exits with status 1; when `edwin-daemon`
+  refuses because an edwind answers by then (another `edwinclient -a` started it), edwinclient attaches to that
+  one. `-a` has nothing to start for an edwind that `--socket`, `--remote` or a remote `$EDWIN_SOCKET` names.
   `-t` (`-nw`, `--tty`) asks for a terminal frame, the default, and `-c` (`--create-frame`) for a window, which
   `--geometry` sizes; `-g` is edwin's.
-- **`-e`, `--eval`.** The arguments after it are Scheme forms, not files. edwinclient says hello as a client of
-  kind `cli` (device `edwinclient`) and sends the forms as `call`s, one after another; a cli client's failing form
-  answers with its error at once instead of waiting in the debugger. Each value goes to standard output as `write`
-  prints it, one line a form. The first error goes to standard error and ends the run with status 1; the forms
-  after it are not sent. No frame is made and the terminal is not touched. It works with `--socket`, `--remote`
-  and `-a`. A definitional form sent this way (`define`, `set!`, `define-key`, `add-hook!`, ...) enters edwind's
-  image log, as `cli@edwinclient`, and reaches every frame, as one typed in a frame does.
+- **`-e`, `--eval`.** The arguments after it are Scheme forms, not files (a FILE before it is one too, as
+  emacsclient takes it), and at least one must follow it. edwinclient says hello as a client of kind `cli` (device
+  `edwinclient`) and sends the forms as `call`s, one after another; a cli client's failing form answers with its
+  error at once instead of waiting in the debugger. Each value goes to standard output as `write` prints it,
+  followed by a newline: one line a form, unless the printed value holds a newline itself (a symbol's name can).
+  The first error goes to standard error and ends the run with status 1; the forms after it are not sent. No frame
+  is made and the terminal is not touched. It works with `--socket`, `--remote` and `-a`. A definitional form sent
+  this way (`define`, `set!`, `define-key`, `add-hook!`, ...) enters edwind's image log, as `cli@edwinclient`, and
+  reaches every frame, as one typed in a frame does.
 - **Not taken from emacsclient:** reusing a frame that exists, and `-n` (`--no-wait`). Every edwinclient is a frame
   of its own and blocks until it ends, as `$EDITOR` wants. What an `-e` form writes to its output port is not
   printed, only its value.
 - **Checked by** the pseudo-terminal suite: `edwin_never_attaches` (an edwind answers on both sockets; the user's
   init binds a key, the note is written to the disk, and edwind opens nothing for edwin),
-  `edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone` (also `-a` without `edwin-daemon`),
-  `eval_prints_values_and_stops_at_an_error` (a definition read back by a second edwinclient),
-  `help_version_and_bad_options_need_no_terminal`, and DT1's and DT3's attached tests, which run edwinclient now.
+  `edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone` (also a socket that closes unanswered,
+  neither variable set, and `-a` without `edwin-daemon`), `dash_a_starts_the_daemon_and_attaches` (also an
+  `edwin-daemon` that refuses because an edwind started meanwhile), `eval_prints_values_and_stops_at_an_error` (a
+  definition read back by a second edwinclient), `help_version_and_bad_options_need_no_terminal` (also the
+  command lines main.rs and main.ts must read alike), and DT1's and DT3's attached tests, which run edwinclient
+  now. The package's install check runs `bin/edwinclient` through its link.
   The window suite's `edwinclient_c_is_a_frame_of_edwind_in_a_window` needs Xvfb, as DT2's tests do. By hand on
   ex44 with the package and a throwaway home: `edwin --daemon`, `edwinclient -e` (the definition was in the image
   log as `cli`), `edwinclient` with no daemon, and `edwin` beside the running daemon (edwind saw no connection).

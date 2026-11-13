@@ -18,7 +18,8 @@
 'use strict';
 const N = globalThis.__n, H = globalThis.EdNativeHost, T = globalThis.EdTerm;
 const client = N.client(), NAME = client ? 'edwinclient' : 'edwin';
-/* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); files: the FORMs after -e. */
+/* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); files: with -e, the FORMs (every
+   argument after it, and a FILE before it too, as emacsclient takes them). */
 interface MainOpts { files: string[]; line: number | null; readOnly: boolean; eval: boolean; stdin: boolean; help: boolean; version: boolean }
 const VERSION = `${NAME} DT3`;
 const LEAVE = `Leave with :q (or :wq, ZZ, C-x C-c); :cq leaves with exit status 1.
@@ -69,14 +70,19 @@ trace('main');
 /* main.rs read the same command line before V8 started, and acted on it only when this finds nothing wrong. */
 function parseArgs(argv: string[]) {
   const o: MainOpts = { files: [], line: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
-  let opts = true, named = 0;
+  let opts = true, named = 0, forms = 0;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (!opts || o.eval) { o.files.push(a); continue; }
+    if (o.eval) { o.files.push(a); forms++; continue; }
+    if (!opts) { o.files.push(a); continue; }
     if (a === '--') opts = false;
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a === '--version') o.version = true;
-    else if (/^--geometry=\d+x\d+$/.test(a)) { /* main.rs sized the window */ }
+    else if (a.startsWith('--geometry=')) {
+      /* main.rs sized the window, from digits only, each within a u32, as here. */
+      const g = /^(\d+)x(\d+)$/.exec(a.slice(11));
+      if (!g || Number(g[1]) > 0xffffffff || Number(g[2]) > 0xffffffff) throw new Error(`--geometry wants COLSxROWS, not ${a.slice(11)}`);
+    }
     else if (a === '-R' || a === '--read-only') o.readOnly = true;
     else if (a === '-') o.stdin = true;
     else if (/^\+\d*$/.test(a)) o.line = a === '+' ? Infinity : Number(a.slice(1));
@@ -94,7 +100,7 @@ function parseArgs(argv: string[]) {
     }
     else o.files.push(a);
   }
-  if (o.eval && !o.files.length && !o.help && !o.version) throw new Error('-e needs a form');
+  if (o.eval && !forms && !o.help && !o.version) throw new Error('-e needs a form');
   return o;
 }
 
@@ -108,8 +114,8 @@ if (client && !edwind) { N.eprint('edwinclient: no edwind was attached\n'); N.ex
 if (opts.eval) { evaluate(opts.files, edwind!); return; }
 
 /* edwinclient -e: each form in turn, as a client of kind cli, whose failing form gives its error at once (a frame's
-   would wait in the debugger). Its printed value goes to stdout, one line a form; the first error ends the run
-   with status 1. A definitional form enters edwind's image log as one typed in a frame does. */
+   would wait in the debugger). Its value goes to stdout as write prints it, and a newline; the first error ends
+   the run with status 1. A definitional form enters edwind's image log as one typed in a frame does. */
 function evaluate(forms: string[], [, id]: [string, number]) {
   let n = 0, done = false;
   const send = (m: object) => N.sockSend(id, JSON.stringify(m));
@@ -118,7 +124,8 @@ function evaluate(forms: string[], [, id]: [string, number]) {
   globalThis.__native.handlers.sock = (sid, line) => {
     if (sid !== id || done) return;
     if (line === null) { end(1, 'edwind closed the connection' + (N.sockError(id) ? ': ' + N.sockError(id) : '')); return; }
-    const m: { t: string; rid?: string; msg?: string; value?: unknown; error?: { report: string } } = JSON.parse(line);
+    let m: { t: string; rid?: string; msg?: string; value?: unknown; error?: { report: string } };
+    try { m = JSON.parse(line); } catch (e) { end(1, 'edwind sent a line that is not JSON'); return; }
     if (m.t === 'ping') send({ t: 'pong', rid: m.rid });
     else if (m.t === 'welcome') next();
     else if (m.t === 'error') end(1, m.msg || 'edwind refused the request');

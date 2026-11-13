@@ -30,6 +30,11 @@ static SNAPSHOT: &Aligned<[u8]> =
     &Aligned(*include_bytes!(concat!(env!("OUT_DIR"), "/snapshot.bin")));
 
 fn main() {
+    // Every reading of the command line after this one takes it as UTF-8.
+    if let Some(a) = std::env::args_os().find(|a| a.to_str().is_none()) {
+        eprintln!("{}: not UTF-8: {}", name(), a.to_string_lossy());
+        std::process::exit(2);
+    }
     // `edwin --daemon` (in the background) and `edwin --fg-daemon` start the user's edwind, as Emacs's do: through
     // edwin-daemon beside this program, which the package installs with edwind.
     if let Some(a) = std::env::args()
@@ -150,9 +155,10 @@ fn args(client: bool) -> Args {
             }
             _ => match a.split_once('=') {
                 Some((k @ ("--socket" | "--remote"), v)) if client => naming(&mut o, k, v),
+                // As main.ts checks it.
                 Some(("--geometry", g)) => match g
                     .split_once('x')
-                    .and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?)))
+                    .and_then(|(c, r)| Some((cells(c)?, cells(r)?)))
                 {
                     Some(size) => o.size = size,
                     None => o.answer = true,
@@ -165,6 +171,14 @@ fn args(client: bool) -> Args {
     o
 }
 
+/// A number of --geometry: digits only (no sign), within a u32.
+fn cells(n: &str) -> Option<u32> {
+    n.bytes()
+        .all(|b| b.is_ascii_digit())
+        .then(|| n.parse().ok())
+        .flatten()
+}
+
 /// --remote HOST:SOCKET as the address sys::sock_open takes: ssh://HOST/SOCKET.
 fn remote_address(r: &str) -> String {
     match r.find(":/") {
@@ -173,15 +187,16 @@ fn remote_address(r: &str) -> String {
     }
 }
 
-/// How long edwinclient waits for a remote edwind (ssh) to answer.
-const REMOTE_MS: u32 = 30000;
+/// How long edwinclient waits for an edwind (through ssh, for a remote one) to answer.
+const ANSWER_MS: u32 = 30000;
 
 /// edwinclient's edwind: the one --socket or --remote names, else the first of $EDWIN_SOCKET and the user's socket
-/// that answers. With -a, when none does, the user's own is started first, as `emacsclient -a ''` starts an Emacs
-/// daemon. Nothing is drawn before this answers, and the connection it opens is the frame's first.
+/// that answers; a remote $EDWIN_SOCKET that does not answer ends the search. With -a, when none does, the user's
+/// own is started first, as `emacsclient -a ''` starts an Emacs daemon. Nothing is drawn before this answers, and
+/// the connection it opens is the frame's first.
 fn attach(a: &Args) -> Result<(String, u32), String> {
     let open = |p: &str| {
-        sys::sock_open(p, p.starts_with(sys::SSH_PREFIX).then_some(REMOTE_MS))
+        sys::sock_open(p, Some(ANSWER_MS))
             .map(|id| (p.to_string(), id))
             .map_err(|e| format!("cannot attach to edwind at {p}: {e}"))
     };
@@ -196,14 +211,15 @@ fn attach(a: &Args) -> Result<(String, u32), String> {
         }
         match open(&p) {
             Ok(c) => return Ok(c),
-            // A remote edwind was asked for by name: why it did not answer is the answer.
+            // A remote edwind in $EDWIN_SOCKET is the one asked for: why it did not answer (ssh's reason) is the
+            // answer, rather than a frame of another edwind, or one -a starts here.
             Err(e) if p.starts_with(sys::SSH_PREFIX) => return Err(e),
             Err(_) => tried.push(p),
         }
     }
     if !a.start {
         return Err(if tried.is_empty() {
-            "no edwind to attach to: neither EDWIN_SOCKET nor XDG_RUNTIME_DIR is set (or give --socket PATH)".into()
+            "no edwind to attach to: neither EDWIN_SOCKET nor XDG_RUNTIME_DIR is set; give --socket PATH, or set XDG_RUNTIME_DIR and start one with `edwin --daemon`".into()
         } else {
             format!(
                 "no edwind answers at {}; start one with `edwin --daemon`, or give -a",
@@ -220,7 +236,8 @@ fn attach(a: &Args) -> Result<(String, u32), String> {
         .status()
     {
         Ok(st) if st.success() => {}
-        Ok(st) => return Err(format!("edwin-daemon failed ({st})")),
+        // It refuses when an edwind already answers there: one another edwinclient -a started meanwhile.
+        Ok(st) => return open(&sock).map_err(|_| format!("edwin-daemon failed ({st})")),
         Err(e) => return Err(format!("cannot run edwin-daemon: {e}")),
     }
     let end = Instant::now() + std::time::Duration::from_secs(10);

@@ -123,6 +123,18 @@ rustPlatform.buildRustPackage {
   postFixup = ''
     patchelf --add-rpath ${lib.makeLibraryPath windowLibs} $out/bin/edwin
   '';
+  # The installed link is edwinclient by its name: its own version, and with no edwind one line and status 1.
+  doInstallCheck = true;
+  installCheckPhase = ''
+    runHook preInstallCheck
+    $out/bin/edwin --version | grep -q '^edwin '
+    $out/bin/edwinclient --version | grep -q '^edwinclient '
+    status=0
+    env -u EDWIN_SOCKET -u XDG_RUNTIME_DIR $out/bin/edwinclient a.txt 2>"$TMPDIR/err" || status=$?
+    test "$status" = 1
+    grep -q '^edwinclient: no edwind to attach to' "$TMPDIR/err"
+    runHook postInstallCheck
+  '';
 
   meta = {
     description = "Edwin on the desktop: a terminal editor and $EDITOR, a window, and a daemon whose frames edwinclient opens";

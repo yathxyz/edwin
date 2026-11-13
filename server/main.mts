@@ -120,7 +120,7 @@ export function loadConfig(file: string): Config {
   const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
   const home = process.env.HOME || os.homedir(), runtime = process.env.XDG_RUNTIME_DIR;
   const out: Config = {
-    /* By default the socket `edwin --daemon` listens on, where every edwin looks. */
+    /* By default the socket `edwin --daemon` listens on, where edwinclient looks after $EDWIN_SOCKET. */
     socket: abs('socket', str('socket', !runtime, runtime && path.join(runtime, 'edwin/edit.sock'))),
     hubSocket: abs('hubSocket', str('hubSocket', false, undefined)),
     webSocket: abs('webSocket', str('webSocket', false, undefined)),
