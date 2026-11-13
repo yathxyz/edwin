@@ -403,9 +403,10 @@ edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon. Both ar
   reason goes in the log (`~/.local/state/edwin/edwin.log`). Remote latency touches only acknowledgements.
 - **`-a`, `--start-daemon`.** When no edwind answers on `$EDWIN_SOCKET` or the user's socket, edwinclient runs
   `edwin-daemon` beside the program (DT4), waits up to 10 s for `$XDG_RUNTIME_DIR/edwin/edit.sock`, and attaches.
-  The daemon outlives the frame. Without `edwin-daemon` (a cargo build), or if it fails, edwinclient says why and
-  exits with status 1 (until 2026-11-13 it edited on its own). `EDITOR="edwinclient -a"` gives every commit
-  message the same buffers as the window.
+  The daemon outlives the frame. Without `edwin-daemon` (a cargo build), or if it fails and no edwind answers by
+  then, edwinclient says why and exits with status 1 (until 2026-11-13 it edited on its own); a remote
+  `$EDWIN_SOCKET` that does not answer ends the search before `-a` is asked. `EDITOR="edwinclient -a"` gives
+  every commit message the same buffers as the window.
 - **Checked by** `remote_notes_go_through_ssh` (through `tests/fake-ssh`, which joins ssh's standard streams to
   the socket here; also the failure message) and `dash_a_starts_the_daemon_and_attaches` (a stand-in
   `edwin-daemon` beside a copy of the binary; the frame shows in edwind's log); by hand through a real OpenSSH
