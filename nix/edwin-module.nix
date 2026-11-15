@@ -1,6 +1,7 @@
 # programs.edwin: Edwin on a NixOS desktop, as services.emacs is for Emacs. The edwin package on the path, and
 # optionally edwind as a systemd user service (edwin --fg-daemon), so every edwinclient and `edwinclient -c` the
-# user starts is a frame of the same buffers, and EDITOR=edwin.
+# user starts is a frame of the same buffers, and EDITOR=edwin. The service is active only once its socket answers
+# (ExecStartPost=edwin-daemon --wait), so a unit ordered After= it can connect at once.
 self:
 {
   config,
@@ -62,7 +63,12 @@ in
       serviceConfig = {
         Type = "exec";
         ExecStart = "${cfg.package}/bin/edwin --fg-daemon";
+        # Started is not listening: 'active' waits until the socket accepts (at most 30 s, else the start fails;
+        # at once when the main process, systemd's $MAINPID, has exited, so a crashing edwind meets the start limit).
+        ExecStartPost = "${cfg.package}/bin/edwin-daemon --wait";
         Restart = "on-failure";
+        # 3: another start (a manual `edwin --daemon`) started the edwind on the socket meanwhile; no retry.
+        RestartPreventExitStatus = 3;
         RestartSec = 1;
         UMask = "0077";
         # The server's worker thread sizes its own stack (32 MiB) for the Scheme cap.

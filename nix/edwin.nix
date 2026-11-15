@@ -50,7 +50,8 @@ let
   # $EDWIN_SOCKET. The config is EDWIND_CONFIG when set, else one made at each start from
   # EDWIN_NOTES_DIR (~/notes): state in ~/.local/state/edwin/edwind, the user's Scheme in ~/.config/edwin.
   # In the background unless --fg (what a systemd user service runs); a background start returns once the socket
-  # answers, and --wait starts nothing and returns once it answers. Without EDWIND_CONFIG a start holds
+  # answers, and --wait starts nothing and returns once it answers (failing at once when the process MAINPID
+  # names, the user service's edwind, has exited). Without EDWIND_CONFIG a start holds
   # ~/.local/state/edwin/edwind.lock from its check until the edwind it started answers (edwind itself never
   # holds it), so of two starts one runs edwind and the other, which waited on the lock, exits with status 3; a
   # start that finds an edwind answering at once exits with status 1. The command line is checked before anything
@@ -72,7 +73,8 @@ let
 
       (none)      start it in the background and return once its socket answers (at most 30 s)
       --fg        run it in the foreground (what the user service runs)
-      --wait      start nothing; return once the socket answers, or fail after 30 s
+      --wait      start nothing; return once the socket answers, or fail after 30 s, or at once when the
+                  process MAINPID names (systemd sets it for the service's ExecStartPost) has exited
       -h, --help  show this text
 
     Statuses: 0 it answers; 1 it did not start, or an edwind already runs; 2 a usage error; 3 another start
@@ -95,12 +97,16 @@ let
     done
     # How long a start and --wait wait for edwind to answer, and a start for another start's lock.
     wait_s=30 lock_s=40
-    # answers SECONDS: whether something accepts on $sock within SECONDS (0: asked once).
+    # answers SECONDS [PID]: whether something accepts on $sock within SECONDS (0: asked once); status 2 when
+    # process PID is gone before then.
     answers() {
-      ${nodejs}/bin/node -e 'const [sock, s] = process.argv.slice(1), end = Date.now() + 1000 * s;
-        const go = () => require("net").connect(sock).on("connect", () => process.exit(0))
-          .on("error", () => (Date.now() < end ? setTimeout(go, 20) : process.exit(1)));
-        go();' "$sock" "$1"
+      ${nodejs}/bin/node -e 'const [sock, s, pid] = process.argv.slice(1), end = Date.now() + 1000 * s;
+        const gone = () => {
+          try { process.kill(Number(pid), 0); return false; } catch (e) { return e.code === "ESRCH"; }
+        };
+        const go = () => require("net").connect(sock).on("connect", () => process.exit(0)).on("error", () =>
+          pid && gone() ? process.exit(2) : Date.now() < end ? setTimeout(go, 20) : process.exit(1));
+        go();' "$sock" "$@"
     }
     cfg=''${EDWIND_CONFIG:-}
     if [ -z "$cfg" ]; then
@@ -115,7 +121,18 @@ let
         "$cfg")
     fi
     if [ "$mode" = wait ]; then
-      answers "$wait_s" && exit 0
+      # As the user service's ExecStartPost, MAINPID (set by systemd) is the service's edwind: once it has exited
+      # nothing will answer, and the start fails at once rather than after wait_s.
+      pid=''${MAINPID:-}
+      case $pid in
+        "") ;;
+        0* | *[!0-9]*) echo "edwin: MAINPID is not a process id: $pid" >&2; exit 2 ;;
+      esac
+      st=0; answers "$wait_s" $pid || st=$?
+      case $st in
+        0) exit 0 ;;
+        2) echo "edwin: the service's edwind (pid $pid) exited before it answered on $sock" >&2; exit 1 ;;
+      esac
       echo "edwin: no edwind answered on $sock within $wait_s s" >&2; exit 1
     fi
     locked=

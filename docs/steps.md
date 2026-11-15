@@ -663,6 +663,51 @@ matches app-id and title; KWin's rules match the window class and title).
   `a.txt` in the terminal and never makes `b.txt` (`a_window_without_a_display_is_the_terminal`). Also
   `nix flake check` (with `edwin-typecheck` over `native/js`).
 
+## The user unit is ready when its socket answers (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `cli-unit-readiness`): programs.edwin's user unit was
+`Type=exec`, so systemd called edwind started as soon as `edwin --fg-daemon` was exec'd, about 350 ms before the
+socket listened, and a unit ordered `After=edwind.service` could start, connect and find no edwind.
+
+- **Ready means listening.** The unit (`systemd.user.services.edwind` in nix/edwin-module.nix) runs
+  `ExecStartPost=edwin-daemon --wait` from the package: the unit stays `activating` until something accepts on
+  `$XDG_RUNTIME_DIR/edwin/edit.sock`, and only then is `active`, so units ordered after it, and
+  `systemctl --user start edwind` itself, return with the socket answering. The post command gets the unit's own
+  environment, so it waits on the socket the foreground start uses.
+- **A dead start fails at once.** systemd gives `ExecStartPost` the main process's pid in `MAINPID`, and `--wait`
+  gives up as soon as that process is gone (it asks the socket first, so an edwind already answering still counts).
+  `Restart=on-failure` starts edwind again a second later, and an edwind that keeps crashing reaches systemd's
+  start limit (5 starts in 10 s) and the unit is `failed` (`start-limit-hit`). Without the `MAINPID` check each
+  crashed start sat in `start-post` for the full 30 s, `systemctl --user start edwind` and the units after it
+  blocked that long, and at one start per 31 s the limit was never reached: it retried forever (measured on ex44
+  with transient user units shaped like this one, a real edwind refusing a mode-755 socket directory: with the
+  check `failed`, `start-limit-hit` and 5 restarts within 10 s; without it still `activating` after 76 s).
+- **A hung start is retried without end.** An edwind that runs but never listens is given up on by `--wait` after
+  30 s (well inside systemd's start timeout); systemd stops it and starts it again a second later. One start per
+  31 s never reaches the default start limit, so the unit keeps retrying, each start blocking for 30 s, until
+  stopped (measured as above with a main process that never listens: a restart every 31 s). The alternative is
+  `StartLimitIntervalSec` long enough to count 31 s starts (e.g. 300 s), which would also count the owner's own
+  restarts against the limit; not done.
+- **Status 3 is not retried.** `RestartPreventExitStatus=3`: the foreground start exits with 3 when it waited on
+  the lock while another start (a manual `edwin --daemon`) brought up the edwind on the socket. Retrying would only
+  meet that edwind again. The unit is then `failed`, with status 3, while the other edwind serves.
+- **Choices.** `ExecStartPost` and the existing `Type=exec` rather than socket activation (systemd holding the
+  socket and handing it to edwind, which today binds its own and would need to accept a passed one) or
+  `Type=notify` (edwind calling sd_notify, a change to server/main.mts, which ex44's public edwind shares); both
+  remain open. `RestartPreventExitStatus=3` rather than `SuccessExitStatus=3`: with the latter a lost race would
+  leave the unit `inactive` instead of `failed`; one line to change if the owner prefers it.
+- **Not in it:** status 1 from the foreground start ("an edwind already runs", found at once with no wait on the
+  lock) is still retried by `Restart=on-failure` until the start limit, then the unit fails, as before
+  (cli-daemon-start kept status 1 for that). No test boots a user manager: the check evaluates the unit, and the
+  behaviour of `--wait` is the edwin-daemon check's. No new file, so no README layout row.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-module`: the evaluated system's rendered `edwind.service`
+  has exactly the lines `ExecStart=…/bin/edwin --fg-daemon`, `ExecStartPost=…/bin/edwin-daemon --wait`,
+  `Restart=on-failure`, `RestartPreventExitStatus=3` and `RestartSec=1` among those that start and restart it (the
+  same check with the `RestartPreventExitStatus` line removed from the module fails with both sides printed); and
+  `nix build .#checks.x86_64-linux.edwin-daemon`, whose `--wait` cases return only once the socket answers, fail
+  after 30 s when edwind dies, and fail within 5 s when the edwind `MAINPID` names dies (with an edwind `MAINPID`
+  names alive, `--wait` returns once it answers; a `MAINPID` that is not a pid is refused with status 2).
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
@@ -1008,7 +1053,8 @@ The flake builds Edwin on its own, as Emacs ships `emacs`, `emacs --daemon` and 
   are added to the binary's RPATH, as winit and wgpu open them at run time. The check phase runs the
   pseudo-terminal suite and, since 2026-11-15, the window's tests on Xvfb and lavapipe (until then they skipped in
   the sandbox: "The window's tests in the package check", above). The flake check `edwin-module`
-  evaluates a system with `programs.edwin` (the user unit, `EDITOR`); it does not boot one.
+  evaluates a system with `programs.edwin` (the user unit, `EDITOR`); it does not boot one. Since 2026-11-15 the
+  unit is active only once its socket answers ("The user unit is ready when its socket answers", above).
 - **The window from Nix** needs the system's GPU drivers where wgpu looks for them: `hardware.graphics.enable` on
   NixOS (`/run/opengl-driver`); elsewhere, Nix's Mesa through `VK_ICD_FILENAMES` or nixGL.
 

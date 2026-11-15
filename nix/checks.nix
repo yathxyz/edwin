@@ -219,9 +219,9 @@ in
 
   # edwin --daemon from the package (test/daemon.test.mts): a start returns once the socket answers, two starts at
   # once give one edwind and one exit with status 3, `edwin --daemon && edwinclient -e 1` 100 times, --wait, and
-  # the timeout when edwind dies; and the command lines of edwin-daemon and edwind: an unknown option and
-  # `edwin --daemon FILE` refused with status 2, --help, bare edwind. Real edwinds under a throwaway HOME and
-  # XDG_RUNTIME_DIR. About two minutes.
+  # the timeout when edwind dies (at once, as the user service's ExecStartPost, when MAINPID has exited); and the
+  # command lines of edwin-daemon and edwind: an unknown option and `edwin --daemon FILE` refused with status 2,
+  # --help, bare edwind. Real edwinds under a throwaway HOME and XDG_RUNTIME_DIR. About two minutes.
   edwin-daemon =
     pkgs.runCommand "edwin-daemon"
       {
@@ -237,7 +237,8 @@ in
       '';
 
   # programs.edwin (nix/edwin-module.nix) evaluates into a system: the user unit runs `edwin --fg-daemon` from the
-  # package, EDITOR is edwin. Evaluation only, so the edwin package itself is not built here.
+  # package, is ready once `edwin-daemon --wait` returns and is not restarted after status 3, as the unit file
+  # systemd reads says; EDITOR is edwin. Evaluation only, so the edwin package itself is not built here.
   edwin-module =
     let
       sys = pkgs.nixos {
@@ -251,17 +252,27 @@ in
         };
       };
       unit = sys.config.systemd.user.services.edwind;
+      # The unit file's lines that start and restart edwind, as rendered for systemd.
+      unitLines = lib.filter (l: lib.hasPrefix "ExecStart" l || lib.hasPrefix "Restart" l) (
+        lib.splitString "\n" sys.config.systemd.user.units."edwind.service".text
+      );
       edwin = self.packages.${pkgs.stdenv.hostPlatform.system}.edwin;
       show = v: builtins.unsafeDiscardStringContext (builtins.toJSON v);
       got = show {
-        exec = unit.serviceConfig.ExecStart;
+        lines = unitLines;
         notes = unit.environment.EDWIN_NOTES_DIR;
         wanted = unit.wantedBy;
         editor = sys.config.environment.variables.EDITOR;
         system = builtins.seq sys.config.system.build.toplevel.drvPath true;
       };
       want = show {
-        exec = "${edwin}/bin/edwin --fg-daemon";
+        lines = [
+          "ExecStart=${edwin}/bin/edwin --fg-daemon"
+          "ExecStartPost=${edwin}/bin/edwin-daemon --wait"
+          "Restart=on-failure"
+          "RestartPreventExitStatus=3"
+          "RestartSec=1"
+        ];
         notes = "%h/notes";
         wanted = [ "default.target" ];
         editor = "edwin";

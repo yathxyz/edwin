@@ -1,8 +1,9 @@
 // edwin --daemon (the edwin-daemon script in nix/edwin.nix), run from the package as a user runs it, each test as a
 // throwaway user (HOME and XDG_RUNTIME_DIR under TMPDIR): a start returns once the socket answers; of two starts at
 // once one runs edwind and the other exits with status 3; --wait returns once the socket answers and fails after
-// its timeout when edwind dies; the lock is never edwind's; a bad command line (an unknown option, a FILE) is
-// refused with status 2 before anything is made, --help prints the usage, and bare edwind says to run edwin --daemon.
+// its timeout when edwind dies, or at once when it is the service's ExecStartPost and MAINPID has exited; the lock
+// is never edwind's; a bad command line (an unknown option, a FILE) is refused with status 2 before anything is
+// made, --help prints the usage, and bare edwind says to run edwin --daemon.
 // EDWIN_BIN is the package's bin (the edwin-daemon check).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -192,6 +193,36 @@ test('a start and --wait fail after the timeout when edwind dies', async () => {
   assert.equal(edwinds(bg.cfg).length, 0);
   assert.ok(lockFree(bg), 'a start whose edwind died leaves the lock free');
   assert.match(fs.readFileSync(path.join(bg.home, '.local/state/edwin/edwind.log'), 'utf8'), /has mode 755, not 700/);
+});
+
+test("--wait as the service's ExecStartPost fails at once when the service's edwind (MAINPID) dies", async () => {
+  // systemd sets MAINPID for ExecStartPost; without this a crashing edwind held each start for WAIT_S and the
+  // unit never reached its start limit.
+  const u = user();
+  fs.mkdirSync(path.join(u.run, 'edwin'));
+  fs.chmodSync(path.join(u.run, 'edwin'), 0o755);
+  const fg = spawn(path.join(BIN, 'edwin'), ['--fg-daemon'], { env: u.env, stdio: 'ignore' });
+  const fgCode = new Promise<number | null>(r => fg.on('exit', r));
+  const w = await run(u, 'edwin-daemon', ['--wait'], { MAINPID: String(fg.pid) });
+  assert.equal(w.code, 1);
+  assert.match(w.err, new RegExp(`^edwin: the service's edwind \\(pid ${fg.pid}\\) exited before it answered on `));
+  assert.ok(w.ms < 5000, `--wait gave up after ${w.ms} ms`);
+  assert.equal(await fgCode, 1);
+  // A MAINPID that is alive is waited on as before: the socket answers and --wait returns 0.
+  const v = user();
+  const ok = spawn(path.join(BIN, 'edwin'), ['--fg-daemon'], { env: v.env, stdio: 'ignore' });
+  const okExit = new Promise(r => ok.on('exit', r));
+  const a = await run(v, 'edwin-daemon', ['--wait'], { MAINPID: String(ok.pid) });
+  assert.equal(a.code, 0, a.err);
+  assert.ok(await answers(v.sock));
+  ok.kill('SIGTERM');
+  await okExit;
+  // Only a process id is taken.
+  for (const bad of ['0', 'x1', '-1']) {
+    const b = await run(v, 'edwin-daemon', ['--wait'], { MAINPID: bad });
+    assert.equal(b.code, 2, `MAINPID=${bad}`);
+    assert.match(b.err, /^edwin: MAINPID is not a process id: /, `MAINPID=${bad}`);
+  }
 });
 
 test('with EDWIND_CONFIG a start waits on the socket the config names', async () => {
