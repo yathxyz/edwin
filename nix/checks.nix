@@ -104,6 +104,14 @@ in
     touch $out
   '';
 
+  # The line diff (Rope.diffLines) and Ed.applyLineDiff: fast-check over random texts, applying the diff of A
+  # gives B and the markers on unchanged lines stay on them. LINEDIFF_RUNS raises the run count.
+  edwin-linediff = pkgs.runCommand "edwin-linediff" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+    export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
+    node --test ${edwin}/edwin/test/linediff.test.mts
+    touch $out
+  '';
+
   # tsc --strict over the TypeScript: edwind and its suites (tsconfig.json), the core (src) and desktop Edwin's
   # JavaScript (native/js). Node and tools/strip.mts only strip the types; this checks them.
   edwin-typecheck = pkgs.runCommand "edwin-typecheck" { nativeBuildInputs = [ pkgs.nodejs ]; } ''

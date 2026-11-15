@@ -46,6 +46,7 @@ class Rope {
   declare flat: string | null;
   declare ci: number;
   declare static flattens: number;
+  declare static diffLines: (a: string, b: string, limit?: number) => [number, number, string][];
   constructor(s?: string) {
     this.ch = []; this.nl = [];
     this.off = new Int32Array(16); this.nlo = new Int32Array(16);
@@ -246,6 +247,95 @@ class Rope {
   }
 }
 Rope.flattens = 0;
+
+/* ---------- the line diff ----------
+   The edits that turn text A into text B, changing only the lines that differ: a Myers diff of the lines
+   (each with its newline), each hunk then shrunk by its common prefix and suffix of characters without
+   splitting a surrogate pair. The result is [pos, del, ins] ops in sequential coordinates (each op's
+   position counts the ops before it as applied), for applyOps. Myers costs O((N + M) D) time and O(D^2)
+   space for D differing lines (lines compared as numbers, one per distinct line); past MAX_D differing lines
+   or LIMIT units of work it gives up and returns the one span between the common prefix and
+   suffix, the whole replace. The same algorithm as edwind's diffOps (server/watch.mts). */
+const LIMIT = 5000000, MAX_D = 1000;
+function lines(s: string) {
+  const out: string[] = [];
+  for (let i = 0; ;) { const j = s.indexOf('\n', i); if (j < 0) { if (i < s.length) out.push(s.slice(i)); return out; } out.push(s.slice(i, j + 1)); i = j + 1; }
+}
+/* Hunks [a0, a1, b0, b1] (A[a0, a1) replaced by B[b0, b1)) of line arrays A and B, or null past the limits. */
+function hunks(A: string[], B: string[], limit: number): number[][] | null {
+  let pre = 0; while (pre < A.length && pre < B.length && A[pre] === B[pre]) pre++;
+  let suf = 0; while (suf < A.length - pre && suf < B.length - pre && A[A.length - 1 - suf] === B[B.length - 1 - suf]) suf++;
+  const N = A.length - pre - suf, M = B.length - pre - suf;
+  if (!N && !M) return [];
+  if (!N || !M) return [[pre, pre + N, pre, pre + M]];
+  const ids = new Map<string, number>(), a = new Int32Array(N), b = new Int32Array(M);
+  const id = (l: string) => { let k = ids.get(l); if (k === undefined) ids.set(l, k = ids.size); return k; };
+  for (let i = 0; i < N; i++) a[i] = id(A[pre + i]);
+  for (let i = 0; i < M; i++) b[i] = id(B[pre + i]);
+  const MAX = Math.min(N + M, MAX_D), off = MAX + 1, V = new Int32Array(2 * MAX + 3);
+  /* trace[d]: V before step d, the band of diagonals -d-1 .. d+1 that step reads */
+  const trace: Int32Array[] = [];
+  let work = 0, done = false;
+  for (let d = 0; d <= MAX && !done; d++) {
+    trace.push(V.slice(off - d - 1, off + d + 2));
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && V[k - 1 + off] < V[k + 1 + off]) ? V[k + 1 + off] : V[k - 1 + off] + 1;
+      let y = x - k;
+      while (x < N && y < M && a[x] === b[y]) { x++; y++; work++; }
+      V[k + off] = x;
+      if (++work > limit) return null;
+      if (x >= N && y >= M) { done = true; break; }
+    }
+  }
+  if (!done) return null;
+  /* Walk back from (N, M), one edit per step; consecutive edits join into one hunk. */
+  const out: number[][] = [];
+  let x = N, y = M;
+  for (let d = trace.length - 1; d > 0; d--) {
+    const v = trace[d], at = (k: number) => v[k + d + 1], k = x - y;
+    const pk = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+    const px = at(pk), py = px - pk;
+    while (x > px && y > py) { x--; y--; }
+    const h = out[out.length - 1];
+    if (h && h[0] === x && h[2] === y) { h[0] = px; h[2] = py; }
+    else out.push([px, x, py, y]);
+    x = px; y = py;
+  }
+  out.reverse();
+  for (const h of out) { h[0] += pre; h[1] += pre; h[2] += pre; h[3] += pre; }
+  return out;
+}
+const isLow = (c: number) => c >= 0xDC00 && c <= 0xDFFF;
+function diffLines(a: string, b: string, limit = LIMIT) {
+  const ops: [number, number, string][] = [];
+  if (a === b) return ops;
+  const A = lines(a), B = lines(b);
+  const hs = hunks(A, B, limit);
+  if (!hs) {
+    let p = 0; const n = Math.min(a.length, b.length);
+    while (p < n && a.charCodeAt(p) === b.charCodeAt(p)) p++;
+    let s = 0; while (s < n - p && a.charCodeAt(a.length - 1 - s) === b.charCodeAt(b.length - 1 - s)) s++;
+    if (p && isHigh(a.charCodeAt(p - 1))) p--;
+    if (s && isLow(a.charCodeAt(a.length - s))) s--;
+    return [[p, a.length - s - p, b.slice(p, b.length - s)]] as [number, number, string][];
+  }
+  const offA = [0]; for (const l of A) offA.push(offA[offA.length - 1] + l.length);
+  const offB = [0]; for (const l of B) offB.push(offB[offB.length - 1] + l.length);
+  let shift = 0;
+  for (const [a0, a1, b0, b1] of hs) {
+    const d = a.slice(offA[a0], offA[a1]), n = b.slice(offB[b0], offB[b1]), m = Math.min(d.length, n.length);
+    let p = 0; while (p < m && d.charCodeAt(p) === n.charCodeAt(p)) p++;
+    let s = 0; while (s < m - p && d.charCodeAt(d.length - 1 - s) === n.charCodeAt(n.length - 1 - s)) s++;
+    if (p && isHigh(d.charCodeAt(p - 1))) p--;
+    if (s && isLow(d.charCodeAt(d.length - s))) s--;
+    const del = d.length - s - p, ins = n.slice(p, n.length - s);
+    if (!del && !ins) continue;
+    ops.push([offA[a0] + p + shift, del, ins]);
+    shift += ins.length - del;
+  }
+  return ops;
+}
+Rope.diffLines = diffLines;
 g.Rope = Rope;
 }
 ropeModule(globalThis);

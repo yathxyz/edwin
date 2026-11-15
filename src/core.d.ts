@@ -669,6 +669,9 @@ interface RopeConstructor {
   from(s: string): Rope;
   /* how many times a rope was flattened (a test counter) */
   flattens: number;
+  /* the ops that turn A into B changing only the differing lines, in sequential coordinates; one span past
+     LIMIT units of work */
+  diffLines(a: string, b: string, limit?: number): [pos: number, del: number, ins: string][];
 }
 
 /* ---------- editor: buffers and markers (editor-core.ts) ---------- */
@@ -1424,6 +1427,9 @@ interface EdApi {
   shiftMarkers(b: EdBuffer, pos: number, del: number, ins: number, entry?: EdLogEntry): void;
   editText(b: EdBuffer, pos: number, n: number, ins: string): string;
   applyOps(b: EdBuffer, ops: EdEditOp[], origin?: string, whole?: string): EdAppliedOp[];
+  /* the line diff (Rope.diffLines), and B's text replaced by it: unchanged lines keep point and markers */
+  diffLines: RopeConstructor['diffLines'];
+  applyLineDiff(b: EdBuffer, text: string, origin?: string, limit?: number): EdAppliedOp[];
   withOrigin<T>(origin: unknown, f: () => T): T;
   runHookSafely(name: string, args?: SchemeValue[]): void;
   removeHookEverywhere(name: string, f: SchemeValue): void;

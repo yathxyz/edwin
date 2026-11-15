@@ -749,6 +749,27 @@ function setText(b: EdBuffer, v: string) {
   const { pre, suf } = diffSpan(old, v);
   applyOps(b, [[pre, old.length - suf - pre, v.slice(pre, v.length - suf)]], undefined, v);
 }
+/* Make B's text TEXT by changing only the lines that differ (Rope.diffLines), as one batch by ORIGIN, so
+   point, the other windows' points and the markers on an unchanged line stay on it. Whole lines inserted at
+   a line start would leave a before marker there (the mark, Evil's marks) on the first inserted line; it is
+   moved past them to stay with the line it was on. Neither the read-only flag nor b.modified is touched:
+   the caller (revert, a formatter) knows which it wants. LIMIT is the diff's work budget (tests only). */
+function applyLineDiff(b: EdBuffer, text: string, origin?: string, limit?: number) {
+  const old = b.rope.toString();
+  const ops = globalThis.Rope.diffLines(old, text, limit);
+  if (!ops.length) return [];
+  const lift: [EdMarker | EdTempMarker, number][] = [];
+  let shift = 0;
+  for (const [pos, del, ins] of ops) {
+    const p = pos - shift;
+    if (!del && ins.charCodeAt(ins.length - 1) === 10 && (p === 0 || old.charCodeAt(p - 1) === 10))
+      for (const m of b.markers) if (m.pos === p && (m as EdMarker).type !== 'after') lift.push([m, ins.length]);
+    shift += ins.length - del;
+  }
+  const out = applyOps(b, ops, origin, ops.length === 1 ? text : undefined);
+  for (const [m, n] of lift) if (m.pos !== null) m.pos += n;
+  return out;
+}
 /* Redisplay in the next frame, once for any number of changes. */
 let renderQueued = false;
 function scheduleRender() {
@@ -2451,7 +2472,7 @@ ${forwardSexp}
 ${parenDepths}`;
 globalThis.Ed = {
   E, hooks, host, Frame, FrameState, makeFrame, selectFrame, deleteFrame, onFrameEvent, frameEvent, frameScale, withFrame, allWindows, allMinibufs, renderFrame, rectAt, scheduleRender, FRAME_CSS,
-  Marker, shiftMarkers, editText, applyOps, withOrigin, runHookSafely, removeHookEverywhere,
+  Marker, shiftMarkers, editText, applyOps, applyLineDiff, diffLines: globalThis.Rope.diffLines, withOrigin, runHookSafely, removeHookEverywhere,
   localized, localize, makeLocal, localValue, defaultValue, setDefault, minorModes, minorOn, modeParents, modeChain, lighters, LEX_SOURCE, Store, Buffer, Keymap, PREFIX, C, SENTINEL, getBuffer, getBufferCreate, toBuffer, setWindowBuffer, otherBuffer, checkRO,
   insertText, deleteText, replaceText, spanOf, changedSince, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, markDocstrings,
   forwardSexp, backwardSexp, upList, matchParen, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,

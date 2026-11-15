@@ -948,6 +948,65 @@ builds on. It replaces the plan's git-spawn-native.
   'TERM', timedOut: true}`; `printf 'ab\377'` with `lossy` gave `ab` and U+FFFD; a missing program, an argv that
   is no array and an unknown signal threw; edwin then exited 0, idle, in 0.12 s.
 
+## The line diff: a buffer replaced by its changed lines (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-line-diff`): `Ed.diffLines` and `Ed.applyLineDiff`, which
+replace a buffer's text by the changed line ranges only, keeping point and markers; auto-revert, formatting and
+ws-butler (later packages) are to use them.
+
+- **`Rope.diffLines(a, b)`** (src/text.ts, also `Ed.diffLines`): the ops `[pos, del, ins]` that turn A into B, in
+  sequential coordinates (each op's position counts the ops before it), ready for `applyOps`. A Myers diff of the
+  lines, each line with its newline and compared as a number (one per distinct line), after the common prefix and
+  suffix lines are taken off; each hunk is then shrunk by its common characters at both ends, never between the
+  halves of a surrogate pair. It is pure and lives in text.ts with the rope, so a worker (which gets `ropeSource`)
+  has it too.
+- **The limits.** Past 1,000 differing lines, or 5,000,000 units of work (diagonal steps and matched lines), it
+  gives up and returns the one span between the common prefix and suffix of characters: the whole replace the
+  package's risks ask for, the same span `b.text = ...` changes. The Myers trace keeps only the band of diagonals
+  each step reads, so it holds at most about a million numbers. On ex44 a 200,000-line file with 10 to 450
+  changed lines diffs in 130 to 200 ms, most of it in splitting and numbering the lines, not in Myers; one with
+  2,000 changed lines (past the limit) falls back in 180 ms, a 20,000-line one in 17 ms.
+- **`Ed.applyLineDiff(b, text, origin?)`** (src/editor-core.ts): the diff of B's text to TEXT applied as one
+  `applyOps` batch by ORIGIN (the current one when absent), so the change hooks, the edit log and undo, `b.ver`,
+  the protocol client and redisplay see an ordinary edit, and `shiftMarkers` moves point, the other windows'
+  points and every marker: those on a line the diff leaves alone stay on it at their column. Returns the applied
+  ops (none when the text is the same).
+- **Choices**, each reversible:
+  - Whole lines inserted at a line start would leave a before marker there (the mark, Evil's marks, a
+    `copy-marker` of type before) on the first inserted line, as an insertion does in Emacs; `applyLineDiff` moves
+    such markers past the inserted lines, to stay with the line they were on. Undo puts them back (the undone
+    insertion is a deletion ending at them). Redo leaves them before the reinserted lines, as any redone insertion
+    does.
+  - Neither the read-only flag nor `b.modified` is touched: a revert wants the buffer unmodified and allowed in
+    a read-only buffer, a formatter the opposite, so the caller says.
+  - The algorithm is in text.ts beside the rope, not in editor-core.ts: text.ts loads first and has no `Ed`, so
+    the plan's `Ed.diffLines` is `Rope.diffLines` re-exported; `applyLineDiff` needs `applyOps` and lives in
+    editor-core.ts.
+- **Differences from Emacs** (`replace-buffer-contents`): its diff is by characters, with a time limit after which
+  it does a plain replacement; this one is by lines, then by characters within each changed run of lines, so a
+  marker inside a changed line goes to the start of the change (before markers) or past it (after markers, point).
+  A last line with no newline that lines are appended after is a changed line: point at its end ends up at the
+  end of the appended text.
+- **Not in it:** no caller; auto-revert (`proc-auto-revert`), formatting and ws-butler are their own packages.
+  `b.text = ...` still changes the one differing span. edwind keeps its own copy of the same algorithm
+  (`diffOps` in server/watch.mts, used by its revert and three-way merge); making it use this one touches
+  ex44's public edwind and is later work.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-linediff` (new, test/linediff.test.mts, fast-check, 2,000
+  runs a property; also passed with `LINEDIFF_RUNS=20000`): for random texts of repeated lines (empty lines, CR,
+  astral characters, with and without a final newline) the ops applied to A give B, so does `applyLineDiff` on a
+  buffer, both again with the work budget forced to 3 (the whole-replace fallback), and no op starts or ends
+  inside a surrogate pair; for A of unique lines and B made from it by deleting, changing and inserting lines,
+  point at a random column, the mark and a before marker at the start of a kept line and an after marker at a
+  random column of one stay on the same line and column; the lifted marker goes back on undo; a 200,000-line file
+  with two changed lines gives two ops, and one with every other line changed gives one span. Taking out the
+  marker lift fails two of the cases; taking out the surrogate guard fails the surrogate case. Also
+  `edwin-typecheck`, `edwin-headless` and `edwin-pool`, and `nix flake check --keep-going` on ex44: a first run
+  failed in `edwin-bench` (shadow stack 12.2% against its 10% limit) and in the package's gui tests (`Xvfb did not
+  start`, with `edwin-daemon` waiting on the package), under load from other builds; `nix build .#edwin` alone
+  (unit 4, gui.rs 5 and 1 ignored, terminal.rs 31), `edwin-bench` alone (7.7%) and the rerun of `nix flake
+  check` then passed. The core files reach edwind and the native program too, but no Scheme primitive is
+  added, so nothing new is reachable through `edwinclient -e`.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
