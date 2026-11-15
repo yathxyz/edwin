@@ -2,8 +2,8 @@
    window of its own (DT2, --gui). Under the name edwinclient it is a frame of an edwind, as emacsclient is of an
    Emacs daemon; edwin never attaches to one.
 
-     edwin [-nw | -g] [-R] [+LINE[:COL]] [FILE | -]...
-     edwinclient [-t | -c] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [+LINE[:COL]] [FILE | -]...
+     edwin [-nw | -g] [--title NAME] [-R] [+LINE[:COL]] [FILE | -]...
+     edwinclient [-t | -c] [--title NAME] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [+LINE[:COL]] [FILE | -]...
      edwinclient [-a] [--socket PATH | --remote HOST:SOCKET] -e FORM...
 
    The core runs as a model frame (display.ts) drawn by term.ts, or by the window (gui.ts and the Rust side's
@@ -31,6 +31,7 @@ Edit FILEs in a frame of edwind, Edwin's daemon (edwin --daemon), in this termin
   -t, -nw, --tty     a frame in this terminal (the default)
   -c, --create-frame a frame in a window of its own (EDWIN_FONT="Family 11" sets its font)
   --geometry=COLSxROWS  the window's first size in characters (100x36)
+  --title NAME       the window's title, whatever it shows (its app_id and WM_CLASS are edwin)
   -e, --eval         the arguments that follow are Scheme forms: evaluate each in edwind and print its value
   -R, --read-only    visit the files read-only
   --socket PATH      the edwind listening on PATH
@@ -52,6 +53,7 @@ Edit FILEs in Edwin, in this terminal or in a window. edwin never attaches to ed
   -nw, -t, --no-window  use this terminal (the default)
   -g, --gui          open a window (EDWIN_FONT="Family 11" sets its font)
   --geometry=COLSxROWS  the window's first size in characters (100x36)
+  --title NAME       the window's title, whatever it shows (its app_id and WM_CLASS are edwin)
   -R, --read-only    visit the files read-only
   --daemon           start your own edwind in the background (--fg-daemon: in the foreground), for
                      edwinclient to attach to, as emacsclient does to emacs --daemon
@@ -84,6 +86,10 @@ function parseArgs(argv: string[]) {
       /* main.rs sized the window, from digits only, each within a u32, as here. */
       const g = /^(\d+)x(\d+)$/.exec(a.slice(11));
       if (!g || Number(g[1]) > 0xffffffff || Number(g[2]) > 0xffffffff) throw new Error(`--geometry wants COLSxROWS, not ${a.slice(11)}`);
+    }
+    /* main.rs titled the window: the next argument, whatever it is, or what follows =. */
+    else if (/^--title(=|$)/.test(a)) {
+      if (!(a.includes('=') ? a.slice(8) : argv[++i])) throw new Error('--title needs a name');
     }
     else if (a === '-R' || a === '--read-only') o.readOnly = true;
     else if (a === '-') o.stdin = true;

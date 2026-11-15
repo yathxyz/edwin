@@ -623,6 +623,46 @@ nothing of how a user starts one.
   `a.txt` give status 2 with their line and the usage. `edit-lockdown`, `edit-security`, `edit-conformance` (which
   runs `edwind --check`) and `edwin-typecheck` pass with server/main.mts changed.
 
+## The window is edwin, and `--title` names it (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `cli-window-identity`): the window carries app_id and WM_CLASS
+`edwin`, and `--title NAME` sets its title, so compositor rules can match the scratch and calculator frames (niri
+matches app-id and title; KWin's rules match the window class and title).
+
+- **The name.** `native/src/gui/mod.rs` opens the window with winit's `with_name("edwin", "edwin")`: on X11 that
+  is `WM_CLASS(STRING) = "edwin", "edwin"`, on Wayland the xdg-toplevel app_id `edwin` (winit's Wayland side takes
+  the same name). Until now X11 got winit's default, the program's name (`edwinclient`'s window was
+  `"edwinclient", "edwinclient"`), and Wayland got no app_id at all. Choices: one name for both programs, the plan's
+  default (decision 17); the alternative is `edwinclient` for a client's windows, which would let a rule tell a
+  frame of edwind from a standalone edwin. Both halves lowercase, so an X11 rule and a Wayland one match the same string
+  (an Xwayland window's app-id is usually its class); the alternative is ICCCM's capitalised class,
+  `"edwin", "Edwin"`, as Emacs has.
+- **`--title NAME`** (and `--title=NAME`), for edwin and edwinclient alike: the window opens with that title and
+  keeps it whatever the frame shows; without it the title is `Edwin` until the frame draws, then `BUFFER - Edwin`,
+  as before. NAME is the next argument whatever it looks like (as Emacs takes `-T`'s), so it is never a file to
+  edit; a missing or empty one is a usage error, status 2 (`--title needs a name`). Both readers of the command line
+  take it alike: `main.rs` hands it to the window, `main.ts` checks it and skips it. In a terminal frame, or when no
+  window opens and the program falls back to the terminal, it is accepted and does nothing. Choice: ignored there;
+  the alternative is the terminal's own title (OSC 2), which nothing asks for.
+- **The window's tests** (`native/tests/gui.rs`) find a window by a title of their choosing, and wait for the
+  frame's first draw (`startup first draw` in the frame's log, under `EDWIN_TRACE`) as well, since a window titled
+  by `--title` is there before the frame draws in it. xprop is checked for with Xvfb and xdotool, so a machine
+  without it skips (and the package's check fails) rather than panicking.
+- **Not in it:** Wayland's app_id is set but not tested: there is no compositor in the sandbox. The owner checks it
+  on niri and Plasma. No `.desktop` file (and so no `StartupWMClass`); the callers that pass `--title`
+  (`fleet-org-scratch`, `fleet-calc-key`) are the fleet's; `-n` is `cli-no-wait`. No new file, so no README layout
+  row; and no check in nix/checks.nix: the tests are the package's own cargo tests, which `nix build .#edwin` runs.
+- **Checked by** `nix build .#edwin` on ex44: `tests/gui.rs` 4 passed, 1 ignored (the latency budget), with
+  `the_window_is_edwin_and_title_names_it_for_good` (WM_CLASS `"edwin", "edwin"` and the title `a.txt - Edwin`
+  without `--title`; with `--title org-scratch` and with `--title=org-scratch`, WM_CLASS the same and
+  `_NET_WM_NAME` and `WM_NAME` still `org-scratch` after the frame drew and an edit) and
+  `edwinclient_c_is_a_frame_of_edwind_in_a_window`, now opened with `-c --title org-scratch` as the scratch popup
+  will be, asserting the client's WM_CLASS is `"edwin", "edwin"` (it was `"edwinclient", "edwinclient"`) and that
+  the title stays. `tests/terminal.rs`: `--title` with no name and `--title=` are status 2 for both programs
+  (`help_version_and_bad_options_need_no_terminal`), and `--gui --title b.txt a.txt` with no display edits
+  `a.txt` in the terminal and never makes `b.txt` (`a_window_without_a_display_is_the_terminal`). Also
+  `nix flake check` (with `edwin-typecheck` over `native/js`).
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

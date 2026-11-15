@@ -106,6 +106,8 @@ struct Args {
     /// cells (--geometry=COLSxROWS).
     window: bool,
     size: (u32, u32),
+    /// --title NAME: the window's title, kept whatever the frame shows (compositor rules match it).
+    title: Option<String>,
     /// edwinclient: the edwind --socket or --remote names, as an address sys::sock_open takes; -a.
     named: Option<String>,
     start: bool,
@@ -117,6 +119,7 @@ fn args(client: bool) -> Args {
     let mut o = Args {
         window: false,
         size: (100, 36),
+        title: None,
         named: None,
         start: false,
         answer: false,
@@ -147,6 +150,7 @@ fn args(client: bool) -> Args {
                 let v = it.next().unwrap_or_default();
                 naming(&mut o, &a, &v);
             }
+            "--title" => titled(&mut o, it.next().unwrap_or_default()),
             // The rest are forms, evaluated with no frame.
             "-e" | "--eval" if client => {
                 o.window = false;
@@ -157,6 +161,7 @@ fn args(client: bool) -> Args {
             }
             _ => match a.split_once('=') {
                 Some((k @ ("--socket" | "--remote"), v)) if client => naming(&mut o, k, v),
+                Some(("--title", v)) => titled(&mut o, v.to_string()),
                 // As main.ts checks it.
                 Some(("--geometry", g)) => match g
                     .split_once('x')
@@ -171,6 +176,15 @@ fn args(client: bool) -> Args {
     }
     o.window &= !o.answer;
     o
+}
+
+/// --title NAME, as main.ts checks it: a name that is not empty.
+fn titled(o: &mut Args, v: String) {
+    if v.is_empty() {
+        o.answer = true;
+    } else {
+        o.title = Some(v);
+    }
 }
 
 /// A number of --geometry: digits only (no sign), within a u32.
@@ -269,7 +283,7 @@ fn open_window(a: &Args) -> Result<Window, i32> {
     {
         let why = match gui::unavailable() {
             Some(why) => why,
-            None => match gui::Gui::open(a.size) {
+            None => match gui::Gui::open(a.size, a.title.clone()) {
                 Ok(g) => return Ok(Some(g)),
                 Err(e) => e,
             },

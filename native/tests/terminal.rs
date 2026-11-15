@@ -534,7 +534,8 @@ fn a_dash_edits_standard_input() {
 fn a_window_without_a_display_is_the_terminal() {
     let d = workdir("nodisplay");
     std::fs::write(d.join("a.txt"), "one\n").unwrap();
-    let mut t = Pty::spawn(&d, &["--gui", "a.txt"], &[]);
+    // --title names the window that did not open: its NAME is not a file to edit.
+    let mut t = Pty::spawn(&d, &["--gui", "--title", "b.txt", "a.txt"], &[]);
     t.ready().keys("Atwo").esc().keys(":wq\r");
     assert_eq!(t.exit(), 0);
     assert!(
@@ -543,6 +544,7 @@ fn a_window_without_a_display_is_the_terminal() {
         tail(&t.out)
     );
     assert_eq!(read(d.join("a.txt")), "onetwo\n");
+    assert!(!d.join("b.txt").exists());
     // With no terminal either (a new session has no controlling terminal) there is nothing to draw on.
     let mut cmd = std::process::Command::new(BIN);
     cmd.args(["--gui", "a.txt"])
@@ -598,6 +600,14 @@ fn help_version_and_bad_options_need_no_terminal() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--geometry wants COLSxROWS"));
+    for args in [&["-g", "--title"][..], &["--title=", "a.txt"][..]] {
+        let o = std::process::Command::new(BIN).args(args).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("edwin: --title needs a name"),
+            "{args:?}"
+        );
+    }
     // An argument that is not UTF-8 is a usage error, not a crash.
     let o = std::process::Command::new(BIN)
         .arg(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"\xff"))
@@ -633,6 +643,11 @@ fn help_version_and_bad_options_need_no_terminal() {
             "edwinclient: --geometry wants COLSxROWS, not 99999999999x1",
         ),
         (&["--socket"][..], "edwinclient: --socket needs a path"),
+        (&["-c", "--title"][..], "edwinclient: --title needs a name"),
+        (
+            &["--title=", "a.txt"][..],
+            "edwinclient: --title needs a name",
+        ),
         (
             &["--socket=/a", "--remote", "h:/b"][..],
             "give one of them once",

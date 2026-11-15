@@ -33,7 +33,9 @@ use winit::window::{Theme, Window, WindowId};
 
 /// Points to pixels at a scale of 1 (CSS's 96 per inch); 10.5 points is the page's 14 pixels.
 const DEFAULT_POINTS: f32 = 10.5;
-/// The window's first size, in cells.
+/// The window's app_id (Wayland) and both parts of its WM_CLASS (X11), whichever program opened it (edwin --gui or
+/// edwinclient -c), so one compositor rule matches either.
+const APP_ID: &str = "edwin";
 
 #[derive(Debug)]
 struct Wake;
@@ -59,6 +61,8 @@ struct App {
     events: Vec<String>,
     model: Option<Model>,
     title: String,
+    /// --title NAME: the window's title, whatever the frame shows.
+    fixed_title: Option<String>,
     theme: String,
     mods: ModifiersState,
     mouse: Option<(i32, i32)>,
@@ -110,10 +114,15 @@ impl App {
             self.start.0 * t.cell_w + 2 * self.pad as u32,
             self.start.1 * t.cell_h + 2 * self.pad as u32,
         );
-        let attrs = Window::default_attributes()
-            .with_title("Edwin")
-            .with_inner_size(logical)
-            .with_min_inner_size(LogicalSize::new(200, 100));
+        // winit's Wayland side takes the same name as its app_id.
+        let attrs = winit::platform::x11::WindowAttributesExtX11::with_name(
+            Window::default_attributes(),
+            APP_ID,
+            APP_ID,
+        )
+        .with_title(self.fixed_title.as_deref().unwrap_or("Edwin"))
+        .with_inner_size(logical)
+        .with_min_inner_size(LogicalSize::new(200, 100));
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         window.set_ime_allowed(true);
         self.scale = window.scale_factor();
@@ -305,7 +314,7 @@ impl App {
         else {
             return;
         };
-        if let Some(t) = &m.title {
+        if let Some(t) = m.title.as_ref().filter(|_| self.fixed_title.is_none()) {
             if *t != self.title {
                 g.window.set_title(&format!("{t} - Edwin"));
                 self.title = t.clone();
@@ -563,8 +572,8 @@ pub fn unavailable() -> Option<String> {
 }
 
 impl Gui {
-    /// Opens a window of COLS x ROWS cells, or says why it cannot be opened.
-    pub fn open((cols, rows): (u32, u32)) -> Result<Gui, String> {
+    /// Opens a window of COLS x ROWS cells, titled TITLE for good when one is given, or says why it cannot be opened.
+    pub fn open((cols, rows): (u32, u32), title: Option<String>) -> Result<Gui, String> {
         let mut builder = EventLoop::<Wake>::with_user_event();
         // V8's thread is not the process's first; X11 and Wayland do not mind.
         winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
@@ -586,6 +595,7 @@ impl Gui {
             events: Vec::new(),
             model: None,
             title: String::new(),
+            fixed_title: title,
             theme: String::new(),
             mods: ModifiersState::empty(),
             mouse: None,

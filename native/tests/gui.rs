@@ -1,8 +1,8 @@
 //! edwin in a window (DT2), on a virtual X display: keys and the mouse as a person sends them (xdotool), the
-//! close button, the keystroke-to-screen latency budget, and edwinclient -c.
+//! close button, the keystroke-to-screen latency budget, edwinclient -c, and the window's WM_CLASS and --title.
 //!
-//! Each test starts its own Xvfb. Without Xvfb or xdotool, or without a GPU adapter (lavapipe will do), the tests
-//! say so and pass, unless EDWIN_TEST_REQUIRE_GUI is set (the package's check sets it): then they fail.
+//! Each test starts its own Xvfb. Without Xvfb, xdotool or xprop, or without a GPU adapter (lavapipe will do), the
+//! tests say so and pass, unless EDWIN_TEST_REQUIRE_GUI is set (the package's check sets it): then they fail.
 #![cfg(feature = "gui")]
 
 use std::path::{Path, PathBuf};
@@ -40,8 +40,8 @@ struct Display {
 
 impl Display {
     fn start(test: &str) -> Option<Display> {
-        if !has("Xvfb", "-help") || !has("xdotool", "version") {
-            skipped(test, "needs Xvfb and xdotool");
+        if !has("Xvfb", "-help") || !has("xdotool", "version") || !has("xprop", "-version") {
+            skipped(test, "needs Xvfb, xdotool and xprop");
             return None;
         }
         // A display number of this process's own, one per test.
@@ -83,6 +83,16 @@ impl Display {
             .unwrap();
         String::from_utf8_lossy(&o.stdout).trim().to_string()
     }
+
+    /// The X property PROP of window WIN, as xprop prints it: `NAME(TYPE) = VALUE`.
+    fn prop(&self, win: &str, prop: &str) -> String {
+        let o = Command::new("xprop")
+            .args(["-id", win, prop])
+            .env("DISPLAY", &self.name)
+            .output()
+            .expect("xprop");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
 }
 
 impl Drop for Display {
@@ -104,10 +114,11 @@ struct Edwin<'a> {
 impl<'a> Edwin<'a> {
     /// Runs edwin --gui with ARGS and waits for its window; None when no window could open here (no GPU adapter).
     fn open(d: &'a Display, dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Option<Edwin<'a>> {
-        Edwin::open_program(d, dir, BIN, "--gui", args, env)
+        Edwin::open_program(d, dir, BIN, "--gui", args, env, FRAME_TITLE)
     }
 
-    /// PROGRAM with FLAG (the one asking for a window) and ARGS, as open.
+    /// PROGRAM with FLAG (the one asking for a window) and ARGS, as open; the window is the one whose title
+    /// matches the regular expression TITLE.
     fn open_program(
         d: &'a Display,
         dir: &Path,
@@ -115,8 +126,12 @@ impl<'a> Edwin<'a> {
         flag: &str,
         args: &[&str],
         env: &[(&str, &str)],
+        title: &str,
     ) -> Option<Edwin<'a>> {
         let log = dir.join("stderr.log");
+        // The frame's own log (console, EDWIN_TRACE's steps): this run's alone.
+        let trace = dir.join("state/edwin/edwin.log");
+        let _ = std::fs::remove_file(&trace);
         let child = Command::new(program)
             .arg(flag)
             .args(args)
@@ -161,11 +176,24 @@ impl<'a> Edwin<'a> {
             );
             std::thread::sleep(Duration::from_millis(100));
             e.win = d
-                .xdo(&["search", "--name", " - Edwin$"])
+                .xdo(&["search", "--name", title])
                 .lines()
                 .next()
                 .unwrap_or("")
                 .to_string();
+        }
+        // A window titled by --title is there before the frame has drawn in it, so the frame's first draw is waited
+        // for too.
+        while !std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .contains("startup first draw")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the frame did not draw: {}",
+                e.stderr()
+            );
+            std::thread::sleep(Duration::from_millis(50));
         }
         // The trace line says the cell's size: "... cell 8x21, scale 1".
         let err = e.stderr();
@@ -260,6 +288,11 @@ impl<'a> Edwin<'a> {
     }
 }
 
+/// The title a window has once the frame has drawn in it, without --title: "BUFFER - Edwin".
+const FRAME_TITLE: &str = " - Edwin$";
+/// The WM_CLASS of every window, whichever program opened it.
+const WM_CLASS: &str = r#"WM_CLASS(STRING) = "edwin", "edwin""#;
+
 impl Drop for Edwin<'_> {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -323,7 +356,9 @@ fn the_close_button_asks_about_changes() {
     assert_eq!(read(dir.join("a.txt")), "onetwo\n");
 }
 
-/// edwinclient -c: a frame of edwind in a window of its own; what is typed in it reaches edwind's note.
+/// edwinclient -c: a frame of edwind in a window of its own; what is typed in it reaches edwind's note. It is
+/// opened as the scratch popup opens it (--title), and its WM_CLASS is edwin's, not the program's name (winit's
+/// default is argv[0]'s).
 #[test]
 fn edwinclient_c_is_a_frame_of_edwind_in_a_window() {
     if !common::have_node() {
@@ -337,19 +372,72 @@ fn edwinclient_c_is_a_frame_of_edwind_in_a_window() {
     let dir = workdir("client");
     let c = common::client(&dir);
     let note = format!("{}/a.md", up.notes);
-    let Some(mut e) =
-        Edwin::open_program(&d, &dir, &c, "-c", &["--socket", &up.socket, &note], &[])
-    else {
+    let args = ["--title", "org-scratch", "--socket", &up.socket, &note];
+    let Some(mut e) = Edwin::open_program(&d, &dir, &c, "-c", &args, &[], "^org-scratch$") else {
         return;
     };
+    assert_eq!(d.prop(&e.win, "WM_CLASS"), WM_CLASS);
     e.settle();
     e.typed("Gotyped in the window").key("Escape");
+    e.settle();
+    assert_eq!(
+        d.prop(&e.win, "_NET_WM_NAME"),
+        r#"_NET_WM_NAME(UTF8_STRING) = "org-scratch""#
+    );
     e.typed(":wq").key("Return");
     assert_eq!(e.exit(), 0, "{}", e.stderr());
     assert_eq!(
         up.finish(),
         r##"{"server":"# Shared page\ntyped in the window\n","disk":"# Shared page\ntyped in the window\n","opened":["a.md"]}"##
     );
+}
+
+/// The window's WM_CLASS is edwin's, and --title NAME (or --title=NAME) is its title for good, as compositor rules
+/// match a scratch or calculator frame by the two; without it the title follows the frame. Wayland's app_id,
+/// set from the same name, has no compositor to show it here.
+#[test]
+fn the_window_is_edwin_and_title_names_it_for_good() {
+    let Some(d) = Display::start("identity") else {
+        return;
+    };
+    let dir = workdir("identity");
+    std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+    let Some(mut e) = Edwin::open(&d, &dir, &["a.txt"], &[]) else {
+        return;
+    };
+    assert_eq!(d.prop(&e.win, "WM_CLASS"), WM_CLASS);
+    assert_eq!(
+        d.prop(&e.win, "_NET_WM_NAME"),
+        r#"_NET_WM_NAME(UTF8_STRING) = "a.txt - Edwin""#
+    );
+    e.typed(":q").key("Return");
+    assert_eq!(e.exit(), 0, "{}", e.stderr());
+    for flag in [
+        &["--title", "org-scratch"][..],
+        &["--title=org-scratch"][..],
+    ] {
+        let args = [flag, &["a.txt"]].concat();
+        let Some(mut e) = Edwin::open_program(&d, &dir, BIN, "--gui", &args, &[], "^org-scratch$")
+        else {
+            return;
+        };
+        assert_eq!(d.prop(&e.win, "WM_CLASS"), WM_CLASS, "{flag:?}");
+        // The frame draws, which without --title names the window after the buffer, and the title stays.
+        e.typed("Atwo").key("Escape");
+        e.settle();
+        for (prop, value) in [
+            (
+                "_NET_WM_NAME",
+                r#"_NET_WM_NAME(UTF8_STRING) = "org-scratch""#,
+            ),
+            ("WM_NAME", r#"WM_NAME(STRING) = "org-scratch""#),
+        ] {
+            assert_eq!(d.prop(&e.win, prop), value, "{flag:?}");
+        }
+        e.typed(":wq").key("Return");
+        assert_eq!(e.exit(), 0, "{}", e.stderr());
+    }
+    assert_eq!(read(dir.join("a.txt")), "onetwotwo\n");
 }
 
 /// The budget (docs/steps.md, step DT2): from a key's arrival to the frame's present, on a 200x50 window full of
