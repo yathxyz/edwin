@@ -571,16 +571,29 @@ pub fn unavailable() -> Option<String> {
     (!missing.is_empty()).then(|| format!("missing system libraries: {}", missing.join(", ")))
 }
 
+/// The event loop, connected to the display (Wayland's, else X11's, as winit chooses), or why the display does not
+/// answer. winit builds one per process.
+fn event_loop() -> Result<EventLoop<Wake>, String> {
+    let mut builder = EventLoop::<Wake>::with_user_event();
+    // V8's thread is not the process's first; X11 and Wayland do not mind.
+    winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
+    winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
+    builder
+        .build()
+        .map_err(|e| format!("cannot reach the display: {e}"))
+}
+
+/// Why a window cannot be opened, or None, the display connected to as a window's would be and closed again:
+/// unavailable's reasons, then a display that does not answer (a stale DISPLAY or WAYLAND_DISPLAY). A GPU adapter
+/// is not looked for. As winit builds one event loop per process, the process that asked opens no window after.
+pub fn probe() -> Option<String> {
+    unavailable().or_else(|| event_loop().err())
+}
+
 impl Gui {
     /// Opens a window of COLS x ROWS cells, titled TITLE for good when one is given, or says why it cannot be opened.
     pub fn open((cols, rows): (u32, u32), title: Option<String>) -> Result<Gui, String> {
-        let mut builder = EventLoop::<Wake>::with_user_event();
-        // V8's thread is not the process's first; X11 and Wayland do not mind.
-        winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
-        winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
-        let mut event_loop = builder
-            .build()
-            .map_err(|e| format!("cannot reach the display: {e}"))?;
+        let mut event_loop = event_loop()?;
         let (family, points) = text::font_setting();
         let mut app = App {
             gfx: None,

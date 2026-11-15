@@ -1,7 +1,8 @@
 /* What a page or Node gives the core and bare V8 does not (DT1): timers, queueMicrotask, performance.now,
    console, TextEncoder, crypto.randomUUID. Timers are kept here; the shell's event loop calls
    __native.tick() for the due ones and sleeps until the next. console writes to the log file
-   (EDWIN_LOG, else edwin.log in the state directory), never to the terminal Edwin draws on. */
+   (EDWIN_LOG, else edwin.log in the state directory), never to the terminal Edwin draws on. main.rs's frame_log
+   names the same file (keep the two alike): edwinclient -n's frame has it for its standard error. */
 (function () {
 'use strict';
 const N = globalThis.__n;

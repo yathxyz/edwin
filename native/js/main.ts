@@ -3,7 +3,7 @@
    Emacs daemon; edwin never attaches to one.
 
      edwin [-nw | -g] [--title NAME] [-R] [-f COMMAND] [+LINE[:COL]] [FILE | -]...
-     edwinclient [-t | -c] [--title NAME] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [-f COMMAND] [+LINE[:COL]] [FILE | -]...
+     edwinclient [-t | -c [-n]] [--title NAME] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [-f COMMAND] [+LINE[:COL]] [FILE | -]...
      edwinclient [-a] [--socket PATH | --remote HOST:SOCKET] -e FORM...
 
    The core runs as a model frame (display.ts) drawn by term.ts, or by the window (gui.ts and the Rust side's
@@ -12,7 +12,9 @@
    notes under its notes directory are opened through it, shared with the browser's frames. Through --remote
    HOST:SOCKET it is the edwind on another machine, reached through ssh (DT3); its notes are then named as they are
    under its notes directory. -e evaluates each FORM in edwind and prints its value, with no frame; -f runs
-   COMMAND in the new frame, once the files are visited, as the key <cmd:COMMAND> would. The process
+   COMMAND in the new frame, once the files are visited, as the key <cmd:COMMAND> would. -n (with -c) returns at
+   once: main.rs checks the display and the edwind, then runs the same line without -n detached, its standard
+   error appended to the log (prelude.ts). The process
    ends with the status the user asked for: :q, :wq, ZZ and C-x C-c give 0, :cq gives 1 (or its argument), so git
    commit and sudoedit can tell an abort. C-z suspends to the shell; fg resumes (in the window, C-z iconifies it). */
 (function () {
@@ -35,6 +37,7 @@ Edit FILEs in a frame of edwind, Edwin's daemon (edwin --daemon), in this termin
 
   -t, -nw, --tty     a frame in this terminal (the default)
   -c, --create-frame a frame in a window of its own (EDWIN_FONT="Family 11" sets its font)
+  -n, --no-wait      with -c: return at once, leaving the window open (once its display and the edwind answer)
   --geometry=COLSxROWS  the window's first size in characters (100x36)
   --title NAME       the window's title, whatever it shows (its app_id and WM_CLASS are edwin)
   -e, --eval         the arguments that follow are Scheme forms: evaluate each in edwind and print its value
@@ -83,7 +86,7 @@ trace('main');
 /* main.rs read the same command line before V8 started, and acted on it only when this finds nothing wrong. */
 function parseArgs(argv: string[]) {
   const o: MainOpts = { files: [], line: null, col: null, funcall: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
-  let opts = true, named = 0, forms = 0;
+  let opts = true, named = 0, forms = 0, noWait = false, window = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (o.eval) { o.files.push(a); forms++; continue; }
@@ -119,7 +122,11 @@ function parseArgs(argv: string[]) {
       o.col = c === undefined ? null : Number(c);
     }
     else if (!client && ['-nw', '--no-window', '-t', '-g', '--gui'].includes(a)) { /* main.rs chose */ }
-    else if (client && ['-t', '-nw', '--tty', '-c', '--create-frame', '-a', '--start-daemon'].includes(a)) { /* main.rs chose, or started it */ }
+    /* main.rs chose (the last of these wins), started edwind, or detached */
+    else if (client && ['-c', '--create-frame'].includes(a)) window = true;
+    else if (client && ['-t', '-nw', '--tty'].includes(a)) window = false;
+    else if (client && ['-n', '--no-wait'].includes(a)) noWait = true;
+    else if (client && ['-a', '--start-daemon'].includes(a)) { /* main.rs started it */ }
     else if (client && (a === '-e' || a === '--eval')) o.eval = true;
     else if (client && /^--(socket|remote)(=|$)/.test(a)) {
       const v = a.includes('=') ? a.slice(a.indexOf('=') + 1) : argv[++i];
@@ -127,13 +134,19 @@ function parseArgs(argv: string[]) {
       if (++named > 1) throw new Error('--socket and --remote name one edwind; give one of them once');
     }
     else if (a.startsWith('-') && a.length > 1) {
-      const theirs = !client && /^(-a|-c|-e|--(standalone|socket|remote|start-daemon|create-frame|eval)(=.*)?)$/.test(a);
+      const theirs = !client && /^(-a|-c|-e|-n|--(standalone|socket|remote|start-daemon|create-frame|eval|no-wait)(=.*)?)$/.test(a);
       throw new Error(`unknown option ${a} (${theirs ? 'edwin never attaches to edwind; edwinclient does' : NAME + ' --help lists them'})`);
     }
     else o.files.push(a);
   }
   if (o.eval && !forms && !o.help && !o.version) throw new Error('-e needs a form');
   if (o.eval && o.funcall !== null) throw new Error('-f runs a command in a frame, and -e opens none');
+  /* As main.rs refuses them, before it detaches: the frame left behind is a window, and outlives standard input. */
+  if (noWait && !o.help && !o.version) {
+    if (o.eval) throw new Error('-n leaves a frame open, and -e opens none');
+    if (!window) throw new Error('-n leaves the frame in a window of its own: give -c');
+    if (o.stdin) throw new Error('-n reads no standard input (-): the frame outlives this command');
+  }
   return o;
 }
 

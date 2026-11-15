@@ -760,6 +760,104 @@ evaluated in edwind, with no frame.
   which shows main.rs refused them before looking for one. Also `nix flake check` (with `edwin-typecheck` over
   `native/js`).
 
+## `edwinclient -n -c`: the window stays, the command returns (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `cli-no-wait`): `edwinclient -n -c` returns at once and leaves
+the frame's window open, as `emacsclient -n -c` does, for the callers that must not wait for the frame (the
+scratch popup, the calculator key, the mail notification and the shell aliases of phase 2 and 5).
+
+- **What returns, and when.** `-n` and `--no-wait`, edwinclient only. native/src/main.rs first tries what can
+  fail while the caller still sees what is said and the status: that a display is set and its libraries load
+  (`gui::unavailable`, as the window's fallback asks) and that the display answers (`gui::probe`: winit's event
+  loop is built as the window's would be, which connects to it, and dropped; a stale `DISPLAY` or
+  `WAYLAND_DISPLAY`, as a tmux or ssh session or a key run after a compositor restart has, is `cannot open a
+  window: cannot reach the display: ...`), then that an edwind answers (the same search as a frame's:
+  `--socket`, `--remote`, `$EDWIN_SOCKET`, the user's socket, and `-a` starting the user's own), then that the
+  frame's log opens. A failure is said on stderr with status 1, before anything is detached, and no frame is
+  started. The probe's connection is closed (with a remote edwind's ssh). Then the same program is run again, by the name it was run by (so it is
+  edwinclient), with the same command line less each `-n` (removed by its place, so a `--title -n` or a `-f -n`
+  value is kept), the same environment and directory, and edwinclient returns 0 without waiting for it. The new
+  process is an ordinary `edwinclient -c` from there: it attaches, boots edwind's image and opens the window.
+- **Detached.** The frame's process calls `setsid` before its exec: a session of its own, so no controlling
+  terminal (the terminal's hangup and keys are not its), and opening `/dev/tty` fails, so a window that cannot
+  open is never drawn in the caller's terminal instead (the frame exits 1). Its standard input and output are
+  `/dev/null`, and its standard error is appended to its log, the file its console writes to (`EDWIN_LOG`, else
+  `edwin.log` in the state directory, `~/.local/state/edwin/edwin.log`; the directory made 0700 and the file 0600
+  when missing; main.rs's `frame_log` and prelude.ts name it alike), so what the frame says once detached is kept
+  there. Every other descriptor edwinclient inherited is marked close-on-exec (`close_range(3, ~0,
+  CLOSE_RANGE_CLOEXEC)`, first of all, before anything is run), so no pipe of the caller's reaches the frame, nor
+  edwin-daemon and its edwind with `-a`, nor a remote edwind's ssh: `$(edwinclient -n -c f)`, a `subprocess`
+  reading the output, or a unit's journal pipe is not held open until the window closes (or the daemon ends). Not waited for, it is reparented
+  when edwinclient exits, so the caller is left no zombie and nothing sits between it and the frame.
+- **Refused with status 2**, by both readers of the command line alike, before an edwind is looked for: `-n`
+  without a window (`-n leaves the frame in a window of its own: give -c`; `-c ... -t` counts as the terminal, the
+  last one winning as before), `-n` with `-` (`-n reads no standard input (-): the frame outlives this command`),
+  and `-n` with `-e` (`-n leaves a frame open, and -e opens none`). `--help` and `--version` answer as before.
+  `edwin -n` is an unknown option that says edwinclient has it.
+- **Choices**, each reversible:
+  - `-n` without `-c` is refused. Emacs's `emacsclient -n FILE` visits FILE in a frame the daemon already has;
+    an edwind has no frame of the desktop's to reuse, and a detached frame cannot draw in a terminal. The
+    alternative is `-n` implying `-c`.
+  - `-n -e` is refused; the alternative is to ignore `-n` there, as the forms are answered at once anyway.
+  - The checks are made before detaching, and what fails in the frame after it is said only in the frame's log:
+    a `-f NAME` that is no command (known only once edwind's init has run), or a window the display refuses after
+    all (no GPU adapter, e.g. `VK_DRIVER_FILES` naming no driver), end the frame with status 1 while the caller
+    has already seen 0. The display itself is connected to before detaching (milliseconds), so a stale one is
+    said to the caller; the GPU adapter is not looked for there, as that is the frame's renderer's start. The
+    alternative is a readiness pipe: the caller waits until the frame has drawn, which reports those too but makes
+    the caller wait for the frame's cold boot (edwinclient does not start from the snapshot), which is what `-n`
+    is for not doing.
+  - The frame's standard error is its log, and a log that cannot be opened (an unwritable state directory) is
+    status 1 before detaching, so a failure after is never without a trace. The alternative is `/dev/null` then,
+    which detaches anyway and loses what the frame says.
+  - Re-executed rather than forked: the frame is a fresh process image (the program is two threads by then, and
+    a fork keeps only one), and nothing but the command line and the environment crosses over. The probe's connection is not handed over; the frame
+    opens its own.
+- **Not in it:** no timeout of edwinclient's own: the attach waits as long as a frame's does (30 s for an edwind
+  to answer, through ssh too). No line of edwinclient's own in the log: what is there is the frame's (its
+  console's lines are timed, its standard error's, such as `edwinclient: NAME is not a command`, are not), and the
+  log is never rotated, as before. The fleet's callers (`fleet-org-scratch`, `fleet-calc-key`,
+  `mail-fleet-notify-edwin`, `fleet-shell-aliases`) are the fleet's. No new file, so no README layout row; and no
+  check in nix/checks.nix: the tests are the package's own cargo tests, which `nix build .#edwin` runs.
+- **Checked by** `nix build .#edwin` on ex44: `tests/gui.rs` 5 passed, 1 ignored (the latency budget), with
+  `edwinclient_n_returns_at_once_and_the_window_stays`, which runs under `EDWIN_TEST_REQUIRE_GUI` (a skip would
+  fail): `-n -c --socket MISSING` says `cannot attach to edwind at MISSING` with status 1 within 1 s and leaves no
+  process; `-n -c --socket EDWIND note` with `DISPLAY` naming a display nobody serves (the Xvfb's number with a 7
+  after it) says `cannot open a window: cannot reach the display` with status 1 within 1 s and leaves no process;
+  `-n -c -f no-such-command-xyz --socket EDWIND note` returns 0 within 1 s, the frame it leaves exits 1, and
+  `edwinclient: no-such-command-xyz is not a command` is in `state/edwin/edwin.log`, made 0600 (the log is then
+  removed, so the next frame's first draw is its own); `-n -c --title no-wait --socket EDWIND note`, given a pipe's write end that is not close-on-exec and
+  with its stdout and stderr read to their ends, returns 0 within 1 s with nothing on stdout, and the pipe's read
+  end is at its end at once (nothing holds the caller's descriptor); the test is a subreaper, and the one process
+  left is the frame, its child directly (nothing between them), leading a session of its own with no controlling
+  terminal (tty_nr 0), `/dev/null` on descriptors 0 and 1 and its log on 2; the window titled `no-wait` appears, draws, is the
+  frame's (`_NET_WM_PID`), is WM_CLASS `edwin`, and stays; text typed in it and `:wq` reach edwind's note, the
+  frame exits 0, is reaped, and no process is left. `tests/terminal.rs` 31 passed: in
+  `help_version_and_bad_options_need_no_terminal`, `edwin -n` and `edwin --no-wait` are unknown options naming
+  edwinclient, and edwinclient's `-n a.txt`, `-c --no-wait -t a.txt`, `-n -c -` and `-c -n -e 1` are status 2 with
+  no edwind to attach to (refused before one is looked for); `no_wait_without_a_display_says_so_and_leaves_the_terminal_alone`
+  (`-n -c a.txt` in a pseudo-terminal with no display: status 1 within 1 s, `cannot open a window: no display`,
+  the terminal not taken). The gui test fails without each defence: with the `close_range` call removed the frame
+  holds the caller's pipe (`poll 0`), and with the `setsid` line removed the frame shares the build's session (a
+  first such run also showed that the test's read of the pipe blocked when poll timed out, hanging instead of
+  failing; it now reads only once poll says it will not block). Also `nix flake check` (with `edwin-typecheck`
+  over `native/js`). One run of it failed in `edit-agent` (a pi agent's call timed out) and `edit-crash` (R16.5),
+  server tests this package does not touch; each then passed twice on its own and the rerun of `nix flake check`
+  passed. One `nix build .#edwin` run beside two others failed in `wq_saves_and_exits_zero` alone (ESC and `:`
+  read together as `M-:` under the load), a test this package does not touch; the build run alone passed.
+- **After review** (the display probe and the frame's log): `nix build .#edwin` on ex44 passed (unit 4, gui.rs 5
+  and 1 ignored, terminal.rs 31). The gui test fails without each fix: with `gui::probe` put back to
+  `gui::unavailable`, the stale-display run gives status 0; with the frame's standard error put back on
+  `/dev/null`, the `-f` frame's message is not in its log. Outside the sandbox, with the built package and a
+  throwaway HOME: `DISPLAY=:77 edwinclient -a -n -c --title e1 f` with no server there says `cannot reach the
+  display` with status 1 in 19 ms, and the frames that failed after detaching (no Vulkan driver outside the
+  sandbox) each left `cannot open a window: cannot draw in the window: ...` in `edwin.log` (0600). One earlier
+  build run failed in `keys_and_clicks_edit_and_wq_leaves_zero` alone (`Xvfb did not start` within 10 s, ex44's
+  load near 10 from other builds); the next passed. `nix flake check --keep-going` ran 29 checks: all passed but
+  `edit-agent` (a pi agent's call timed out, as before), which passed on the rerun. A first run, without
+  `--keep-going`, stopped at `edwin-bench` (shadow stack 10.1% against its 10% limit, under the same load), which
+  passed in the next.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

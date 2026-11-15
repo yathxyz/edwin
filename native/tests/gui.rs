@@ -1,10 +1,12 @@
 //! edwin in a window (DT2), on a virtual X display: keys and the mouse as a person sends them (xdotool), the
-//! close button, the keystroke-to-screen latency budget, edwinclient -c, and the window's WM_CLASS and --title.
+//! close button, the keystroke-to-screen latency budget, edwinclient -c and -n -c, and the window's WM_CLASS and
+//! --title.
 //!
 //! Each test starts its own Xvfb. Without Xvfb, xdotool or xprop, or without a GPU adapter (lavapipe will do), the
 //! tests say so and pass, unless EDWIN_TEST_REQUIRE_GUI is set (the package's check sets it): then they fail.
 #![cfg(feature = "gui")]
 
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -389,6 +391,309 @@ fn edwinclient_c_is_a_frame_of_edwind_in_a_window() {
     assert_eq!(
         up.finish(),
         r##"{"server":"# Shared page\ntyped in the window\n","disk":"# Shared page\ntyped in the window\n","opened":["a.md"]}"##
+    );
+}
+
+/// A process of this test's, killed and reaped when dropped, unless reaped before (0).
+struct Pid(i32);
+impl Drop for Pid {
+    fn drop(&mut self) {
+        if self.0 > 0 {
+            // SAFETY: a signal to, and a wait for, a process this test made its own.
+            unsafe {
+                libc::kill(self.0, libc::SIGKILL);
+                libc::waitpid(self.0, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+}
+
+/// The fields of /proc/PID/stat after the command's name: [state, ppid, pgrp, session, tty_nr, ...], or none
+/// when there is no such process.
+fn proc_stat(pid: i32) -> Vec<String> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    match s.rfind(") ") {
+        Some(i) => s[i + 2..].split(' ').map(str::to_string).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The processes whose parent is this test's process and whose working directory is DIR.
+fn children_in(dir: &Path) -> Vec<i32> {
+    let (me, here) = (std::process::id().to_string(), dir.canonicalize().unwrap());
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&pid| {
+            proc_stat(pid).get(1) == Some(&me)
+                && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|c| c == here)
+        })
+        .collect()
+}
+
+/// edwinclient -n -c returns at once, within 1 s, with status 0, and the window stays: a frame of edwind in a
+/// process of its own session (so with no controlling terminal), with /dev/null for its standard input and output,
+/// its log for its standard error, and none of the caller's other descriptors, so reading the command's output to
+/// its end, as `$(...)` does, is not held until the window closes. Nothing is left between the frame and the caller
+/// (this test is a subreaper: the frame is its child once edwinclient has returned) and nothing is left over: the
+/// frame exits 0 on :wq and is reaped. What can fail before it returns (no edwind answering, a display that does
+/// not answer) is said with status 1, and no frame is left; what fails in the frame after (-f NAME that is no
+/// command) is in its log.
+#[test]
+fn edwinclient_n_returns_at_once_and_the_window_stays() {
+    if !common::have_node() {
+        skipped("no-wait", "no node");
+        return;
+    }
+    let Some(d) = Display::start("no-wait") else {
+        return;
+    };
+    let up = common::EdwindUp::start();
+    let dir = workdir("no-wait");
+    let c = common::client(&dir);
+    let note = format!("{}/a.md", up.notes);
+    // edwinclient with ARGS, and EXTRA, a descriptor of the test's, inherited, and ENV over the rest; its output
+    // read to the end, then its status, and how long that took.
+    let edwinclient = |args: &[&str], extra: Option<RawFd>, env: &[(&str, &str)]| {
+        let mut cmd = Command::new(&c);
+        cmd.args(args)
+            .current_dir(&dir)
+            .env("DISPLAY", &d.name)
+            .env_remove("WAYLAND_DISPLAY")
+            .env("HOME", &dir)
+            .env("XDG_STATE_HOME", dir.join("state"))
+            .env("XDG_CONFIG_HOME", dir.join("config"))
+            .env_remove("EDWIN_SOCKET")
+            .env_remove("XDG_RUNTIME_DIR")
+            .env_remove("EDWIN_LOG")
+            .env("EDWIN_TRACE", "1")
+            .envs(env.iter().copied())
+            .stdin(Stdio::null());
+        if let Some(fd) = extra {
+            // SAFETY: fcntl is async-signal-safe. Only this child gets FD: it is close-on-exec everywhere else, so
+            // the other tests' children do not hold it.
+            unsafe {
+                std::os::unix::process::CommandExt::pre_exec(&mut cmd, move || {
+                    libc::fcntl(fd, libc::F_SETFD, 0);
+                    Ok(())
+                });
+            }
+        }
+        let t0 = Instant::now();
+        let o = cmd.output().unwrap();
+        (o, t0.elapsed())
+    };
+    // SAFETY: prctl on this process. The frame, orphaned when edwinclient returns, becomes this process's child.
+    assert_eq!(
+        unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+        0
+    );
+
+    // No edwind answers: said here, with status 1, and no frame is started.
+    let missing = dir.join("missing.sock").display().to_string();
+    let (o, took) = edwinclient(&["-n", "-c", "--socket", &missing, &note], None, &[]);
+    let err = String::from_utf8_lossy(&o.stderr).to_string();
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(&format!("edwinclient: cannot attach to edwind at {missing}")),
+        "{err}"
+    );
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(children_in(&dir), Vec::<i32>::new(), "a frame was left");
+
+    // A display that does not answer (a stale DISPLAY), with an edwind that does: said here, with status 1, as the
+    // display is connected to before detaching, and no frame is started. (This suite's displays are :300 to :2299.)
+    let stale = format!("{}7", d.name);
+    assert!(!Path::new(&format!("/tmp/.X11-unix/X{}", &stale[1..])).exists());
+    let (o, took) = edwinclient(
+        &["-n", "-c", "--socket", &up.socket, &note],
+        None,
+        &[("DISPLAY", &stale)],
+    );
+    let err = String::from_utf8_lossy(&o.stderr).to_string();
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("edwinclient: cannot open a window: cannot reach the display"),
+        "{err}"
+    );
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(children_in(&dir), Vec::<i32>::new(), "a frame was left");
+
+    // What fails only in the frame, once detached (a -f NAME that is no command, known once edwind's init has run),
+    // is in its log: the caller saw 0, the frame ends with 1, and its standard error was appended to edwin.log.
+    let log = dir.join("state/edwin/edwin.log");
+    let (o, took) = edwinclient(
+        &[
+            "-n",
+            "-c",
+            "-f",
+            "no-such-command-xyz",
+            "--socket",
+            &up.socket,
+            &note,
+        ],
+        None,
+        &[],
+    );
+    let err = String::from_utf8_lossy(&o.stderr).to_string();
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(took < Duration::from_secs(1), "{took:?}");
+    let frames = children_in(&dir);
+    assert_eq!(frames.len(), 1, "the frame, the one child left: {frames:?}");
+    let mut frame = Pid(frames[0]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut st = 0;
+    // SAFETY: a wait for the frame, this test's child, without blocking.
+    while unsafe { libc::waitpid(frame.0, &mut st, libc::WNOHANG) } != frame.0 {
+        assert!(Instant::now() < deadline, "the frame did not leave");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    frame.0 = 0;
+    assert!(
+        libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 1,
+        "the frame's status: {st}"
+    );
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    if said.contains("cannot open a window") {
+        skipped("no-wait", &format!("no window here: {said}"));
+        return;
+    }
+    assert!(
+        said.contains("edwinclient: no-such-command-xyz is not a command"),
+        "the frame's log: {said}"
+    );
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&log).unwrap().permissions())
+            & 0o777,
+        0o600
+    );
+    // The next frame's first draw is its own.
+    std::fs::remove_file(&log).unwrap();
+
+    // A descriptor of the caller's that is not close-on-exec, as a caller's leaked pipe would be.
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 into a two-element array.
+    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    let args = [
+        "-n",
+        "-c",
+        "--title",
+        "no-wait",
+        "--socket",
+        &up.socket,
+        &note,
+    ];
+    let (o, took) = edwinclient(&args, Some(fds[1]), &[]);
+    // SAFETY: the write end, which the test has no more use for.
+    unsafe { libc::close(fds[1]) };
+    let err = String::from_utf8_lossy(&o.stderr).to_string();
+    assert_eq!(o.status.code(), Some(0), "{err}");
+    assert!(took < Duration::from_secs(1), "edwinclient -n took {took:?}");
+    assert!(o.stdout.is_empty(), "{:?}", o.stdout);
+    let frames = children_in(&dir);
+    assert_eq!(frames.len(), 1, "the frame, the one child left: {frames:?}");
+    let mut frame = Pid(frames[0]);
+    let pid = frame.0;
+    // Nothing holds the pipe's write end now: its read end is at its end at once.
+    let mut p = libc::pollfd {
+        fd: fds[0],
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut b = [0u8; 1];
+    // SAFETY: poll of one descriptor, a read into a buffer of its size (only once poll says it will not block), and
+    // the close of the test's own.
+    let (n, got) = unsafe {
+        let n = libc::poll(&mut p, 1, 2000);
+        let got = if n == 1 {
+            libc::read(fds[0], b.as_mut_ptr().cast(), 1)
+        } else {
+            -1
+        };
+        libc::close(fds[0]);
+        (n, got)
+    };
+    assert!(
+        n == 1 && got == 0,
+        "the frame holds the caller's descriptor (poll {n}, read {got})"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let win = loop {
+        let mut st = 0;
+        // SAFETY: a wait for the frame, this test's child, without blocking.
+        if unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) } == pid {
+            frame.0 = 0;
+            // The -f frame above had a window, so this one should have: why it ended is in its log.
+            panic!(
+                "the frame ended ({st}) before its window appeared: {}",
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+        assert!(Instant::now() < deadline, "the window did not appear");
+        if let Some(w) = d.xdo(&["search", "--name", "^no-wait$"]).lines().next() {
+            break w.to_string();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    while !std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("startup first draw")
+    {
+        assert!(Instant::now() < deadline, "the frame did not draw");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        d.prop(&win, "_NET_WM_PID"),
+        format!("_NET_WM_PID(CARDINAL) = {pid}"),
+        "the window is the frame's"
+    );
+    assert_eq!(d.prop(&win, "WM_CLASS"), WM_CLASS);
+    let stat = proc_stat(pid);
+    assert_eq!(
+        stat[1],
+        std::process::id().to_string(),
+        "nothing between the frame and its caller"
+    );
+    assert_eq!(stat[3], pid.to_string(), "the frame leads a session of its own");
+    assert_eq!(stat[4], "0", "the frame has no controlling terminal");
+    // Standard input and output are /dev/null, and standard error is its log.
+    let log_at = log.canonicalize().unwrap();
+    for (fd, at) in [(0, Path::new("/dev/null")), (1, Path::new("/dev/null")), (2, &log_at)] {
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/fd/{fd}")).unwrap(),
+            at,
+            "descriptor {fd}"
+        );
+    }
+    // The window stays, and is a frame of edwind.
+    d.xdo(&["mousemove", "300", "300"]);
+    d.xdo(&["windowfocus", &win]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(d.xdo(&["search", "--name", "^no-wait$"]), win);
+    d.xdo(&["type", "--delay", "20", "Gotyped without waiting"]);
+    d.xdo(&["key", "Escape"]);
+    std::thread::sleep(Duration::from_millis(300));
+    d.xdo(&["type", "--delay", "20", ":wq"]);
+    d.xdo(&["key", "Return"]);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut st = 0;
+    // SAFETY: as above.
+    while unsafe { libc::waitpid(pid, &mut st, libc::WNOHANG) } != pid {
+        assert!(Instant::now() < deadline, "the frame did not leave");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    frame.0 = 0;
+    assert!(
+        libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0,
+        "the frame's status: {st}"
+    );
+    assert_eq!(children_in(&dir), Vec::<i32>::new(), "something was left");
+    assert_eq!(
+        up.finish(),
+        r##"{"server":"# Shared page\ntyped without waiting\n","disk":"# Shared page\ntyped without waiting\n","opened":["a.md"]}"##
     );
 }
 

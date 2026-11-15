@@ -111,6 +111,9 @@ struct Args {
     /// edwinclient: the edwind --socket or --remote names, as an address sys::sock_open takes; -a.
     named: Option<String>,
     start: bool,
+    /// edwinclient -n: where it stands on the line (its places among the arguments after the program's name), so
+    /// the detached frame gets the line without it.
+    no_wait: Vec<usize>,
     /// --help, --version or a usage error: main.ts answers, and no edwind, terminal or window is opened.
     answer: bool,
 }
@@ -122,9 +125,10 @@ fn args(client: bool) -> Args {
         title: None,
         named: None,
         start: false,
+        no_wait: Vec::new(),
         answer: false,
     };
-    let (mut named, mut funcall) = (0, false);
+    let (mut named, mut funcall, mut stdin) = (0, false, false);
     let mut naming = |o: &mut Args, k: &str, v: &str| {
         named += 1;
         if v.is_empty() || named > 1 {
@@ -135,23 +139,29 @@ fn args(client: bool) -> Args {
             o.named = Some(v.to_string());
         }
     };
-    let mut it = std::env::args().skip(1);
-    while let Some(a) = it.next() {
+    // Each argument with its place on the line; an option's value is the next one, whatever it is.
+    let mut it = std::env::args().skip(1).enumerate();
+    let value = |it: &mut std::iter::Enumerate<std::iter::Skip<std::env::Args>>| {
+        it.next().map(|(_, v)| v).unwrap_or_default()
+    };
+    while let Some((i, a)) = it.next() {
         match a.as_str() {
             "--" => break,
             "-h" | "--help" | "--version" => o.answer = true,
-            "-R" | "--read-only" | "-" => {}
+            "-R" | "--read-only" => {}
+            "-" => stdin = true,
+            "-n" | "--no-wait" if client => o.no_wait.push(i),
             "-g" | "--gui" if !client => o.window = true,
             "-nw" | "--no-window" | "-t" if !client => o.window = false,
             "-c" | "--create-frame" if client => o.window = true,
             "-t" | "-nw" | "--tty" if client => o.window = false,
             "-a" | "--start-daemon" if client => o.start = true,
             "--socket" | "--remote" if client => {
-                let v = it.next().unwrap_or_default();
+                let v = value(&mut it);
                 naming(&mut o, &a, &v);
             }
-            "--title" => titled(&mut o, it.next().unwrap_or_default()),
-            "-f" | "--funcall" => funcalled(&mut o, &mut funcall, &it.next().unwrap_or_default()),
+            "--title" => titled(&mut o, value(&mut it)),
+            "-f" | "--funcall" => funcalled(&mut o, &mut funcall, &value(&mut it)),
             // The rest are forms, evaluated with no frame, so with no frame for a -f before them either.
             "-e" | "--eval" if client => {
                 o.window = false;
@@ -176,6 +186,8 @@ fn args(client: bool) -> Args {
             },
         }
     }
+    // -n leaves a window, which nothing but -c opens, and the frame outlives this command's standard input.
+    o.answer |= !o.no_wait.is_empty() && (!o.window || stdin);
     o.window &= !o.answer;
     o
 }
@@ -334,9 +346,129 @@ fn fallback(why: &str) -> Result<Window, i32> {
     }
 }
 
+/// The frame's log, the file prelude.ts's console appends to (keep the two alike): EDWIN_LOG, else edwin.log in
+/// the state directory, its directory made (0700) when missing; opened to append, made 0600.
+fn frame_log() -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let path = env("EDWIN_LOG").unwrap_or_else(|| {
+        env("XDG_STATE_HOME")
+            .unwrap_or_else(|| {
+                env("HOME")
+                    .unwrap_or_else(|| "/tmp".into())
+                    .join(".local/state")
+            })
+            .join("edwin/edwin.log")
+    });
+    let made = match path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(dir) => std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir),
+        None => Ok(()),
+    };
+    made.and_then(|()| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(&path)
+    })
+    .map_err(|e| format!("cannot open the frame's log {}: {e}", path.display()))
+}
+
+/// edwinclient -n: what can fail is tried here, while the caller still sees what is said and the status: the window's
+/// display (connected to and closed again), an edwind that answers (started first with -a), and the frame's log.
+/// Then the same command line without -n runs detached, as the frame, and this returns at once. The frame has its
+/// own session, so no controlling terminal and none of the terminal's signals; its standard input and output are
+/// /dev/null, and its standard error is appended to its log, so what it says once detached (no GPU adapter, a -f
+/// NAME that is no command) is kept; and no other descriptor of the caller's reaches it, so a caller reading this
+/// command's output to its end is not held until the frame closes.
+fn detach(a: &Args) -> i32 {
+    use std::os::unix::process::CommandExt;
+    // Every descriptor the caller left open past 0-2 is marked close-on-exec, before anything is run: the frame,
+    // and with -a edwin-daemon and its edwind, or a remote edwind's ssh, get none of them. (This program opened
+    // none of its own yet, and what it opens from here is close-on-exec already.)
+    // SAFETY: close_range on this process's own descriptors.
+    if unsafe { libc::close_range(3, u32::MAX, libc::CLOSE_RANGE_CLOEXEC as i32) } < 0 {
+        eprintln!(
+            "edwinclient: cannot keep its descriptors from the frame: {}",
+            std::io::Error::last_os_error()
+        );
+        return 1;
+    }
+    // A display that does not answer (a stale DISPLAY or WAYLAND_DISPLAY) is said here, with status 1. This process
+    // opens no window after the probe, which winit's one event loop per process would refuse.
+    #[cfg(feature = "gui")]
+    let no_window = gui::probe();
+    #[cfg(not(feature = "gui"))]
+    let no_window = Some("this edwin was built without the window (the gui feature)".to_string());
+    if let Some(why) = no_window {
+        eprintln!("edwinclient: cannot open a window: {why}");
+        return 1;
+    }
+    match attach(a) {
+        // The frame opens its own connection; this one (and a remote edwind's ssh) is closed first.
+        Ok((_, id)) => sys::sock_close(id),
+        Err(why) => {
+            eprintln!("edwinclient: {why}");
+            return 1;
+        }
+    }
+    let log = match frame_log() {
+        Ok(f) => f,
+        Err(why) => {
+            eprintln!("edwinclient: {why}");
+            return 1;
+        }
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("edwinclient: cannot find its own program");
+        return 1;
+    };
+    let mut cmd = std::process::Command::new(exe);
+    // The name it was run by, which makes it edwinclient (current_exe is edwin, where the link leads).
+    cmd.arg0(std::env::args_os().next().unwrap_or_default());
+    // Every argument but -n, each in its place: an option's value that reads -n stays.
+    cmd.args(
+        std::env::args()
+            .skip(1)
+            .enumerate()
+            .filter(|(i, _)| !a.no_wait.contains(i))
+            .map(|(_, v)| v),
+    );
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe, as between fork and exec it must be.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Not waited for: once this returns the frame is init's (or a subreaper's) to reap.
+    match cmd.spawn() {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("edwinclient: cannot start the frame: {e}");
+            1
+        }
+    }
+}
+
 fn run() -> i32 {
     let client = is_client();
     let args = args(client);
+    if client && !args.no_wait.is_empty() && !args.answer {
+        return detach(&args);
+    }
     if client {
         let edwind = if args.answer {
             None

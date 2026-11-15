@@ -682,7 +682,14 @@ fn help_version_and_bad_options_need_no_terminal() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("unknown option --frobnicate"));
     // edwin never attaches: edwinclient's options, and the removed --standalone, are unknown to it.
-    for opt in ["--socket=/x", "--remote", "-a", "--standalone"] {
+    for opt in [
+        "--socket=/x",
+        "--remote",
+        "-a",
+        "--standalone",
+        "-n",
+        "--no-wait",
+    ] {
         let o = std::process::Command::new(BIN).arg(opt).output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{opt}");
         let err = String::from_utf8_lossy(&o.stderr);
@@ -797,6 +804,23 @@ fn help_version_and_bad_options_need_no_terminal() {
             &["-c", "-f", "upcase-word", "-f", "kill-line"][..],
             "edwinclient: -f runs one command; give it once",
         ),
+        // -n leaves a window, and only a window, behind; refused before it looks for an edwind or detaches.
+        (
+            &["-n", "a.txt"][..],
+            "edwinclient: -n leaves the frame in a window of its own: give -c",
+        ),
+        (
+            &["-c", "--no-wait", "-t", "a.txt"][..],
+            "edwinclient: -n leaves the frame in a window of its own: give -c",
+        ),
+        (
+            &["-n", "-c", "-"][..],
+            "edwinclient: -n reads no standard input (-): the frame outlives this command",
+        ),
+        (
+            &["-c", "-n", "-e", "1"][..],
+            "edwinclient: -n leaves a frame open, and -e opens none",
+        ),
     ] {
         let o = std::process::Command::new(&c)
             .args(args)
@@ -811,6 +835,36 @@ fn help_version_and_bad_options_need_no_terminal() {
             String::from_utf8_lossy(&o.stderr)
         );
     }
+}
+
+/// edwinclient -n -c with no display to open the window on: said, with status 1, before it detaches, and at once;
+/// the terminal it was run from is not taken.
+#[test]
+fn no_wait_without_a_display_says_so_and_leaves_the_terminal_alone() {
+    let d = workdir("no-wait-no-display");
+    let c = client(&d);
+    let run = d.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    let t0 = Instant::now();
+    let mut t = Pty::spawn_program(
+        &d,
+        &c,
+        &["-n", "-c", "a.txt"],
+        &[("XDG_RUNTIME_DIR", run.to_str().unwrap())],
+    );
+    assert_eq!(t.exit(), 1);
+    assert!(t0.elapsed() < Duration::from_secs(1), "{:?}", t0.elapsed());
+    t.pump(200);
+    assert!(
+        contains(
+            &t.out,
+            b"edwinclient: cannot open a window: no display (DISPLAY and WAYLAND_DISPLAY are unset)"
+        ),
+        "{:?}",
+        tail(&t.out)
+    );
+    assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
+    assert!(!d.join("a.txt").exists());
 }
 
 #[test]
