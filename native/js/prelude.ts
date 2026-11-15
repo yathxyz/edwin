@@ -28,7 +28,7 @@ globalThis.queueMicrotask = f => { Promise.resolve().then(f); };
 globalThis.performance = { now: () => N.now(), timeOrigin: Date.now() - N.now() };
 
 /* ---------- the event loop's side: due timers, then milliseconds to the next (-1: none) ---------- */
-const handlers: EdNativeLoop['handlers'] = { input: null, signal: null, sock: null };
+const handlers: EdNativeLoop['handlers'] = { input: null, signal: null, sock: null, proc: null };
 let frozenAt: number | null = null;
 function report(e: unknown) { try { console.error(e && (e as Error).stack ? (e as Error).stack : String(e)); } catch (e2) { /* nowhere to say it */ } }
 globalThis.__native = {
@@ -66,6 +66,7 @@ globalThis.__native = {
   input(s) { if (handlers.input) try { handlers.input(s); } catch (e) { report(e); } },
   signal(name) { if (handlers.signal) try { handlers.signal(name); } catch (e) { report(e); } },
   sock(id, line) { if (handlers.sock) try { handlers.sock(id, line); } catch (e) { report(e); } },
+  proc(id, kind, data) { if (handlers.proc) try { handlers.proc(id, kind, data); } catch (e) { report(e); } },
   gui(json) { if (handlers.gui) try { handlers.gui(json); } catch (e) { report(e); } },
 };
 

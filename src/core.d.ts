@@ -2150,6 +2150,35 @@ interface EdNatives {
   guiDraw(json: string): void;
   guiAction(name: string, arg?: string): void;
   guiClipboard(): string | null;
+  /* child processes (native/src/proc.rs): ARGV run as it is, never through a shell, in a session of its own
+     with only its three descriptors; output, error and exit reach __native.handlers.proc. procSpawn throws
+     when it cannot run (no such program or directory, 64 already running). env changes the inherited
+     environment (null removes a name); past timeout ms it gets TERM, then KILL; past maxBytes of output and
+     error it is killed; output that is not UTF-8 ends it with an error unless lossy; merge sends its error
+     into its output. procWrite queues text for its input (false once that is closed); procKill signals its
+     process group (false when it is not running) */
+  procSpawn(argv: string[], opts?: EdProcSpawnOptions): number;
+  procWrite(id: number, text: string): boolean;
+  procCloseStdin(id: number): void;
+  procKill(id: number, signal?: 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT' | 'STOP' | 'CONT' | 'USR1' | 'USR2'): boolean;
+  procList(): { id: number; pid: number; argv: string[] }[];
+}
+interface EdProcSpawnOptions {
+  cwd?: string;
+  env?: Record<string, string | null>;
+  timeout?: number;
+  maxBytes?: number;
+  lossy?: boolean;
+  merge?: boolean;
+}
+/* How a child ended: after all of its output. code is null when a signal ended it; error says why Edwin
+   stopped it (output that is not UTF-8). */
+interface EdProcExit {
+  code: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  truncated: boolean;
+  error?: string;
 }
 /* __native: what the shell's event loop calls (prelude.ts); main.ts sets the handlers. */
 interface EdNativeLoop {
@@ -2157,6 +2186,7 @@ interface EdNativeLoop {
     input: ((s: string) => void) | null;
     signal: ((name: string) => void) | null;
     sock: ((id: number, line: string | null) => void) | null;
+    proc: EdNativeProcHandler | null;
     gui?: ((json: string) => void) | null;
   };
   /* run the due timers; milliseconds to the next (-1: none) */
@@ -2167,8 +2197,11 @@ interface EdNativeLoop {
   input(s: string): void;
   signal(name: string): void;
   sock(id: number, line: string | null): void;
+  proc: EdNativeProcHandler;
   gui(json: string): void;
 }
+/* A child's output or error as it comes (text), then its exit, once (an EdProcExit). */
+type EdNativeProcHandler = (id: number, kind: 'out' | 'err' | 'exit', data: string | EdProcExit) => void;
 /* host-native.ts's module: the host, and the path helpers main.ts uses. */
 interface EdNativeHostModule {
   createHost(opts?: { storage?: EdHostStorage; dark?: boolean }): EdHost;

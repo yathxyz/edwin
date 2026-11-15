@@ -1,5 +1,5 @@
 //! The Unix floor: the terminal (/dev/tty in raw mode), signals through a self-pipe, edwind's sockets (a remote
-//! edwind's through ssh), and one poll(2) over all of them.
+//! edwind's through ssh), and one poll(2) over all of them and the child processes' pipes (proc.rs).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -116,6 +116,7 @@ const SIGNALS: &[libc::c_int] = &[
     libc::SIGTERM,
     libc::SIGINT,
     libc::SIGQUIT,
+    libc::SIGCHLD,
 ];
 
 fn handle(sig: libc::c_int, f: libc::sighandler_t) {
@@ -123,7 +124,13 @@ fn handle(sig: libc::c_int, f: libc::sighandler_t) {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = f;
-        sa.sa_flags = libc::SA_RESTART;
+        // A child's exit wakes the loop (proc.rs reaps it); its stopping does not.
+        sa.sa_flags = libc::SA_RESTART
+            | if sig == libc::SIGCHLD {
+                libc::SA_NOCLDSTOP
+            } else {
+                0
+            };
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(sig, &sa, std::ptr::null_mut());
     }
@@ -362,7 +369,11 @@ fn ssh_spawn(spec: &str) -> Result<(UnixStream, Ssh), String> {
     static N: AtomicU32 = AtomicU32::new(0);
     let (dest, socket) = match spec.find('/') {
         Some(i) => (&spec[..i], &spec[i..]),
-        None => return Err(format!("{SSH_PREFIX}{spec} names no socket: say HOST:/PATH")),
+        None => {
+            return Err(format!(
+                "{SSH_PREFIX}{spec} names no socket: say HOST:/PATH"
+            ))
+        }
     };
     if dest.is_empty() {
         return Err("no host in the ssh:// address".into());
@@ -494,6 +505,9 @@ pub fn poll_fds() -> Vec<(RawFd, i16)> {
             (s.stream.as_raw_fd(), libc::POLLIN | out)
         }))
     });
+    let mut children = Vec::new();
+    crate::proc::add_fds(&mut children);
+    fds.extend(children.iter().map(|p| (p.fd, p.events)));
     fds
 }
 
@@ -505,10 +519,12 @@ pub struct Ready {
     pub signals: Vec<&'static str>,
     pub socket_lines: Vec<(u32, Option<String>)>,
     pub tty_gone: bool,
+    /// The child processes' output and exits.
+    pub procs: Vec<crate::proc::Event>,
 }
 
 /// Bytes to text: whole UTF-8 sequences now, an unfinished one kept for the next read, bad bytes as U+FFFD.
-fn decode(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
+pub(crate) fn decode(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
     carry.extend_from_slice(bytes);
     let mut out = String::new();
     let mut rest: &[u8] = carry;
@@ -539,9 +555,21 @@ fn decode(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
     out
 }
 
-/// Wait up to TIMEOUT ms (-1: forever) for input, a signal or socket data, and collect what arrived.
+/// Wait up to TIMEOUT ms (-1: forever), or until a child's timeout is due, for input, a signal, socket data or a
+/// child's output or exit, and collect what arrived.
 pub fn wait(timeout: i32) -> Ready {
     let mut ready = Ready::default();
+    let timeout = match crate::proc::until_deadline() {
+        Some(d) => {
+            let ms = d.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+            if timeout < 0 {
+                ms
+            } else {
+                timeout.min(ms)
+            }
+        }
+        None => timeout,
+    };
     ST.with(|st| {
         let mut st = st.borrow_mut();
         let mut fds: Vec<libc::pollfd> = Vec::new();
@@ -573,16 +601,26 @@ pub fn wait(timeout: i32) -> Ready {
                 revents: 0,
             });
         }
+        let children = fds.len();
+        let tags = crate::proc::add_fds(&mut fds);
         // SAFETY: fds is a valid array of pollfd for the duration of the call.
         let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if n <= 0 {
-            return;
+            // Nothing is ready, but a child may be past its timeout or have exited.
+            for p in fds.iter_mut() {
+                p.revents = 0;
+            }
         }
         if fds[0].revents & libc::POLLIN != 0 {
             let mut b = [0u8; 64];
             // SAFETY: reading our own non-blocking pipe.
             let k = unsafe { libc::read(sig_fd, b.as_mut_ptr() as *mut libc::c_void, b.len()) };
-            for &x in b.iter().take(k.max(0) as usize) {
+            // SIGCHLD only wakes the loop: the children are reaped below, every turn, not reported to JS.
+            for &x in b
+                .iter()
+                .take(k.max(0) as usize)
+                .filter(|&&x| x as libc::c_int != libc::SIGCHLD)
+            {
                 let name = signal_name(x as libc::c_int);
                 if !ready.signals.contains(&name) {
                     ready.signals.push(name);
@@ -659,6 +697,7 @@ pub fn wait(timeout: i32) -> Ready {
                 ready.socket_lines.push((id, None));
             }
         }
+        crate::proc::service(&fds[children..], &tags, &mut ready.procs);
     });
     ready
 }

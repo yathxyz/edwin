@@ -1,18 +1,20 @@
 //! edwin: Edwin's JavaScript core on embedded V8, in a terminal (DT1) or a window (DT2, `--gui`); under the name
 //! edwinclient, a frame of an edwind, as emacsclient is of an Emacs daemon.
 //!
-//! The Rust side is the host's floor: the files, the terminal or the window, signals, edwind's socket and the
-//! event loop. Everything Edwin is runs as JavaScript: native/js/prelude.ts, host-native.ts, term.ts and
+//! The Rust side is the host's floor: the files, the terminal or the window, signals, edwind's socket, child
+//! processes and the event loop. Everything Edwin is runs as JavaScript: native/js/prelude.ts, host-native.ts, term.ts and
 //! main.ts, which loads the unchanged core from src. All of it is compiled into the binary, with the
 //! shipped Scheme.
 //!
-//! The loop: poll the terminal (or pump the window's events), the signal pipe and the sockets; hand what arrived
+//! The loop: poll the terminal (or pump the window's events), the signal pipe, the sockets and the children's
+//! pipes; hand what arrived
 //! to JS; run due timers; run microtasks; write or draw what JS drew; sleep until the next input or timer.
 
 mod bridge;
 #[cfg(feature = "gui")]
 mod gui;
 mod natives;
+mod proc;
 mod snapshot;
 mod sources;
 mod sys;
@@ -463,7 +465,14 @@ fn detach(a: &Args) -> i32 {
     }
 }
 
+/// The program, and then the end of every child it started that still runs, however it returns.
 fn run() -> i32 {
+    let code = run_program();
+    proc::kill_all();
+    code
+}
+
+fn run_program() -> i32 {
     let client = is_client();
     let args = args(client);
     if client && !args.no_wait.is_empty() && !args.answer {
@@ -553,9 +562,10 @@ fn event_loop(scope: &mut v8::HandleScope, context: v8::Local<v8::Context>) -> i
         global_fn(scope, nat, "next"),
         global_fn(scope, nat, "input"),
     );
-    let (signal, sock) = (
+    let (signal, sock, child) = (
         global_fn(scope, nat, "signal"),
         global_fn(scope, nat, "sock"),
+        global_fn(scope, nat, "proc"),
     );
     let recv: v8::Local<v8::Value> = nat.into();
     let mut next_ms: f64 = 0.0;
@@ -597,6 +607,12 @@ fn event_loop(scope: &mut v8::HandleScope, context: v8::Local<v8::Context>) -> i
             sock.call(tc, recv, &[a0, a1]);
             tc.perform_microtask_checkpoint();
         }
+        for ev in ready.procs {
+            let a = natives::proc_event(scope, ev);
+            let tc = &mut v8::TryCatch::new(scope);
+            child.call(tc, recv, &a);
+            tc.perform_microtask_checkpoint();
+        }
         if natives::exit_code().is_some() {
             continue;
         }
@@ -624,11 +640,12 @@ fn gui_loop(
     let g = context.global(scope);
     let k = v8::String::new(scope, "__native").unwrap();
     let nat = g.get(scope, k.into()).unwrap().to_object(scope).unwrap();
-    let (tick, next, signal, sock) = (
+    let (tick, next, signal, sock, child) = (
         global_fn(scope, nat, "tick"),
         global_fn(scope, nat, "next"),
         global_fn(scope, nat, "signal"),
         global_fn(scope, nat, "sock"),
+        global_fn(scope, nat, "proc"),
     );
     let k = v8::String::new(scope, "gui").unwrap();
     let on_event = nat
@@ -649,6 +666,11 @@ fn gui_loop(
         }
         let timeout =
             (next_ms >= 0.0).then(|| std::time::Duration::from_micros((next_ms * 1000.0) as u64));
+        // A child's timeout is due then too.
+        let timeout = match (timeout, proc::until_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         gui.pump(timeout, sys::poll_fds());
         let ready = sys::wait(0);
         for sig in ready.signals {
@@ -665,6 +687,12 @@ fn gui_loop(
             };
             let tc = &mut v8::TryCatch::new(scope);
             sock.call(tc, recv, &[a0, a1]);
+            tc.perform_microtask_checkpoint();
+        }
+        for ev in ready.procs {
+            let a = natives::proc_event(scope, ev);
+            let tc = &mut v8::TryCatch::new(scope);
+            child.call(tc, recv, &a);
             tc.perform_microtask_checkpoint();
         }
         if let Some(f) = on_event {

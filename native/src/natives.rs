@@ -1,7 +1,7 @@
 //! __n: what the JavaScript host gets from Rust. Files throw JS errors with the system's message; reading a
 //! missing file gives null, as host.files.read promises.
 
-use crate::{bridge, sources, sys};
+use crate::{bridge, proc, sources, sys};
 use std::cell::{Cell, OnceCell};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -21,9 +21,9 @@ pub fn start_clock(t: Instant) {
 pub fn exit_code() -> Option<i32> {
     EXIT.with(|e| e.get())
 }
-/// Nothing left that could wake the loop: no terminal and no socket (timers are JS's to report).
+/// Nothing left that could wake the loop: no terminal, no socket and no child (timers are JS's to report).
 pub fn idle_without_work() -> bool {
-    !sys::tty_is_open() && sys::sock_count() == 0
+    !sys::tty_is_open() && sys::sock_count() == 0 && proc::count() == 0
 }
 
 fn throw(scope: &mut v8::HandleScope, msg: &str) {
@@ -571,6 +571,183 @@ fn sock_close(
     sys::sock_close(id);
 }
 
+/* ---------- child processes (proc.rs): argv only, never a shell ---------- */
+/// procSpawn(argv, {cwd, env, timeout, maxBytes, lossy, merge}): the child's id; throws when it cannot run.
+fn proc_spawn(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    match proc_spec(scope, &args).and_then(proc::spawn) {
+        Ok(id) => rv.set(v8::Integer::new_from_unsigned(scope, id).into()),
+        Err(e) => throw(scope, &e),
+    }
+}
+/// Option K of O, unless it is undefined or null.
+fn opt<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    o: v8::Local<v8::Object>,
+    k: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let key = v8::String::new(scope, k).unwrap();
+    o.get(scope, key.into())
+        .filter(|v| !v.is_null_or_undefined())
+}
+/// A count of milliseconds or bytes: a number, finite and not negative.
+fn amount(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>, k: &str) -> Result<f64, String> {
+    v.number_value(scope)
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .ok_or(format!(
+            "procSpawn: {k} is not a number of milliseconds or bytes"
+        ))
+}
+fn proc_spec<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    args: &v8::FunctionCallbackArguments,
+) -> Result<proc::Spec, String> {
+    let argv = v8::Local::<v8::Array>::try_from(args.get(0))
+        .map_err(|_| "procSpawn: argv is not an array")?;
+    let mut spec = proc::Spec::default();
+    for i in 0..argv.length() {
+        let v = argv
+            .get_index(scope, i)
+            .filter(|v| v.is_string())
+            .ok_or("procSpawn: argv holds strings only")?;
+        spec.argv.push(v.to_rust_string_lossy(scope));
+    }
+    let Ok(opts) = v8::Local::<v8::Object>::try_from(args.get(1)) else {
+        return Ok(spec);
+    };
+    let get = |scope: &mut v8::HandleScope<'s>, k: &str| opt(scope, opts, k);
+    if let Some(v) = get(scope, "cwd") {
+        spec.cwd = Some(v.to_rust_string_lossy(scope));
+    }
+    if let Some(v) = get(scope, "env") {
+        let env =
+            v8::Local::<v8::Object>::try_from(v).map_err(|_| "procSpawn: env is not an object")?;
+        let names = env
+            .get_own_property_names(scope, Default::default())
+            .ok_or("procSpawn: env has no names")?;
+        for i in 0..names.length() {
+            let k = names.get_index(scope, i).unwrap();
+            let v = env.get(scope, k).unwrap();
+            let k = k.to_rust_string_lossy(scope);
+            spec.env.push((
+                k,
+                (!v.is_null_or_undefined()).then(|| v.to_rust_string_lossy(scope)),
+            ));
+        }
+    }
+    if let Some(v) = get(scope, "timeout") {
+        // Too long for a Duration is no timeout at all (the loop would never get there).
+        spec.timeout =
+            std::time::Duration::try_from_secs_f64(amount(scope, v, "timeout")? / 1000.0).ok();
+    }
+    if let Some(v) = get(scope, "maxBytes") {
+        spec.max_bytes = Some(amount(scope, v, "maxBytes")? as usize);
+    }
+    spec.lossy = get(scope, "lossy").is_some_and(|v| v.boolean_value(scope));
+    spec.merge = get(scope, "merge").is_some_and(|v| v.boolean_value(scope));
+    Ok(spec)
+}
+/// procWrite(id, text): queued for the child's standard input; false once that is closed.
+fn proc_write(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let text = arg_str(scope, &args, 1);
+    match proc::write(id, text.as_bytes()) {
+        Ok(b) => rv.set(v8::Boolean::new(scope, b).into()),
+        Err(e) => throw(scope, &e),
+    }
+}
+fn proc_close_stdin(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    proc::close_stdin(id);
+}
+/// procKill(id, signal = 'TERM'): to the child and what it started; false when it is not running.
+fn proc_kill(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let name = if args.get(1).is_undefined() {
+        "TERM".to_string()
+    } else {
+        arg_str(scope, &args, 1)
+    };
+    match proc::signal_number(&name) {
+        Some(sig) => rv.set(v8::Boolean::new(scope, proc::kill(id, sig)).into()),
+        None => throw(scope, &format!("procKill: no signal {name}")),
+    }
+}
+/// procList(): [{id, pid, argv}] of the children not yet reported ended.
+fn proc_list(
+    scope: &mut v8::HandleScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let arr = v8::Array::new(scope, 0);
+    for (i, (id, pid, argv)) in proc::list().into_iter().enumerate() {
+        let o = v8::Object::new(scope);
+        let v = v8::Integer::new_from_unsigned(scope, id).into();
+        set(scope, o, "id", v);
+        let v = v8::Integer::new_from_unsigned(scope, pid).into();
+        set(scope, o, "pid", v);
+        let a = v8::Array::new(scope, argv.len() as i32);
+        for (j, s) in argv.iter().enumerate() {
+            let v = v8::String::new(scope, s).unwrap().into();
+            a.set_index(scope, j as u32, v);
+        }
+        set(scope, o, "argv", a.into());
+        arr.set_index(scope, i as u32, o.into());
+    }
+    rv.set(arr.into());
+}
+/// A child's event as the arguments of __native.proc: (id, 'out' | 'err', text) or (id, 'exit', {code, signal,
+/// timedOut, truncated, error?}).
+pub fn proc_event<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    ev: proc::Event,
+) -> [v8::Local<'s, v8::Value>; 3] {
+    let (id, kind, data): (u32, &str, v8::Local<v8::Value>) = match ev {
+        proc::Event::Out(id, t) => (id, "out", v8::String::new(scope, &t).unwrap().into()),
+        proc::Event::Err(id, t) => (id, "err", v8::String::new(scope, &t).unwrap().into()),
+        proc::Event::Exit(id, x) => {
+            let o = v8::Object::new(scope);
+            let v = match x.code {
+                Some(c) => v8::Integer::new(scope, c).into(),
+                None => v8::null(scope).into(),
+            };
+            set(scope, o, "code", v);
+            let v = match &x.signal {
+                Some(s) => v8::String::new(scope, s).unwrap().into(),
+                None => v8::null(scope).into(),
+            };
+            set(scope, o, "signal", v);
+            let v = v8::Boolean::new(scope, x.timed_out).into();
+            set(scope, o, "timedOut", v);
+            let v = v8::Boolean::new(scope, x.truncated).into();
+            set(scope, o, "truncated", v);
+            if let Some(e) = &x.error {
+                let v = v8::String::new(scope, e).unwrap().into();
+                set(scope, o, "error", v);
+            }
+            (id, "exit", o.into())
+        }
+    };
+    let id = v8::Integer::new_from_unsigned(scope, id).into();
+    let kind = v8::String::new(scope, kind).unwrap().into();
+    [id, kind, data]
+}
+
 /* ---------- edwinclient: main.rs found its edwind before V8 started ---------- */
 thread_local! {
     static CLIENT: Cell<bool> = const { Cell::new(false) };
@@ -688,7 +865,8 @@ macro_rules! natives {
             "remove" remove, "mkdirs" mkdirs, "lstat" lstat, "rename" rename, "copyTree" copy_tree, "removeDir" remove_dir, "readStdin" read_stdin, "ttyOpen" tty_open, "ttyClose" tty_close,
             "ttyWrite" tty_write, "ttyFlush" tty_flush, "ttySize" tty_size, "suspend" suspend, "exit" exit,
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
-            "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind
+            "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind,
+            "procSpawn" proc_spawn, "procWrite" proc_write, "procCloseStdin" proc_close_stdin, "procKill" proc_kill, "procList" proc_list
         )
     };
 }

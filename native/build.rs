@@ -11,6 +11,9 @@ mod bridge;
 #[path = "src/natives.rs"]
 mod natives;
 #[allow(dead_code)]
+#[path = "src/proc.rs"]
+mod proc;
+#[allow(dead_code)]
 #[path = "src/snapshot.rs"]
 mod snapshot;
 #[allow(dead_code)]

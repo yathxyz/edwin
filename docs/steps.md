@@ -858,6 +858,96 @@ scratch popup, the calculator key, the mail notification and the shell aliases o
   `--keep-going`, stopped at `edwin-bench` (shadow stack 10.1% against its 10% limit, under the same load), which
   passed in the next.
 
+## Child processes in the desktop program (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `proc-host-spawn`; owner decision 1: the native program may
+start child processes, from the TypeScript core only). Until now the desktop program started only its own
+helpers: a remote edwind's ssh, edwin-daemon (`--daemon`, `edwinclient -a`) and itself again (`edwinclient -n`). Compile, grep, shell commands, git, jj, formatters and language servers all need one, and
+this package gives them one implementation: natives in `native/src/proc.rs`, which `Ed.proc` (proc-frame-api)
+builds on. It replaces the plan's git-spawn-native.
+
+- **The natives** (`__n`, typed in `src/core.d.ts`): `procSpawn(argv, {cwd, env, timeout, maxBytes, lossy,
+  merge})` returns the child's id, or throws `cannot run PROGRAM: No such file or directory` (a missing program
+  or directory is said at once: std's exec-error pipe); `procWrite(id, text)` queues text for its standard input
+  and returns false once that is closed; `procCloseStdin(id)` closes it once the queue is written; `procKill(id,
+  signal = 'TERM')` signals it and what it started, false when it is not running; `procList()` gives `{id, pid,
+  argv}` of each child not yet reported ended. What a child writes reaches `__native.handlers.proc(id, 'out' |
+  'err', text)` as it comes; its exit reaches `(id, 'exit', {code, signal, timedOut, truncated, error?})` once,
+  after all of its output.
+- **argv only.** The program is looked up on `PATH` (the one `env` gives, if it sets one) and run with its
+  arguments as they are; no shell sees them. `env` changes the inherited environment, a `null` value removing a
+  name; a name that is empty or holds `=` is refused.
+- **Never blocking the loop.** The three pipes are non-blocking and polled by `sys::wait` with the terminal, the
+  signal pipe and the sockets (and handed to the window's waker thread through `poll_fds`). Input is queued and
+  written as the pipe takes it (8 MiB queued for a `cat` that has read nothing returns at once; past 64 MiB not
+  yet taken a write throws). Output is read one 64 KiB chunk per pipe per turn, so a child that writes without
+  pause (`yes`) never starves the keys.
+- **Exits.** SIGCHLD joins the signals on the self-pipe (with `SA_NOCLDSTOP`), only to wake the loop: it is not
+  passed to JS. Every turn each child is reaped by its own pid (`try_wait`), never `waitpid(-1)`, which would
+  take the ssh child and edwin-daemon's `status()` from std. A reaped child's pipes are read to what it left in
+  them (its own output is all there once it has exited), then its exit is reported and the pipes closed: what it
+  started and left running, holding the pipe, does not delay the exit.
+- **At most 64** children run at once, counted until reaped: the 65th spawn throws `too many processes: at most
+  64 run at once`.
+- **Ended with the program.** However `run` returns, `proc::kill_all` sends TERM to each child's process group,
+  then KILL after 500 ms to what is left, reaping each; a child stuck in the kernel is left to init after another
+  500 ms, so quitting never waits past 1 s. A child of a program that dies otherwise (a crash, `panic = abort`,
+  SIGKILL) is killed by the kernel (`PR_SET_PDEATHSIG`).
+- **The child's start** (`pre_exec`, async-signal-safe calls only): `setsid`, so a session and process group of
+  its own and no controlling terminal; `PR_SET_PDEATHSIG(SIGKILL)` (and not run when the parent is already gone);
+  SIGPIPE back to its default (Edwin ignores it, and an ignored signal stays ignored across exec; std resets it
+  too, the line keeps it so whatever std does); `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`, so it inherits only its
+  three descriptors (marked close-on-exec rather than closed, which keeps std's own exec-error pipe working).
+- **Choices**, each reversible:
+  - A session of its own rather than only a process group: a git or ssh that would ask on `/dev/tty` fails
+    (`No such device or address`) instead of being stopped by SIGTTIN or reading keys from the raw terminal
+    Edwin holds, and the signals of a terminal (C-c in a shell around edwin) do not reach it. A signal from
+    `procKill`, a timeout or the end goes to the whole group, so what the child started (`sh -c 'a | b'`) ends
+    with it. Signals go only to a child not yet reaped, whose pid therefore cannot belong to another process.
+  - `timeout` (ms) sends TERM, then KILL 500 ms later to a child that ignores it, and the exit says `timedOut`.
+    TERM first gives git the chance to remove its lock files. A timeout too long for the clock is no timeout.
+  - `maxBytes` counts output and error together: what is past it is not delivered, the child is killed and the
+    exit says `truncated` (a UTF-8 sequence cut at the limit is dropped).
+  - Output is UTF-8. Without `lossy`, bytes that are not end the child with `error: 'its output is not UTF-8
+    text'` (what came before them is delivered), as `readFile` refuses such a file: a filter or a formatter
+    whose output replaces text never writes back changed bytes. With `lossy` (git's output: names and contents
+    in any encoding) they become U+FFFD. A sequence split between two reads is one character either way.
+  - `merge` sends standard error into the output pipe, interleaved as written (compile's buffer); without it
+    the two are separate and their relative order is lost.
+  - Standard input is always a pipe; a caller that gives none closes it at once (`procCloseStdin`), as
+    proc-frame-api's `run` will.
+- **Not in it:** no pseudo-terminal (a shell's or a REPL's own terminal), no `Ed.proc` and no refusal under image
+  replay or in web frames (proc-frame-api), no Scheme `make-process` (declined), and nothing in edwind, which
+  still never spawns (R4.45). Processes are the desktop program's only; a `--remote` frame's children run on its
+  own machine. No detached spawn: every child is ended with the program, so an opener that waits for its viewer
+  (bib-open-external) needs one of its own. No new check in nix/checks.nix: the tests are the package's cargo tests, which `nix build .#edwin`
+  runs.
+- **Checked by** `nix build .#edwin` on ex44: unit tests 17 passed (13 in `proc::tests`), `tests/gui.rs` 5 passed
+  and 1 ignored (the latency budget), `tests/terminal.rs` 31 passed. The proc tests drive `sys::wait` as the loop
+  does, with coreutils from `PATH`: `echo_gives_its_output_then_its_exit`, `argv_is_never_a_shell_line` (`$HOME;
+  touch x` and `` `id` `` come back as written), `error_status_cwd_env_and_merge` (status 2 of `ls` on a missing
+  directory, `cwd`, a variable set and one removed, merged error), `a_program_that_cannot_run_is_refused_at_once`,
+  `stdin_is_written_as_the_child_takes_it_and_closed` (8 MiB through `cat`, queued in under 1 s, all of it back),
+  `kill_ends_the_child_and_what_it_started` (TERM reaches a grandchild in the group; a reaped child takes no
+  signal), `the_65th_spawn_is_refused` (64 `sleep`s, then room again after `kill_all`), `no_zombie_after_exit`
+  (`/proc/PID` gone, `waitpid` finds nothing), `the_timeout_fires_and_kill_follows_a_child_that_ignores_term`
+  (TERM at 200 ms; KILL after a `trap '' TERM`; the loop wakes for the deadline by itself),
+  `max_bytes_cuts_the_output_and_ends_the_child` (`yes`, exactly 10,000 bytes),
+  `output_that_is_not_utf8_is_an_error_unless_lossy`, `the_child_inherits_only_its_three_descriptors_and_no_terminal`
+  (a descriptor of the test's that is not close-on-exec does not reach it; its own session, `tty_nr` 0, SIGPIPE
+  not ignored) and `kill_all_ends_every_child_within_its_bound` (one child ignoring TERM; under 2 s). Each defence was also checked by
+  taking it out, in a scratch crate that compiles only `sys.rs` and `proc.rs` (`cargo test`, not the package
+  build): with the `close_range` call removed the descriptor test fails; with `setsid` removed 6 of the 14 tests
+  fail (the group signals, the session check, `kill_all`); with the per-turn reaping removed the 11 tests that
+  wait for an exit event fail (most after a 60 s hang); with the SIGPIPE line removed nothing fails, as std
+  resets it as well. `nix build .#checks.x86_64-linux.edwin-typecheck` passed (the new
+  types in `src/core.d.ts`, `native/js/prelude.ts`). And once through the built program's own JavaScript, with
+  a throwaway patch of `native/js/main.ts` (not committed) run from the restored snapshot with a throwaway HOME:
+  `sh -c 'cat; echo "$X" >&2; exit 3'` given `hi` and `env: {X: 'y', HOME: null}` gave `out hi`, `err y` and
+  `{code: 3, signal: null, timedOut: false, ...}`; `sleep 10` with `timeout: 100` gave `{code: null, signal:
+  'TERM', timedOut: true}`; `printf 'ab\377'` with `lossy` gave `ab` and U+FFFD; a missing program, an argv that
+  is no array and an unknown signal threw; edwin then exited 0, idle, in 0.12 s.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
