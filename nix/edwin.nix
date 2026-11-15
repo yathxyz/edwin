@@ -53,7 +53,10 @@ let
   # answers, and --wait starts nothing and returns once it answers. Without EDWIND_CONFIG a start holds
   # ~/.local/state/edwin/edwind.lock from its check until the edwind it started answers (edwind itself never
   # holds it), so of two starts one runs edwind and the other, which waited on the lock, exits with status 3; a
-  # start that finds an edwind answering at once exits with status 1. The edwin-daemon check tests it.
+  # start that finds an edwind answering at once exits with status 1. The command line is checked before anything
+  # else: --help prints the usage; an unknown option, both modes, or a FILE (edwin --daemon FILE: edwin hands it
+  # every argument after --daemon) is refused with status 2 before any directory, lock or edwind. The edwin-daemon
+  # check tests it.
   daemon = writeShellScript "edwin-daemon" ''
     set -eu
     PATH=${
@@ -62,11 +65,34 @@ let
         util-linux
       ]
     }:$PATH
+    usage() {
+      cat <<'EOF'
+    Usage: edwin-daemon [--fg | --wait]      (edwin --daemon; edwin --fg-daemon is edwin-daemon --fg)
+    Start your own edwind, Edwin's text daemon, on $XDG_RUNTIME_DIR/edwin/edit.sock, for edwinclient to attach to.
+
+      (none)      start it in the background and return once its socket answers (at most 30 s)
+      --fg        run it in the foreground (what the user service runs)
+      --wait      start nothing; return once the socket answers, or fail after 30 s
+      -h, --help  show this text
+
+    Statuses: 0 it answers; 1 it did not start, or an edwind already runs; 2 a usage error; 3 another start
+    started it meanwhile. It opens no files: once it runs, edit them with edwinclient FILE.
+    EDWIND_CONFIG names edwind's config (its socket among it); without it the config is made at each start, with
+    the notes in EDWIN_NOTES_DIR (~/notes), the state in ~/.local/state/edwin and the Scheme in ~/.config/edwin.
+    EOF
+    }
+    # The whole command line is read before anything else is looked at or made.
     mode=bg
-    case ''${1:-} in
-      --fg) mode=fg; shift ;;
-      --wait) mode=wait; shift ;;
-    esac
+    for a in "$@"; do
+      case $a in
+        -h | --help) usage; exit 0 ;;
+        --fg | --wait)
+          if [ "$mode" != bg ]; then echo "edwin: give one of --fg and --wait" >&2; usage >&2; exit 2; fi
+          mode=''${a#--} ;;
+        -?*) echo "edwin: unknown option $a" >&2; usage >&2; exit 2 ;;
+        *) echo "edwin: the daemon opens no files ($a); once it runs, edit them with edwinclient FILE" >&2; exit 2 ;;
+      esac
+    done
     # How long a start and --wait wait for edwind to answer, and a start for another start's lock.
     wait_s=30 lock_s=40
     # answers SECONDS: whether something accepts on $sock within SECONDS (0: asked once).

@@ -1,7 +1,9 @@
 // edwin --daemon (the edwin-daemon script in nix/edwin.nix), run from the package as a user runs it, each test as a
 // throwaway user (HOME and XDG_RUNTIME_DIR under TMPDIR): a start returns once the socket answers; of two starts at
 // once one runs edwind and the other exits with status 3; --wait returns once the socket answers and fails after
-// its timeout when edwind dies; the lock is never edwind's. EDWIN_BIN is the package's bin (the edwin-daemon check).
+// its timeout when edwind dies; the lock is never edwind's; a bad command line (an unknown option, a FILE) is
+// refused with status 2 before anything is made, --help prints the usage, and bare edwind says to run edwin --daemon.
+// EDWIN_BIN is the package's bin (the edwin-daemon check).
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -213,4 +215,93 @@ test('with EDWIND_CONFIG a start waits on the socket the config names', async ()
   assert.equal(b.code, 1);
   assert.match(b.err, /^edwin: .*bad\.json: unknown field "bogus"$/m);
   assert.ok(!(await answers(sock)));
+});
+
+/* Nothing of the daemon's was made or started for U: no edwind, no socket, no run directory, no state, no lock. */
+async function untouched(u: User, what: string) {
+  assert.equal(edwinds(u.cfg).length, 0, `${what}: an edwind runs`);
+  assert.ok(!(await answers(u.sock)), `${what}: the socket answers`);
+  assert.ok(!fs.existsSync(path.join(u.run, 'edwin')), `${what}: the run directory was made`);
+  assert.ok(!fs.existsSync(path.join(u.home, '.local')), `${what}: the state directory (and its lock) was made`);
+}
+
+test('edwin-daemon and edwin --daemon refuse an unknown option, or both modes, with the usage and status 2', async () => {
+  for (const [program, args] of [
+    ['edwin-daemon', ['--bogus']], ['edwin', ['--daemon', '--bogus']], ['edwin', ['--fg-daemon', '-x']],
+    ['edwin-daemon', ['--fg', '--wait']], ['edwin', ['--fg-daemon', '--wait']], ['edwin-daemon', ['--wait', '--']],
+  ] as [string, string[]][]) {
+    const u = user(), what = [program, ...args].join(' ');
+    const r = await run(u, program, args);
+    assert.equal(r.code, 2, `${what}: ${r.err}`);
+    assert.match(r.err, /^edwin: (unknown option |give one of --fg and --wait)/, what);
+    assert.match(r.err, /^Usage: edwin-daemon \[--fg \| --wait\]/m, what);
+    assert.equal(r.out, '', what);
+    await untouched(u, what);
+  }
+});
+
+test('edwin-daemon --help and edwin --daemon --help print the usage and start nothing', async () => {
+  for (const [program, args] of [
+    ['edwin-daemon', ['--help']], ['edwin-daemon', ['-h']], ['edwin', ['--daemon', '--help']], ['edwin', ['--fg-daemon', '-h']],
+  ] as [string, string[]][]) {
+    const u = user(), what = [program, ...args].join(' ');
+    // Even with no XDG_RUNTIME_DIR and an EDWIND_CONFIG that does not exist: the line is read before either.
+    const r = await run(u, program, args, { XDG_RUNTIME_DIR: undefined, EDWIND_CONFIG: path.join(u.home, 'none.json') });
+    assert.equal(r.code, 0, `${what}: ${r.err}`);
+    assert.match(r.out, /^Usage: edwin-daemon \[--fg \| --wait\]/, what);
+    assert.match(r.out, /edit them with edwinclient FILE/, what);
+    assert.equal(r.err, '', what);
+    await untouched(u, what);
+  }
+});
+
+test('edwin --daemon FILE refuses the file rather than dropping it', async () => {
+  for (const args of [['--daemon', 'a.txt'], ['--fg-daemon', 'a.txt'], ['--daemon', '+3', 'a.txt'], ['--daemon', '-']]) {
+    const u = user(), what = ['edwin', ...args].join(' ');
+    const r = await run(u, 'edwin', args);
+    assert.equal(r.code, 2, `${what}: ${r.err}`);
+    assert.match(r.err, /^edwin: the daemon opens no files \((a\.txt|\+3|-)\); once it runs, edit them with edwinclient FILE$/m, what);
+    assert.ok(!fs.existsSync(path.join(u.home, 'a.txt')), `${what}: the file was made`);
+    await untouched(u, what);
+  }
+  // edwin-daemon itself, which edwin hands the rest of the line to, refuses it alike.
+  const u = user();
+  const r = await run(u, 'edwin-daemon', ['--wait', 'a.txt']);
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /^edwin: the daemon opens no files \(a\.txt\)/m);
+  await untouched(u, 'edwin-daemon --wait a.txt');
+});
+
+test('bare edwind says how to start one; --help prints the usage; a bad line is refused with status 2', async () => {
+  const u = user();
+  const bare = await run(u, 'edwind', []);
+  assert.equal(bare.code, 2, bare.err);
+  assert.match(bare.err, /^edwind: no --config PATH\. To start your own edwind, run `edwin --daemon`/);
+  assert.match(bare.err, /^Usage: edwind --config PATH /m);
+  assert.equal(bare.out, '');
+  for (const h of ['--help', '-h']) {
+    const r = await run(u, 'edwind', [h]);
+    assert.equal(r.code, 0, `${h}: ${r.err}`);
+    assert.match(r.out, /^Usage: edwind --config PATH \[--check \| --export DIR \| --write-roots \| --primitives\]/, h);
+    assert.match(r.out, /`edwin --daemon`/, h);
+    assert.equal(r.err, '', h);
+  }
+  // --help wins over a config that is not there: nothing is read or started.
+  const hc = await run(u, 'edwind', ['--config', path.join(u.home, 'none.json'), '--help']);
+  assert.equal(hc.code, 0, hc.err);
+  assert.match(hc.out, /^Usage: edwind /);
+  for (const [args, why] of [
+    [['--bogus'], /^edwind: unknown option --bogus$/m],
+    [['--config', path.join(u.home, 'x.json'), '--bogus'], /^edwind: unknown option --bogus$/m],
+    [['--config'], /^edwind: --config needs a path$/m],
+    [['--config', path.join(u.home, 'x.json'), '--export'], /^edwind: --export needs a directory$/m],
+    [['a.txt'], /^edwind: no file arguments \(a\.txt\); edit files with edwinclient FILE$/m],
+  ] as [string[], RegExp][]) {
+    const r = await run(u, 'edwind', args);
+    assert.equal(r.code, 2, `${args.join(' ')}: ${r.err}`);
+    assert.match(r.err, why, args.join(' '));
+    assert.match(r.err, /^Usage: edwind --config PATH /m, args.join(' '));
+    assert.equal(r.out, '', args.join(' '));
+  }
+  await untouched(u, 'edwind');
 });

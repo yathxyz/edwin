@@ -219,7 +219,9 @@ in
 
   # edwin --daemon from the package (test/daemon.test.mts): a start returns once the socket answers, two starts at
   # once give one edwind and one exit with status 3, `edwin --daemon && edwinclient -e 1` 100 times, --wait, and
-  # the timeout when edwind dies. Real edwinds under a throwaway HOME and XDG_RUNTIME_DIR. About two minutes.
+  # the timeout when edwind dies; and the command lines of edwin-daemon and edwind: an unknown option and
+  # `edwin --daemon FILE` refused with status 2, --help, bare edwind. Real edwinds under a throwaway HOME and
+  # XDG_RUNTIME_DIR. About two minutes.
   edwin-daemon =
     pkgs.runCommand "edwin-daemon"
       {

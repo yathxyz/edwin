@@ -47,6 +47,8 @@ fn main() {
                 if a == "--fg-daemon" {
                     cmd.arg("--fg");
                 }
+                // The rest of the line, which edwin-daemon checks before anything: it refuses a FILE and
+                // an unknown option with status 2, and answers --help.
                 cmd.args(std::env::args().skip(2));
                 let err = std::os::unix::process::CommandExt::exec(&mut cmd);
                 eprintln!("edwin: cannot start edwin-daemon: {err}");

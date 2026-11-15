@@ -579,6 +579,50 @@ sandbox had no display and no GPU adapter, so DT2's window tests and its offscre
   xdotool (the three window tests: `needs Xvfb and xdotool`), and again without the Vulkan driver (the two renders:
   `no graphics adapter`), failed in its check phase.
 
+## edwin-daemon and edwind check their command lines (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `cli-daemon-args-and-edwind-usage`): edwin-daemon read only its
+first argument and ignored the rest, so `edwin --daemon FILE` started a daemon and dropped FILE, and an unknown
+option was not noticed; `edwind --help` and bare `edwind` answered with one raw usage line and status 2, and said
+nothing of how a user starts one.
+
+- **edwin-daemon reads the whole line first**, before `XDG_RUNTIME_DIR`, `EDWIND_CONFIG`, any directory, the lock
+  or edwind. `-h`/`--help` prints its usage on stdout with status 0 (also with no `XDG_RUNTIME_DIR`). An unknown
+  option (and `--`), or both `--fg` and `--wait`, prints what is wrong and the usage on stderr with status 2. Any
+  other argument is a FILE: "the daemon opens no files (FILE); once it runs, edit them with edwinclient FILE",
+  status 2. `edwin --daemon` and `edwin --fg-daemon` hand edwin-daemon every argument after themselves (as
+  before), so `edwin --daemon --help`, `edwin --daemon --bogus` and `edwin --daemon FILE` get the same answers.
+  Status 2 is apart from 1 (did not start, or one already runs) and 3 (another start started it), so a unit's
+  `RestartPreventExitStatus=3` (`cli-unit-readiness`) does not cover a usage error. Bare `edwin-daemon`,
+  `--fg` and `--wait` are unchanged, and `edwinclient -a` runs it with no arguments.
+- **edwind.** `-h`/`--help` prints a usage that says what each option does and that your own edwind starts with
+  `edwin --daemon`, on stdout with status 0, wherever it stands on the line (before the config is read). Every
+  usage error says what is wrong in one line, then the usage, on stderr with status 2: bare `edwind` (or any line
+  without `--config`) says "no --config PATH. To start your own edwind, run `edwin --daemon` ..."; an unknown
+  option, `--config` or `--export` with nothing after it, and a file argument each say so. The lines that worked
+  (services.edwind's `--config /etc/edwind/edit.json`, `--check`, `--export DIR`, `--write-roots`,
+  `--primitives`) parse as before, after `lockdown()` and `guardProcesses()` as before.
+- **Choices.** `edwin --daemon FILE` is refused in edwin-daemon, not in native/src/main.rs as the plan's "Where"
+  had it: main.rs already hands edwin-daemon the rest of the line, so one reader checks it and the two cannot
+  disagree (the alternative, a check in main.rs too, would also need its own copy of the message). The refusal is
+  status 2, a usage error, rather than 1. In both programs the line is read in order and the first problem or
+  `--help` answers: `--bogus --help` is refused, `--config NONE --help` prints the usage. A FILE is refused
+  rather than visited by the new edwind; the alternative, the daemon visiting it at start, would make the start
+  open a buffer no frame asked for.
+- **Not in it:** `edwin FILE --daemon` (`--daemon` not first) is still main.ts's "unknown option --daemon", status
+  2, as before. No new file; the README row of `test/daemon.test.mts` and the edwin-daemon check grew.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-daemon` (`test/daemon.test.mts`): `edwin-daemon --bogus`,
+  `edwin --daemon --bogus`, `edwin --fg-daemon -x`, `--fg --wait`, `edwin --fg-daemon --wait` and `--wait --` give
+  status 2 with the usage on stderr; `--help` and `-h`, through edwin-daemon and through `edwin --daemon` and
+  `--fg-daemon`, give status 0 and the usage on stdout with no `XDG_RUNTIME_DIR` and an `EDWIND_CONFIG` that does
+  not exist; `edwin --daemon a.txt`, `--fg-daemon a.txt`, `--daemon +3 a.txt`, `--daemon -` and `edwin-daemon
+  --wait a.txt` give status 2 and the FILE message, and a.txt is not made; and in every one of those no edwind
+  runs, the socket does not answer, and neither the run directory nor the state directory (with its lock) was
+  made. Bare `edwind` gives status 2 and names `edwin --daemon`; `edwind --help`, `-h` and `--config NONE --help`
+  give status 0 and the usage on stdout; `--bogus`, `--config X --bogus`, `--config`, `--config X --export` and
+  `a.txt` give status 2 with their line and the usage. `edit-lockdown`, `edit-security`, `edit-conformance` (which
+  runs `edwind --check`) and `edwin-typecheck` pass with server/main.mts changed.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

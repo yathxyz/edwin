@@ -5,6 +5,7 @@
 //   edwind --config … --export DIR                    write every live buffer's text to DIR (R15.12)
 //   edwind --config … --write-roots                   print the write roots, one per line (for bin/edwind's flags)
 //   edwind --config … --primitives                    print the primitive registry as JSON (R4.48)
+//   edwind --help                                     the usage; bare edwind says to start one with edwin --daemon
 //
 // The process loads Edwin's core headless (host-node.cts), replays the journals, then listens on edit.sock.
 import fs from 'node:fs';
@@ -481,7 +482,21 @@ export async function exportAll(cfg: Config, dir: string, log: Log): Promise<num
 }
 
 /* ---------- main ---------- */
-function usage() { process.stderr.write('usage: edwind --config PATH [--check | --export DIR | --write-roots | --primitives]\n'); return 2; }
+const USAGE = `Usage: edwind --config PATH [--check | --export DIR | --write-roots | --primitives]
+edwind, Edwin's text daemon: the buffers and the Lisp machine every Edwin frame shares, on the socket its config names.
+
+  --config PATH  the config (JSON: socket, notesDir, stateDir, ...); edwind runs and serves until SIGTERM
+  --check        verify every journal and snapshot offline, then exit
+  --export DIR   write every live buffer's text to DIR, then exit
+  --write-roots  print the write roots, one per line
+  --primitives   print the primitive registry as JSON
+  -h, --help     show this text
+
+Your own edwind starts with \`edwin --daemon\`, which writes its config and runs edwind with it; edwinclient
+attaches to it. A system's is the NixOS service services.edwind.
+`;
+/* A usage error: WHY, then the usage, on stderr, and status 2. */
+function usage(why: string) { process.stderr.write(`edwind: ${why}\n${USAGE}`); return 2; }
 /* R4.45, R14.12: edwind never starts processes. Node's permission model would enforce this, but it also
    disables fsync and fdatasync (Node 22 and 24), which the journal and atomic save need (R8.3, R8.7). So the
    backstop is in-process: every function of child_process is replaced before anything else runs, for CJS
@@ -500,14 +515,15 @@ export async function main(argv: string[]): Promise<number | undefined> {
   let config: string | null | undefined = null, mode = 'run', exportDir: string | null | undefined = null;
   while (args.length) {
     const a = args.shift();
-    if (a === '--config') config = args.shift();
+    if (a === '-h' || a === '--help') { process.stdout.write(USAGE); return 0; }
+    if (a === '--config') { config = args.shift(); if (!config) return usage('--config needs a path'); }
     else if (a === '--check') mode = 'check';
-    else if (a === '--export') { mode = 'export'; exportDir = args.shift(); }
+    else if (a === '--export') { mode = 'export'; exportDir = args.shift(); if (!exportDir) return usage('--export needs a directory'); }
     else if (a === '--write-roots') mode = 'roots';
     else if (a === '--primitives') mode = 'primitives';
-    else return usage();
+    else return usage(a!.startsWith('-') ? `unknown option ${a}` : `no file arguments (${a}); edit files with edwinclient FILE`);
   }
-  if (!config || (mode === 'export' && !exportDir)) return usage();
+  if (!config) return usage('no --config PATH. To start your own edwind, run `edwin --daemon`: it writes the config and starts edwind with it');
   const [maj, min] = process.versions.node.split('.').map(Number);
   if (maj < MIN_NODE[0] || (maj === MIN_NODE[0] && min < MIN_NODE[1])) { process.stderr.write(`edwind needs Node ${MIN_NODE.join('.')} or newer (R15.2); this is ${process.versions.node}\n`); return 1; }
   let cfg: Config;
