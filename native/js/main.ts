@@ -2,8 +2,8 @@
    window of its own (DT2, --gui). Under the name edwinclient it is a frame of an edwind, as emacsclient is of an
    Emacs daemon; edwin never attaches to one.
 
-     edwin [-nw | -g] [-R] [+LINE] [FILE | -]...
-     edwinclient [-t | -c] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [+LINE] [FILE | -]...
+     edwin [-nw | -g] [-R] [+LINE[:COL]] [FILE | -]...
+     edwinclient [-t | -c] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [+LINE[:COL]] [FILE | -]...
      edwinclient [-a] [--socket PATH | --remote HOST:SOCKET] -e FORM...
 
    The core runs as a model frame (display.ts) drawn by term.ts, or by the window (gui.ts and the Rust side's
@@ -18,13 +18,13 @@
 'use strict';
 const N = globalThis.__n, H = globalThis.EdNativeHost, T = globalThis.EdTerm;
 const client = N.client(), NAME = client ? 'edwinclient' : 'edwin';
-/* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); files: with -e, the FORMs (every
-   argument after it, and a FILE before it too, as emacsclient takes them). */
-interface MainOpts { files: string[]; line: number | null; readOnly: boolean; eval: boolean; stdin: boolean; help: boolean; version: boolean }
+/* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); col: +LINE:COL's COL, in characters
+   from 1; files: with -e, the FORMs (every argument after it, and a FILE before it too, as emacsclient takes them). */
+interface MainOpts { files: string[]; line: number | null; col: number | null; readOnly: boolean; eval: boolean; stdin: boolean; help: boolean; version: boolean }
 const VERSION = `${NAME} DT3`;
 const LEAVE = `Leave with :q (or :wq, ZZ, C-x C-c); :cq leaves with exit status 1.
 C-z suspends to the shell.`;
-const USAGE = client ? `Usage: edwinclient [OPTION]... [+LINE] [FILE]...
+const USAGE = client ? `Usage: edwinclient [OPTION]... [+LINE[:COL]] [FILE]...
        edwinclient [OPTION]... -e FORM...
 Edit FILEs in a frame of edwind, Edwin's daemon (edwin --daemon), in this terminal or in a window.
 
@@ -38,6 +38,7 @@ Edit FILEs in a frame of edwind, Edwin's daemon (edwin --daemon), in this termin
                      their names under its notes directory
   -a, --start-daemon start your own edwind (edwin --daemon) when none answers
   +LINE, +           start on line LINE of the first file (+ alone: its last line)
+  +LINE:COL          start there on character COL of the line (from 1)
   -                  edit what arrives on standard input
   -h, --help         show this text;  --version  show the version
 
@@ -45,7 +46,7 @@ Without --socket or --remote the edwind is the one on $EDWIN_SOCKET, else on $XD
 when none answers edwinclient says so and exits with status 1. Notes under edwind's notes directory are its
 buffers, shared with its other frames; every other file is this frame's own.
 ${LEAVE} edwind's init file is the one that runs.
-` : `Usage: edwin [OPTION]... [+LINE] [FILE]...
+` : `Usage: edwin [OPTION]... [+LINE[:COL]] [FILE]...
 Edit FILEs in Edwin, in this terminal or in a window. edwin never attaches to edwind; edwinclient does.
 
   -nw, -t, --no-window  use this terminal (the default)
@@ -55,6 +56,7 @@ Edit FILEs in Edwin, in this terminal or in a window. edwin never attaches to ed
   --daemon           start your own edwind in the background (--fg-daemon: in the foreground), for
                      edwinclient to attach to, as emacsclient does to emacs --daemon
   +LINE, +           start on line LINE of the first file (+ alone: its last line)
+  +LINE:COL          start there on character COL of the line (from 1)
   -                  edit what arrives on standard input
   -h, --help         show this text;  --version  show the version
 
@@ -69,7 +71,7 @@ trace('main');
 
 /* main.rs read the same command line before V8 started, and acted on it only when this finds nothing wrong. */
 function parseArgs(argv: string[]) {
-  const o: MainOpts = { files: [], line: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
+  const o: MainOpts = { files: [], line: null, col: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
   let opts = true, named = 0, forms = 0;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -85,7 +87,13 @@ function parseArgs(argv: string[]) {
     }
     else if (a === '-R' || a === '--read-only') o.readOnly = true;
     else if (a === '-') o.stdin = true;
-    else if (/^\+\d*$/.test(a)) o.line = a === '+' ? Infinity : Number(a.slice(1));
+    /* +, +LINE and +LINE:COL; any other +... is a file name, as Emacs takes it, so main.rs (which leaves it to this)
+       and this agree. */
+    else if (/^\+(\d+(:\d+)?)?$/.test(a)) {
+      const [l, c] = a.slice(1).split(':');
+      o.line = a === '+' ? Infinity : Number(l);
+      o.col = c === undefined ? null : Number(c);
+    }
     else if (!client && ['-nw', '--no-window', '-t', '-g', '--gui'].includes(a)) { /* main.rs chose */ }
     else if (client && ['-t', '-nw', '--tty', '-c', '--create-frame', '-a', '--start-daemon'].includes(a)) { /* main.rs chose, or started it */ }
     else if (client && (a === '-e' || a === '--eval')) o.eval = true;
@@ -369,8 +377,14 @@ async function start() {
   frame = Ed.makeFrame(null, { backend, kind: 'console', theme, buffer: first || undefined });
   frame.focused = true;
   if (first && opts.line !== null) {
-    const n = opts.line === Infinity ? Ed.lineCountB(first) : opts.line;
-    first.pt = Ed.lineStartB(first, Math.min(n, Ed.lineCountB(first)));
+    const n = opts.line === Infinity ? Ed.lineCountB(first) : opts.line, t = first.rope;
+    let p = Ed.lineStartB(first, Math.min(n, Ed.lineCountB(first)));
+    /* COL counts characters, not UTF-16 units or display cells; past the line's end it stops there, and in
+       normal state the cursor then sits on the last one, as Vim puts it. */
+    const end = Ed.eol(t, p);
+    for (let c = 1; c < (opts.col ?? 1) && p < end; c++) p += t.codePointAt(p)! > 0xffff ? 2 : 1;
+    first.pt = p;
+    if (Ed.hooks.clampPoint) Ed.hooks.clampPoint(first);
     frame.sel!.pt = first.pt;
   }
   /* Said once the frame is there: the echo area belongs to a frame. */

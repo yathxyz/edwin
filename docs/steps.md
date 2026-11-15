@@ -469,6 +469,34 @@ split is in Edwin itself, on every host, and the terminal stays the default of b
   ex44 with the package and a throwaway home: `edwin --daemon`, `edwinclient -e` (the definition was in the image
   log as `cli`), `edwinclient` with no daemon, and `edwin` beside the running daemon (edwind saw no connection).
 
+## `+LINE:COL` on the command line (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package cli-line-col): `edwin +L:C FILE` and `edwinclient +L:C FILE`
+start with point on line L, column C, as `emacs +L:C` and `emacsclient +L:C` do; until then `+3:5` was a file name.
+
+- **What it reads.** `+LINE:COL` beside `+LINE` and `+`, in `native/js/main.ts`'s parseArgs, for edwin and
+  edwinclient alike (both start through it), in the terminal and the window. As before, the position applies to
+  the first file. Any other argument starting with `+` (`+3:`, `+:5`, `+x`) is a file name, as Emacs takes it;
+  `./+3:5` or `-- +3:5` names a file that looks like one.
+- **COL is characters, from 1.** The point moves COL-1 characters (code points, so a character outside the BMP is
+  one) from the start of the line, never past its end: a COL past the end stops there, and in Evil's normal state
+  the cursor then sits on the line's last character, as Vim puts it. COL 0 is column 1, as LINE 0 is line 1, and a
+  LINE past the last line is the last. Choice: characters, the plan's default. The alternative is display columns
+  (a tab to the next multiple of 8, a wide character two cells), what Emacs's `move-to-column` does; changing it is
+  the one loop in main.ts's start().
+- **main.rs needed no change.** It acts on the command line before V8 only for the window, the edwind and usage
+  errors, and an argument that does not start with `-` never sets any of them; so `+3:5` and a malformed `+...`
+  are both left to main.ts, which takes the malformed one as a file name and refuses neither. The two readers
+  agree without a second parser (062d316's rule: a line main.ts refuses must not attach or start a daemon first).
+- **Not in it:** a position per file (`emacs +3 a +5 b`); `+LINE:COL` applies to the first file, as `+LINE` did.
+  No new file, so no README layout row; and no check in nix/checks.nix: the tests are the pseudo-terminal suite's,
+  which `nix build .#edwin` runs (the package's cargo test).
+- **Checked by** the pseudo-terminal suite: `plus_line_col_puts_the_cursor_on_that_cell` (the cell the cursor is
+  drawn on for `+3:5` is four right of the one for `+3`, and `x` deletes that character),
+  `plus_line_col_counts_characters_and_stops_at_the_line_end` (a character of two UTF-16 units, a column past the
+  end, column 0, a line past the last, and `+3:` as a file name) and `edwinclient_plus_line_col_places_the_cursor`
+  (attached to a throwaway edwind). `nix build .#edwin` runs them; `edwin-typecheck` checks main.ts.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
@@ -895,7 +923,7 @@ Build and run (the prebuilt V8 is downloaded by the `v8` crate's build script, o
   its argument) and saves nothing, so `git commit` aborts. `C-x C-c` asks about each changed file (y, n, !, q),
   then confirms leaving with changes. In a split, `:q` closes the window, as before. The program blocks until it
   ends, so `git`, `sudoedit` and anything else that runs `$EDITOR` work. `+LINE` starts on a line (`+` alone: the
-  last); `-` edits standard input (`git diff | edwin -`), the terminal being `/dev/tty`. Files the editor is handed by git (`COMMIT_EDITMSG`, `git-rebase-todo`...) start at the top
+  last; `+LINE:COL` on a character of it, above); `-` edits standard input (`git diff | edwin -`), the terminal being `/dev/tty`. Files the editor is handed by git (`COMMIT_EDITMSG`, `git-rebase-todo`...) start at the top
   (`save-place-ignore-files-regexp`).
 - **Files are the disk's.** The host has a file system (`host.files`): the core's `Store` reads and writes paths,
   relative to the directory `edwin` started in, `~` expanded. A buffer's file is the absolute path; it is shown and

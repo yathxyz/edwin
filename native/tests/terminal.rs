@@ -439,6 +439,83 @@ fn plus_line_starts_on_that_line() {
     assert_eq!(read(d.join("l.txt")), "1\n3\n");
 }
 
+/// The cell the last draw left the cursor on: the CSI y;x H before the cursor is shown (term.ts draw).
+fn cursor_cell(out: &[u8]) -> (u32, u32) {
+    let s = String::from_utf8_lossy(out);
+    let end = s.rfind("H\x1b[?25h").expect("a drawn cursor");
+    let start = s[..end].rfind("\x1b[").unwrap() + 2;
+    let (y, x) = s[start..end].split_once(';').unwrap();
+    (y.parse().unwrap(), x.parse().unwrap())
+}
+
+#[test]
+fn plus_line_col_puts_the_cursor_on_that_cell() {
+    let d = workdir("linecol");
+    std::fs::write(d.join("l.txt"), "one\ntwo\nthree four\n").unwrap();
+    // +3 gives the line's first cell, whatever sits left of the text; +3:5 is four cells on.
+    let mut t = Pty::spawn(&d, &["+3", "l.txt"], &[]);
+    t.ready().pump(200);
+    let (y, x) = cursor_cell(&t.out);
+    t.keys(":q\r");
+    assert_eq!(t.exit(), 0);
+    let mut t = Pty::spawn(&d, &["+3:5", "l.txt"], &[]);
+    t.ready().pump(200);
+    assert_eq!(
+        cursor_cell(&t.out),
+        (y, x + 4),
+        "screen tail: {:?}",
+        tail(&t.out)
+    );
+    t.keys("x:wq\r");
+    assert_eq!(t.exit(), 0);
+    assert_eq!(read(d.join("l.txt")), "one\ntwo\nthre four\n");
+}
+
+#[test]
+fn plus_line_col_counts_characters_and_stops_at_the_line_end() {
+    for (text, arg, after) in [
+        // One character that is two UTF-16 units.
+        ("a\u{1F600}bc\n", "+1:3", "a\u{1F600}c\n"),
+        // Past the end of the line: on its last character, as Vim puts it; not onto the next line.
+        ("abc\nde\n", "+1:99", "ab\nde\n"),
+        // Column 0 is the first, as line 0 is.
+        ("ab\ncd\n", "+2:0", "ab\nd\n"),
+        // Past the last line: on the last.
+        ("ab\ncd\n", "+9:2", "ab\nc\n"),
+    ] {
+        let d = workdir("linecol-chars");
+        std::fs::write(d.join("l.txt"), text).unwrap();
+        let mut t = Pty::spawn(&d, &[arg, "l.txt"], &[]);
+        t.ready().keys("x:wq\r");
+        assert_eq!(t.exit(), 0, "{arg}");
+        assert_eq!(read(d.join("l.txt")), after, "{arg} on {text:?}");
+    }
+    // Anything else after + is a file name, as Emacs takes it: main.rs and main.ts both leave it to the files.
+    let d = workdir("linecol-name");
+    let mut t = Pty::spawn(&d, &["+3:"], &[]);
+    t.ready().keys("ihi").esc().keys(":wq\r");
+    assert_eq!(t.exit(), 0);
+    assert_eq!(read(d.join("+3:")), "hi\n");
+}
+
+#[test]
+fn edwinclient_plus_line_col_places_the_cursor() {
+    if !have_node() {
+        return;
+    }
+    let up = EdwindUp::start();
+    let d = workdir("linecol-client");
+    std::fs::write(d.join("l.txt"), "one\ntwo words\n").unwrap();
+    let c = client(&d);
+    let mut t = Pty::spawn_program(&d, &c, &["--socket", &up.socket, "+2:5", "l.txt"], &[]);
+    t.ready();
+    t.pump(300);
+    t.keys("x:wq\r");
+    assert_eq!(t.exit(), 0);
+    assert_eq!(read(d.join("l.txt")), "one\ntwo ords\n");
+    up.finish();
+}
+
 #[test]
 fn a_dash_edits_standard_input() {
     let d = workdir("stdin");
