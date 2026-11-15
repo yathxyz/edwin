@@ -2,7 +2,7 @@
 //! close button, the keystroke-to-screen latency budget, and edwinclient -c.
 //!
 //! Each test starts its own Xvfb. Without Xvfb or xdotool, or without a GPU adapter (lavapipe will do), the tests
-//! say so and pass.
+//! say so and pass, unless EDWIN_TEST_REQUIRE_GUI is set (the package's check sets it): then they fail.
 #![cfg(feature = "gui")]
 
 use std::path::{Path, PathBuf};
@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 mod common;
 
 const BIN: &str = env!("CARGO_BIN_EXE_edwin");
+
+/// TEST cannot run here, for WHY: it passes, saying so on its standard error, or fails under EDWIN_TEST_REQUIRE_GUI.
+/// (cargo test hides a passing test's output, so a skip and a run look alike in a build log.)
+fn skipped(test: &str, why: &str) {
+    assert!(
+        std::env::var_os("EDWIN_TEST_REQUIRE_GUI").is_none(),
+        "{test}: cannot run ({why}), and EDWIN_TEST_REQUIRE_GUI is set"
+    );
+    eprintln!("{test}: skipped ({why})");
+}
 
 fn has(program: &str, arg: &str) -> bool {
     Command::new(program)
@@ -31,7 +41,7 @@ struct Display {
 impl Display {
     fn start(test: &str) -> Option<Display> {
         if !has("Xvfb", "-help") || !has("xdotool", "version") {
-            eprintln!("{test}: skipped (needs Xvfb and xdotool)");
+            skipped(test, "needs Xvfb and xdotool");
             return None;
         }
         // A display number of this process's own, one per test.
@@ -57,7 +67,7 @@ impl Display {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !Path::new(&format!("/tmp/.X11-unix/X{n}")).exists() {
             if Instant::now() > deadline {
-                eprintln!("{test}: skipped (Xvfb did not start)");
+                skipped(test, "Xvfb did not start");
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -141,7 +151,7 @@ impl<'a> Edwin<'a> {
                     err.contains("cannot open a window"),
                     "{program} ended before its window appeared: {err}"
                 );
-                eprintln!("no window here: {err}");
+                skipped(program, &format!("no window here: {err}"));
                 return None;
             }
             assert!(
@@ -317,6 +327,7 @@ fn the_close_button_asks_about_changes() {
 #[test]
 fn edwinclient_c_is_a_frame_of_edwind_in_a_window() {
     if !common::have_node() {
+        skipped("client", "no node");
         return;
     }
     let Some(d) = Display::start("client") else {

@@ -13,6 +13,12 @@
   edwind,
   coreutils,
   util-linux,
+  # The window's tests: a virtual X display, keys and the mouse sent to it, its properties read, and Mesa's
+  # software Vulkan driver (lavapipe) as the GPU.
+  xvfb,
+  xdotool,
+  xprop,
+  mesa,
   # What the window loads at run time (winit and wgpu open them with dlopen).
   libxkbcommon,
   wayland,
@@ -154,12 +160,22 @@ rustPlatform.buildRustPackage {
     test -f "$EDWIN_ICU_DATA"
   '';
 
-  # The pseudo-terminal suite (edwinclient's tests run node on test/) and the window's unit tests,
-  # which skip without a GPU adapter; tests/gui.rs skips without Xvfb and xdotool.
-  nativeCheckInputs = [ nodejs ];
-  # The window's renders need a font (and a GPU adapter, which the sandbox lacks, so they skip after it).
+  # The pseudo-terminal suite (edwinclient's tests run node on test/), the window's unit tests (offscreen
+  # renders) and tests/gui.rs (the window on its own Xvfb, driven by xdotool). The window's tests skip without a
+  # display or a GPU adapter; EDWIN_TEST_REQUIRE_GUI makes them fail instead, so here they run or the build fails.
+  nativeCheckInputs = [
+    nodejs
+    xvfb
+    xdotool
+    xprop
+  ];
+  # The renders need a font and a GPU adapter: lavapipe, the one Vulkan driver the loader is given. The binary
+  # under test is target/'s, which has no RPATH to the window's libraries yet (postFixup adds it).
   preCheck = ''
     export HOME=$TMPDIR FONTCONFIG_FILE=${makeFontsConf { fontDirectories = [ dejavu_fonts ]; }}
+    export VK_DRIVER_FILES=${mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json
+    export LD_LIBRARY_PATH=${lib.makeLibraryPath windowLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+    export EDWIN_TEST_REQUIRE_GUI=1
   '';
 
   postInstall = ''

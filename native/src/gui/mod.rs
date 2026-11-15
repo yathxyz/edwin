@@ -658,6 +658,16 @@ mod tests {
     use super::render::render_rgba;
     use super::text::Text;
 
+    /// No font or no GPU adapter here: the test passes, saying so, or fails under EDWIN_TEST_REQUIRE_GUI (the
+    /// package's check sets it, with lavapipe as the adapter).
+    fn skipped(why: &str) {
+        assert!(
+            std::env::var_os("EDWIN_TEST_REQUIRE_GUI").is_none(),
+            "cannot render ({why}), and EDWIN_TEST_REQUIRE_GUI is set"
+        );
+        eprintln!("skipped: {why}");
+    }
+
     fn sample() -> Model {
         serde_json::from_str(include_str!("../../tests/model.json")).unwrap()
     }
@@ -667,7 +677,7 @@ mod tests {
         let m = sample();
         let mut text = Text::new(None, 14.0);
         if text.empty {
-            eprintln!("skipped: no fonts");
+            skipped("no fonts");
             return;
         }
         let (cw, ch) = (text.cell_w, text.cell_h);
@@ -675,7 +685,7 @@ mod tests {
         let px = match render_rgba(&m, &mut text, w, h) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("skipped: {e}");
+                skipped(&e);
                 return;
             }
         };
@@ -736,7 +746,7 @@ mod tests {
         });
         let mut text = Text::new(None, 14.0);
         if text.empty {
-            eprintln!("skipped: no fonts");
+            skipped("no fonts");
             return;
         }
         let (cw, ch) = (text.cell_w, text.cell_h);
@@ -744,7 +754,7 @@ mod tests {
         let px = match render_rgba(&m, &mut text, w, h) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("skipped: {e}");
+                skipped(&e);
                 return;
             }
         };

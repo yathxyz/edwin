@@ -546,6 +546,39 @@ socket it finds and binds its own) while both use one state directory.
   755) fail after 30 s and leave the lock free; and `EDWIND_CONFIG` with a socket of its own (and a config edwind
   refuses, refused before anything starts).
 
+## The window's tests in the package check (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package cli-gui-tests-in-check): `native/tests/gui.rs` runs inside
+`nix build .#edwin` under Xvfb with xdotool, xprop and lavapipe, instead of skipping there; until then the
+sandbox had no display and no GPU adapter, so DT2's window tests and its offscreen renders passed without running.
+
+- **What the check has.** `nix/edwin.nix` gives the check phase Xvfb, xdotool and xprop (`nativeCheckInputs`),
+  and Mesa's software Vulkan driver, lavapipe, as the only driver the Vulkan loader sees (`VK_DRIVER_FILES`, the
+  `lvp_icd` file of `mesa`). The binary under test is `target/`'s, which gets its RPATH to the window's libraries
+  only in `postFixup`, after the tests, so `preCheck` puts them on `LD_LIBRARY_PATH`. Mesa and the X tools are in
+  the check's closure only, not the package's.
+- **A skip fails there.** cargo test hides what a passing test prints, so a test that skipped and one that ran
+  are both `... ok` in a build log. Every skip of the window's tests goes through one function, `skipped` (in
+  `native/tests/gui.rs`, and in the render tests of `native/src/gui/mod.rs`), that fails the test when
+  `EDWIN_TEST_REQUIRE_GUI` is set; the package's `preCheck` sets it. The skips it covers: no Xvfb or xdotool, an
+  Xvfb that did not start, no window (`cannot open a window`: no adapter or no window libraries), no node for the
+  edwinclient test, and no font or no adapter for the offscreen renders. Without the variable, as in a plain
+  `cargo test` on a machine without Xvfb, they skip as before. Choice: fail on a variable. The alternative is
+  `--nocapture` and a grep of the log for `skipped`, which floods the log with every test's output and proves only
+  what the grep looks for.
+- **Not in it:** the latency budget, `keystroke_to_screen_latency_budget`, stays `#[ignore]`d (timing on a shared
+  builder is noise; it runs by hand, as DT2 says). Wayland is still not run (no compositor in the sandbox). xprop is
+  there for `cli-window-identity`'s WM_CLASS and title test; no test here calls it yet. No new file, so no README
+  layout row; and no check in nix/checks.nix: the tests are the package's own cargo tests, which `nix build
+  .#edwin` runs (`nix flake check` does not build the package).
+- **Checked by** `nix build .#edwin` on ex44: the log shows `tests/gui.rs` with 3 passed and 1 ignored
+  (`keys_and_clicks_edit_and_wq_leaves_zero`, `the_close_button_asks_about_changes`,
+  `edwinclient_c_is_a_frame_of_edwind_in_a_window`) and the unit tests `a_model_draws_its_faces_text_and_cursor`
+  and `another_writer_is_a_bar_and_a_name_tag` passed, each of which would have failed had it skipped; three
+  builds from scratch in a row passed (the window suite takes about 2.3 s). The same build without Xvfb and
+  xdotool (the three window tests: `needs Xvfb and xdotool`), and again without the Vulkan driver (the two renders:
+  `no graphics adapter`), failed in its check phase.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
@@ -889,7 +922,8 @@ The flake builds Edwin on its own, as Emacs ships `emacs`, `emacs --daemon` and 
 - **The build.** The prebuilt V8 (`librusty_v8` 130.0.1) is a fixed-output fetch handed to the `v8` crate as
   `RUSTY_V8_ARCHIVE`, so the build runs offline. The window's libraries (libxkbcommon, Wayland, Vulkan, libGL, X11)
   are added to the binary's RPATH, as winit and wgpu open them at run time. The check phase runs the
-  pseudo-terminal suite; the window's tests skip in the sandbox (no display). The flake check `edwin-module`
+  pseudo-terminal suite and, since 2026-11-15, the window's tests on Xvfb and lavapipe (until then they skipped in
+  the sandbox: "The window's tests in the package check", above). The flake check `edwin-module`
   evaluates a system with `programs.edwin` (the user unit, `EDITOR`); it does not boot one.
 - **The window from Nix** needs the system's GPU drivers where wgpu looks for them: `hardware.graphics.enable` on
   NixOS (`/run/opengl-driver`); elsewhere, Nix's Mesa through `VK_ICD_FILENAMES` or nixGL.
@@ -949,7 +983,7 @@ Build and test: `cargo build --release` builds the window in (the `gui` feature;
 terminal program alone). It needs, at run time, libxkbcommon, and on X11 libX11, libX11-xcb and libxkbcommon-x11
 (winit loads them; `edwin -g` checks for them first), a Vulkan or GL driver, and fontconfig's fonts. `cargo test
 --release` runs the window's tests on their own Xvfb when `Xvfb` and `xdotool` are installed, and skips them
-otherwise. The binary is 48.6 MB (37.6 without the window). The window opens in about 100 ms on the software
+otherwise (with `EDWIN_TEST_REQUIRE_GUI` set, as the package's check sets it, a skip fails). The binary is 48.6 MB (37.6 without the window). The window opens in about 100 ms on the software
 renderer before the snapshot restores, so the first frame is drawn at about 146 ms (40 ms in a terminal).
 
 Not in DT2: ligatures (each cell is shaped alone, as the grid needs), proportional fonts, the pulse animation,
