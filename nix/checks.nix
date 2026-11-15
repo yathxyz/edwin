@@ -217,6 +217,23 @@ in
   # session, and a switch of provider mid-session.
   edit-agent = suite "agent" [ "agent.test.mts" ];
 
+  # edwin --daemon from the package (test/daemon.test.mts): a start returns once the socket answers, two starts at
+  # once give one edwind and one exit with status 3, `edwin --daemon && edwinclient -e 1` 100 times, --wait, and
+  # the timeout when edwind dies. Real edwinds under a throwaway HOME and XDG_RUNTIME_DIR. About two minutes.
+  edwin-daemon =
+    pkgs.runCommand "edwin-daemon"
+      {
+        nativeBuildInputs = [
+          pkgs.nodejs
+          pkgs.util-linux
+        ];
+      }
+      ''
+        export HOME=$TMPDIR EDWIN_BIN=${self.packages.${pkgs.stdenv.hostPlatform.system}.edwin}/bin
+        node --test ${edwin}/edwin/test/daemon.test.mts
+        touch $out
+      '';
+
   # programs.edwin (nix/edwin-module.nix) evaluates into a system: the user unit runs `edwin --fg-daemon` from the
   # package, EDITOR is edwin. Evaluation only, so the edwin package itself is not built here.
   edwin-module =

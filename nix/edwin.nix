@@ -43,7 +43,11 @@ let
   # edwin --daemon: edwind for this user on $XDG_RUNTIME_DIR/edwin/edit.sock, where edwinclient looks after
   # $EDWIN_SOCKET. The config is EDWIND_CONFIG when set, else one made at each start from
   # EDWIN_NOTES_DIR (~/notes): state in ~/.local/state/edwin/edwind, the user's Scheme in ~/.config/edwin.
-  # In the background unless --fg (what a systemd user service runs).
+  # In the background unless --fg (what a systemd user service runs); a background start returns once the socket
+  # answers, and --wait starts nothing and returns once it answers. Without EDWIND_CONFIG a start holds
+  # ~/.local/state/edwin/edwind.lock from its check until the edwind it started answers (edwind itself never
+  # holds it), so of two starts one runs edwind and the other, which waited on the lock, exits with status 3; a
+  # start that finds an edwind answering at once exits with status 1. The edwin-daemon check tests it.
   daemon = writeShellScript "edwin-daemon" ''
     set -eu
     PATH=${
@@ -52,28 +56,72 @@ let
         util-linux
       ]
     }:$PATH
-    fg=; [ "''${1:-}" = --fg ] && { fg=1; shift; }
+    mode=bg
+    case ''${1:-} in
+      --fg) mode=fg; shift ;;
+      --wait) mode=wait; shift ;;
+    esac
+    # How long a start and --wait wait for edwind to answer, and a start for another start's lock.
+    wait_s=30 lock_s=40
+    # answers SECONDS: whether something accepts on $sock within SECONDS (0: asked once).
+    answers() {
+      ${nodejs}/bin/node -e 'const [sock, s] = process.argv.slice(1), end = Date.now() + 1000 * s;
+        const go = () => require("net").connect(sock).on("connect", () => process.exit(0))
+          .on("error", () => (Date.now() < end ? setTimeout(go, 20) : process.exit(1)));
+        go();' "$sock" "$1"
+    }
     cfg=''${EDWIND_CONFIG:-}
     if [ -z "$cfg" ]; then
       run=''${XDG_RUNTIME_DIR:?edwin --daemon needs XDG_RUNTIME_DIR (or EDWIND_CONFIG)}/edwin
+      sock=$run/edit.sock
+    elif [ "$mode" != fg ]; then
+      # The socket edwind listens on, as edwind reads the config.
+      # (main.mts runs edwind when process.argv[1] names it, so the config is the only argument.)
+      sock=$(${nodejs}/bin/node --no-warnings=ExperimentalWarning --input-type=module -e '
+        const { loadConfig } = await import("${edwind}/share/edwin/server/main.mts");
+        try { process.stdout.write(loadConfig(process.argv[1]).socket); } catch (e) { console.error(`edwin: ''${e.message}`); process.exit(1); }' \
+        "$cfg")
+    fi
+    if [ "$mode" = wait ]; then
+      answers "$wait_s" && exit 0
+      echo "edwin: no edwind answered on $sock within $wait_s s" >&2; exit 1
+    fi
+    locked=
+    if [ -z "$cfg" ]; then
       home=''${HOME:?}
       notes=''${EDWIN_NOTES_DIR:-$home/notes}
       state=''${XDG_STATE_HOME:-$home/.local/state}/edwin
       mkdir -p -m 700 "$run" "$state/edwind"
       mkdir -p "$notes"
-      if [ -S "$run/edit.sock" ] && ${nodejs}/bin/node -e 'require("net").connect(process.argv[1]).on("connect", () => process.exit(0)).on("error", () => process.exit(1))' "$run/edit.sock"; then
-        echo "edwin: an edwind already runs on $run/edit.sock" >&2; exit 1
+      exec 9>>"$state/edwind.lock"
+      raced=
+      if ! flock -n 9; then
+        raced=1
+        flock -w "$lock_s" 9 || { echo "edwin: another start held $state/edwind.lock for $lock_s s" >&2; exit 1; }
+      fi
+      locked=1
+      if [ -S "$sock" ] && answers 0; then
+        if [ -n "$raced" ]; then echo "edwin: another start started the edwind on $sock" >&2; exit 3; fi
+        echo "edwin: an edwind already runs on $sock" >&2; exit 1
       fi
       cfg=$run/edwind.json
       ${nodejs}/bin/node -e 'const [f, sock, notes, state, conf] = process.argv.slice(1);
         require("fs").writeFileSync(f, JSON.stringify({ socket: sock, notesDir: notes, stateDir: state, configDir: conf,
           refusePaths: ["~/.ssh", "~/.config/systemd", "~/.local/share/systemd"] }), { mode: 0o600 });' \
-        "$cfg" "$run/edit.sock" "$(realpath "$notes")" "$state/edwind" "''${XDG_CONFIG_HOME:-$home/.config}/edwin"
+        "$cfg" "$sock" "$(realpath "$notes")" "$state/edwind" "''${XDG_CONFIG_HOME:-$home/.config}/edwin"
     fi
-    if [ -n "$fg" ]; then exec ${edwind}/bin/edwind --config "$cfg"; fi
+    # edwind never gets the lock's descriptor (9>&-), so an edwind that dies leaves no lock held.
+    if [ "$mode" = fg ]; then
+      # A detached helper keeps the lock until this edwind answers, as a background start keeps it.
+      if [ -n "$locked" ]; then (answers "$wait_s" </dev/null >/dev/null 2>&1 &); fi
+      exec ${edwind}/bin/edwind --config "$cfg" 9>&-
+    fi
     log=''${XDG_STATE_HOME:-''${HOME:?}/.local/state}/edwin/edwind.log
     mkdir -p "''${log%/*}"
-    setsid -f ${edwind}/bin/edwind --config "$cfg" </dev/null >>"$log" 2>&1
+    setsid -f ${edwind}/bin/edwind --config "$cfg" </dev/null >>"$log" 2>&1 9>&-
+    if ! answers "$wait_s"; then
+      echo "edwin: the edwind started did not answer on $sock within $wait_s s (log: $log)" >&2; exit 1
+    fi
     echo "edwin: edwind started (log: $log)" >&2
   '';
 in

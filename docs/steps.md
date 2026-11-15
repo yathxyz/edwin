@@ -402,7 +402,8 @@ edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon. Both ar
   editor runs, as the browser's frames retry: the frame keeps its replica, edits wait in its queue, and ssh's
   reason goes in the log (`~/.local/state/edwin/edwin.log`). Remote latency touches only acknowledgements.
 - **`-a`, `--start-daemon`.** When no edwind answers on `$EDWIN_SOCKET` or the user's socket, edwinclient runs
-  `edwin-daemon` beside the program (DT4), waits up to 10 s for `$XDG_RUNTIME_DIR/edwin/edit.sock`, and attaches.
+  `edwin-daemon` beside the program (DT4), which since 2026-11-15 returns once `$XDG_RUNTIME_DIR/edwin/edit.sock`
+  answers ("edwin --daemon waits", below; edwinclient still allows 10 s after it), and attaches.
   The daemon outlives the frame. Without `edwin-daemon` (a cargo build), or if it fails and no edwind answers by
   then, edwinclient says why and exits with status 1 (until 2026-11-13 it edited on its own); a remote
   `$EDWIN_SOCKET` that does not answer ends the search before `-a` is asked. `EDITOR="edwinclient -a"` gives
@@ -496,6 +497,54 @@ start with point on line L, column C, as `emacs +L:C` and `emacsclient +L:C` do;
   `plus_line_col_counts_characters_and_stops_at_the_line_end` (a character of two UTF-16 units, a column past the
   end, column 0, a line past the last, and `+3:` as a file name) and `edwinclient_plus_line_col_places_the_cursor`
   (attached to a throwaway edwind). `nix build .#edwin` runs them; `edwin-typecheck` checks main.ts.
+
+## edwin --daemon waits, and two starts give one edwind (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `cli-daemon-start`): `edwin --daemon` returned about 350 ms
+before its edwind listened, so `edwin --daemon && edwinclient …` could find no edwind; and two starts at once
+could both pass the check and both run edwind, the later one taking the socket from the earlier (edwind unlinks a
+socket it finds and binds its own) while both use one state directory.
+
+- **A start returns once the socket answers.** `edwin --daemon` (edwin-daemon in the background) starts edwind and
+  then waits until something accepts on its socket, up to 30 s. When edwind dies first (or is slower than that) it
+  says so with the log's path and exits with status 1. With `EDWIND_CONFIG` the socket is the one edwind reads
+  from that config (edwind's own `loadConfig`, so the default and `~` are edwind's).
+- **`edwin-daemon --wait`** starts nothing: it returns with status 0 once the user's socket (or `EDWIND_CONFIG`'s)
+  accepts, and with status 1 after 30 s. It is for a caller that needs the socket, such as a service's
+  `ExecStartPost` (`cli-unit-readiness`).
+- **The lock.** Without `EDWIND_CONFIG` a start takes `~/.local/state/edwin/edwind.lock` (`$XDG_STATE_HOME`) with
+  flock before its check and keeps it until the edwind it started answers, so a start never sees "nothing answers"
+  while another start's edwind is coming up. edwind never gets the descriptor (`9>&-` on both launches): an edwind
+  that crashes leaves no lock held, and a start killed mid-way releases it with its process. A start whose edwind
+  never answers lets go after its 30 s; another start waits up to 40 s for the lock, then makes its own check.
+- **Statuses.** A start that waited on the lock and then finds an edwind answering lost a race: status 3 ("another
+  start started the edwind on …"). One that finds an edwind answering at once keeps status 1 ("an edwind already
+  runs on …"). After status 0 or 3 the socket answers, so `edwinclient -a`, which attaches after any refusal,
+  attaches to the winner.
+- **The foreground start** (`edwin --fg-daemon`, what the user service runs) takes the lock for its check as well.
+  It cannot keep it across `exec` without edwind inheriting it, so a detached helper (one node process, the same
+  wait) holds it until that edwind answers, at most 30 s. A service start and a manual `edwin --daemon` at the same
+  moment give one edwind too.
+- **Choices.** Status 1 for "already runs" is kept, as the plan's default until the owner agrees otherwise; the
+  alternative is status 3 for every refusal because an edwind answers, which `RestartPreventExitStatus=3` in a unit
+  would then cover in full (today it covers only the lost race). The lock is held until the socket answers rather
+  than only across the check and the `setsid`, as the plan worded it: the shorter hold leaves the 350 ms window in
+  which a second start sees nothing answering. The timeouts are fixed (30 s, 40 s for the lock), as edwinclient's
+  are, rather than options.
+- **Not in it:** a lock under `EDWIND_CONFIG` (that path never checked for a running edwind, and still does not);
+  argument checking and usage (`cli-daemon-args-and-edwind-usage`); the unit's readiness (`cli-unit-readiness`).
+  edwind's own `stop()` unlinks the socket path last, after it stopped listening, so a new edwind that binds in that
+  moment loses its socket. A start does not wait for a stopping edwind to exit; the check waits for each edwind
+  it stops to be gone before the next start.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-daemon` (`test/daemon.test.mts`, real edwinds from the
+  package under a throwaway `HOME` and `XDG_RUNTIME_DIR`): a start returns with the socket answering and a second
+  is refused with status 1, while edwind holds no descriptor of the lock and the lock is free; `edwin --daemon &&
+  edwinclient -e 1` prints 1 a hundred times in a row, each with a fresh edwind; two starts at once, five times,
+  give statuses 0 and 3 and one edwind, and a second start 50, 150 and 300 ms after the first still gives one; the
+  service start and `edwin --daemon` together give one edwind (the service's), and the helper lets the lock go;
+  `--wait` returns only once the socket answers; a start and `--wait` whose edwind dies (a socket directory of mode
+  755) fail after 30 s and leave the lock free; and `EDWIND_CONFIG` with a socket of its own (and a config edwind
+  refuses, refused before anything starts).
 
 ## Notes into brain: the projector (done)
 
@@ -829,7 +878,9 @@ The flake builds Edwin on its own, as Emacs ships `emacs`, `emacs --daemon` and 
 - **The daemon.** `edwin --daemon` starts the user's edwind in the background (`--fg-daemon` in the foreground,
   which the user service runs) on `$XDG_RUNTIME_DIR/edwin/edit.sock`. Its config is `EDWIND_CONFIG` when set,
   else one written at each start: notes in `EDWIN_NOTES_DIR` (`~/notes`), state in `~/.local/state/edwin/edwind`,
-  the user's Scheme in `~/.config/edwin`, the log (background start) in `~/.local/state/edwin/edwind.log`.
+  the user's Scheme in `~/.config/edwin`, the log (background start) in `~/.local/state/edwin/edwind.log`. Since
+  2026-11-15 a background start returns once the socket answers, and two starts give one edwind ("edwin --daemon
+  waits", above).
 - **The client.** `edwinclient` and `edwinclient -c` attach to the edwind `--socket` or `--remote` names, else
   the first that answers on `$EDWIN_SOCKET` or `$XDG_RUNTIME_DIR/edwin/edit.sock` (until 2026-10-19 also
   Workbench's `/run/workbench-edit/edit.sock`), so notes are shared between frames and with the browser. Files
