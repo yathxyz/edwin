@@ -708,6 +708,58 @@ socket listened, and a unit ordered `After=edwind.service` could start, connect 
   after 30 s when edwind dies, and fail within 5 s when the edwind `MAINPID` names dies (with an edwind `MAINPID`
   names alive, `--wait` returns once it answers; a `MAINPID` that is not a pid is refused with status 2).
 
+## `-f COMMAND`: a command run in the new frame (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `cli-funcall`): `edwinclient -f NAME` runs the command NAME in
+the frame it opens, delivered as the key `<cmd:NAME>`, as `emacsclient`'s callers use `-e '(NAME)'` and `emacs -f
+NAME` does. It is the one way the calculator key, the mail notification and the git alias will open Edwin on a
+command (`fleet-calc-key`, `mail-fleet-notify-edwin`, `git-fleet-retire`). `-e FORM` stays what it was: forms
+evaluated in edwind, with no frame.
+
+- **Both programs.** `-f COMMAND`, `--funcall COMMAND` and `--funcall=COMMAND`, for edwin and edwinclient alike,
+  in the terminal and the window. Choice (decision 17, which named no default): edwin too, because
+  `git-fleet-retire` makes `mg` `edwin -f vc-status`, and one parser serves both programs; the alternative is
+  edwinclient only, a `client &&` in main.ts and an `if client` in main.rs.
+- **A name, never a form.** COMMAND is the next argument whatever it looks like (as `--title`'s NAME is), and must
+  be made of printable ASCII letters, digits and `! $ % & * + - . / : = ? @ ^ _ ~`: nothing that could open a
+  form, a string, a comment or a key name. Anything else (`(delete-file "a.txt")`, `quick calc`, `a;b`) is a
+  usage error, status 2, and so is a missing or empty COMMAND. Both readers of the command line check it alike
+  (main.rs's `command_name`, main.ts's `COMMAND_NAME`), so a refused `-f` never attaches to edwind, starts one
+  with `-a` or opens a window first. The name is only interned, never read or evaluated. Choice: ASCII only,
+  which every shipped command name is; the alternative is any character but those, which would need the two
+  readers to agree on Unicode's whitespace.
+- **When it runs.** After the init files (edwind's for edwinclient, `~/.config/edwin/init.scm` for edwin) and
+  the files on the line, once the frame is made and `+LINE[:COL]` has placed point, so `+2 -f upcase-word f.txt`
+  acts on line 2. The key is fed before any typed key can reach the frame. A command declared `(:where 'server)` runs in edwind, as from `M-x` (`-f image-log` shows
+  edwind's `*image-log*`).
+- **A name that is no command** (unbound, or a function that is not interactive, such as `car`) is checked once
+  the init files have run and before any file is visited or a frame drawn: the program gives the terminal back,
+  says `NAME is not a command` and exits with status 1. Choices: status 1, since the line was well formed and
+  only the editor's commands could tell (status 2 stays for usage errors); and exiting rather than opening the
+  frame with the error in the echo area (as Emacs does), which is what the package asks for, so a script can
+  tell.
+- **One `-f`.** A second is a usage error (`-f runs one command; give it once`). Fed together, a second command's
+  key would be read by the first's prompt (`find-file`'s minibuffer, an operator) as its answer. Choice: once,
+  which every caller in the plan needs; the alternative is Emacs's chain, each command fed only once the one before
+  has returned to the top level (src/ai.ts's feedAtTopLevel waits that way).
+- **`-f` with `-e`** is a usage error (`-f runs a command in a frame, and -e opens none`). After `-e` every
+  argument is a form, so a `-f` there is one, as before.
+- **Not in it:** passing arguments to the command (it is called interactively, and prompts in the frame as from
+  `M-x`); `-n` is `cli-no-wait`. The `desktop-only` stubs in scm/init.scm are untouched: none of them is this.
+  No new file, so no README layout row; and no check in nix/checks.nix: the tests are the pseudo-terminal
+  suite's, which `nix build .#edwin` runs.
+- **Checked by** `nix build .#edwin` on ex44 (`tests/terminal.rs` 30 passed), with
+  `funcall_runs_a_command_in_the_frame` (`+2 -f upcase-word f.txt` makes line 2 `THREE four` with no key typed
+  before `:wq`, and `+1 --funcall=funcall-test-mark f.txt` runs a command of the user's init.scm),
+  `funcall_of_a_name_that_is_no_command_exits_1` (`no-such-command` and `car`: status 1, `edwin: NAME is not a
+  command`, no frame drawn, the terminal left, the file unchanged) and
+  `edwinclient_funcall_runs_a_command_in_the_frame` (against a throwaway edwind: `-f upcase-word` edits the file,
+  `-f image-log` shows edwind's `*image-log*`, and `-f no-such-command` exits 1 before a frame is drawn).
+  `help_version_and_bad_options_need_no_terminal`: a missing or empty name and a form are status 2 for both
+  programs, and so is a second `-f`; so are `-f x -e 1` and a refused name after `-c` for edwinclient with no edwind to attach to,
+  which shows main.rs refused them before looking for one. Also `nix flake check` (with `edwin-typecheck` over
+  `native/js`).
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

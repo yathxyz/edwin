@@ -2,8 +2,8 @@
    window of its own (DT2, --gui). Under the name edwinclient it is a frame of an edwind, as emacsclient is of an
    Emacs daemon; edwin never attaches to one.
 
-     edwin [-nw | -g] [--title NAME] [-R] [+LINE[:COL]] [FILE | -]...
-     edwinclient [-t | -c] [--title NAME] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [+LINE[:COL]] [FILE | -]...
+     edwin [-nw | -g] [--title NAME] [-R] [-f COMMAND] [+LINE[:COL]] [FILE | -]...
+     edwinclient [-t | -c] [--title NAME] [-R] [-a] [--socket PATH | --remote HOST:SOCKET] [-f COMMAND] [+LINE[:COL]] [FILE | -]...
      edwinclient [-a] [--socket PATH | --remote HOST:SOCKET] -e FORM...
 
    The core runs as a model frame (display.ts) drawn by term.ts, or by the window (gui.ts and the Rust side's
@@ -11,7 +11,8 @@
    (host-native.ts). edwinclient's edwind is the one main.rs attached to before anything was drawn (N.edwind()); the
    notes under its notes directory are opened through it, shared with the browser's frames. Through --remote
    HOST:SOCKET it is the edwind on another machine, reached through ssh (DT3); its notes are then named as they are
-   under its notes directory. -e evaluates each FORM in edwind and prints its value, with no frame. The process
+   under its notes directory. -e evaluates each FORM in edwind and prints its value, with no frame; -f runs
+   COMMAND in the new frame, once the files are visited, as the key <cmd:COMMAND> would. The process
    ends with the status the user asked for: :q, :wq, ZZ and C-x C-c give 0, :cq gives 1 (or its argument), so git
    commit and sudoedit can tell an abort. C-z suspends to the shell; fg resumes (in the window, C-z iconifies it). */
 (function () {
@@ -19,8 +20,12 @@
 const N = globalThis.__n, H = globalThis.EdNativeHost, T = globalThis.EdTerm;
 const client = N.client(), NAME = client ? 'edwinclient' : 'edwin';
 /* The command line, as parseArgs reads it. line: +LINE (Infinity for + alone); col: +LINE:COL's COL, in characters
-   from 1; files: with -e, the FORMs (every argument after it, and a FILE before it too, as emacsclient takes them). */
-interface MainOpts { files: string[]; line: number | null; col: number | null; readOnly: boolean; eval: boolean; stdin: boolean; help: boolean; version: boolean }
+   from 1; files: with -e, the FORMs (every argument after it, and a FILE before it too, as emacsclient takes them);
+   funcall: -f's COMMAND. */
+interface MainOpts { files: string[]; line: number | null; col: number | null; funcall: string | null; readOnly: boolean; eval: boolean; stdin: boolean; help: boolean; version: boolean }
+/* -f's COMMAND, as main.rs checks it: a command's name, never a form. Printable ASCII of the kinds a symbol is made
+   of, with nothing that could open a form, a string or a comment. */
+const COMMAND_NAME = /^[A-Za-z0-9!$%&*+\-./:=?@^_~]+$/;
 const VERSION = `${NAME} DT3`;
 const LEAVE = `Leave with :q (or :wq, ZZ, C-x C-c); :cq leaves with exit status 1.
 C-z suspends to the shell.`;
@@ -33,6 +38,8 @@ Edit FILEs in a frame of edwind, Edwin's daemon (edwin --daemon), in this termin
   --geometry=COLSxROWS  the window's first size in characters (100x36)
   --title NAME       the window's title, whatever it shows (its app_id and WM_CLASS are edwin)
   -e, --eval         the arguments that follow are Scheme forms: evaluate each in edwind and print its value
+  -f, --funcall COMMAND  run the command named COMMAND in the frame once the files are open (a name that
+                     is no command ends edwinclient with status 1)
   -R, --read-only    visit the files read-only
   --socket PATH      the edwind listening on PATH
   --remote HOST:SOCKET  the edwind listening on SOCKET on HOST, through ssh; FILEs are then its notes, by
@@ -54,6 +61,8 @@ Edit FILEs in Edwin, in this terminal or in a window. edwin never attaches to ed
   -g, --gui          open a window (EDWIN_FONT="Family 11" sets its font)
   --geometry=COLSxROWS  the window's first size in characters (100x36)
   --title NAME       the window's title, whatever it shows (its app_id and WM_CLASS are edwin)
+  -f, --funcall COMMAND  run the command named COMMAND once the files are open (a name that is no command
+                     ends edwin with status 1)
   -R, --read-only    visit the files read-only
   --daemon           start your own edwind in the background (--fg-daemon: in the foreground), for
                      edwinclient to attach to, as emacsclient does to emacs --daemon
@@ -73,7 +82,7 @@ trace('main');
 
 /* main.rs read the same command line before V8 started, and acted on it only when this finds nothing wrong. */
 function parseArgs(argv: string[]) {
-  const o: MainOpts = { files: [], line: null, col: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
+  const o: MainOpts = { files: [], line: null, col: null, funcall: null, readOnly: false, eval: false, stdin: false, help: false, version: false };
   let opts = true, named = 0, forms = 0;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -90,6 +99,15 @@ function parseArgs(argv: string[]) {
     /* main.rs titled the window: the next argument, whatever it is, or what follows =. */
     else if (/^--title(=|$)/.test(a)) {
       if (!(a.includes('=') ? a.slice(8) : argv[++i])) throw new Error('--title needs a name');
+    }
+    /* -f COMMAND: the next argument whatever it is, as main.rs takes it, or what follows =. Once: a second command
+       fed behind the first would be read by the first's prompt, if it has one, as its answer. */
+    else if (/^(-f|--funcall(=.*)?)$/.test(a)) {
+      const flag = a.replace(/=.*/, ''), v = a.includes('=') ? a.slice(10) : argv[++i];
+      if (o.funcall !== null) throw new Error('-f runs one command; give it once');
+      if (!v) throw new Error(`${flag} needs a command's name`);
+      if (!COMMAND_NAME.test(v)) throw new Error(`${flag} takes a command's name, not ${v}`);
+      o.funcall = v;
     }
     else if (a === '-R' || a === '--read-only') o.readOnly = true;
     else if (a === '-') o.stdin = true;
@@ -115,6 +133,7 @@ function parseArgs(argv: string[]) {
     else o.files.push(a);
   }
   if (o.eval && !forms && !o.help && !o.version) throw new Error('-e needs a form');
+  if (o.eval && o.funcall !== null) throw new Error('-f runs a command in a frame, and -e opens none');
   return o;
 }
 
@@ -363,6 +382,11 @@ async function start() {
     Ed.loadUserInit();
   }
   trace('booted');
+  /* -f's name, checked once the init files (edwind's, or the user's own) have defined their commands, and before
+     a file is visited: a name that is no command changes nothing. The name is only interned, never read. */
+  if (opts.funcall !== null && !Ed.isCommand(L.intern(opts.funcall))) {
+    leaveTerminal(); N.eprint(`${NAME}: ${opts.funcall} is not a command\n`); N.exit(1); return;
+  }
   let first: EdBuffer | null = null;
   if (stdinText !== null) {
     const b = Ed.getBufferCreate('*stdin*'); b.text = stdinText; b.pt = 0; b.modified = false; Ed.setWindowBuffer(b); first = b;
@@ -397,6 +421,10 @@ async function start() {
   if (failed.length) Ed.message(failed.join('; '));
   else if (first && first.file) Ed.message(fresh.has(first) ? `"${Ed.fileLabel(first.file)}" [New]` : lineMessage(first));
   Ed.render();
+  /* As the key <cmd:NAME> (the window's close button's way), after +LINE:COL has placed point. The command loop
+     reads it before any typed key: input reaches a frame only once there is one, and nothing since makeFrame above
+     has waited. */
+  if (opts.funcall !== null) Ed.feedKey(`<cmd:${opts.funcall}>`);
   if (N.env('EDWIN_TRACE')) setTimeout(() => trace('first draw'), 0);
 }
 start().catch(e => { console.error(e); leaveTerminal(); N.eprint(`${NAME}: ` + (e && e.stack || e) + '\n'); N.exit(70); });

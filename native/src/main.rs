@@ -124,7 +124,7 @@ fn args(client: bool) -> Args {
         start: false,
         answer: false,
     };
-    let mut named = 0;
+    let (mut named, mut funcall) = (0, false);
     let mut naming = |o: &mut Args, k: &str, v: &str| {
         named += 1;
         if v.is_empty() || named > 1 {
@@ -151,10 +151,11 @@ fn args(client: bool) -> Args {
                 naming(&mut o, &a, &v);
             }
             "--title" => titled(&mut o, it.next().unwrap_or_default()),
-            // The rest are forms, evaluated with no frame.
+            "-f" | "--funcall" => funcalled(&mut o, &mut funcall, &it.next().unwrap_or_default()),
+            // The rest are forms, evaluated with no frame, so with no frame for a -f before them either.
             "-e" | "--eval" if client => {
                 o.window = false;
-                if it.next().is_none() {
+                if it.next().is_none() || funcall {
                     o.answer = true;
                 }
                 break;
@@ -162,6 +163,7 @@ fn args(client: bool) -> Args {
             _ => match a.split_once('=') {
                 Some((k @ ("--socket" | "--remote"), v)) if client => naming(&mut o, k, v),
                 Some(("--title", v)) => titled(&mut o, v.to_string()),
+                Some(("--funcall", v)) => funcalled(&mut o, &mut funcall, v),
                 // As main.ts checks it.
                 Some(("--geometry", g)) => match g
                     .split_once('x')
@@ -185,6 +187,20 @@ fn titled(o: &mut Args, v: String) {
     } else {
         o.title = Some(v);
     }
+}
+
+/// -f NAME, as main.ts checks it: given once, and a command's name.
+fn funcalled(o: &mut Args, seen: &mut bool, v: &str) {
+    o.answer |= *seen || !command_name(v);
+    *seen = true;
+}
+
+/// A command's name, never a form: printable ASCII of the kinds a symbol is made of, with nothing that could open
+/// a form, a string or a comment.
+fn command_name(v: &str) -> bool {
+    !v.is_empty()
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!$%&*+-./:=?@^_~".contains(&b))
 }
 
 /// A number of --geometry: digits only (no sign), within a u32.

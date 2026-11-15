@@ -516,6 +516,105 @@ fn edwinclient_plus_line_col_places_the_cursor() {
     up.finish();
 }
 
+/// -f COMMAND runs that command in the frame once the file is open and +LINE has placed point, with no key typed;
+/// the user's init.scm can define the command.
+#[test]
+fn funcall_runs_a_command_in_the_frame() {
+    let d = workdir("funcall");
+    std::fs::create_dir_all(d.join("config/edwin")).unwrap();
+    std::fs::write(
+        d.join("config/edwin/init.scm"),
+        "(define-command (funcall-test-mark)\n  \"Insert a mark.\"\n  (interactive \"*\")\n  (insert \"<f>\"))\n",
+    )
+    .unwrap();
+    std::fs::write(d.join("f.txt"), "one two\nthree four\n").unwrap();
+    for (args, after) in [
+        (
+            &["+2", "-f", "upcase-word", "f.txt"][..],
+            "one two\nTHREE four\n",
+        ),
+        (
+            // +1: save-place would start where the first run left.
+            &["+1", "--funcall=funcall-test-mark", "f.txt"][..],
+            "<f>one two\nTHREE four\n",
+        ),
+    ] {
+        let mut t = Pty::spawn(&d, args, &[]);
+        t.ready().pump(300);
+        t.keys(":wq\r");
+        assert_eq!(t.exit(), 0, "{args:?}: screen tail: {:?}", tail(&t.out));
+        assert_eq!(read(d.join("f.txt")), after, "{args:?}");
+    }
+}
+
+/// A name that is no command (nothing by that name, or a function that is not a command) ends edwin with status 1
+/// and says so, before a frame is drawn or a file touched, and gives the terminal back.
+#[test]
+fn funcall_of_a_name_that_is_no_command_exits_1() {
+    let d = workdir("funcall-none");
+    std::fs::write(d.join("f.txt"), "one\n").unwrap();
+    for name in ["no-such-command", "car"] {
+        let mut t = Pty::spawn(&d, &["-f", name, "f.txt"], &[]);
+        assert_eq!(t.exit(), 1, "{name}");
+        t.pump(200);
+        let said = format!("edwin: {name} is not a command");
+        assert!(contains(&t.out, said.as_bytes()), "{:?}", tail(&t.out));
+        assert!(!contains(&t.out, b"\x1b[?2026l"), "a frame was drawn");
+        assert!(contains(&t.out, b"\x1b[?1049l"), "the terminal was kept");
+    }
+    assert_eq!(read(d.join("f.txt")), "one\n");
+}
+
+/// edwinclient -f: the command runs in the new frame of edwind, a command declared (:where 'server) runs in edwind
+/// and answers there, and a name that is no command ends the client with status 1 before a frame is drawn.
+#[test]
+fn edwinclient_funcall_runs_a_command_in_the_frame() {
+    if !have_node() {
+        return;
+    }
+    let up = EdwindUp::start();
+    let d = workdir("funcall-client");
+    std::fs::write(d.join("f.txt"), "one two\n").unwrap();
+    let c = client(&d);
+    let sock = up.socket.clone();
+    let mut t = Pty::spawn_program(
+        &d,
+        &c,
+        &["--socket", &sock, "-f", "upcase-word", "f.txt"],
+        &[],
+    );
+    t.ready().pump(300);
+    t.keys(":wq\r");
+    assert_eq!(t.exit(), 0, "screen tail: {:?}", tail(&t.out));
+    assert_eq!(read(d.join("f.txt")), "ONE two\n");
+    // image-log is edwind's: its answer is the buffer *image-log*, which the frame then shows.
+    let mut t = Pty::spawn_program(&d, &c, &["--socket", &sock, "-f", "image-log"], &[]);
+    t.ready().pump(800);
+    assert!(
+        contains(&t.out, b"*image-log*"),
+        "screen tail: {:?}",
+        tail(&t.out)
+    );
+    t.keys("\x18\x03");
+    assert_eq!(t.exit(), 0);
+    let mut t = Pty::spawn_program(
+        &d,
+        &c,
+        &["--socket", &sock, "-f", "no-such-command", "f.txt"],
+        &[],
+    );
+    assert_eq!(t.exit(), 1);
+    t.pump(200);
+    assert!(
+        contains(&t.out, b"edwinclient: no-such-command is not a command"),
+        "{:?}",
+        tail(&t.out)
+    );
+    assert!(!contains(&t.out, b"\x1b[?2026l"), "a frame was drawn");
+    assert_eq!(read(d.join("f.txt")), "ONE two\n");
+    up.finish();
+}
+
 #[test]
 fn a_dash_edits_standard_input() {
     let d = workdir("stdin");
@@ -608,6 +707,34 @@ fn help_version_and_bad_options_need_no_terminal() {
             "{args:?}"
         );
     }
+    // -f takes a command's name, never a form; main.rs refuses what main.ts refuses, so no window opens first.
+    for (args, said) in [
+        (&["-f"][..], "edwin: -f needs a command's name"),
+        (
+            &["--funcall=", "a.txt"][..],
+            "edwin: --funcall needs a command's name",
+        ),
+        (
+            &["-f", "(delete-file \"a.txt\")", "a.txt"][..],
+            "edwin: -f takes a command's name, not (delete-file \"a.txt\")",
+        ),
+        (
+            &["-g", "--funcall=quick calc"][..],
+            "edwin: --funcall takes a command's name, not quick calc",
+        ),
+        (
+            &["-f", "upcase-word", "--funcall=kill-line", "a.txt"][..],
+            "edwin: -f runs one command; give it once",
+        ),
+    ] {
+        let o = std::process::Command::new(BIN).args(args).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains(said),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
     // An argument that is not UTF-8 is a usage error, not a crash.
     let o = std::process::Command::new(BIN)
         .arg(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b"\xff"))
@@ -651,6 +778,24 @@ fn help_version_and_bad_options_need_no_terminal() {
         (
             &["--socket=/a", "--remote", "h:/b"][..],
             "give one of them once",
+        ),
+        // -f as edwin takes it; refused before edwinclient looks for an edwind (which would be status 1).
+        (&["-f"][..], "edwinclient: -f needs a command's name"),
+        (
+            &["-f", "(kill-emacs)", "a.txt"][..],
+            "edwinclient: -f takes a command's name, not (kill-emacs)",
+        ),
+        (
+            &["-c", "--funcall=a;b"][..],
+            "edwinclient: --funcall takes a command's name, not a;b",
+        ),
+        (
+            &["-f", "upcase-word", "-e", "1"][..],
+            "edwinclient: -f runs a command in a frame, and -e opens none",
+        ),
+        (
+            &["-c", "-f", "upcase-word", "-f", "kill-line"][..],
+            "edwinclient: -f runs one command; give it once",
         ),
     ] {
         let o = std::process::Command::new(&c)
