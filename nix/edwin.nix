@@ -48,7 +48,8 @@ let
   ];
   # edwin --daemon: edwind for this user on $XDG_RUNTIME_DIR/edwin/edit.sock, where edwinclient looks after
   # $EDWIN_SOCKET. The config is EDWIND_CONFIG when set, else one made at each start from
-  # EDWIN_NOTES_DIR (~/notes): state in ~/.local/state/edwin/edwind, the user's Scheme in ~/.config/edwin.
+  # EDWIN_NOTES_DIR (~/notes): state in ~/.local/state/edwin/edwind, the user's Scheme in ~/.config/edwin, and
+  # the fields of EDWIND_CONFIG_EXTRA (programs.edwin.daemon.settings) merged in; EDWIND_CONFIG with it is refused.
   # In the background unless --fg (what a systemd user service runs); a background start returns once the socket
   # answers, and --wait starts nothing and returns once it answers (failing at once when the process MAINPID
   # names, the user service's edwind, has exited). Without EDWIND_CONFIG a start holds
@@ -80,7 +81,8 @@ let
     Statuses: 0 it answers; 1 it did not start, or an edwind already runs; 2 a usage error; 3 another start
     started it meanwhile. It opens no files: once it runs, edit them with edwinclient FILE.
     EDWIND_CONFIG names edwind's config (its socket among it); without it the config is made at each start, with
-    the notes in EDWIN_NOTES_DIR (~/notes), the state in ~/.local/state/edwin and the Scheme in ~/.config/edwin.
+    the notes in EDWIN_NOTES_DIR (~/notes), the state in ~/.local/state/edwin and the Scheme in ~/.config/edwin,
+    and the fields of the JSON object in EDWIND_CONFIG_EXTRA merged in (its refusePaths added to the made ones).
     EOF
     }
     # The whole command line is read before anything else is looked at or made.
@@ -109,6 +111,9 @@ let
         go();' "$sock" "$@"
     }
     cfg=''${EDWIND_CONFIG:-}
+    if [ -n "$cfg" ] && [ -n "''${EDWIND_CONFIG_EXTRA:-}" ]; then
+      echo "edwin: EDWIND_CONFIG_EXTRA is merged into the config made at a start; with EDWIND_CONFIG, put its fields there" >&2; exit 1
+    fi
     if [ -z "$cfg" ]; then
       run=''${XDG_RUNTIME_DIR:?edwin --daemon needs XDG_RUNTIME_DIR (or EDWIND_CONFIG)}/edwin
       sock=$run/edit.sock
@@ -154,10 +159,20 @@ let
         echo "edwin: an edwind already runs on $sock" >&2; exit 1
       fi
       cfg=$run/edwind.json
-      ${nodejs}/bin/node -e 'const [f, sock, notes, state, conf] = process.argv.slice(1);
-        require("fs").writeFileSync(f, JSON.stringify({ socket: sock, notesDir: notes, stateDir: state, configDir: conf,
-          refusePaths: ["~/.ssh", "~/.config/systemd", "~/.local/share/systemd"] }), { mode: 0o600 });' \
-        "$cfg" "$sock" "$(realpath "$notes")" "$state/edwind" "''${XDG_CONFIG_HOME:-$home/.config}/edwin"
+      # EDWIND_CONFIG_EXTRA (programs.edwin.daemon.settings) names a JSON object of more fields: its refusePaths
+      # are added to these, the four fields made here are not its to set, and any other field is taken as it is.
+      ${nodejs}/bin/node -e 'const fs = require("fs"), [f, sock, notes, state, conf, extra] = process.argv.slice(1);
+        const fail = m => { console.error(`edwin: EDWIND_CONFIG_EXTRA (''${extra}): ''${m}`); process.exit(1); };
+        let x = {};
+        if (extra) {
+          try { x = JSON.parse(fs.readFileSync(extra, "utf8")); } catch (e) { fail(e.message); }
+          if (!x || typeof x !== "object" || Array.isArray(x)) fail("not a JSON object");
+          for (const k of ["socket", "notesDir", "stateDir", "configDir"]) if (k in x) fail(`''${k} is made by edwin-daemon`);
+          if ("refusePaths" in x && !Array.isArray(x.refusePaths)) fail("refusePaths must be a list of paths");
+        }
+        fs.writeFileSync(f, JSON.stringify({ ...x, socket: sock, notesDir: notes, stateDir: state, configDir: conf,
+          refusePaths: ["~/.ssh", "~/.config/systemd", "~/.local/share/systemd", ...(x.refusePaths || [])] }), { mode: 0o600 });' \
+        "$cfg" "$sock" "$(realpath "$notes")" "$state/edwind" "''${XDG_CONFIG_HOME:-$home/.config}/edwin" "''${EDWIND_CONFIG_EXTRA:-}"
     fi
     # edwind never gets the lock's descriptor (9>&-), so an edwind that dies leaves no lock held.
     if [ "$mode" = fg ]; then
@@ -242,6 +257,9 @@ rustPlatform.buildRustPackage {
     grep -q '^edwinclient: no edwind to attach to' "$TMPDIR/err"
     runHook postInstallCheck
   '';
+
+  # The edwin-daemon-models check runs the daemon script without building the program.
+  passthru = { inherit daemon; };
 
   meta = {
     description = "Edwin on the desktop: a terminal editor and $EDITOR, a window, and a daemon whose frames edwinclient opens";

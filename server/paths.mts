@@ -54,7 +54,6 @@ export class Authority {
   declare writeRoots: string[];
   declare refuse: string[];
   declare realWriteRoots: string[];
-  declare realRefuse: string[];
   constructor({ notesDir, stateDir, configDir, writablePaths = [], refusePaths = [] }: AuthorityConfig) {
     const norm = (p: string) => path.resolve(expandHome(p));
     this.notesDir = norm(notesDir); this.stateDir = norm(stateDir); this.configDir = norm(configDir);
@@ -62,13 +61,15 @@ export class Authority {
     this.refuse = refusePaths.map(norm);
     /* The roots as the kernel sees them, so a root reached through a symlinked parent still counts. */
     this.realWriteRoots = this.writeRoots.map(r => { try { return fs.realpathSync.native(r); } catch (e) { return r; } });
-    this.realRefuse = this.refuse.map(r => { try { return fs.realpathSync.native(r); } catch (e) { return r; } });
   }
+  /* The refused paths by both spellings, the real one resolved at each check: a refused symlink re-pointed while
+     edwind runs (sops-nix moves /run/secrets/NAME to a new /run/secrets.d/N at each activation) stays refused. */
+  refusals(): string[] { return [...this.refuse, ...this.refuse.map(r => { try { return fs.realpathSync.native(r); } catch (e) { return r; } })]; }
   /* Nothing in, on or above a refused path (the rule of POST /api/mv). */
-  refused(real: string): boolean { return this.realRefuse.some(r => under(real, r) || under(r, real)) || this.refuse.some(r => under(real, r) || under(r, real)); }
+  refused(real: string): boolean { return this.refusals().some(r => under(real, r) || under(r, real)); }
   /* In or on a refused path. A directory above one is not: it lists, and shows the refused name and nothing of
      its inside. */
-  inRefused(real: string): boolean { return this.realRefuse.some(r => under(real, r)) || this.refuse.some(r => under(real, r)); }
+  inRefused(real: string): boolean { return this.refusals().some(r => under(real, r)); }
   /* In or on edwind's state directory (journals, snapshots, the image log), by either spelling. */
   inState(real: string): boolean {
     let r = this.stateDir; try { r = fs.realpathSync.native(r); } catch (e) { /* not made yet */ }

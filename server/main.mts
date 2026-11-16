@@ -15,7 +15,7 @@ import os from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import { Authority, expandHome } from './paths.mts';
+import { Authority, expandHome, realPath } from './paths.mts';
 import { Buffers } from './buffers.mts';
 import { Client } from './session.mts';
 import { ImageLog, randomId, readJournal, jidPath, SNAP_NEW } from './journal.mts';
@@ -233,6 +233,14 @@ export class Server {
     /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
     const safe = this.image.bootGuard();
     const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log) });
+    /* load, include, require and init.scm read the disk through the host: through the authority, as a visit does,
+       so no form reads a refused file, a credential among them, and no error quotes one (R14.6). */
+    const read = host.readFile, readChecked = (p: string): string | null => {
+      let real; try { real = this.auth.checkRead(realPath(p).real); } catch (e) { return null; }
+      return read(real);
+    };
+    host.readFile = readChecked;
+    host.userConfig = (name: string) => readChecked(path.join(this.cfg.configDir, name));
     if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
     this.Ed = loadEdwin(host, { mode: 'gen' });
     this.L = (globalThis as any).L; // any: the core sets globalThis.L

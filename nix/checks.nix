@@ -290,6 +290,138 @@ in
     assert lib.assertMsg (got == want) "programs.edwin evaluated to ${got}, expected ${want}";
     pkgs.runCommand "edwin-module" { } "touch $out";
 
+  # programs.edwin.daemon.settings and .credentials (nix/edwin-module.nix): settings from two modules merge into
+  # one fragment, the unit's EDWIND_CONFIG_EXTRA, that names credentials and refuses every credential's file (a
+  # desktop with credentials and no settings gets that refusal too); the credentials become the unit's
+  # LoadCredential lines; a credential file in the store, a colon in one, a bad name and a
+  # fragment that sets the daemon's own fields are refused; a desktop without them renders the unit as before.
+  # Then test/daemon-models.test.mts runs the package's edwin-daemon with that fragment under a throwaway HOME and
+  # XDG_RUNTIME_DIR: the fragment reaches the edwind.json it writes and edwind, and no form or frame request
+  # reaches a credential's bytes. The daemon script and edwind only: the program itself is not built here.
+  edwin-daemon-models =
+    let
+      desktop =
+        extra:
+        pkgs.nixos {
+          imports = [
+            self.nixosModules.edwin
+            extra
+          ];
+          system.stateVersion = lib.trivial.release;
+          boot.isContainer = true;
+          programs.edwin = {
+            enable = true;
+            daemon.enable = true;
+          };
+        };
+      sys = desktop {
+        # Two modules set settings, as the models and the brain areas will; the module system merges them.
+        imports = [
+          { programs.edwin.daemon.settings.models = settings.models; }
+          {
+            programs.edwin.daemon.settings = { inherit (settings) brain refusePaths; };
+          }
+        ];
+        programs.edwin.daemon.credentials = {
+          anthropic-api-key = "/run/secrets/anthropic";
+          brain-read-token = "/run/secrets/brain-read";
+        };
+      };
+      unit = sys.config.systemd.user.services.edwind;
+      unitText = sys.config.systemd.user.units."edwind.service".text;
+      plain = (desktop { }).config.systemd.user.services.edwind;
+      # The messages of the assertions a desktop with EXTRA fails.
+      refused =
+        extra: map (a: a.message) (lib.filter (a: !a.assertion) (desktop extra).config.assertions);
+      show = v: builtins.unsafeDiscardStringContext (builtins.toJSON v);
+      fragment = unit.environment.EDWIND_CONFIG_EXTRA;
+      credsOnly = (desktop { programs.edwin.daemon.credentials.k = "/run/k"; }).config.systemd.user.services.edwind;
+      # The fragment: the settings, their refusals followed by the credentials' files.
+      merged = settings // {
+        refusePaths = settings.refusePaths ++ [
+          "/run/secrets/anthropic"
+          "/run/secrets/brain-read"
+        ];
+      };
+      settings = {
+        models = {
+          anthropic = {
+            baseUrl = "https://api.anthropic.com";
+            credential = "anthropic-api-key";
+          };
+          tiers = {
+            default = "model-default";
+            quick = "model-quick";
+          };
+        };
+        brain = {
+          url = "http://127.0.0.1:9";
+          readCredential = "brain-read-token";
+          tags = [ "roam" ];
+        };
+        refusePaths = [ "~/private" ];
+      };
+      got = show {
+        creds = unit.serviceConfig.LoadCredential;
+        inherit (sys.config.programs.edwin.daemon) settings;
+        fragmentInStore = lib.hasPrefix "${builtins.storeDir}/" fragment;
+        credLines = lib.filter (lib.hasPrefix "LoadCredential=") (lib.splitString "\n" unitText);
+        plain = {
+          extra = plain.environment ? EDWIND_CONFIG_EXTRA;
+          creds = plain.serviceConfig ? LoadCredential;
+        };
+        credsOnly = credsOnly.environment ? EDWIND_CONFIG_EXTRA;
+        refused = {
+          store = refused { programs.edwin.daemon.credentials.k = "${builtins.storeDir}/0000-k"; };
+          colon = refused { programs.edwin.daemon.credentials.k = "/run/a:b"; };
+          relative = refused { programs.edwin.daemon.credentials.k = "run/k"; };
+          name = refused { programs.edwin.daemon.credentials.Bad_Name = "/run/k"; };
+          own = refused { programs.edwin.daemon.settings.socket = "/run/elsewhere.sock"; };
+          none = refused { };
+        };
+        system = builtins.seq sys.config.system.build.toplevel.drvPath true;
+      };
+      fileMsg = "programs.edwin.daemon.credentials: each file must be an absolute path outside ${builtins.storeDir}, with no colon.";
+      want = show {
+        creds = [
+          "anthropic-api-key:/run/secrets/anthropic"
+          "brain-read-token:/run/secrets/brain-read"
+        ];
+        inherit settings;
+        fragmentInStore = true;
+        credLines = [
+          "LoadCredential=anthropic-api-key:/run/secrets/anthropic"
+          "LoadCredential=brain-read-token:/run/secrets/brain-read"
+        ];
+        plain = {
+          extra = false;
+          creds = false;
+        };
+        credsOnly = true;
+        refused = {
+          store = [ fileMsg ];
+          colon = [ fileMsg ];
+          relative = [ fileMsg ];
+          name = [ "programs.edwin.daemon.credentials: names must match ^[a-z0-9-]{1,32}$." ];
+          own = [ "programs.edwin.daemon.settings: socket, notesDir, stateDir, configDir are edwin-daemon's own." ];
+          none = [ ];
+        };
+        system = true;
+      };
+      daemon = self.packages.${pkgs.stdenv.hostPlatform.system}.edwin.daemon;
+    in
+    assert lib.assertMsg (got == want) "programs.edwin.daemon evaluated to ${got}, expected ${want}";
+    pkgs.runCommand "edwin-daemon-models" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+      # The fragment in the store is the merged settings, the credentials' files among its refusals.
+      node -e 'const [f, want] = process.argv.slice(1); require("assert").deepStrictEqual(JSON.parse(require("fs").readFileSync(f, "utf8")), JSON.parse(want));' \
+        ${fragment} ${lib.escapeShellArg (builtins.toJSON merged)}
+      node -e 'const [f, want] = process.argv.slice(1); require("assert").deepStrictEqual(JSON.parse(require("fs").readFileSync(f, "utf8")), JSON.parse(want));' \
+        ${credsOnly.environment.EDWIND_CONFIG_EXTRA} '{"refusePaths":["/run/k"]}'
+      export HOME=$TMPDIR EDWIN_DAEMON=${daemon} EDWIND_CONFIG_EXTRA=${fragment}
+      node --test ${edwin}/edwin/test/daemon-models.test.mts
+      touch $out
+    '';
+
   # services.edwind (nix/edwind-module.nix) evaluates into a system, and edwind itself accepts the edit.json it
   # writes: loadConfig refuses unknown fields, so a module that drifts from the server fails here.
   edwind-module =

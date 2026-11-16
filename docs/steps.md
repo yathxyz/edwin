@@ -1007,6 +1007,91 @@ ws-butler (later packages) are to use them.
   check` then passed. The core files reach edwind and the native program too, but no Scheme primitive is
   added, so nothing new is reachable through `edwinclient -e`.
 
+## The desktop daemon's settings and credentials (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `ai-daemon-models`): the desktop edwind's edwind.json was made
+by `edwin-daemon` at each start with five fixed fields, so a desktop could declare no models, brain or hub, and its
+user unit loaded no credentials. This is the one way every area extends the desktop edwind.json.
+
+- **Settings.** `programs.edwin.daemon.settings` (nix/edwin-module.nix) is free-form JSON, merged by the module
+  system from every module that sets it (the models area and the brain area each add their part), written to the
+  store and given to the unit as `EDWIND_CONFIG_EXTRA`. `edwin-daemon` merges that object into the edwind.json it
+  writes: its `refusePaths` are added to the daemon's three (so no fragment drops `~/.ssh`), `socket`, `notesDir`,
+  `stateDir` and `configDir` stay the daemon's (an assertion in the module, and a refusal with status 1 before
+  anything is written in the script), and every other field is taken as given. edwind's `loadConfig` then checks
+  the result as it checks any config, so a wrong field fails the start visibly. `EDWIND_CONFIG` and
+  `EDWIND_CONFIG_EXTRA` together are refused: the fragment would otherwise be silently ignored. With no settings
+  the unit has no `EDWIND_CONFIG_EXTRA` and renders as before.
+- **Credentials.** `programs.edwin.daemon.credentials` (name to file) become the unit's `LoadCredential=NAME:FILE`
+  lines; settings name them (`models.anthropic.credential`, `models.credentials.NAME`, `brain.readCredential`),
+  and edwind reads `$CREDENTIALS_DIRECTORY/NAME` at use. The file is a string, never a Nix path (a path would be
+  copied into the world-readable store); the module refuses one in the store, a relative one, one with a colon
+  (it would end LoadCredential's path) and a name outside `^[a-z0-9-]{1,32}$`. A user manager runs
+  LoadCredential: measured on ex44 (systemd 262) with a transient user unit, the file appears 0400 in
+  `/run/user/UID/credentials/UNIT/`, owned by the user. So the file must be readable by the user: a sops secret
+  edwind loads needs `owner = "yanni"` on the fleet side (the owner's step; otherwise the unit fails with status
+  243/CREDENTIALS). A manual `edwin --daemon` has no `CREDENTIALS_DIRECTORY`: its backends are unusable.
+- **The security boundary.** Every process of the user's uid that can open the socket can use what the
+  credentials unlock, through `edwinclient -e` and the frame protocol (a request to a backend's origin, a brain
+  read), and can read the files in `/run/user/UID/credentials/` directly anyway: same uid is the trust boundary on
+  a desktop. What is guaranteed, and tested: no primitive a form or frame can reach returns a credential's bytes,
+  from the copy in `$CREDENTIALS_DIRECTORY` or from the file it was loaded from, and none enters the journal of
+  the unit (edwind's log), the image log, edwind's state or the store. The module adds every
+  `daemon.credentials` file to the fragment's `refusePaths` (after the settings' own; a desktop with credentials
+  and no settings gets a fragment of that refusal alone), since the file is readable by the user and a form could
+  otherwise `load` it (found in review: `Unbound variable: sk-...`). A credential's path is in the store that way;
+  its bytes are not. The authority (server/paths.mts) now resolves each refused path to its real path at every
+  check rather than once at start: sops-nix re-points `/run/secrets` to a new `/run/secrets.d/N` at each
+  activation and edwind's user unit is not restarted by a switch, so a real path taken at start would leave the
+  new generation readable. This also reaches ex44's public edwind (more is refused, nothing less). A limit: with
+  sops-nix's `keepGenerations` above its default 1, an older generation's file stays on disk under a real path
+  no refusal names; the fleet keeps the default. Another, of the same shape: while an activation writes the new
+  generation to `/run/secrets.d/N+1` and before it re-points `/run/secrets`, those files are under no refused
+  real path, so a form run in that window and naming `/run/secrets.d/N+1/NAME` could read one. Both close on the
+  fleet side by adding `/run/secrets.d` itself to `daemon.settings.refusePaths` on a host that keeps secrets
+  there; Edwin names no host's layout.
+- **A hole closed in edwind (server/main.mts, ex44's public edwind too).** `load`, `include`, `require` and the
+  boot's init.scm read the disk through the host (host-node.cts `readFile`, `userConfig`) with no path check, so
+  `(load "$CREDENTIALS_DIRECTORY/anthropic-api-key")` read the key as a symbol and answered `Unbound variable:
+  sk-...` to any client, and an init.scm linked to a credential put it in the log. edwind now gives the core a
+  host whose two readers go through the authority as a visit does (the real path, then `checkRead`): a refused
+  file reads as absent (`Cannot open file`). d45b539 had refused visits only. edwind's other readers were
+  checked too: the primitive registry (debug.mts) reads only the shipped tree, and the notes index (notes-parse.mts)
+  skips a symlink that leads out of the notes directory. The browser host and the desktop
+  program's are unchanged; they hold no credentials.
+- **Choices.** `server/main.mts` FIELDS is unchanged: models, brain and hubSocket are already fields, and mail
+  was declined (decision 5), so the fragment needs no new one. The merge is shallow apart from `refusePaths`: deep
+  merging is the module system's, before the fragment is written. The credentials option has no origin: brain's
+  tokens must not be under `models.credentials` (loadConfig refuses that), so origins stay in settings.
+- **Not in it:** what a desktop declares (fleet packages); `proc-daemon-hub-option` and `proc-unit-path` add
+  their options on top. No user manager is booted by the check: the unit is evaluated, and the daemon script runs
+  as the unit runs it.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-daemon-models` (new, with `test/daemon-models.test.mts`):
+  the evaluated unit has exactly the two `LoadCredential=` lines; settings from two modules merge into the
+  fragment, which is in the store and equals them with the two credential files added to their `refusePaths`; a
+  desktop with credentials and no settings has a fragment of the refusal alone; a store, colon or relative file, a
+  bad name and `settings.socket` each fail with their assertion message; a desktop without them has neither
+  line. Then the package's `edwin-daemon --fg`, with that fragment and a credentials directory as LoadCredential
+  makes one, under a throwaway HOME and XDG_RUNTIME_DIR: the written edwind.json holds the fragment and the
+  daemon's refusals plus the fragment's, edwind lists the backend as usable and reports the tiers; `load`,
+  `include`, `require` (by file and through load-path), `find-file` of the file and of a notes symlink to it,
+  `open` and `visit-id` by the protocol, `credential`, `gptel-backend-info`, `model-backends` and `status` give
+  no key bytes (brain's token is no handle Scheme can name); `load`, `include`, `require`, `find-file`, `open`
+  and `visit-id` of the source file (laid out as sops-nix lays out `/run/secrets`, refused as the module refuses
+  it), by its symlink and its real path, give none either, and still none once the symlink is re-pointed to a
+  new generation (against the daemon before the fix, `load` of the re-pointed file answers `Unbound variable:
+  sk-test-...`); an init.scm that is a credential is not read, and no
+  message sent, no line logged and no file under the state and runtime directories holds a key; fragments that set
+  `socket` or `notesDir`, are no object or have a non-list `refusePaths`, and EDWIND_CONFIG with a fragment, are
+  refused before edwind starts. With the main.mts change put back, the check fails: `(load ...)` answers
+  `Unbound variable: sk-test-...`, and the key turns up in what edwind kept. On the first draft also
+  passed: `edwin-module`, `edwind-module`, `edit-lockdown`, `edit-security`, `edwin-typecheck`, `edwin-daemon`,
+  `nix build .#edwin`, and `nix flake check --keep-going` but for `edwin-bench` (shadow stack 12.5% against its
+  10% limit under build load), which passed when run again alone. On the second draft (which changed
+  server/paths.mts and nix/edwin-module.nix) `nix build .#edwin` and the whole `nix flake check --keep-going`
+  passed, `edwin-bench` included. After the rebase onto lang-line-diff, `edwin-daemon-models`, `edit-lockdown`,
+  `edit-security`, `edwin-typecheck`, `edwin-module` and `edwind-module` passed again.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
