@@ -32,6 +32,11 @@
 (set! recentf-mode #t)
 (set! savehist-mode #t)
 
+;; A buffer without changes follows its file when something else writes
+;; it (git, a formatter, another editor), looked at every
+;; auto-revert-interval seconds; saving over a file changed since asks.
+(global-auto-revert-mode 1)
+
 ;; How long a prefix key (SPC, g, z ...) waits before its keys are listed.
 (set! which-key-idle-delay 1.0)
 

@@ -963,6 +963,68 @@ fn the_user_init_runs_and_settings_persist() {
     assert_eq!(read(d.join("p.txt")), "a\nb\nd\n");
 }
 
+/// global-auto-revert-mode in the program: another program's write (a new file renamed over the old one: a new
+/// inode) reaches the unmodified buffer, point on its line; saving a changed buffer over a file changed since asks.
+/// A file under $TMPDIR is never looked at.
+#[test]
+fn a_buffer_follows_its_file_and_a_save_over_a_change_asks() {
+    let d = workdir("autorevert");
+    std::fs::create_dir_all(d.join("config/edwin")).unwrap();
+    std::fs::write(
+        d.join("config/edwin/init.scm"),
+        "(set! auto-revert-interval 1)\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.join("tmp")).unwrap();
+    let (a, tmp) = (d.join("a.txt"), d.join("tmp").display().to_string());
+    std::fs::write(&a, "one\ntwo\n").unwrap();
+    let mut t = Pty::spawn(&d, &["a.txt"], &[("TMPDIR", &tmp)]);
+    t.ready().keys("j");
+    std::fs::write(d.join("a.new"), "zero\none\ntwo\n").unwrap();
+    std::fs::rename(d.join("a.new"), &a).unwrap();
+    t.pump(2500);
+    assert!(
+        contains(&t.out, b"Reverted a.txt"),
+        "no revert: {:?}",
+        tail(&t.out)
+    );
+    // Point stayed on "two", now line 3: x takes its t.
+    t.keys("x");
+    std::fs::write(&a, "outside\n").unwrap();
+    t.pump(1500);
+    t.keys(":w\r");
+    t.pump(200);
+    assert!(
+        contains(&t.out, b"changed on disk; save anyway?"),
+        "no question: {:?}",
+        tail(&t.out)
+    );
+    t.keys("n");
+    t.pump(100);
+    assert_eq!(read(&a), "outside\n", "n keeps the other program's file");
+    t.keys(":w\r");
+    t.pump(200);
+    t.keys("y");
+    t.pump(100);
+    assert_eq!(read(&a), "zero\none\nwo\n");
+    t.keys(":q\r");
+    assert_eq!(t.exit(), 0);
+
+    // The same file with $TMPDIR its directory: the write is not looked at, and the save does not ask.
+    let home = d.display().to_string();
+    let mut t = Pty::spawn(&d, &["a.txt"], &[("TMPDIR", &home)]);
+    t.ready();
+    std::fs::write(&a, "sops\n").unwrap();
+    t.pump(2500);
+    assert!(
+        !contains(&t.out, b"Reverted"),
+        "a temporary file was looked at"
+    );
+    t.keys("ggx:wq\r");
+    assert_eq!(t.exit(), 0);
+    assert_eq!(read(&a), "ero\none\nwo\n");
+}
+
 /// edwin is the editor on its own, as emacs is: an edwind answering on $EDWIN_SOCKET and on the user's socket is
 /// not asked, the note is the disk's file, and the user's own init.scm runs.
 #[test]

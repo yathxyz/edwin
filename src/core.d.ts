@@ -849,6 +849,9 @@ interface EdBuffer extends SchemeForeign {
   folds?: EdFold[] | null;
   _foldVer?: number;
   _foldPre?: number[] | null;
+  /* the visited file's stamp as the buffer last read or wrote it (host.files.stamp), and one a save over it
+     was allowed for, and one auto-revert could not read; absent when the file is not looked at (editor-prims.ts) */
+  disk?: { stamp: string | null; ok?: string; seen?: string };
   /* a directory listing (dired.ts) */
   dired?: unknown;
   _cycle?: unknown;
@@ -1256,6 +1259,8 @@ interface EdState {
   timers: Map<unknown, number>;
   suppressUndo: boolean;
   noUndo: boolean;
+  /* commands started and not yet finished (more than one in a recursive edit) */
+  running: number;
   /* the frame being worked on (accessors) */
   root: EdWindowNode | null;
   sel: EdWindow | null;
@@ -1613,6 +1618,13 @@ interface EdApi {
   setLeaderKey(name: string): string;
   fileLabel(name: string): string;
   visit(name: string): EdBuffer | null | Promise<EdBuffer | null | false>;
+  /* B now holds its file as it is on disk: its stamp is taken again (auto-revert, save supersession), or is
+     STAMP, one Ed.diskStamp took before the file was read */
+  noteDisk(b: EdBuffer, stamp?: string | null): void;
+  /* FILE's stamp, or undefined for a file auto-revert never looks at */
+  diskStamp(file: string): string | null | undefined;
+  /* ask PROMPT with (y or n); true for y */
+  yesOrNo(prompt: string): Promise<boolean>;
   servedName(id: string): string;
   symProp(sym: SchemeValue, name: string): SchemeValue;
   adviceOf(name: string): { how: string; fn: SchemeValue; name: string | null | undefined }[];
@@ -1767,6 +1779,11 @@ interface EdHostFiles {
   truename(name: string): string;
   exists(name: string): boolean;
   readonly cwd: string;
+  /* what tells two versions of a file apart (auto-revert: inode, modification time, size), null when there is no
+     file; absent where nothing else writes the files */
+  stamp?(name: string): string | null;
+  /* the true names of the temporary directories, whose files are never looked at again (sops's decrypted copies) */
+  readonly temp?: string[];
   /* directories, for dired (src/dired.ts); absent where the files are not a tree */
   tree?: EdHostTree;
 }
@@ -1804,6 +1821,8 @@ interface EdHost {
   /* native */
   files?: EdHostFiles;
   proc?: EdHostProc;
+  /* a session that keeps nothing of the text and polls no file (edwin --private: ui-sensitive-session sets it) */
+  readonly private?: boolean;
   readonly dirs?: { home: string; cwd: string; config: string; state: string };
   init?(): void;
   /* node: worker threads for the pool (host-node.cts) */
@@ -2166,7 +2185,8 @@ interface EdNatives {
   readFile(path: string): string | null;
   writeFile(path: string, text: string): void;
   appendFile(path: string, text: string): void;
-  stat(path: string): { dir: boolean; size: number; mtime: number; mode: number } | null;
+  /* mtime in milliseconds; nsec, its nanoseconds within the second, and ino tell versions apart (auto-revert) */
+  stat(path: string): { dir: boolean; size: number; mtime: number; mode: number; ino: number; nsec: number } | null;
   realpath(path: string): string | null;
   readDir(path: string): [name: string, dir: boolean][];
   remove(path: string): void;

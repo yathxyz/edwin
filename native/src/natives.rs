@@ -278,6 +278,12 @@ fn stat(scope: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv
             set(scope, o, "mtime", mtime);
             let mode = v8::Integer::new(scope, (m.mode() & 0o7777) as i32).into();
             set(scope, o, "mode", mode);
+            // auto-revert tells a file's versions apart by these: the inode (a file replaced by a rename has
+            // another) and the modification time's nanoseconds, which mtime's milliseconds round away.
+            let ino = v8::Number::new(scope, m.ino() as f64).into();
+            set(scope, o, "ino", ino);
+            let nsec = v8::Integer::new(scope, m.mtime_nsec() as i32).into();
+            set(scope, o, "nsec", nsec);
             rv.set(o.into());
         }
         Err(_) => rv.set(v8::null(scope).into()),

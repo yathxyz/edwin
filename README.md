@@ -65,6 +65,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `server/*.mts` | edwind, the text daemon (E1; see "Step E1" below) |
 | `test/ot.test.mts`, `test/ot-sim.mts` | the OT properties with fast-check (`edwin-ot`; needs `NODE_PATH` at `tools/node_modules`) |
 | `test/linediff.test.mts` | the line diff (`Rope.diffLines` in `src/text.ts`) and `Ed.applyLineDiff` with fast-check: the diff of A gives B, markers on unchanged lines stay (`edwin-linediff`; needs `NODE_PATH` as `edwin-ot`) |
+| `test/autorevert.test.mts` | auto-revert and save supersession on the desktop program's files: another program's write reaches an unmodified buffer with point kept, a modified one's save asks, a --private session and the temporary directory are never looked at (`edwin-autorevert`) |
 | `test/conformance.test.mts`, `test/crash.test.mts`, `test/disk.test.mts`, `test/edit-client.mts` | the edwind gate suites (`edit-conformance`, `edit-crash`, `edit-disk`) and their client |
 | `src/display.ts`, `test/display.test.mts` | the display seam (DT0, see below): frames with no page, drawn on a cell grid for a terminal or native backend (`edwin-display`) |
 | `native/` | `edwin`, the desktop program (DT1 to DT4, see below): a Rust crate with its own Cargo workspace that embeds V8 and these files; `native/js/` is its JavaScript (prelude, host, terminal, window, startup), `native/src/gui/` the window, `native/src/proc.rs` its child processes (argv only, for the core's TypeScript), `native/tests/` its pseudo-terminal and virtual-display suites (`cargo test`) |

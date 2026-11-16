@@ -298,14 +298,7 @@ CMD('dired-toggle-marks', '', '', 'Mark the unmarked files and unmark the marked
 });
 /* What a command acts on: the marked files, else the one at point. */
 function targets(b: EdBuffer) { const d = diredOf(b), marked = d.entries.filter(e => d.marks.get(e.name) === '*'); return marked.length ? marked : [needEntry(b)]; }
-async function yesOrNo(prompt: string) {
-  for (;;) {
-    const ch = L.chr(await Ed.readChar(prompt + ' (y or n) '));
-    if (ch === 'y' || ch === 'Y') return true;
-    if (ch === 'n' || ch === 'N') return false;
-    Ed.ding();
-  }
-}
+const yesOrNo = Ed.yesOrNo;
 /* Delete ES for good, after one question; a directory that is not empty takes a typed yes of its own. */
 async function deleteEntries(b: EdBuffer, es: DiredEntry[]) {
   const d = diredOf(b);

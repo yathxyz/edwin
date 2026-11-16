@@ -1282,6 +1282,90 @@ edwind uses for processes, as `services.edwind.hubSocket` does for ex44's.
   none. The daemon-models suite passed again (5 of 5). With the line that adds `hubSocket` taken out of the
   module, the check fails at evaluation. `nix build .#checks.x86_64-linux.edwin-module` passed too.
 
+## Auto-revert, and a save over a changed file asks (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-auto-revert`, which takes in `ui-auto-revert`):
+global-auto-revert-mode, so unmodified buffers follow the file on disk by inode and modification time through the
+line diff; saving over a file changed since asks; buffers of a --private session and files under the system's
+temporary directory are never polled.
+
+- **The stamp.** The `stat` native (native/src/natives.rs) also gives `ino` and `nsec`, the modification time's
+  nanoseconds; `host.files.stamp(name)` (native/js/host-native.ts) is `ino:mtime:nsec:size`, null when there is no
+  file. A write in place changes the time (and mostly the size); a file renamed over the old one (git, most
+  editors, Edwin's own atomic write) changes the inode too. A buffer keeps the stamp it last read or wrote in
+  `b.disk` (src/editor-prims.ts): taken by `visit` and `revert-buffer` (src/evil-ex.ts) before they read the file,
+  so a write between the read and the stat leaves an older stamp and the next look reads the file again, by
+  `writeTo` after the write (save-buffer, write-file and the saves that go through them) and by each revert. Writing a region to
+  another file (`:w FILE`) takes none.
+- **global-auto-revert-mode** (src/editor-prims.ts, a global minor mode; scm/init.scm turns it on, as init.el
+  did): every `auto-revert-interval` seconds (5, as Emacs) each buffer with a stamp is looked at; an unmodified
+  one whose file has another stamp is read again and made the file's text by `Ed.applyLineDiff` with origin
+  `disk`, so point, the other windows' points and the marks stay on their lines. The revert is one undo step (a
+  snapshot pushed first): undoing it gives the old text back, marked modified. Read-only buffers follow too. The
+  echo area says `Reverted FILE`. A modified buffer is never touched. `(auto-revert-buffers)` looks once, now.
+- **Save supersession.** `writeTo`, the one place a buffer's text reaches its file, refuses when the visited file's
+  stamp is not the buffer's (and the file is still there), and queues `ask-user-about-supersession-threat`, a
+  command of its own: `FILE changed on disk; save anyway? (y or n)`. y saves the buffer over that version of the
+  file (a further change asks again), n says `FILE not saved` and leaves the disk and the buffer as they are. So
+  `:w`, `:wq`, `:x`, `:wa`, C-x C-s, SPC f s, C-x C-c's saves and Org's saves after its commands all ask.
+  After an n, each later Org command that saves its buffer meets the refusal and asks again, until the buffer is
+  saved (y) or read again (`revert-buffer`).
+- **Polling cost.** One stat per buffer with a stamp each interval; a file is read only when its stamp changed,
+  and the diff is bounded by the line diff's whole-replace fallback. A version that cannot be read (not UTF-8,
+  unreadable) is tried once, not on every look, and a save over it still asks.
+- **Never looked at** (no stat, no stamp, no question on save):
+  - any buffer of a --private session: `host.private`, a host flag (not a Scheme variable, so neither init.scm
+    nor image replay can clear it) that `ui-sensitive-session`'s `edwin --private` is to set; nothing sets it yet;
+  - files whose true name is under the system's temporary directory, `$TMPDIR` or else `/tmp` as sops and mktemp
+    take it, read when the program starts (`host.files.temp`), for sops's decrypted copies;
+  - edwind's buffers (`b.shared`): in edwinclient the notes under edwind's notes directory are edwind's, which
+    follows their files itself (server/watch.mts); edwinclient's other files are its own and are looked at;
+  - the page and edwind: their hosts have no `stamp`, so the mode does nothing there.
+- **Choices made where the package left one open:**
+  - The poll is armed by the first buffer with a stamp, and disarmed when a look finds none or the mode is off,
+    not at boot: the startup snapshot holds the boot, init.scm included. `auto-revert-interval` is read when the
+    poll is armed.
+  - The revert is an undo step of its own, so a look is skipped while another is still open: while a command
+    runs (`E.running`: an operator waiting for its motion, a command waiting in the minibuffer), and, for a
+    buffer, while its insert session is open (insert or replace state). Taken into that step, one u would undo
+    the revert with the user's edit, leave the buffer with the new stamp and the old text, and a save would
+    write over the other program's version without asking. The next look catches up; an insert session with
+    typing in it has made the buffer modified, so it is left alone and a save asks. `(auto-revert-buffers)`
+    from M-: returns 0 for the same reason.
+  - A file gone from disk is no change: the buffer stays, and saving makes the file again without asking.
+  - The question comes after the save is refused, as a command of its own, because Scheme in a frame cannot wait
+    (`:w` is Scheme calling `save-buffer`); the refused save's caller stops (`:wq` does not quit). `:w!` asks
+    too: Vim's `!` there overrides other refusals, and one y is not much.
+  - dired's `yesOrNo` is now `Ed.yesOrNo`, shared with the question.
+- **Differences from Emacs:** Emacs asks when a modified buffer's file changed on its first edit
+  (`ask-user-about-supersession-threat` from the lock check) and again on save; Edwin asks on save only. Emacs
+  compares the modification time alone; Edwin the inode, time and size. No `auto-revert-mode` per buffer, no
+  `auto-revert-tail-mode`, no file notifications (a poll only), no `auto-revert-verbose` switch.
+- **Not in it:** dired following its directory (`proc-dired-auto-revert`); `edwin --private` itself
+  (`ui-sensitive-session`).
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-autorevert` (new, test/autorevert.test.mts: a real
+  directory, the Node host with host.files as host-native.ts shapes it, its stamps and reads counted): a file
+  renamed over with a line inserted above point updates the buffer with point on its line and column, unmodified,
+  the revert undoable as one step; a same-size write in place is seen; a modified buffer is not touched, and `:w`
+  then asks, n keeps the disk and the buffer modified, C-x C-s asks again and y writes; a save after the buffer's
+  own write and after `revert-buffer` does not ask; a file gone stays in its buffer and saving makes it again;
+  under `host.private` and for a file under the temporary directory no stamp is taken (zero stat calls) and nothing
+  reverts or asks; a shared buffer takes no stamp; with the mode off nothing follows, and on again the timer
+  reverts within its interval; a version that is not UTF-8 is read once over two looks and a save over it asks; a write while insert state is
+  open and while `d` waits for its motion is not reverted, the edit after it then saves only after asking, and
+  one u takes back the edit alone; a write between `visit`'s read and its stat is reverted by the next look.
+  `nix build .#edwin`: the new terminal test `a_buffer_follows_its_file_and_a_save_over_a_change_asks` (the
+  program with `auto-revert-interval` 1: a rename reverts the buffer with point kept, a save over a write in place
+  asks, n and y; with `$TMPDIR` the file's directory the write is not looked at and `:wq` saves without asking);
+  unit 17, gui.rs 5 and 1 ignored, terminal.rs 32 (a first run failed one gui test with `Xvfb did not start` at
+  load 27 from other builds; the rerun passed). Also `edwin-typecheck`, `edwin-headless`, `edwin-native`,
+  `edit-dired`, `edwin-scheme`, `edwin-linediff`, `edit-frame`, and, as init.scm reaches ex44's public edwind,
+  `edit-conformance`, `edit-lockdown` and `edit-security`; and by hand a throwaway edwind (its own HOME,
+  XDG_RUNTIME_DIR and TMPDIR) answering `global-auto-revert-enabled` with #t, `(procedure? vile-vcs-status)` with
+  #t (init.scm ran past the new line) and `(auto-revert-buffers)` with 0, not in safe mode: the mode is bound
+  there and inert (its host has no stamp). No primitive gives Scheme a file's text or stamp:
+  `auto-revert-buffers` returns a count.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

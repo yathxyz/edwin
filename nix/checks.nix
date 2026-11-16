@@ -112,6 +112,12 @@ in
     touch $out
   '';
 
+  # Auto-revert and save supersession (src/editor-prims.ts) on the desktop program's own files: another
+  # program's write reaches an unmodified buffer with point kept, a modified one is left and its save asks, and a
+  # --private session, the temporary directory and edwind's buffers are never looked at. The stamp's native is
+  # tested by the package's cargo tests.
+  edwin-autorevert = suite "autorevert" [ "autorevert.test.mts" ];
+
   # tsc --strict over the TypeScript: edwind and its suites (tsconfig.json), the core (src) and desktop Edwin's
   # JavaScript (native/js). Node and tools/strip.mts only strip the types; this checks them.
   edwin-typecheck = pkgs.runCommand "edwin-typecheck" { nativeBuildInputs = [ pkgs.nodejs ]; } ''

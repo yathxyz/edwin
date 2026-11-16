@@ -757,11 +757,12 @@ function visit(name: string) {
   const file = fileOf(name);
   const existing = E.buffers.find(b => b.file === file) || sameFile(file);
   if (existing) { Ed.setWindowBuffer(existing); if (Ed.hooks.visited) Ed.hooks.visited(existing, file, false); return existing; }
-  let content;
-  try { content = Ed.Store.get(file) ?? (host.files ? null : shippedConfig(name)); }
+  let content, stamp;
+  try { stamp = diskStamp(file); content = Ed.Store.get(file) ?? (host.files ? null : shippedConfig(name)); }
   catch (e) { signal('file-error', `Cannot read ${name}: ${e && e.message ? e.message : e}`); }
   const b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
   b.text = content ?? ''; b.pt = 0; b.file = file; b.mode = Ed.modeFor(name); b.modified = false; b.undo = [];
+  noteDisk(b, stamp);
   if (Ed.hooks.visited) Ed.hooks.visited(b, file, true);
   Ed.setWindowBuffer(b);
   if (content === null) Ed.message('(New file)');
@@ -784,13 +785,14 @@ CMD('find-file', async () => [await readFileName('Find file: ')], 'FILENAME', 'V
 L.defvar('require-final-newline', false, 'When true, saving a file adds a newline at its end if it has none (the terminal program sets it, as Vim does).');
 function writeTo(b: EdBuffer, given: string) {
   const name = fileOf(given);
+  if (name === b.file && superseded(b)) askSupersession(b);
   if (truthy(L.get('require-final-newline')) && b.rope.length && b.rope.charCodeAt(b.rope.length - 1) !== 10) {
     const pt = b.pt; b.pt = b.rope.length; Ed.insertText(b, '\n'); b.pt = Math.min(pt, b.rope.length);
   }
   let ok;
   try { ok = Ed.Store.set(name, b.text); }
   catch (e) { signal('file-error', `Cannot write ${name}: ${e && e.message ? e.message : e}`); }
-  b.file = name; Ed.markSaved(b);
+  b.file = name; Ed.markSaved(b); noteDisk(b);
   if (Ed.hooks.wrote) Ed.hooks.wrote(b, name);
   Ed.message(ok ? `Wrote ${fileLabel(name)}` : `Wrote ${name} (kept for this session only: browser storage is unavailable)`);
 }
@@ -1132,6 +1134,113 @@ D('%define-minor-mode', 'name doc plist body', 'define-minor-mode: NAME is the m
 });
 D('minor-mode-list', '', 'Names of the defined minor modes.', () => listOf([...Ed.minorModes.keys()].map(intern)));
 D('minor-mode-active-p', 'mode [buffer]', '#t if minor MODE is on in BUFFER.', ([m, b]) => { const mm = Ed.minorModes.get(symName(m, 'minor-mode-active-p')); return !!mm && Ed.minorOn(bufArg(b), mm); });
+
+/* ---------- the visited file on disk: auto-revert and save supersession ----------
+   A buffer visiting a file keeps the file's stamp (host.files.stamp: inode, modification time to the nanosecond,
+   size) as it last read or wrote it, in b.disk. global-auto-revert-mode looks every auto-revert-interval seconds:
+   an unmodified buffer whose file has another stamp reads it again through the line diff (Ed.applyLineDiff, by
+   origin disk), so point, the other windows' points and the marks stay on their lines, and the revert is one undo
+   step. A modified buffer is left as it is; saving it over a file that changed since asks first. Never looked at:
+   edwind's buffers (b.shared: edwind follows their files itself, server/watch.mts), any buffer of a --private
+   session (host.private), and files under the system's temporary directory (host.files.temp: sops's decrypted
+   copies). The poll is armed by the first buffer it has to look at, not at boot: the startup snapshot holds the
+   boot. */
+async function yesOrNo(prompt: string) {
+  for (;;) {
+    const ch = L.chr(await Ed.readChar(prompt + ' (y or n) '));
+    if (ch === 'y' || ch === 'Y') return true;
+    if (ch === 'n' || ch === 'N') return false;
+    Ed.ding();
+  }
+}
+Ed.yesOrNo = yesOrNo;
+function underTemp(file: string) {
+  const t = host.files!.truename(file);
+  return (host.files!.temp || []).some(d => t === d || t.startsWith(d.replace(/\/$/, '') + '/'));
+}
+function diskStamp(file: string) {
+  const f = host.files;
+  return !f || !f.stamp || host.private || underTemp(file) ? undefined : f.stamp(file);
+}
+Ed.diskStamp = diskStamp;
+/* A reader takes the stamp before it reads (STAMP): a write in between then leaves the buffer an older stamp
+   than its text, and the next look reads the file again, rather than a newer stamp on older text. */
+function noteDisk(b: EdBuffer, stamp?: string | null) {
+  const s = !b.file || b.shared ? undefined : stamp !== undefined ? stamp : diskStamp(b.file);
+  if (s === undefined) { b.disk = undefined; return; }
+  b.disk = { stamp: s };
+  armPoll();
+}
+Ed.noteDisk = noteDisk;
+/* The file changed on disk since B read or wrote it, and no save over this version was allowed. A file gone
+   since is no change: saving makes it again. */
+function superseded(b: EdBuffer) {
+  if (!b.disk) return false;
+  const now = host.files!.stamp!(b.file!);
+  return now !== null && now !== b.disk.stamp && now !== b.disk.ok;
+}
+L.defvar('auto-revert-interval', 5, 'Seconds between global-auto-revert-mode\'s looks at the visited files; read when the look is armed (the mode turned on, or the first file visited).');
+let poll: ReturnType<typeof setInterval> | null = null;
+function armPoll() {
+  if (poll !== null || !truthy(L.get('global-auto-revert-enabled'))) return;
+  const s = L.get('auto-revert-interval');
+  poll = setInterval(autoRevert, Math.max(1, typeof s === 'number' ? s : 5) * 1000);
+}
+function disarmPoll() { if (poll !== null) { clearInterval(poll); poll = null; } }
+/* One look at every buffer with a stamp; the number of buffers read again. The revert is an undo step of its
+   own, so the look is skipped while one is still open: while a command runs (an operator waiting for its
+   motion, a command waiting in the minibuffer) and, for its buffer, while an insert session is open. Taken
+   into that step, the revert would be undone with it, the buffer left with the file's new stamp and older
+   text, and a save would write over the other program's version without asking. */
+function autoRevert() {
+  if (!truthy(L.get('global-auto-revert-enabled'))) { disarmPoll(); return 0; }
+  if (E.running || E.mini) return 0;
+  let looked = false, n = 0;
+  for (const b of E.buffers) {
+    if (!b.disk) continue;
+    looked = true;
+    if (b.modified || b.pendingUndo || (Ed.hooks.inSession && Ed.hooks.inSession(b))) continue;
+    let now: string | null, text: string | null = null;
+    try { now = host.files!.stamp!(b.file!); } catch (e) { continue; }
+    if (now === null || now === b.disk.stamp || now === b.disk.seen) continue;
+    /* A version that cannot be read (not UTF-8, unreadable) is tried once, not on every look; the stamp stays,
+       so a save over it still asks. */
+    try { text = Ed.Store.get(b.file!); } catch (e) { /* below */ }
+    if (text === null) { b.disk.seen = now; continue; }
+    if (text !== b.text) {
+      b.undo.push(Ed.snap(b)); b.redo = [];
+      Ed.applyLineDiff(b, text, 'disk');
+      Ed.markSaved(b);
+      Ed.message(`Reverted ${fileLabel(b.file!)}`);
+      n++;
+    }
+    b.disk = { stamp: now };
+  }
+  if (!looked) disarmPoll();
+  if (n) Ed.scheduleRender();
+  return n;
+}
+defineMinorMode({ name: 'global-auto-revert-mode', global: true, pretty: 'Global Auto-Revert mode',
+  doc: 'Toggle global-auto-revert-mode: unmodified buffers follow their files when something else changes them.',
+  body: (on: boolean) => { if (!on) disarmPoll(); else if (E.buffers.some(b => b.disk)) armPoll(); } });
+D('auto-revert-buffers', '', 'Look at the visited files once now, as global-auto-revert-mode does every auto-revert-interval seconds. Return the number of buffers read again (0 while a command runs, M-: included).', () => autoRevert());
+/* Saving over a superseded file: writeTo refuses and queues the question, which runs as a command of its own
+   (the minibuffer is a recursive edit there): y saves this buffer over that version of the file. */
+const supersessions: EdBuffer[] = [];
+function askSupersession(b: EdBuffer) {
+  if (!supersessions.includes(b)) { supersessions.push(b); Ed.feedKey('<cmd:ask-user-about-supersession-threat>'); }
+  signal('user-error', `${fileLabel(b.file!)} changed on disk since it was read`);
+}
+CMD('ask-user-about-supersession-threat', async () => {
+  const b = supersessions.shift();
+  if (!b || !b.disk || !E.buffers.includes(b) || !superseded(b)) return [false];
+  if (!await yesOrNo(`${fileLabel(b.file!)} changed on disk; save anyway?`)) { Ed.message(`${fileLabel(b.file!)} not saved`); return [false]; }
+  b.disk.ok = host.files!.stamp!(b.file!) ?? undefined;
+  return [b];
+}, 'buffer', 'Ask whether to save a buffer over its file that changed on disk (used by save-buffer; not for M-x).', ([b]) => {
+  if (b instanceof Ed.Buffer) { const was = E.current; E.current = b; try { L.call('save-buffer', []); } finally { E.current = was; } }
+  return false;
+});
 /* Major modes: switching runs the mode's hooks, parents first, then after-change-major-mode-hook. */
 L.defvar('after-change-major-mode-hook', NIL, 'Procedures called after a major mode command switches the current buffer’s mode.');
 const majorBodies = new Map<string, SchemeValue>();

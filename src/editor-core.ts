@@ -135,7 +135,7 @@ const E = {
   prefixArg: null, keepPrefix: false, uArg: false, uDigits: null, depth: 0,
   lastCommand: false, thisCommand: false, thisKeys: '', killRing: [], killIdx: 0,
   isearch: null, lastSearch: '', goalCol: null, cmdSeq: 0,
-  inhibitRO: false, pasteText: '', timers: new Map(), suppressUndo: false, noUndo: false,
+  inhibitRO: false, pasteText: '', timers: new Map(), suppressUndo: false, noUndo: false, running: 0,
 } as Partial<EdState> as EdState;
 /* The minibuffer, the echo area and the window tree are per frame (R9.2): E.minibuf, E.mini, E.echo,
    E.root, E.sel and the rest are accessors onto the selected frame (below, after Window). */
@@ -1652,9 +1652,11 @@ async function runCommand(def: SchemeValue, keys?: string) {
   try { L.resetOps(); L.runHook('pre-command-hook'); } catch (e) { reportError(e); }
   const layout = windowLayout();
   let failed = false;
+  E.running++;
   try { await callInteractivelySafe(def); }
   catch (e) { failed = true; reportError(e); flushReplay(); }
   finally {
+    E.running--;
     finishUndo(b, before);
     b.pin = pin;
     if (!E.keepMark && wasActive && !b.visual && changedSince(b, before.ver)) b.markActive = false;

@@ -14,7 +14,7 @@ const N = globalThis.__n;
 const env = (k: string) => { const v = N.env(k); return v === undefined || v === null || v === '' ? null : v; };
 /* The directories are the process's: read by init(), when the program starts (not when the startup snapshot
    was made). */
-let HOME = '/', CWD = '/', CONFIG_DIR = '/', STATE_DIR = '/';
+let HOME = '/', CWD = '/', CONFIG_DIR = '/', STATE_DIR = '/', TEMP: string[] = [];
 const join = (a: string, b: string) => (b.startsWith('/') ? b : (a.endsWith('/') ? a : a + '/') + b);
 const dirname = (p: string) => { const i = p.lastIndexOf('/'); return i <= 0 ? '/' : p.slice(0, i); };
 /* An absolute path without empty, . and .. segments (as the shell's cd does, not following links). */
@@ -41,6 +41,9 @@ function readDirs() {
   CWD = N.cwd();
   CONFIG_DIR = join(env('XDG_CONFIG_HOME') || join(HOME, '.config'), 'edwin');
   STATE_DIR = join(env('XDG_STATE_HOME') || join(HOME, '.local/state'), 'edwin');
+  /* The system's temporary directory as sops and mktemp take it: $TMPDIR, else /tmp; by its true name. */
+  const tmp = env('TMPDIR') || '/tmp';
+  TEMP = [N.realpath(tmp) || normalize(tmp)];
 }
 readDirs();
 
@@ -103,6 +106,10 @@ function rename(src: string, dst: string) {
 }
 const files: EdHostFiles = {
   read, write, remove: name => { N.remove(resolve(name)); listCache = null; }, list, resolve, label, truename, exists: name => N.stat(resolve(name)) !== null, get cwd() { return CWD; },
+  /* inode, modification time to the nanosecond and size: a write in place and a file replaced by a rename both
+     change it */
+  stamp: name => { const s = N.stat(resolve(name)); return s && !s.dir ? `${s.ino}:${s.mtime}:${s.nsec}:${s.size}` : null; },
+  get temp() { return TEMP; },
   tree: {
     entry: p => N.lstat(p), names: dir => N.readDir(dir).map(e => e[0]), rename,
     copy: (src, dst) => { N.copyTree(src, dst); listCache = null; },
