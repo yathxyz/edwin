@@ -192,6 +192,11 @@ in
   # and status, spawn, and the refusals in a web frame, with no host.proc and while the image replays (R16.15).
   edwin-proc = suite "proc" [ "proc.test.mts" ];
 
+  # compile (src/compile.ts) in the headless runtime, with host.proc stood in by test/fake-proc.mts: output
+  # streamed into *compilation*, the status line on exit, recompile with the same command and directory,
+  # kill-compilation, the line cap, and no compilation in a web frame, with no host.proc or while the image replays.
+  edwin-compile = suite "compile" [ "compile.test.mts" ];
+
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
   # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's
   # Node host, an Org https link. The opener's own checks and argv (native/src/open.rs) are cargo tests, which

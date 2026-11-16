@@ -1510,6 +1510,11 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "+" 'dired-create-directory
   "Y" 'dired-copy-filename-as-kill)
 
+;; *compilation*, as evil-collection binds it; q and SPC come from special-mode.
+(evil-define-key 'motion 'compilation-mode
+  "g r" 'recompile
+  "C-c C-k" 'kill-compilation)
+
 ;; Surround, snipe and comments take s, S and gc from the default bindings above.
 (define-key evil-normal-state-map "s" 'evil-snipe-s)
 (define-key evil-normal-state-map "S" 'evil-snipe-S)

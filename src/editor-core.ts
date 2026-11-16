@@ -579,6 +579,10 @@ function trimLog(b: EdBuffer) {
   let k = 0; while (k < log.length && log[k].v <= min) k++;
   if (k) log.splice(0, k);
 }
+/* Drop all of B's edit log, past every floor: for a buffer whose history is worth nothing and costs memory
+   (*compilation*, its output cut from the top as it streams). What cached an older version of the text
+   finds that the log no longer reaches back and starts again from the text; undo there is gone. */
+function forgetLog(b: EdBuffer) { b.log.length = 0; }
 /* Low-level change: no read-only check, no marker adjustment and no change hooks. Returns the removed text. */
 function ropeEdit(b: EdBuffer, pos: number, n: number, ins: string) {
   const removed = b.rope.splice(pos, n, ins);
@@ -2477,7 +2481,7 @@ globalThis.Ed = {
   E, hooks, host, Frame, FrameState, makeFrame, selectFrame, deleteFrame, onFrameEvent, frameEvent, frameScale, withFrame, allWindows, allMinibufs, renderFrame, rectAt, scheduleRender, FRAME_CSS,
   Marker, shiftMarkers, editText, applyOps, applyLineDiff, diffLines: globalThis.Rope.diffLines, withOrigin, runHookSafely, removeHookEverywhere,
   localized, localize, makeLocal, localValue, defaultValue, setDefault, minorModes, minorOn, modeParents, modeChain, lighters, LEX_SOURCE, Store, Buffer, Keymap, PREFIX, C, SENTINEL, getBuffer, getBufferCreate, toBuffer, setWindowBuffer, otherBuffer, checkRO,
-  insertText, deleteText, replaceText, spanOf, changedSince, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, markDocstrings,
+  insertText, deleteText, replaceText, spanOf, changedSince, forgetLog, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, markDocstrings,
   forwardSexp, backwardSexp, upList, matchParen, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,
   normKey, kbd, defineKey, lookupIn, lookupKey, lookupWith, activeMaps, whereIs, keyName, keyChar, selfInsertable, message, ding,
   reportError, errorText, quietQuit, QUIET, feedKey, unreadKeys, flushReplay, nextKey, readMini, exitMini, abortMini, completeMini, historyMove,

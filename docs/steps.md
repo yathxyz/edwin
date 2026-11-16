@@ -1162,6 +1162,99 @@ formatters and language servers will all call it, from TypeScript.
   after two awaits from a replay entered in a timer callback; after the turn `available()` was true again; no
   child was left once edwin exited.
 
+## compile: a command's output in *compilation* (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-compile`). `src/compile.ts` with `Ed.compile.start`: a
+command run in the project through Ed.proc (TypeScript only), its output streamed into `*compilation*`, with
+recompile and kill. The `compile` desktop-only stub in scm/init.scm goes.
+
+- **`src/compile.ts`** (new, through the seven places of the touch list, after `proc`). `Ed.compile.start(COMMAND,
+  [DIR])` runs the shell line COMMAND as `sh -c COMMAND` (`sh` from PATH) in DIR, or in the project of the current
+  buffer, and gives the run once its child has started: its command, directory, buffer, `exit` (a promise that
+  settles after all of the output is in the buffer) and `kill` (INT unless told). `Ed.compile.recompile()` runs
+  the command `*compilation*` shows (else the last one) again in its directory; `Ed.compile.running()` says
+  whether one runs. A compilation still running when another starts is killed (KILL) and its late output and
+  exit are dropped (each run is told from the one that replaced it).
+- **The child.** Through `Ed.proc.spawn` only: argv `['sh', '-c', COMMAND]`, output and error merged so they keep
+  their order, decoded lossily (a byte that is not UTF-8 shows as U+FFFD instead of killing the build), no byte
+  bound (a long build is not killed for its output), standard input closed at once, `TERM=dumb`, and the changes
+  `Ed.proc.envFor` gives for the directory (none yet; proc-direnv). The image never reaches it (R16.15): `start`
+  asks `Ed.proc.envFor` before its first wait, which refuses while the image replays, and only after that wait
+  kills the old child and spawns the new one, with nothing waiting in between; a refused start leaves a running
+  compilation alone. In a web frame and on edwind's Node host there is no process, and `compile` and
+  `recompile` say so before reading anything.
+- **The directory.** The project: the nearest directory up from the buffer's with a `.git` or a `.jj`, else the
+  buffer's own. The buffer's directory is its dired listing's or its file's parent (a relative name resolved by
+  the host). A note edwind opens and a listing of edwind's are on edwind's machine, which may not be this one,
+  so for those, and for a buffer with no file, it is the program's own directory (`host.files.cwd`). With no
+  file system (a test host with no `host.files`) the child starts where the program runs.
+- **`*compilation*`**, in `compilation-mode` (derived from `special-mode`, so `q` and the `SPC` leader keys work),
+  read-only, in Motion state, shown in another window without selecting it. It starts with a header, `-*- mode:
+  compilation; default-directory: "DIR/" -*-`, DIR quoted as a JSON string (a `"` or `\` escaped), `Compilation started at TIME`, a blank line and the command;
+  then the output as it comes, taken in batches every 30 ms; then a blank line and the status line: `Compilation
+  finished`, `Compilation exited abnormally with code N`, `Compilation interrupted` / `terminated` / `killed`
+  (by the signal), each followed by `at TIME, duration S s`, also shown in the echo area. A child that cannot
+  start leaves `Compilation failed to start at TIME: REASON` and signals `process-error`. Terminal escapes
+  (colours, OSC titles) are dropped. A carriage return starts its line again, as on a terminal: of each line
+  only the text after its last `\r` stays, also when the `\r` comes in a later batch than the line's start, so
+  `10%\r50%\r100%\n` shows `100%`; `\r\n` is a newline, and a `\r` that ends the output is dropped. An escape
+  or a `\r` cut by the end of a batch waits for the rest; a run of `\r` acts as one, and is read in linear time (no regex), so a binary file on stdout does not stall the frame. `b.compile` holds `{command, dir}` for recompile and the
+  error parser to come.
+- **Large output.** At most 20000 lines and 4 MiB of output are kept: past either the oldest go, below the
+  header, and the first time they do the line `[Earlier output dropped: the last 20000 lines and 4 MiB are
+  kept]` goes below the header (not a `file:line` shape, for the error parser to come). The cut is at the first
+  line start past the bound when one is within 64 KiB of it, else mid-line (never inside a surrogate pair), so
+  of a line longer than 4 MiB its last 4 MiB stay. Memory stays bounded under a flood (`yes`, `cat` of a big
+  log): a batch is put in the buffer as soon as it reaches 4 MiB, not only every 30 ms, and after each cut, and each batch that starts the last line again, the
+  buffer's edit log is dropped (`Ed.forgetLog`, new in src/editor-core.ts), since the log keeps every deleted
+  and inserted text until it passes 512 entries, which under a flood was gigabytes (the editor ran out of heap
+  on `timeout 6 yes`). What caches a version of the text (the lexer, the worker mirrors) finds the log no
+  longer reaching back and starts again from the text, as after any cut at the top. The buffer keeps no undo
+  history and is never marked modified.
+- **Commands and keys.** `compile` (`SPC c c`, the desktop-only stub removed): reads `Compile command: ` with
+  `compile-command` (default `make -k `, then the last command run) and its own history; with one running, asks
+  `A compilation process is running; kill it? (y or n)` and stops on n. `recompile` (`g r` in `*compilation*`, as
+  evil-collection binds it), asking the same. `kill-compilation` (`C-c C-k` in `*compilation*`): SIGINT to the
+  child's process group. Killing the `*compilation*` buffer kills its child (KILL), so none is left behind.
+- **Choices and differences from Emacs:** the shell is `sh`, not `$SHELL` or `shell-file-name`: the fleet's login
+  shell is nushell, which reads `make && x` differently, and a compile command is a POSIX line. The directory is
+  the project's (project-compile's), where Emacs's `compile` uses the buffer's `default-directory`. A compile
+  started from code (not the command) with one running kills it without asking, as with
+  `compilation-always-kill`. Killing the buffer does not ask. Colours are dropped, not shown
+  (`ansi-color-compilation-filter`). The mode line shows no `:run`/`:exit` process state. Emacs keeps every line;
+  here the oldest go past 20000 lines or 4 MiB. One `*compilation*` buffer, not one per project.
+- **Not in it:** error parsing and next-error from the buffer (proc-compile-errors), grep (proc-grep),
+  `compilation-scroll-output` (point at the end of the buffer follows the output; elsewhere it stays), colours,
+  `compile` with a prefix argument (comint input), `project-compile` as a separate command.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-compile`, `test/compile.test.mts` (18): output
+  streamed (the first line is in the buffer while the child still runs, the later one is not), the argv, cwd and
+  options the host was given, the header, error merged in order and `Compilation finished`; `SPC c c` read the
+  typed command, `exit 2` gives `Compilation exited abnormally with code 2` in the buffer and echo area and
+  becomes `compile-command`, and `g r` in `*compilation*` runs the same argv in the same directory into a fresh
+  buffer, `q` leaving it; the project found by `.git` and by `.jj` from a nested and a relative file name, and a
+  directory with neither; `C-c C-k` gives `Compilation interrupted` with no child left; a compilation started
+  over a running one kills it and the old output never shows; `seq 1 25000` keeps 5001..25000 below the header
+  and the dropped-output line (once), with no undo kept; 6 MB with no newline kept within 4 MiB, the header and
+  status line intact; a 5 MB line keeps its last 4 MiB (less at most 64 KiB) after the dropped-output line; 60 MB
+  of `yes` output, with `*compilation*` selected and not, leaves the edit log never above 12 Mi characters
+  (sampled through the run; the code before the fix held 142 and 262 million) and 20000 lines kept; colour and
+  OSC escapes dropped, `\r\n` a newline, `10%\r50%\r100%\n` as `100%`, a `\r` in a later batch restarting the
+  line shown, a `\r\n` split across batches, a final `\r` dropped, a 0xFF byte as U+FFFD, stdin closed; `kill-buffer`
+  kills the child; a directory that is not there says `Compilation failed to start` and signals
+  `process-error`; inside `Ed.proc.replay` start and recompile are refused, nothing spawned and the running
+  compilation untouched, and the same for `(compile "...")` and `(recompile)` evaluated inside it; RET on an
+  output line changes nothing; in a web frame and with no `host.proc` `SPC c c` refuses before the minibuffer and
+  nothing spawns. The review fix (the flood, the long line, carriage returns; `Ed.forgetLog` in the core) was
+  checked again on ex44 with `edwin-compile` (15), `edwin-typecheck`, `edwin-headless`, `edwin-scheme`,
+  `edwin-proc`, `edwin-next-error`, `edwin-native`, `edit-security` and `edit-lockdown`; `nix build .#edwin` and
+  `nix flake check` were not run again for it. The second review fix (a long run of `\r` took quadratic time in the two regexes, 30 s for 200000; a progress line that only replaces the last line never cut, so its edits stayed in the log while evil's floor pinned it; the header's directory unquoted) adds three tests (18): 400000 `\r` twice around a line in under 5 s with no stall over 1 s (the code before took 84 s), 100 `\r` progress updates with `*compilation*` selected leave at most 2 log entries (before: 33), and a directory `a b "c\d` in the header escaped; `\r\r\r\n` a newline. Re-run on ex44: `edwin-compile` (18), `edwin-typecheck`, `edwin-proc`, `edwin-headless`, `edwin-native`, `edwin-next-error`, `nix build .#edwin` (its GUI test failed once at Xvfb startup under load, then passed on rerun).
+  Also passed: `edwin-typecheck`, `edwin-headless` (21; the page's script list), `edwin-proc` (6), `edwin-native`
+  (31; boot.ts's file list), `edwin-scheme` (38), `edwin-next-error` (10), `edit-security` (21) and
+  `edit-lockdown` (6), since scm/init.scm and scm/evil.scm also run on edwind and the core files load there;
+  `nix build .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35), and `nix flake check`:
+  every check passed but `edwin-bench`, which failed on the shadow stack (11.1% against its 10%) under the load of
+  the full run and passed when built again alone (7.3%; this package does not touch the evaluator).
+
 ## Opening a file or URL in the desktop's application (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `bib-open-external`, on proc-host-spawn): one way to hand a

@@ -123,7 +123,6 @@
 (desktop-only git-timemachine "SPC g t" "git-timemachine")
 (desktop-only consult-eglot-symbols "SPC p s" "LSP symbols")
 (desktop-only citar-open "SPC y o" "citar: open a reference")
-(desktop-only compile "SPC c c" "compile")
 (desktop-only apheleia-format-buffer "SPC b f" "apheleia: format the buffer")
 (desktop-only embark-act "SPC e a" "embark-act")
 (desktop-only devdocs-lookup "SPC h d" "devdocs")
@@ -170,7 +169,7 @@
   "SPC g l" 'gptel-preset-menu
   "SPC g L" 'gptel-menu
   "SPC g a" 'gptel                   ; agent-shell on the desktop
-  "SPC c c" 'compile                 ; desktop only
+  "SPC c c" 'compile
   ;; notes: the nodes of brain and the dailies (n r), brain's agenda (m a), a new task (o)
   "SPC n r f" 'brain-node-find
   "SPC n r i" 'brain-node-insert

@@ -20,6 +20,7 @@
   "src/brain.js",
   "src/proc.js",
   "src/vc.js",
+  "src/compile.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

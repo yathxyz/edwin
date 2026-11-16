@@ -854,6 +854,8 @@ interface EdBuffer extends SchemeForeign {
   disk?: { stamp: string | null; ok?: string; seen?: string };
   /* a directory listing (dired.ts) */
   dired?: unknown;
+  /* *compilation*: the command it shows and its directory (compile.ts) */
+  compile?: { command: string; dir: string | null };
   /* global-auto-revert-mode's look at a buffer that is not a file's (a dired listing): true when it reads B
      again (editor-prims.ts) */
   autoRevert?: (b: EdBuffer) => boolean;
@@ -1482,6 +1484,7 @@ interface EdApi {
   replaceText(b: EdBuffer, s: number, e: number, str: string): void;
   spanOf(b: EdBuffer, old: number): { pre: number; suf: number } | null;
   changedSince(b: EdBuffer, ver: number): boolean;
+  forgetLog(b: EdBuffer): void;
   installLex(b: EdBuffer, ver: number, cls: Uint8Array | number[], d: unknown): void;
   metrics(w: EdWindow): EdMetrics;
   lastMatch(str: string, re: RegExp, from: number, len: number, win?: number): number;
@@ -1654,6 +1657,28 @@ interface EdApi {
   /* set by proc.ts: TARGET in the desktop's application, through the host; null when it is on its way, else
      why not (refused while the image replays, and by the host's checks) */
   openUrl(target: string, opts?: { confirmed?: boolean }): string | null;
+  /* set by compile.ts */
+  compile: EdCompileApi;
+}
+
+/* ---------- editor: compile (compile.ts) ---------- */
+
+/* A compilation: its command, the directory it runs in (null: where the program runs), its buffer, its exit
+   (after all of its output is in the buffer), and kill (INT unless told), false once it has ended or another
+   compilation replaced it. */
+interface EdCompilation {
+  command: string;
+  dir: string | null;
+  buffer: EdBuffer;
+  exit: Promise<EdProcExit>;
+  kill(signal?: EdProcSignal): boolean;
+}
+interface EdCompileApi {
+  /* run the shell line COMMAND in DIR (absent: the project of the current buffer) into *compilation* */
+  start(command: string, dir?: string | null): Promise<EdCompilation>;
+  /* the last command again, in its directory */
+  recompile(): Promise<EdCompilation>;
+  running(): boolean;
 }
 
 /* ---------- editor: child processes for the core's TypeScript (proc.ts) ---------- */
