@@ -53,6 +53,21 @@ test('R4.40 make-thread, mailboxes and thread-join; a background thread is preem
   c.close();
 });
 
+test('R4.40 future-wait blocks a thread on a pool future; failure and timeout are signalled; thread-number', async () => {
+  const c = await client();
+  assert.equal(await value(c, "(future-wait (parallel-map (lambda (x) (* x x)) '(1 2 3 4) 1))"), '(1 4 9 16)');
+  assert.equal(await value(c, '(define (wfib n) (if (< n 2) n (+ (wfib (- n 1)) (wfib (- n 2))))) (future-wait (thread-run wfib 20) 30)'), '6765');
+  assert.equal(await value(c, '(define fw-t (make-thread (lambda () (future-wait (thread-run (lambda () (+ 1 2))))))) (thread-join fw-t 30)'), '3');
+  const bad = await c.form('(future-wait (thread-run (lambda () (car 1))))');
+  assert.ok(bad.error && bad.error.condition !== 'cannot-block', JSON.stringify(bad.error));
+  const late = await c.form('(future-wait (thread-run (lambda () (let loop ((i 0)) (if (< i 1e12) (loop (+ i 1)) i))) :timeout 30) 0.05)');
+  assert.equal(late.error.condition, 'timeout');
+  assert.equal((await c.form('(future-wait 1)')).error.condition, 'wrong-type-argument');
+  assert.equal(await value(c, '(let ((t (make-thread (lambda () 1)))) (thread-join t) (integer? (thread-number t)))'), '#t');
+  assert.equal(await value(c, '(thread-id)'), '#f', '(thread-id) keeps the pool meaning in the server image');
+  c.close();
+});
+
 test('R4.39, R4.42 a command that blocks does not block other clients; the deadline is runnable time', async () => {
   const a = await client(), b = await client();
   const t0 = Date.now();

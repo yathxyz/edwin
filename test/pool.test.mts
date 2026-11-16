@@ -125,6 +125,35 @@ test('closure conversion ships free variables; (future ...) and thread-eval work
   assert.equal(ed.eval('got'), 10);
 });
 
+test('a self-recursive global procedure ships by value as by name; a closure over local state still ships its copy', async () => {
+  ed.eval('(define (pfib n) (if (< n 2) n (+ (pfib (- n 1)) (pfib (- n 2)))))');
+  assert.equal(await ed.eval('(thread-run pfib 15)'), 610);
+  assert.equal(await ed.eval("(thread-run 'pfib 15)"), 610);
+  assert.equal(ed.L.write(await ed.eval("(parallel-map pfib '(10 11 12) 1)")), '(55 89 144)');
+  assert.equal(await ed.eval('(let ((f pfib)) (thread-run (lambda () (f 12))))'), 144);
+  /* A global bound to a closure over a let: global converts that definition itself (no (define g g)). */
+  ed.eval('(define pcount (let ((n 41)) (lambda () (set! n (+ n 1)) n)))');
+  assert.equal(await ed.eval('(thread-run pcount)'), 42);
+  assert.equal(await ed.eval('(thread-run (lambda () (pcount)))'), 42);
+  assert.equal(ed.eval('(pcount)'), 42, 'the thread changed its copy of n, not the main thread\'s');
+});
+
+test('future-wait on the main thread: the value of a settled future, cannot-block while it runs', async () => {
+  const f = ed.eval('(define fw (thread-run (lambda () (* 6 7)))) fw');
+  await f;
+  assert.equal(ed.eval('(future-wait fw)'), 42);
+  assert.throws(() => ed.eval('(future-wait (thread-run (lambda () (car 1))))'), (e: Condition) => e.kind === 'cannot-block');
+  const g = ed.eval('(define fbad (thread-run (lambda () (car 1)))) fbad');
+  await pr(g).catch(() => {});
+  assert.throws(() => ed.eval('(future-wait fbad)'), (e: Condition) => e.kind !== 'cannot-block');
+});
+
+test('(thread-id) is the pool index in a thread and #f on the main thread', async () => {
+  assert.equal(ed.eval('(thread-id)'), false);
+  const k = await ed.eval('(thread-run (lambda () (thread-id)))');
+  assert.ok(Number.isInteger(k) && k >= 0 && k < P.size);
+});
+
 test('parallel-map over a list, in order, and parallel-filter', async () => {
   assert.equal(ed.L.write(await ed.eval("(parallel-map (lambda (x) (* x x)) '(1 2 3 4 5 6 7 8 9 10) 2)")), '(1 4 9 16 25 36 49 64 81 100)');
   assert.equal(ed.L.write(await ed.eval("(parallel-filter odd? '(1 2 3 4 5 6 7))")), '(1 3 5 7)');
