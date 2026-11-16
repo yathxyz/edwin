@@ -25,7 +25,11 @@
    FILE:LINE:[COLUMN:] is that line of its file, and C-c C-c writes the changed lines back, one whole write per
    file. A file is written only when it is as the search saw it: its stamp the one taken when its first row came
    (where the host gives stamps), and each of its rows' lines still the text rg printed; else nothing of it is
-   written and the echo area says why. */
+   written and the echo area says why.
+
+   The shell commands (M-!, M-&, M-|, :! and the ! operator) run here too, the last part of this file: M-& is a
+   third kind of run, into *Async Shell Command*; the others wait for their child and show its output, or filter
+   text through it. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -37,6 +41,9 @@ const MAX_CHARS = 4 * 1024 * 1024;
 const FLUSH_MS = 30;
 /* How far past the bound a cut looks for a line start before it cuts mid-line. */
 const LINE_SLACK = 64 * 1024;
+/* What a shell line starts with when its standard input is /dev/null: rg given no path searches a pipe on its
+   standard input (even a closed one) instead of the directory. */
+const DEV_NULL = 'exec </dev/null\n';
 const DROPPED = `[Earlier output dropped: the last ${MAX_LINES} lines and ${MAX_CHARS / 1024 / 1024} MiB are kept]\n`;
 
 L.defvar('compile-command', 'make -k ', 'The command compile offers: the last one it ran.');
@@ -46,9 +53,10 @@ Ed.modeParents.set('compilation-mode', 'special-mode');
 Ed.MODE_NAMES['grep-mode'] = 'Grep';
 Ed.modeParents.set('grep-mode', 'compilation-mode');
 
-/* What a compilation and a grep differ in: the buffer, its mode, the words its lines use, how its output is read
-   and what its exit status means. */
-interface Kind { buffer: string; mode: string; word: string; label: string; owner: string; read: Reader; restarts: boolean; ending(x: EdProcExit, r: Run): string }
+/* What a compilation, a grep and an async shell command differ in: the buffer, its mode, the words its lines use,
+   how its output is read, whether it feeds the error list and has a header, whether its standard input is
+   /dev/null, and what its exit status means. */
+interface Kind { buffer: string; mode: string; word: string; label: string; owner: string; read: Reader; restarts: boolean; errors: boolean; header: boolean; devNull: boolean; ending(x: EdProcExit, r: Run): string }
 /* The run of a kind its buffer shows now, or null. gen tells its events from those of a run it replaced. */
 interface Run { kind: Kind; gen: number; command: string; dir: string | null; buffer: EdBuffer; proc: EdProc | null; started: number; head: number; lines: number; cut: boolean; pending: string; carry: string; timer: ReturnType<typeof setTimeout> | null; ended: boolean; parse: Parse; owner: string; stamps: Map<string, string | null> }
 const runs = new Map<Kind, Run>();
@@ -260,7 +268,7 @@ function flush(r: Run, final = false) {
   if (r.timer) { clearTimeout(r.timer); r.timer = null; }
   const { text, restart } = clean(r, r.pending, final); r.pending = '';
   if (!live(r)) return;
-  const found = scan(r.parse, text, restart, final);
+  const found = r.kind.errors ? scan(r.parse, text, restart, final) : [];
   /* A row's file is stamped as its first row comes, as close to rg's read of it as the output lets. */
   if (r.kind === GREP_KIND && canStamp()) for (const [f] of found) if (!r.stamps.has(f)) r.stamps.set(f, stampOf(f));
   if (text || restart) output(r, text, restart);
@@ -308,11 +316,11 @@ function take(r: Run, text: string) {
 const SIGNALS: Record<string, string> = { INT: 'interrupted', TERM: 'terminated', KILL: 'killed', HUP: 'hung up' };
 /* How the run ended, as the last line says it. */
 const killed = (label: string, x: EdProcExit) => `${label} ${SIGNALS[x.signal!] || 'killed by SIG' + x.signal}`;
-function compileEnding(x: EdProcExit) {
-  if (x.signal) return killed('Compilation', x);
-  if (x.code === 0) return 'Compilation finished';
-  return `Compilation exited abnormally with code ${x.code}`;
-}
+const ending = (label: string) => (x: EdProcExit) => {
+  if (x.signal) return killed(label, x);
+  if (x.code === 0) return `${label} finished`;
+  return `${label} exited abnormally with code ${x.code}`;
+};
 /* grep's status: 1 is no match, not a failure; 127 with the shell's word that a program is not there names it. */
 function grepEnding(x: EdProcExit, r: Run) {
   if (x.signal) return killed('Grep', x);
@@ -321,10 +329,12 @@ function grepEnding(x: EdProcExit, r: Run) {
   if (x.code === 127 && r.parse.missing) return `Grep failed: ${r.parse.missing} is not on PATH (exit 127)`;
   return `Grep exited abnormally with code ${x.code}`;
 }
-const COMPILATION: Kind = { buffer: '*compilation*', mode: 'compilation-mode', word: 'compilation', label: 'Compilation', owner: 'compile', read: parseLine, restarts: true, ending: compileEnding };
-const GREP_KIND: Kind = { buffer: '*grep*', mode: 'grep-mode', word: 'grep', label: 'Grep', owner: 'grep', read: grepLine, restarts: false, ending: grepEnding };
-/* The kind buffer B shows: grep's for *grep*, else compile's. */
-const kindOf = (b: EdBuffer) => (b.mode === GREP_KIND.mode ? GREP_KIND : COMPILATION);
+const COMPILATION: Kind = { buffer: '*compilation*', mode: 'compilation-mode', word: 'compilation', label: 'Compilation', owner: 'compile', read: parseLine, restarts: true, errors: true, header: true, devNull: false, ending: ending('Compilation') };
+const GREP_KIND: Kind = { buffer: '*grep*', mode: 'grep-mode', word: 'grep', label: 'Grep', owner: 'grep', read: grepLine, restarts: false, errors: true, header: true, devNull: true, ending: grepEnding };
+/* M-&: a shell command's output as it comes, with no header and no error list. */
+const ASYNC: Kind = { buffer: '*Async Shell Command*', mode: 'async-shell-command-mode', word: 'shell command', label: 'Shell command', owner: 'shell', read: parseLine, restarts: true, errors: false, header: false, devNull: true, ending: ending('Shell command') };
+/* The kind buffer B shows: grep's for *grep*, the shell command's for *Async Shell Command*, else compile's. */
+const kindOf = (b: EdBuffer) => (b.mode === GREP_KIND.mode ? GREP_KIND : b.mode === ASYNC.mode ? ASYNC : COMPILATION);
 function finish(r: Run, x: EdProcExit) {
   r.ended = true;
   flush(r, true);
@@ -362,7 +372,7 @@ async function start(kind: Kind, command: string, dir?: string | null): Promise<
   const b = Ed.getBufferCreate(kind.buffer);
   editDone(b); delete b.grepRows;
   b.mode = kind.mode; b.readOnly = true; b.evilState = 'motion';
-  const header = `-*- mode: ${kind.word}; default-directory: ${JSON.stringify(where ? abbr(where).replace(/\/?$/, '/') : './')} -*-\n${kind.label} started at ${stamp(Date.now())}\n\n${command}\n`;
+  const header = !kind.header ? '' : `-*- mode: ${kind.word}; default-directory: ${JSON.stringify(where ? abbr(where).replace(/\/?$/, '/') : './')} -*-\n${kind.label} started at ${stamp(Date.now())}\n\n${command}\n`;
   b.text = header; b.pt = 0; b.modified = false; b.undo = []; b.redo = []; Ed.forgetLog(b);
   b.compile = { command, dir: where };
   const grep = kind === GREP_KIND;
@@ -371,7 +381,7 @@ async function start(kind: Kind, command: string, dir?: string | null): Promise<
   const exit = new Promise<EdProcExit>(res => { settle = res; });
   let p: EdProc;
   try {
-    p = Ed.proc.spawn(['sh', '-c', grep ? 'exec </dev/null\n' + command : command], { cwd: where || undefined, env: { ...env, TERM: 'dumb' }, merge: true, lossy: true, onOut: s => take(r, s), onErr: s => take(r, s) });
+    p = Ed.proc.spawn(['sh', '-c', kind.devNull ? DEV_NULL + command : command], { cwd: where || undefined, env: { ...env, TERM: 'dumb' }, merge: true, lossy: true, onOut: s => take(r, s), onErr: s => take(r, s) });
   } catch (e) {
     append(b, `\n${kind.label} failed to start at ${stamp(Date.now())}: ${Ed.errorText(e)}\n`);
     show(b);
@@ -382,8 +392,8 @@ async function start(kind: Kind, command: string, dir?: string | null): Promise<
   p.closeStdin();
   /* The error list is this run's from now on, empty until its output names places. A refusal is reported, not
      thrown: the child runs and is watched, so the caller is told it started and sees the buffer. */
-  try { L.call('next-error-set-list!', [L.list(), r.owner]); } catch (e) { Ed.reportError(e); }
-  if (!grep) L.set('compile-command', command);
+  if (kind.errors) try { L.call('next-error-set-list!', [L.list(), r.owner]); } catch (e) { Ed.reportError(e); }
+  if (kind === COMPILATION) L.set('compile-command', command);
   show(b);
   return { command, dir: where, buffer: b, exit, kill: (sig?: EdProcSignal) => (current(r) && !r.ended ? p.kill(sig || 'INT') : false) };
 }
@@ -637,6 +647,156 @@ CMD('grep-change-to-grep-edit-mode', '', '', 'Make *grep* editable, once its gre
 CMD('grep-edit-finish', '', '', 'Write each changed row of *grep* to its file and leave grep-edit-mode (C-c C-c, C-x C-s, ZZ). A file changed since the search, or one whose row lines are no longer what it found, is not written.', () => { editFinish(cur()); return false; });
 CMD('grep-edit-abort', '', '', 'Give up the edits in *grep* not yet written and leave grep-edit-mode (C-c C-k, ZQ).', () => { editAbort(cur()); return false; });
 for (const n of ['grep-change-to-grep-edit-mode', 'grep-edit-finish', 'grep-edit-abort']) L.put(intern(n), 'evil-repeat', intern('abort'));
+
+/* ---- Shell commands: M-!, M-&, M-|, :! and the ! operator ----
+
+   A shell line the user typed, run as sh -c COMMAND (sh from PATH, as compile's) in the buffer's directory, through
+   Ed.proc only, so under its gates: the desktop program alone runs one, and never while the image replays, since
+   each entry reaches Ed.proc.envFor before its first wait.
+
+   shell-command waits for its child, and C-g stops the wait and kills it (KILL to its group). Its standard input
+   is /dev/null, or the region's text for shell-command-on-region. What it prints, its error merged in, goes to
+   *Shell Command Output*, and is shown in the echo area when it is one line, else in that buffer in another
+   window. A command that ends in & runs as async-shell-command: its output streamed into *Async Shell Command* as
+   a compilation's is, with no header and no error list.
+
+   A filter (C-u M-|, :{range}!, the ! operator) and an insert (C-u M-!) put the command's standard output in the
+   buffer only when the command exited 0, its output was whole UTF-8 text within SHELL_MAX_BYTES, and the buffer did
+   not change while it ran; else the text stays as it was and the output and error go to *Shell Command Output*.
+   Its error never enters the text: when it succeeded, the error's first line is shown in the echo area. */
+const OUTPUT = '*Shell Command Output*';
+const SHELL_MAX_BYTES = 16 * 1024 * 1024;
+const SHELL_HISTORY = 'shell-command';
+Ed.MODE_NAMES['async-shell-command-mode'] = 'Shell';
+Ed.modeParents.set('async-shell-command-mode', 'special-mode');
+interface ShellResult extends EdProcExit { out: string; err: string }
+
+/* COMMAND run in DIR with INPUT (null: /dev/null) on its standard input, waited for; C-g kills it. MERGE puts its
+   error in its output, in order; LOSSY shows a byte that is not UTF-8 as U+FFFD instead of stopping it. */
+async function shellRun(command: string, dir: string | null, input: string | null, merge: boolean, lossy: boolean): Promise<ShellResult> {
+  if (typeof command !== 'string' || !command.trim()) signal('user-error', 'No command to run');
+  /* Before the first wait: a replayed form is refused here (R16.15). */
+  const env = await Ed.proc.envFor(dir || (Ed.host.files ? Ed.host.files.cwd : '/'));
+  const out: string[] = [], err: string[] = [];
+  const p = Ed.proc.spawn(['sh', '-c', input === null ? DEV_NULL + command : command], { cwd: dir || undefined, env: { ...env, TERM: 'dumb' }, merge, lossy, maxBytes: SHELL_MAX_BYTES, onOut: s => { out.push(s); }, onErr: s => { err.push(s); } });
+  try { if (input) p.write(input); p.closeStdin(); } catch (e) { p.kill('KILL'); throw e; }
+  const exit = Object.assign(p.exit, { cancel: () => { p.kill('KILL'); } });
+  const x = await (EdPool.interruptible ? EdPool.interruptible(exit) : exit);
+  return { ...x, out: out.join(''), err: err.join('') };
+}
+/* What went wrong, or '' when the command exited 0 with all of its output. */
+function failure(x: ShellResult) {
+  if (x.error) return `Shell command stopped: ${x.error}`;
+  if (x.truncated) return `Shell command killed: its output passed ${SHELL_MAX_BYTES / 1024 / 1024} MiB`;
+  if (x.signal) return killed('Shell command', x);
+  return x.code === 0 ? '' : `Shell command exited abnormally with code ${x.code}`;
+}
+/* TEXT in *Shell Command Output*: shown in the echo area when it is one line, else the buffer in another window.
+   WHY, when not empty, is said in the echo area. */
+function display(text: string, why: string) {
+  text = text.replace(ESC, '').replace(/\x1b/g, '').replace(/\r\n/g, '\n');
+  const b = Ed.getBufferCreate(OUTPUT);
+  b.readOnly = false; b.text = text; b.pt = 0; b.modified = false; b.undo = []; b.redo = []; Ed.forgetLog(b);
+  const line = text.replace(/\n$/, '');
+  if (!line) Ed.message(why ? `(${why}, with no output)` : '(Shell command succeeded with no output)');
+  else if (!line.includes('\n')) Ed.message(why ? `${line}  [${why}]` : line);
+  else { show(b); Ed.message(why); }
+}
+const shellCommandAsync = (command: string) => /(?<!&)&\s*$/.test(command);
+
+/* M-!: COMMAND, its output shown, or with INSERT put at point in the current buffer. */
+async function shellCommand(command: string, insert: boolean) {
+  if (typeof command !== 'string') signal('wrong-type-argument', 'expected a string, got', command);
+  if (shellCommandAsync(command)) { await start(ASYNC, command.replace(/&\s*$/, ''), directoryFor(cur(), false)); return false; }
+  const b = cur();
+  if (insert) return filterText(b, b.pt, b.pt, command, null, false);
+  const x = await shellRun(command, directoryFor(b, false), null, true, true);
+  display(x.out, failure(x));
+  return false;
+}
+/* The text of B from S to E replaced by COMMAND's standard output, INPUT on its standard input; LINES: whole lines
+   are filtered, and when the last has no newline the output's last newline is dropped. Point goes to S and the
+   mark after the output (to the first non-blank of S's line when LINES). True when the text was replaced. */
+async function filterText(b: EdBuffer, s: number, e: number, command: string, input: string | null, lines: boolean) {
+  Ed.checkRO(b);
+  const ver = b.ver;
+  const x = await shellRun(command, directoryFor(b, false), input, false, false);
+  const why = failure(x);
+  /* What it printed goes to *Shell Command Output*, unless that is the buffer whose text is to stay. */
+  const refuse = (msg: string) => { if (b.name === OUTPUT) Ed.message(msg); else display(x.out + x.err, msg); return false; };
+  if (why) return refuse(`${why}; the text is left as it was`);
+  if (!E.buffers.includes(b) || Ed.changedSince(b, ver)) return refuse('The buffer changed while the command ran; its text is left as it was');
+  let out = x.out;
+  if (lines && e > s && b.rope.at(e - 1) !== '\n' && out.endsWith('\n')) out = out.slice(0, -1);
+  Ed.replaceText(b, s, e, out);
+  b.pt = lines ? EvilCore.firstNonBlank(b.rope, s) : s;
+  b.mark = s + out.length; b.markActive = false;
+  const err = x.err.replace(ESC, '').trim();
+  if (err) Ed.message(err.split('\n')[0]);
+  return true;
+}
+/* M-|: the region's text on COMMAND's standard input; the output shown, or with REPLACE in place of the region. */
+async function onRegion(beg: number, end: number, command: string, replace: boolean) {
+  if (typeof command !== 'string') signal('wrong-type-argument', 'expected a string, got', command);
+  const b = cur(), s = Math.max(0, Math.min(beg, end)), e = Math.min(b.rope.length, Math.max(beg, end));
+  const input = b.rope.slice(s, e);
+  if (replace) return filterText(b, s, e, command, input, false);
+  const x = await shellRun(command, directoryFor(b, false), input, true, true);
+  display(x.out, failure(x));
+  return false;
+}
+/* The whole lines of B from L1 to L2 (from 1) through COMMAND. */
+function filterLines(b: EdBuffer, l1: number, l2: number, command: string) {
+  const t = b.rope, s = Ed.lineStartOf(t, l1), e = Math.min(t.length, Ed.eol(t, Ed.lineStartOf(t, l2)) + 1);
+  return filterText(b, s, e, command, t.slice(s, e), true);
+}
+/* The region for M-|: Visual state's selection (which it leaves), else point and mark. */
+function region(b: EdBuffer): [number, number] {
+  if (EvilCore.stateOf(b) === 'visual') { const [s, e] = EvilCore.visualRange(b, true); return [s, e]; }
+  if (b.mark === null) signal('user-error', 'The mark is not set now, so there is no region');
+  return [Math.min(b.pt, b.mark!), Math.max(b.pt, b.mark!)];
+}
+const readShell = (prompt: string) => Ed.readMini(prompt, '', null, { kind: SHELL_HISTORY });
+
+CMD('shell-command', async () => {
+  needProc('shell-command');
+  /* The prefix is this command's, not the minibuffer's: it would repeat each character typed there. */
+  const insert = E.prefixArg !== null; E.prefixArg = null;
+  const command = await readShell('Shell command: ');
+  if (shellCommandAsync(command)) await confirmKill(ASYNC);
+  return [command, insert];
+}, 'COMMAND &optional INSERT', 'Run the shell line COMMAND in the buffer\'s directory and show its output: one line in the echo area, more in *Shell Command Output* (M-!). With a prefix argument (INSERT), put its output at point, only when it exits 0. A COMMAND ending in & runs as async-shell-command.',
+  async ([command, insert]: SchemeValue[]) => shellCommand(command as string, insert !== undefined && insert !== false));
+CMD('async-shell-command', async () => {
+  needProc('async-shell-command');
+  const command = await readShell('Async shell command: ');
+  await confirmKill(ASYNC);
+  return [command];
+}, 'COMMAND', 'Run the shell line COMMAND in the buffer\'s directory and show its output in *Async Shell Command* as it comes (M-&); C-c C-k there interrupts it, and killing the buffer kills it.',
+  async ([command]: SchemeValue[]) => { if (typeof command !== 'string') signal('wrong-type-argument', 'expected a string, got', command); await start(ASYNC, command as string, directoryFor(cur(), false)); return false; });
+CMD('shell-command-on-region', async () => {
+  needProc('shell-command-on-region');
+  const replace = E.prefixArg !== null, b = cur(), [s, e] = region(b);
+  E.prefixArg = null;
+  if (replace) Ed.checkRO(b);
+  const command = await readShell(replace ? 'Shell command on region (replace): ' : 'Shell command on region: ');
+  return [s + 1, e + 1, command, replace];
+}, 'START END COMMAND &optional REPLACE', 'Run the shell line COMMAND with the region\'s text on its standard input and show its output as shell-command does (M-|). With a prefix argument (REPLACE), its standard output takes the place of the region, only when it exits 0.',
+  async ([s, e, command, replace]: SchemeValue[]) => onRegion((s as number) - 1, (e as number) - 1, command as string, replace !== undefined && replace !== false));
+/* :!COMMAND shows COMMAND's output; :{range}!COMMAND filters those lines through it. */
+CMD('evil-ex-shell-command', async () => {
+  needProc(':!');
+  const ex = E.ex, command = (ex && ex.arg) || '';
+  return ex && ex.lines ? [ex.lines[0], ex.lines[1], command] : [false, false, command];
+}, 'L1 L2 COMMAND', 'Filter the lines L1 to L2 (from 1) through the shell line COMMAND, its standard output in their place only when it exits 0 (:{range}!COMMAND); with no lines, run it as shell-command does (:!COMMAND).',
+  async ([l1, l2, command]: SchemeValue[]) => {
+    if (typeof command !== 'string') signal('wrong-type-argument', 'expected a string, got', command);
+    if (l1 === false) return shellCommand(command as string, false);
+    const b = cur(), last = Ed.lineNo(b.rope, Ed.lastLineStart(b.rope)), a = Math.min(l1 as number, l2 as number), z = Math.max(l1 as number, l2 as number);
+    if (!Number.isInteger(a) || a < 1 || z > last) signal('user-error', 'E16: Invalid range');
+    return filterLines(b, a, z, command as string);
+  });
+L.put(intern('evil-ex-shell-command'), 'evil-repeat', intern('abort'));
 
 Ed.compile = { start: (command, dir) => start(COMPILATION, command, dir), recompile: () => again(COMPILATION), running: () => running(COMPILATION),
   grep: (command, dir) => start(GREP_KIND, command, dir), regrep: () => again(GREP_KIND), grepping: () => running(GREP_KIND),

@@ -417,6 +417,8 @@ or a block comment's two delimiters in a mode with no line comment."
    ("C-g" . keyboard-quit)           ("C-u" . universal-argument)
    ("C-s" . isearch-forward)         ("C-r" . isearch-backward)
    ("M-%" . replace-string)
+   ("M-!" . shell-command)           ("M-&" . async-shell-command)
+   ("M-|" . shell-command-on-region)
    ("M-x" . execute-extended-command)
    ("M-:" . eval-expression)         ("C-x C-e" . eval-last-sexp)
    ("C-M-f" . forward-sexp)          ("C-M-b" . backward-sexp)

@@ -1556,6 +1556,105 @@ line numbers drift, so the original line text is checked before writing. The own
   both times only at `tests/gui.rs:21` (Xvfb did not start), unit 22 and the gui tests before it passing; the
   change is TypeScript the typecheck covers. Not run: the full `nix flake check`.
 
+## Shell commands: M-!, M-&, M-|, :! and the ! operator (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-shell-command`, on proc-compile): M-!, M-&, M-|, :!
+and the ! operator, written in TypeScript over Ed.proc with the key bindings in Scheme. A filter replaces text
+only on exit 0. Risk named: this is the one place a shell string the user typed is allowed, so it is refused
+under the image's replay.
+
+- **Where.** The last part of src/compile.ts, beside compile and grep, whose directory rule, run machinery
+  (streaming, line and byte bounds, kill on buffer kill) and process gate it shares, so there is no new file
+  and no touch-list change. The `!` operator is in src/evil-ex.ts, next to `evil-ex`. The keys are `M-!`, `M-&`
+  and `M-|` in the global map (scm/emacs.scm), `!` in Normal state and the ex command `!` (scm/evil.scm).
+- **The child.** Through `Ed.proc.spawn` only, argv `['sh', '-c', COMMAND]` (`sh` from PATH), in the buffer's
+  directory (compile's rule without the project step: a dired listing's directory or the file's parent, else
+  the program's own directory), with `TERM=dumb` and the changes `Ed.proc.envFor` gives. Each entry reaches
+  `Ed.proc.envFor` before its first wait, so a replayed form is refused (R16.15). In a web frame, on edwind's
+  Node host and with no `host.proc`, the commands say so before reading anything.
+- **`shell-command` (`M-!`).** Reads `Shell command: ` (its own history, shared by all of these) and waits for
+  the child. Standard input is /dev/null (the line starts `exec </dev/null`, so `rg` searches the directory and
+  not a pipe), error merged with output, lossy decoding, at most 16 MiB. The output (terminal escapes dropped,
+  `\r\n` a newline) is put in `*Shell Command Output*`: one line goes to the echo area, more shows that buffer
+  in another window, unselected. No output says `(Shell command succeeded with no output)` or `(Shell command
+  exited abnormally with code N, with no output)`, and a failure with output adds the exit status (in brackets
+  after one line, in the echo area for more). **C-g** stops the wait and kills the child (KILL to its group,
+  through `EdPool.interruptible`). While it waits, the frame draws but other keys wait for the command to end,
+  as in Emacs; C-g is the one taken at once. The region's text is written through the host's queue (polled,
+  native/src/proc.rs), so a large region does not block the loop. With a prefix argument
+  (`C-u M-!`, `(shell-command CMD #t)`) the output is inserted at point, point before it and the mark after,
+  under the filter's rules below. A command ending in `&` (not `&&`) runs as `async-shell-command`.
+- **`async-shell-command` (`M-&`).** A third kind of compile's run: the output streamed into `*Async Shell
+  Command*` (`async-shell-command-mode`, from `special-mode`: read-only, Motion state, `q`), with compile's
+  carriage-return handling and bounds (20000 lines, 4 MiB), no header and no error list (the frame's
+  next-error list and `compile-command` are left alone), then the line `Shell command finished` / `exited
+  abnormally with code N` / `interrupted` with the time and duration. Standard input is /dev/null. `C-c C-k`
+  there interrupts it (SIGINT to its group), killing the buffer kills it, and one still running when another
+  starts is killed, after asking when the command is typed.
+- **`shell-command-on-region` (`M-|`).** The region (Visual state's selection, which it leaves, else point and
+  mark) goes to the child's standard input; the output is shown as `M-!` shows it. With a prefix argument
+  (`C-u M-|`) the region is replaced.
+- **Filters.** `C-u M-|`, `:{range}!CMD`, the `!` operator and `C-u M-!` change the text only when all of these
+  hold: the command exited 0, it was not killed, its output was UTF-8 (decoded strictly) and within 16 MiB,
+  and the buffer did not change while it ran (a timer's edit, a shared note's remote edit). Otherwise the
+  text is left as it was, the output and error go to `*Shell Command Output*`, and the echo area says why,
+  ending `; the text is left as it was`. Only the standard output replaces the text: the error never enters
+  it, and when the command succeeded the error's first line is shown in the echo area. A read-only buffer is
+  refused before anything runs. The replacement is one undo step. Whole-line filters put point on the first
+  non-blank of the first line, and a last line with no newline stays without one.
+- **`:!` and the `!` operator.** `:!CMD` runs CMD as `M-!` does; `:{range}!CMD` filters those lines
+  (`evil-ex-shell-command`). Everything after the `!` is the shell line: the ex parser now takes a leading `!`
+  as the command name by itself, so `:!~/bin/x`, `:!<f` or `:!=` are not read as other ex names. `!{motion}`
+  (and `!!`, `3!!`) reads the motion, as `>` does, puts point on its first line and opens the ex line with
+  `.,.+N!` (`.!` for one line); in Visual state `!` opens it with `'<,'>!`. The command typed after that runs
+  as `:{range}!`, with the ex history.
+- **Choices and differences from Emacs and Vim:**
+  - The shell is `sh`, not `$SHELL` or `shell-file-name`. The plan's "the user's shell" is read as "a shell
+    line the user typed": the owner's login shell is nushell, where `sort` is a builtin over structured data,
+    so `nu -c sort` would not sort a region's lines. These are POSIX lines, as compile's are.
+  - A filter replaces only on exit 0 and only with standard output; Emacs and Vim replace on any exit and
+    merge the error in. `C-u M-!` inserts under the same rule; Emacs inserts whatever came.
+  - The output is shown in the echo area only when it is one line, not when it fits a resized echo area.
+    `*Shell Command Output*` is in fundamental mode, as in Emacs.
+  - `M-&` with one running asks to kill it, as compile does; Emacs asks to use a new buffer
+    (`async-shell-command-buffer`). There is one `*Async Shell Command*`, its output not an interactive shell
+    (no comint input), and it ends with a status line Emacs puts in the echo area instead.
+  - The `!` operator opens the ex line, as Vim does; evil reads `!` from its own prompt. Its `.` repeat is
+    off.
+- **Not in it:** `:!!` (repeat the last shell command) and `%`/`#` expansion to the file name in `:!`; `:r
+  !CMD` and `:w !CMD`; `shell-command-on-region`'s error buffer argument and `shell-command-default-error-buffer`;
+  `shell-mode`/comint input to `*Async Shell Command*`; `$SHELL`. The server's `shell-command-to-string` and
+  `call-process` (scm/process.scm, on the hub) are untouched.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-shell-command`, `test/shell-command.test.mts`
+  (8). `C-u M-|` with `sort` over a region in Emacs state replaces it: argv `['sh', '-c', 'sort']`, the
+  program's directory, error not merged, strict decoding, `TERM=dumb`, point and mark around the output, one
+  `C-/` bringing the text back. `M-|` without the prefix shows `apple` and leaves the text. `M-!` reached from
+  Normal state. A failing filter (`exit 3`), a 0xFF byte, a child killed by TERM and 17 MB of output each leave
+  the text and the modified flag as they were, with the reason in the echo area and the failing sort's output in
+  `*Shell Command Output*`. `:%!` failing leaves it too. A sort writing to its error replaces the text with its
+  output only, the error in the echo area. A timer's edit during `sleep 0.3; sort` stops the replacement. A
+  read-only buffer is refused with nothing spawned, from Scheme and from `:%!`. A failing filter in `*Shell
+  Command Output*` itself keeps its text. `:1,3!sort`, `!j` (the ex line `.,.+1!`, point on the first line),
+  `2!!` with `tac`, `V j !` (`'<,'>!`), a last line without a newline kept so, and `:!~/no-such-program` taken
+  whole (exit 127). `M-!` shows one line in the echo area with no window, stdin `/dev/null`, merged and lossy;
+  three lines with exit 4 shown in another window, unselected, with the status in the echo area; no output, a
+  failure with no output, colours dropped; `C-u M-!` inserting at point only on exit 0; `(shell-command ...)`
+  and `:!echo` shown, not inserted. C-g during `M-! sleep 30` kills the child, says Quit, and the next `M-!`
+  runs. `M-&` streams (the first line before the second), read-only, unselected, no header, the status line,
+  `compile-command` and the error list untouched. `M-! echo bg &` runs async. `C-c C-k` gives `Shell command
+  interrupted`, and killing the buffer kills its child. Every entry evaluated inside `Ed.proc.replay` is refused
+  with process-error, and so is `(evil-ex-execute "%!sort")` (reported), with nothing spawned and the text
+  unchanged. In a web frame and with no `host.proc`, `M-!`, `M-&`, `M-|`, `!` and `:%!` refuse before any
+  minibuffer and nothing spawns.
+  Also passed: `edwin-compile` (39), `edwin-typecheck`, `edwin-headless` (21), `edwin-native` (31),
+  `edwin-scheme` (38), `edit-security` (21) and `edit-lockdown` (6) (scm/emacs.scm, scm/evil.scm and
+  compile.ts also load on edwind, where every one of these commands refuses since it has no `host.proc`),
+  `edit-grep` (14), `edwin-next-error` (12), `edwin-proc` (6), `nix build .#edwin` (unit 22, `tests/gui.rs` 5
+  with 1 ignored, `tests/terminal.rs` 35; its first run failed only at Xvfb startup under a load of 9.6, and the
+  rerun passed), and `nix flake check`. After the last fix (a failing filter in `*Shell Command Output*` keeps
+  its text) `edwin-shell-command`, `edwin-typecheck` and `edwin-compile` were run again and passed. `nix build
+  .#edwin` and `nix flake check` were not run again for it.
+
 ## Opening a file or URL in the desktop's application (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `bib-open-external`, on proc-host-spawn): one way to hand a

@@ -1290,7 +1290,8 @@ SEARCH   /re ?re n N * #     Vim regexps: \\( \\) \\| \\< \\> \\{n,m} \\zs \\ze 
 
 OPERATORS take a motion or text object, or act on a selection:
          d delete  c change  y yank  > < shift  = indent
-         gu gU g~ case  g? rot13   (doubled: dd cc yy >> gUU)
+         gu gU g~ case  g? rot13   ! filter through a shell command
+         (doubled: dd cc yy >> gUU !!)
 TEXT OBJECTS  iw aw iW aW ip ap  i( a( ib  i[ a[  i{ a{ iB  i< a<
          i\" a\" i' a' i` a`         e.g. ciw, da(, yap, >ip, gUiw
 
@@ -1311,6 +1312,7 @@ EX       :w [file]  :q[!]  :wq  :x  :e file  :e!  :sav file  :r file
          :d :y :> :< :j :m 0 :t $ :pu :sort :normal :noh
          :set nu rnu wrap ic scs hls ws sw=4  :reg  :marks  :so
          :cn :cp :cc N next, previous, Nth error (M-g n, M-g p)
+         :!cmd runs a shell command   :%!sort filters lines through one
          :(+ 1 2) evaluates Scheme.  :h name describes a procedure.
 
 LEADER   SPC f f find file   SPC b b switch buffer   SPC SPC M-x
@@ -1352,7 +1354,8 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
    ("reg[isters]" . evil-ex-registers) ("di[splay]" . evil-ex-registers) ("marks" . evil-ex-marks)
    ("u[ndo]" . evil-undo) ("red[o]" . evil-redo) ("h[elp]" . evil-help)
    ("sp[lit]" . evil-window-split-file) ("vs[plit]" . evil-window-vsplit-file) ("new" . evil-window-new)
-   ("on[ly]" . evil-window-close-others) ("clo[se]" . delete-window) ("q[uit]" . evil-quit)))
+   ("on[ly]" . evil-window-close-others) ("clo[se]" . delete-window) ("q[uit]" . evil-quit)
+   ("!" . evil-ex-shell-command)))
 
 ;;;; Key bindings
 
@@ -1442,6 +1445,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "g ~" 'evil-invert-case   "g u" 'evil-downcase      "g U" 'evil-upcase
   "g ?" 'evil-rot13
   ">" 'evil-shift-right     "<" 'evil-shift-left      "=" 'evil-indent
+  "!" 'evil-shell-command
   "." 'evil-repeat
   "q" 'evil-record-macro    "@" 'evil-execute-macro
   "m" 'evil-set-mark
@@ -1514,6 +1518,9 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 (evil-define-key 'motion 'compilation-mode
   "g r" 'recompile
   "C-c C-k" 'kill-compilation)
+
+;; *Async Shell Command* (M-&): C-c C-k interrupts its command; q and SPC come from special-mode.
+(evil-define-key 'motion 'async-shell-command-mode "C-c C-k" 'kill-compilation)
 
 ;; *grep* can be edited once its grep has ended, as wgrep (C-c C-p) does it: C-c C-c,
 ;; C-x C-s or ZZ write the changed rows to their files, C-c C-k or ZQ give the edits up.

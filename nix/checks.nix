@@ -208,6 +208,13 @@ in
   # order mark, --vimgrep rows of one line.
   edit-grep = suiteWith [ pkgs.ripgrep ] "grep-edit" [ "grep-edit.test.mts" ];
 
+  # The shell commands (src/compile.ts; the ! operator in src/evil-ex.ts) with host.proc stood in by
+  # test/fake-proc.mts: M-! in the echo area or *Shell Command Output*, C-u M-! at point, M-& into *Async Shell
+  # Command*, sort over a region with C-u M-|, :{range}! and the ! operator; a failing, cut or non-UTF-8 filter and
+  # a buffer changed meanwhile leave the text as it was; C-g kills the child; nothing starts while the image
+  # replays, in a web frame or with no host.proc.
+  edwin-shell-command = suite "shell-command" [ "shell-command.test.mts" ];
+
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
   # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's
   # Node host, an Org https link. The opener's own checks and argv (native/src/open.rs) are cargo tests, which

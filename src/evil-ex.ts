@@ -347,7 +347,8 @@ async function exExecute(line: string) {
     b.pt = firstNonBlank(b.rope, lineStartOf(b.rope, lines[1] === 0 ? 1 : lines[1]));
     return;
   }
-  const m = /^([a-zA-Z]+|&&|[&<>=~!@*#]+)/.exec(s);
+  /* :!COMMAND: all that follows the ! is the shell line, whatever its first character. */
+  const m = /^(!|[a-zA-Z]+|&&|[&<>=~@*#]+)/.exec(s);
   if (!m) signal('user-error', `E492: Not an editor command: ${line}`);
   let name = m![1], rest = s.slice(name.length);
   let bang = false;
@@ -395,6 +396,27 @@ CMD('evil-ex', async () => {
   await exExecute(s);
   return false;
 });
+/* The ! operator, as in Vim and evil: the lines of the motion (or of the selection) give the ex line its range,
+   .,.+N! (or '<,'>!), and the shell line typed after it filters them (:{range}!, src/compile.ts). */
+CMD('evil-shell-command', async () => {
+  if (!Ed.proc.available()) signal('process-error', 'No process here: ! runs commands in the desktop program (edwin, edwinclient)');
+  const b = cur();
+  let init = "'<,'>!";
+  if (stateOf(b) === 'visual') EC.visualRange(b, true);
+  else {
+    const [s, e] = await EC.readRange(), t = b.rope, l1 = lineNo(t, s), l2 = lineNo(t, e > s ? e - 1 : e);
+    b.pt = lineStartOf(t, l1);
+    init = l2 > l1 ? `.,.+${l2 - l1}!` : '.!';
+  }
+  return [await Ed.readMini(':', init, exCompleter, { history: E.exHistory, label: exLabel, kind: 'ex', keepOrder: true, noIndex: true })];
+}, 'COMMAND', 'Filter the lines of a motion or of the selection through a shell command (!): read the ex line .,.+N! (\'<,\'>! in Visual state) and run it.', async ([s]: [string]) => {
+  if (!s.trim()) return false;
+  E.lastEx = s;
+  await exExecute(s);
+  return false;
+});
+L.put(intern('evil-shell-command'), 'evil-operator', true);
+L.put(intern('evil-shell-command'), 'evil-repeat', intern('abort'));
 
 /* ---------- ex commands written in JavaScript ---------- */
 function exLines(): [number, number] {
