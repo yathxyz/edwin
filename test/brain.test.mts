@@ -772,9 +772,9 @@ test('SPC m a t: every open task by state, in brain’s order, asked for a page 
   await keys('q');
 });
 
-test('RET opens the task’s record; t, x, s, d and p change the task at point against the revision shown', async () => {
+test('o opens the task’s record; t, x, s, d and p change the task at point against the revision shown', async () => {
   await showTasks('a');
-  onTask(1); await keys('RET');
+  onTask(1); await keys('o');
   await until(() => cur().name === '*brain: Pay the invoice*', 'the record');
   assert.match(cur().text, /^#\+title: Pay the invoice\ntask · :prv: · owner\n\nstate: todo\npriority: A\ndue: 2026-11-07\n/);
   await showTasks('a');
@@ -915,7 +915,7 @@ test('q closes a window made for the agenda, and gives a window the agenda took 
   await showTasks('a');
   assert.equal(Ed.windowList().length, 2);
   // A record opened from the agenda is in the agenda's window, and the agenda asked for from there has it back.
-  onTask(4); await keys('RET'); await until(() => cur().name.startsWith('*brain: '), 'the record');
+  onTask(4); await keys('o'); await until(() => cur().name.startsWith('*brain: '), 'the record');
   await keys('SPC m a'); await until(() => E.prompt, 'the key prompt'); await keys('t');
   await until(() => cur().name === '*Agenda*', 'the agenda');
   assert.equal(Ed.windowList().length, 2);
@@ -1029,6 +1029,74 @@ test('fields typed by hand are read as the keys write them; a line brain cannot 
   assert.ok(messages().slice(from).includes('task:8 added :x:y:, scheduled 2026-11-12, due 2026-11-20 17:00'));
   assert.equal(TASKS.length, 8); assert.equal(written.length, 2);
   assert.deepEqual(lastWrite().body, { title: 'Typed by hand', state: 'waiting', priority: 'B', scheduled: '2026-11-12', due: '2026-11-20T17:00', tags: ['x', 'y'], recur: '+1w', waiting_on: 'the bank', body: 'First line.\n\n- [ ] a box' });
+});
+
+/* RET on task N of the agenda: the buffer it is changed in. */
+async function edit(n: number) { onTask(n); await keys('RET'); await until(() => cur().name === TASK_BUFFER, 'the buffer of the task'); return cur(); }
+test('RET in the agenda changes the task at point in such a buffer: it starts as the task is, and C-c C-c saves what was changed, against the revision shown', async () => {
+  await showTasks('a');
+  change(taskN(2), { body: 'Ask about the boiler.\n\nAnd the tap.\n', waiting_on: 'the landlord' });
+  const last = agenda().agenda; await keys('r'); await until(() => agenda().agenda !== last, 'the agenda again');
+  const AS_IT_IS = '---\ntitle: Call the plumber\nstate: todo\npriority: \nscheduled: 2026-11-10T14:30\ndue: \ntags: home phone prv\nwaiting_on: the landlord\n---\n\nAsk about the boiler.\n\nAnd the tap.\n';
+  let b = await edit(2);
+  assert.equal(b.mode, 'markdown-mode'); assert.equal(L.call('minor-mode-active-p', [L.intern('brain-capture-mode')]), true);
+  assert.equal(b.text, AS_IT_IS, 'a field with no line of its own in a new task has one when the task has it');
+  assert.equal(evilState(b), 'normal'); assert.equal(b.pt, '---\ntitle: '.length);
+  assert.ok(messages().endsWith('C-c C-c saves task:2, C-c C-k leaves it as it was\n'));
+  // Nothing changed: brain is not asked. C-c C-k leaves the task too.
+  const w = written.length;
+  await saying('task:2: nothing changed', () => keys('C-c C-c'));
+  assert.equal(Ed.getBuffer(TASK_BUFFER), null); assert.equal(cur(), agenda(), 'the agenda is selected again');
+  b = await edit(2); b.text = b.text.replace('Call the plumber', 'Never mind');
+  await saying('task:2 is as it was', () => keys('C-c C-k'));
+  assert.equal(written.length, w); assert.equal(taskN(2).title, 'Call the plumber'); assert.equal(cur(), agenda());
+
+  // Only what was changed is sent: a field by its key, the rest typed. Tags go as those added and removed.
+  b = await edit(2);
+  await pick('C-c C-t', 'n'); await until(() => fieldLine('state') === 'state: next', 'the state');
+  b.text = b.text.replace('priority: ', 'priority: b').replace('scheduled: 2026-11-10T14:30', 'scheduled: ').replace('home phone prv', 'home urgent prv').replace('\n\nAnd the tap.\n', '\n');
+  await saying('task:2: saved', () => keys('C-c C-c'));
+  assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/tasks/${taskN(2).id}`, auth: `Bearer ${TASK_TOKEN}`, session: 'edwind',
+    body: { state: 'next', priority: 'B', scheduled: null, add_tags: ['urgent'], remove_tags: ['phone'], body: 'Ask about the boiler.', base_revision: 2 } });
+  assert.equal(cur(), agenda()); assert.equal(Ed.getBuffer(TASK_BUFFER), null);
+  assert.ok(body().some(l => /^ {2}task:2 .*NEXT \[#B\] Call the plumber {2}:home:prv:urgent:$/.test(l)), `the agenda shows the task as it is now: ${body().join('|')}`);
+  assert.equal(taskN(2).props.waiting_on, 'the landlord', 'a field that was not changed is not written');
+
+  // Its text emptied is no text; a task has a title and a state; a line brain cannot take is said by its number.
+  b = await edit(2);
+  const refused = async (text: string, said: string) => { const n = written.length; b.text = text; await saying(said, () => keys('C-c C-c')); assert.equal(cur(), b); assert.equal(written.length, n); };
+  const now = b.text;
+  await refused(now.replace('title: Call the plumber', 'title: '), 'No title');
+  await refused(now.replace('state: next', 'state: '), 'No state');
+  await refused(now.replace('state: next', 'state: Later'), 'Line 3: Later is not a state');
+  // RET on another task, or SPC o, goes on with this one.
+  Ed.selectWindow(Ed.windowFor(agenda())); onTask(1);
+  await saying('A task is being written already: C-c C-c saves task:2, C-c C-k leaves it as it was', () => keys('RET'));
+  assert.equal(cur(), b);
+  b.text = now.replace('Ask about the boiler.\n', '').replace('title: Call the plumber', 'title:   Ring the plumber ');
+  // A second C-c C-c while brain is asked saves nothing more.
+  const from = messages().length, n = written.length, first = L.call('brain-capture-finalize', []);
+  await assert.rejects(Promise.resolve(L.call('brain-capture-finalize', [])), /^Error: The task is being saved$/);
+  await first;
+  assert.ok(messages().slice(from).includes('task:2: saved'));
+  assert.equal(written.length, n + 1); assert.deepEqual(lastWrite().body, { title: 'Ring the plumber', body: null, base_revision: 3 });
+  assert.equal(taskN(2).body, null);
+
+  // Elsewhere the task got another title and another priority since the agenda showed it: the title is kept,
+  // and the priority changed here replaces the other, which is said.
+  b = await edit(1);
+  assert.equal(b.text, '---\ntitle: Pay the invoice\nstate: todo\npriority: A\nscheduled: \ndue: 2026-11-07\ntags: prv\n---\n\n');
+  change(taskN(1), { title: 'Pay the big invoice', priority: 'C' });
+  b.text = b.text.replace('priority: A', 'priority: B');
+  await saying('task:1: saved; replaced what had changed since: priority was C', () => keys('C-c C-c'));
+  assert.deepEqual(lastWrite().body, { priority: 'B', base_revision: 3 });
+  assert.equal(taskN(1).title, 'Pay the big invoice');
+  // An agenda that does not show the last change opens no task.
+  agenda().agenda.stale = true; onTask(1);
+  await saying('The agenda does not show the last change: r asks brain again', () => keys('RET'));
+  assert.equal(Ed.getBuffer(TASK_BUFFER), null);
+  agenda().agenda.stale = false;
+  await keys('q');
 });
 
 test('brain-task-add adds a task from Scheme with the tags of brain-task-tags, and M-x reads its title', async () => {

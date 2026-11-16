@@ -211,7 +211,7 @@ in
   # opening a node; the backlinks window; id: and title links; a new note and a daily made on disk through
   # edwind. Tasks are read with the read token and written with the task token, a task's fields only; the
   # agenda's two views, its keys, what brain replaced and what it refused; a new task written in a buffer of its
-  # own, from a selection, with its fields in the front matter.
+  # own, from a selection, with its fields in the front matter, and a task brain has changed in such a buffer.
   edit-brain = suite "brain" [ "brain.test.mts" ];
 
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved

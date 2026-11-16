@@ -617,7 +617,8 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   owner's (an agent made it) says `by` and who, after the tags. It is a task like any other: edwind sets no
   trust. The faces come from what the line was built from, not from reading the text
   back, so a title cannot colour itself as something else.
-- **Keys there**, each on the task at point: `RET` opens its record; `t` sets the state (then `t n w h s d c`);
+- **Keys there**, each on the task at point: `RET` changes it in a buffer (below) and `o` opens its record,
+  read only, with its links and who wrote it; `t` sets the state (then `t n w h s d c`);
   `x` is done; `s` schedules and `d` sets when it is due (the date reader of `org-schedule`: nothing typed is
   today, a typed time is kept; `C-u s` and `C-u d` clear the date, so `C-u` is the prefix argument in this
   buffer and not a scroll); `p` sets the priority (`a b c`, space for none); `e` edits the title; `:` changes its
@@ -668,6 +669,18 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   task's tags and its dates, and an agenda that a window shows is asked for again. One task is written at a
   time: `SPC o` while one is goes back to its buffer. `C-u` is Evil's in this buffer, so a date is cleared by
   emptying its line.
+- **`brain-task-edit` (`RET` in the agenda)** changes the task at point in the same buffer (asked 2026-11-16:
+  a task's text could not be changed from Edwin at all). `*Task*` starts as the task is, in Normal state on
+  the title: every field of the new task's front matter, `recur` and `waiting_on` when the task has them, and
+  its text below, from the row the agenda shows (brain sends a task's whole text with it). The keys and the
+  reading of what is typed are those above. `C-c C-c` sends what differs from what the buffer started with
+  and nothing else, against the revision the agenda showed (`base_revision`), so what changed in the task
+  meanwhile is kept, and what this change replaced is said, as for the agenda's keys. A field emptied is
+  cleared, and so is the text; a task keeps a title and a state (`No title`, `No state`). Tags go as those
+  added and those removed, so a tag the task was given meanwhile stays. Nothing changed asks brain nothing
+  (`task:N: nothing changed`), and `C-c C-k` leaves the task as it was. It is the one buffer: `RET` or `SPC o`
+  while a task is written or changed goes back to it. An agenda that does not show the last change opens no
+  task until `r` has asked again.
 - **`brain-task-add TITLE [BODY]`** adds a task in one call, for Scheme, with the tags of `brain-task-tags`;
   as a command it reads `Task: ` in the minibuffer and takes the body from the selection and the note at
   point, as it did on `SPC o` before the buffer.

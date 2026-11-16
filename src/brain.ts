@@ -277,7 +277,7 @@ CMD('brain-follow', '', '', 'Open the link at point, or the first link of the li
    which date put it there, and on an overdue one DAY is that date's day. */
 interface BrainTask {
   id: string; title: string; tags: string[]; trust: string; revision: number; number: number | null; props: Record<string, unknown>;
-  created_by_title?: unknown; why?: string; day?: string;
+  body?: unknown; created_by_title?: unknown; why?: string; day?: string;
 }
 /* A line of the agenda: its text, the spans of it that have a face (start, end, face) and the task it shows. */
 interface AgendaLine { text: string; spans: [number, number, number][]; task?: BrainTask }
@@ -541,13 +541,21 @@ const brief = (x: unknown) => { const t = oneLine(typeof x === 'string' ? x : x 
    shows, so what changed in brain since is kept, and where it changed one of FIELDS too, brain takes this one
    and says so (`clashes`). The echo area says what SAY makes of the task brain answers, and what was replaced. */
 async function change(fields: Record<string, unknown>, say: (t: BrainTask) => string, id?: SchemeValue) {
+  const t = shownTask(id);
+  const v = await ask('brain-task-set', t.id, { ...fields, base_revision: t.revision }), now = taskOf(v);
+  Ed.message(await refreshed(`${refOfTask(now)}: ${say(now)}${replacedText(v)}`));
+  return false;
+}
+/* The task ID names, or the one at point, when the agenda shows it as brain has it. */
+function shownTask(id?: SchemeValue): BrainTask {
   const t = taskFor(id), b = Ed.getBuffer(AGENDA);
   if (b && b.agenda && (b.agenda as Agenda).stale) signal('user-error', 'The agenda does not show the last change: r asks brain again');
-  const v = await ask('brain-task-set', t.id, { ...fields, base_revision: t.revision }), now = taskOf(v);
+  return t;
+}
+/* What brain's answer V to a change says it replaced: '' when nothing had changed since. */
+function replacedText(v: unknown) {
   const clashes = (isObj(v) && Array.isArray(v.clashes) ? v.clashes : []).filter(isObj);
-  const replaced = clashes.length ? `; replaced what had changed since: ${clashes.map(c => `${brief(c.field)} was ${brief(c.was)}`).join(', ')}` : '';
-  Ed.message(await refreshed(`${refOfTask(now)}: ${say(now)}${replaced}`));
-  return false;
+  return clashes.length ? `; replaced what had changed since: ${clashes.map(c => `${brief(c.field)} was ${brief(c.was)}`).join(', ')}` : '';
 }
 /* C-u before the key, not a count. */
 const prefixed = () => Array.isArray(E.prefixArg);
@@ -567,7 +575,7 @@ CMD('brain-agenda-quit', '', '', 'Leave the agenda: close its window when it was
   if (win) { try { Ed.restoreWinConfig(win); return false; } catch (e) { /* the windows are not those any more */ } }
   return L.call('quit-window', []);
 });
-CMD('brain-agenda-open', '', '', 'Open the record of the task at point (RET).', async () => { await open(taskAt().id); return false; });
+CMD('brain-agenda-open', '', '', 'Open the record of the task at point, with its links and who wrote it (o).', async () => { await open(taskAt().id); return false; });
 /* TASK in the commands below is the id of a task the agenda shows, for the task at point when it is not given. */
 const readState = async () => STATE_KEYS[await Org.keyOf('State: [t]odo [n]ext [w]aiting [h]old [s]omeday [d]one [c]ancelled ', Object.keys(STATE_KEYS))];
 /* A priority read as one key: "A", "B" or "C", and false for none. */
@@ -628,19 +636,23 @@ CMD('brain-task-add', async () => {
   });
 
 /* ---------- writing a task ---------- */
-/* A new task is written in a buffer of its own, *Task*, in markdown-mode: its fields in the front matter, a
-   line each, and its text below. brain-capture-mode is on there, and its keys add the task (C-c C-c), drop it
+/* A task is written in a buffer of its own, *Task*, in markdown-mode: its fields in the front matter, a line
+   each, and its text below. brain-capture-mode is on there, and its keys add the task (C-c C-c), drop it
    (C-c C-k) and set a field as the agenda's keys do. A field is typed as well as set: a date as org-read-date
    takes one (fri 17:00, +2d), the tags with spaces between. A field left empty is not sent.
-   CAPTURE.win: the windows as they were before the buffer was shown. SENDING: brain is being asked to add it. */
+   A task brain has is changed in the same buffer (brain-task-edit): it starts as the task is, and C-c C-c
+   sends what was changed there, against the revision the agenda showed.
+   CAPTURE.win: the windows as they were before the buffer was shown. SENDING: brain is being asked to add or
+   change it. TASK: the task being changed, with the fields (WAS) and the text (BODY) the buffer started with. */
 const CAPTURE = '*Task*';
-interface Capture { win: EdWinConfig; sending: boolean }
+interface Edited { id: string; revision: number; ref: string; was: Record<string, string>; body: string }
+interface Capture { win: EdWinConfig; sending: boolean; task?: Edited }
 interface Matter { lines: string[]; close: number; fields: Map<string, { value: string; line: number }> }
 /* The fields a new buffer lists, and after them those it takes when they are written in. */
 const LISTED = ['title', 'state', 'priority', 'scheduled', 'due', 'tags'], FIELDS = [...LISTED, 'recur', 'waiting_on'];
 const STATES = Object.values(STATE_KEYS);
-const CAPTURE_KEYS = 'C-c C-c adds the task, C-c C-k drops it';
-Ed.defineMinorMode({ name: 'brain-capture-mode', lighter: ' Capture', pretty: 'Task capture', doc: 'The keys of a buffer a task is written in (brain-task-capture): C-c C-c adds the task to brain and C-c C-k drops it; C-c C-t sets its state, C-c , its priority, C-c C-s and C-c C-d when it is scheduled and due, C-c C-q its tags. The state is brain-capture-enabled.' });
+const captureKeys = (c: Capture) => (c.task ? `C-c C-c saves ${c.task.ref}, C-c C-k leaves it as it was` : 'C-c C-c adds the task, C-c C-k drops it');
+Ed.defineMinorMode({ name: 'brain-capture-mode', lighter: ' Capture', pretty: 'Task capture', doc: 'The keys of a buffer a task is written in (brain-task-capture, brain-task-edit): C-c C-c adds the task to brain, or saves what was changed of one it has, and C-c C-k drops it; C-c C-t sets its state, C-c , its priority, C-c C-s and C-c C-d when it is scheduled and due, C-c C-q its tags. The state is brain-capture-enabled.' });
 function capturing(): EdBuffer {
   const b = Ed.getBuffer(CAPTURE);
   if (!b || !b.capture) signal('user-error', 'No task is being written (SPC o writes one)');
@@ -691,6 +703,26 @@ function taskFields(b: EdBuffer): Record<string, unknown> {
   const body = lines.slice(close + 1).join('\n').trim();
   return body ? { ...out, body } : out;
 }
+/* What B changed of the task it started as, as brain-task-set takes it: a field whose line is as it was is
+   left out, and one that is empty now is cleared. Tags go as those added and those removed, so a tag brain was
+   given meanwhile stays. */
+function changedFields(b: EdBuffer, task: Edited): Record<string, unknown> {
+  const { lines, close, fields } = matter(b), out: Record<string, unknown> = {};
+  const words = (x: string) => x.toLowerCase().split(' ').filter(w => w);
+  for (const k of FIELDS) {
+    const f = fields.get(k), now = f ? f.value : '';
+    if (now === (task.was[k] || '')) continue;
+    const v = now && fieldValue(k, now, `Line ${f!.line + 1}: `);
+    if (k === 'tags') {
+      const has = words(task.was.tags || ''), wants = words(v), add = wants.filter(w => !has.includes(w)), remove = has.filter(w => !wants.includes(w));
+      if (add.length) out.add_tags = add;
+      if (remove.length) out.remove_tags = remove;
+    } else if ((k === 'title' || k === 'state') && !v) signal('user-error', `No ${k}`);
+    else out[k] = v || null;
+  }
+  const body = lines.slice(close + 1).join('\n').trim();
+  return body === task.body ? out : { ...out, body: body || null };
+}
 /* Write VALUE as the field KEY of the task being written, on its line or on a new last line of the front
    matter; '' leaves the field empty. */
 function setField(key: string, value: string) {
@@ -708,44 +740,63 @@ function leaveCapture(b: EdBuffer) {
   L.call('kill-buffer', [b]);
   try { Ed.restoreWinConfig(win); } catch (e) { /* the windows are not those any more */ }
 }
-CMD('brain-task-capture', '', '', 'Write a task for brain in a buffer of its own: Markdown, with its title, state, priority, dates and tags in the front matter and its text below. It starts with the tags of brain-task-tags and, as its text, the Visual selection, then a link to the note at point when it has an Org id. C-c C-c adds the task and C-c C-k drops it; one task is written at a time (SPC o, a in the agenda).', () => {
-  /* Before a task is written that cannot be added. */
-  if (!attached()) signal('user-error', NO_EDWIND);
-  const from = cur(), old = Ed.getBuffer(CAPTURE);
-  if (old && old.capture) {
-    const w = Ed.windowFor(old);
-    if (w) Ed.selectWindow(w); else Ed.popToBuffer(old, true);
-    Ed.message(`A task is being written already: ${CAPTURE_KEYS}`);
-    return false;
-  }
-  const tags = namedTags(), text = about(from);
-  if (EC.stateOf(from) === 'visual') EC.setState(from, 'normal');
-  const win = Ed.winConfig(), b = Ed.getBufferCreate(CAPTURE), head = '---\ntitle: ';
+/* Go back to the task being written, when there is one: one is written at a time. */
+function resumed() {
+  const old = Ed.getBuffer(CAPTURE);
+  if (!old || !old.capture) return false;
+  const w = Ed.windowFor(old);
+  if (w) Ed.selectWindow(w); else Ed.popToBuffer(old, true);
+  Ed.message(`A task is being written already: ${captureKeys(old.capture as Capture)}`);
+  return true;
+}
+/* Show *Task* in a window below, with VALUES as its fields and TEXT under them, and point on the title: a new
+   task in Insert state. TASK is the one being changed, when it is one brain has. A field that is not LISTED
+   has a line when it has a value. */
+function writeTask(values: Record<string, string>, text: string, task?: Edited) {
+  const c: Capture = { win: Ed.winConfig(), sending: false, task }, b = Ed.getBufferCreate(CAPTURE), head = '---\ntitle: ';
   Ed.switchMajorMode(b, 'markdown-mode');
-  b.text = `${head}\n${LISTED.slice(1).map(k => `${k}: ${k === 'state' ? 'todo' : k === 'tags' ? tags.join(' ') : ''}`).join('\n')}\n---\n\n${text ? text + '\n' : ''}`;
+  b.text = `${head}${values.title || ''}\n${FIELDS.slice(1).filter(k => LISTED.includes(k) || values[k]).map(k => `${k}: ${values[k] || ''}`).join('\n')}\n---\n\n${text ? text + '\n' : ''}`;
   b.modified = false; b.undo = []; b.redo = [];
-  b.capture = { win, sending: false } satisfies Capture;
+  b.capture = c;
   Ed.makeLocal(b, 'brain-capture-enabled'); b.locals!.set('brain-capture-enabled', true);
   Ed.popToBuffer(b, true);
   b.pt = head.length;
-  if (E.evil && EC.stateOf(b) !== 'insert') EC.enterInsert(b, 1, false);
-  Ed.message(CAPTURE_KEYS);
+  if (E.evil && !task && EC.stateOf(b) !== 'insert') EC.enterInsert(b, 1, false);
+  Ed.message(captureKeys(c));
   return false;
+}
+CMD('brain-task-capture', '', '', 'Write a task for brain in a buffer of its own: Markdown, with its title, state, priority, dates and tags in the front matter and its text below. It starts with the tags of brain-task-tags and, as its text, the Visual selection, then a link to the note at point when it has an Org id. C-c C-c adds the task and C-c C-k drops it; one task is written at a time (SPC o, a in the agenda).', () => {
+  /* Before a task is written that cannot be added. */
+  if (!attached()) signal('user-error', NO_EDWIND);
+  if (resumed()) return false;
+  const from = cur(), tags = namedTags(), text = about(from);
+  if (EC.stateOf(from) === 'visual') EC.setState(from, 'normal');
+  return writeTask({ state: 'todo', tags: tags.join(' ') }, text);
 });
-CMD('brain-capture-finalize', '', '', 'Add the task being written to brain, and leave its buffer. A field brain cannot take is said with its line, and what brain refuses in its words: the buffer stays as it is (C-c C-c).', async () => {
-  const b = capturing(), c = b.capture as Capture;
-  if (c.sending) signal('user-error', 'The task is being added');
-  const fields = taskFields(b);
+CMD('brain-task-edit', '', '&optional TASK', 'Change the task at point in a buffer of its own, as brain-task-capture writes a new one: its title, state, priority, dates and tags in the front matter, with recur and waiting_on when it has them, and its text below. C-c C-c saves what was changed there, against the revision the agenda shows, and C-c C-k leaves the task as it was (RET).', ([id]: SchemeValue[]) => {
+  const t = shownTask(id);
+  if (resumed()) return false;
+  const was: Record<string, string> = { title: oneLine(t.title), tags: t.tags.join(' ') };
+  for (const k of FIELDS) if (!(k in was)) was[k] = prop(t, k);
+  const body = typeof t.body === 'string' ? t.body.trim() : '';
+  return writeTask(was, body, { id: t.id, revision: t.revision, ref: refOfTask(t), was, body });
+});
+CMD('brain-capture-finalize', '', '', 'Add the task being written to brain, or save what was changed of the one being changed, and leave its buffer. A field brain cannot take is said with its line, and what brain refuses in its words: the buffer stays as it is (C-c C-c).', async () => {
+  const b = capturing(), c = b.capture as Capture, task = c.task;
+  if (c.sending) signal('user-error', task ? 'The task is being saved' : 'The task is being added');
+  const fields = task ? changedFields(b, task) : taskFields(b);
+  if (task && !Object.keys(fields).length) { leaveCapture(b); Ed.message(`${task.ref}: nothing changed`); return false; }
   c.sending = true;
-  let t: BrainTask;
-  try { t = taskOf(await ask('brain-task-add', fields)); } finally { c.sending = false; }
+  let v: unknown, t: BrainTask;
+  try { v = task ? await ask('brain-task-set', task.id, { ...fields, base_revision: task.revision }) : await ask('brain-task-add', fields); t = taskOf(v); } finally { c.sending = false; }
   leaveCapture(b);
-  Ed.message(await refreshed(addedText(t)));
+  Ed.message(await refreshed(task ? `${refOfTask(t)}: saved${replacedText(v)}` : addedText(t)));
   return false;
 });
-CMD('brain-capture-kill', '', '', 'Drop the task being written: nothing is added, and its buffer is left (C-c C-k).', () => {
-  leaveCapture(capturing());
-  Ed.message('The task is dropped');
+CMD('brain-capture-kill', '', '', 'Drop the task being written: nothing is added or changed, and its buffer is left (C-c C-k).', () => {
+  const b = capturing(), task = (b.capture as Capture).task;
+  leaveCapture(b);
+  Ed.message(task ? `${task.ref} is as it was` : 'The task is dropped');
   return false;
 });
 CMD('brain-capture-state', async () => { capturing(); return [await readState()]; },
@@ -764,7 +815,7 @@ CMD('brain-capture-tags', async () => [await Ed.readMini('Tags: ', matter(captur
   ([tags]: SchemeValue[]) => setField('tags', fieldValue('tags', typeof tags === 'string' ? tags : '')));
 for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
   'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-tag', 'brain-task-add',
-  'brain-task-capture', 'brain-capture-finalize', 'brain-capture-kill', 'brain-capture-state', 'brain-capture-priority', 'brain-capture-schedule', 'brain-capture-due', 'brain-capture-tags']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'brain-task-capture', 'brain-task-edit', 'brain-capture-finalize', 'brain-capture-kill', 'brain-capture-state', 'brain-capture-priority', 'brain-capture-schedule', 'brain-capture-due', 'brain-capture-tags']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 globalThis.Brain = { open, noteTitled };
 })();

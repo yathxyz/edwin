@@ -126,7 +126,8 @@
 ;; C-u is the prefix argument here, not a scroll: C-u s and C-u d clear a date.
 (evil-define-key 'motion 'brain-agenda-mode
   "C-u" 'universal-argument
-  "RET" 'brain-agenda-open
+  "RET" 'brain-task-edit
+  "o" 'brain-agenda-open
   "t" 'brain-task-state
   "x" 'brain-task-done
   "s" 'brain-task-schedule
@@ -142,7 +143,8 @@
   "RET" 'brain-follow
   "q" 'quit-window)
 
-;; A task being written (brain-task-capture): a Markdown buffer, its fields in the front matter.  The keys
+;; A task being written or changed (brain-task-capture, brain-task-edit): a Markdown buffer, its fields in
+;; the front matter.  The keys
 ;; that set a field are Org's for an entry; a minor mode's map comes before markdown-mode's.
 (define-key brain-capture-mode-map "C-c C-c" 'brain-capture-finalize)
 (define-key brain-capture-mode-map "C-c C-k" 'brain-capture-kill)
