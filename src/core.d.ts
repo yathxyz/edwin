@@ -2341,6 +2341,10 @@ interface VcViewApi {
   model(b: EdBuffer, kind: VcViewKind): unknown;
   /* what the line at point in B, a buffer of KIND, says RET does there; null on a line that says nothing */
   at(b: EdBuffer, kind: VcViewKind): VcRowExtra | null;
+  /* the same for every selected line in Visual state (which it leaves), else for the line at point */
+  selected(b: EdBuffer, kind: VcViewKind): VcRowExtra[];
+  /* draw B again from its model, without reading */
+  redraw(b: EdBuffer): void;
   /* read B again (its kind's read) and draw it, keeping folds and point */
   refresh(b: EdBuffer): Promise<void>;
   /* a file's hunks under D's current section, each a section of its lines that RET visits */

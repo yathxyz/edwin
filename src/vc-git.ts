@@ -652,7 +652,22 @@ function atPoint(b: EdBuffer, kind: VcViewKind): VcRowExtra | null {
   const r = here(b).row;
   return r && (r.visit || r.show || r.more) ? { visit: r.visit, show: r.show, more: r.more } : null;
 }
-globalThis.VcView = { faces: F, open: openView, model: modelOf, at: atPoint, refresh, hunks, fileHeading, shown };
+/* What the lines of B, a buffer of KIND, say RET does there: in Visual state the selected lines' (Visual state then
+   left), else the line at point's; lines that say nothing are left out. */
+function selectedRows(b: EdBuffer, kind: VcViewKind): VcRowExtra[] {
+  modelOf(b, kind);
+  const v = viewOf(b);
+  let rows: (GitRow | undefined)[];
+  if (EvilCore.stateOf(b) === 'visual') {
+    const [s, e] = EvilCore.visualRange(b, true);
+    EvilCore.setState(b, 'motion');
+    rows = v.rows.slice(lineNoB(b, s) - 1, lineNoB(b, Math.max(s, e - 1)));
+  } else rows = [here(b).row];
+  return rows.filter((r): r is GitRow => !!r && !!(r.visit || r.show || r.more)).map(r => ({ visit: r.visit, show: r.show, more: r.more }));
+}
+/* Draw B, a view buffer, from its model again, without reading. */
+const redraw = (b: EdBuffer) => { draw(b); Ed.scheduleRender(); };
+globalThis.VcView = { faces: F, open: openView, model: modelOf, at: atPoint, selected: selectedRows, redraw, refresh, hunks, fileHeading, shown };
 
 CMD('git-log', '', '', 'Show the log of HEAD in the current buffer\'s git repository (l l in the status buffer): a commit per line, read a page at a time in the background; RET on a commit shows it, + reads the next page.', () => openLog());
 CMD('git-log-more', '', '', 'Read the log\'s next page (+), in the background.', () => { logOf(cur()); return logMore(); });

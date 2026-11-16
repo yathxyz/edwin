@@ -2804,6 +2804,122 @@ the log, each proved by `edwin-vc`.
     `edit-lockdown` (6), `edit-security` (21), `edwin-display` (20), `edwin-headless` (21), `edwin-scheme` (38).
     This entry's last bullet was written after it; docs/ is outside the checks' sources.
 
+## jj rebase, split by file, undo and redo (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-jj-rewrite`, on git-jj-ops): history rewriting and the
+operation log's undo from jj's log and change view, proved by `edwin-vc`.
+
+- **The keys** are majutsu's Evil ones: `r` `jj-rebase`, `u` `jj-undo`, `C-r` `jj-redo` in `jj-log-mode` and
+  `jj-change-mode`; `S` `jj-split` in `jj-change-mode`, in Motion and Visual state. What is given to jj is only
+  revsets Edwin built (`change_id(ID)` or `commit_id(HEX)`, git-jj-log's revOf, from the line at point or the
+  view's change) and file names read from jj, as `root-file:` filesets; nothing typed reaches a revset. Every
+  child goes through `Vc.run` (no pager, no colour, `JJ_EDITOR=false`).
+- **r** is a mark, not a transient. On a change with no source marked in the workspace it reads the change
+  (immutable: `ID SUBJECT is immutable: jj does not rebase it`), marks it, draws `[rebase source]` at the end of
+  its log line and says `Rebasing ID SUBJECT and its descendants: r on the change to put them on, r on it again to
+  stop`. The mark is kept by workspace root, outside the log's model, so `g r` keeps it. r on the marked change
+  again: `No rebase`. r on another change asks `Rebase ID SUBJECT and its descendants onto ID SUBJECT?`, offers to
+  save the workspace's changed buffers, and runs `jj rebase --source SRC --onto DEST`; the log and the change view
+  are read again and jj's first line said (`Rebased 2 commits to destination.`). The mark goes as soon as a
+  destination is picked, whatever comes of it (n: `Nothing rebased`; a source gone meanwhile: `... is gone:
+  nothing rebased`). An immutable destination is normal and allowed; `--ignore-immutable` is never given. jj's
+  own refusals (onto a descendant) are said from its `Error:` line. The source can be marked from the change
+  view (r there marks the change it shows) and put on from the log.
+- **S** in the change view splits the file at point (its heading or any line of its hunks), or every file the
+  lines of a Visual selection touch, off the change the view shows: `jj split -r REV --message=TEXT --
+  root-file:"NAME"...`. Before anything: the change must be mutable; then the save offer, before the files are
+  checked, since a saved file is snapshotted into @ and changes what the change shown has when it is @; then the
+  files are read again from jj's own template (`diff.files()`, each name and the name it came from), and a picked
+  file the change no longer changes is refused (`NAME is not changed in ID SUBJECT now: g r, then pick again`),
+  since jj itself would make an empty change of a fileset matching nothing; picking every file is refused
+  (`Every file of ID SUBJECT is picked: nothing would be left`). A rename takes the name it came from too, so it
+  moves whole. Each name is quoted as a jj string (`\` and `"` escaped), and a name with a control character or
+  U+FFFD (the diff is read lossily: not UTF-8) is never given back. Then `*jj-split: NAME*` in vc-message-mode
+  with the change's description and the lines `JJ: Splitting NAMES off ID in ROOT: the description of the change
+  that takes them; the rest keeps ID's.` and `JJ: C-c C-c splits, C-c C-k aborts. ...`; C-c C-c gives it as one
+  `--message=` argument (jj would otherwise open its editor, which is false here). jj keeps the change id on the
+  part split off, so the open change view, read again by it, shows that part; the rest is its child with the old
+  description. A message jj refuses is kept for the next S on that change, as describe's is.
+- **u** reads jj's last operation (`jj op log --limit 1` with a JSON template of its id and description; the
+  read snapshots the working copy, as jj undo's own start would) and asks `Undo jj's last operation,
+  DESCRIPTION?`. When the last operation is itself an undo (`undo: restore to operation ID`), jj undo (0.33 on)
+  does not undo it but steps further back: it undoes operation ID, the one that undo restored to
+  (cli/src/commands/undo.rs). So u then reads that operation (`jj op show ID --no-op-diff`, its id checked to be
+  ID) and asks `Undo jj's operation before that too, DESCRIPTION?`. When the last operation is a redo (`redo:
+  restore to operation ID`, jj's whole description of it) jj undo undoes the redo itself, so u reads operation
+  ID the same way and asks `Undo jj's redo of DESCRIPTION?`. When the operation undo would undo is a snapshot of
+  the working copy (files written since jj last looked), it asks `Undo jj's snapshot of the working copy (the
+  files written since jj last looked go back as they were)?` instead, since undoing it takes those files' new
+  text out of the work tree. On y the last operation is read again, and when it is another one (a file written
+  while it asked) nothing is undone: `jj's operations changed while asking: nothing undone`. Else `jj undo`, the
+  views read again, its first line said (`Undid operation: ...`). n: `Nothing undone`.
+- **C-r** runs `jj redo` at once; with nothing to redo jj's refusal is said (`jj redo failed (exit 1): Nothing to
+  redo`).
+- **Choices**, each reversible:
+  - One rebase shape: `--source` (the change and its descendants) onto one destination. No `-r` (the change
+    alone), `-b`, `--insert-after`/`--insert-before`, several destinations, `--skip-emptied` or
+    `--simplify-parents`.
+  - The rebase source is a mark with a confirmation, not majutsu's transient of selections.
+  - No save is offered before u and C-r: a save writes files jj then snapshots, and the undo would undo that
+    snapshot instead of the operation the user meant. Unsaved buffers keep their text while the files under
+    them change, as after any rewrite outside Edwin. Rebase and split offer the save, as new and edit do.
+  - A snapshot is not refused by u, only named: undoing one is how written files are put back.
+  - Split is by whole file, into a parent and a child (jj's default), never `--parallel`, `--onto` or
+    interactive; picking every file is refused rather than leaving jj to make an empty change.
+- **Not in it:** hunk-level split (the plan's risk: not ported), the operation log as a view, `jj op restore` or
+  `op revert` of an older operation, restore, rebase of several changes at once, bookmarks, fetch and push
+  (git-jj-remote).
+- **Image replay and edwind.** Each command checks `Ed.proc.refusal()` before anything, and every child goes
+  through `Vc.run`, which refuses under the image's replay, in a web frame and in edwind.
+- **VcView** (src/vc-git.ts) gains `selected(b, kind)`, the rows of a Visual selection (leaving Visual state) or
+  of the line at point, and `redraw(b)`, a view drawn again from its model without a read (the source mark).
+- **Checked by**, on ex44, with nixpkgs' jujutsu 0.45.1 and git: `nix build .#checks.x86_64-linux.edwin-vc` (102
+  passed, test/vc-jj-rewrite.test.mts's 8 among them) and `edwin-typecheck`, both passed. The suite's workspace:
+  an immutable first change A (tag `v1`), B and C on it, D on A beside them, an empty working copy on C:
+  - `r` on C: the message and `[rebase source]` on C's line alone, still there after `g r`; `r` on D: the question
+    `Rebase ID third and its descendants onto ID side? (y or n)`, y; `rebase --source change_id(C) --onto
+    change_id(D)` after the runner's switches; C's parent D, @ on C, B childless, the work tree with d.txt and
+    c.txt, the mark gone. The whole graph (every commit with its parents, jj's own template) differs from before.
+  - `u`: `Undo jj's last operation, rebase commit HEX and descendants? (y or n)`, y; `undo`; the graph equal to
+    the one before the rebase, commit for commit, d.txt gone from the work tree, `Undid operation:` said. `C-r`:
+    `redo`, the graph equal to the rebased one. `C-r` again: jj's `Nothing to redo` said, the operation log
+    unchanged. `u` then: `Undo jj's redo of rebase commit HEX and descendants? (y or n)`, read by `op log` then
+    `op show`; n: `Nothing undone`. `u` with a file written while it asks, then y: refused, no undo run, the
+    file kept.
+  - r twice on B: `No rebase`, the mark gone; r on B, r on D, n: `Nothing rebased`; r on A: refused as
+    immutable, no mark; D onto its descendant C: jj's `Cannot rebase ... onto descendant ...` said, the
+    operation log unchanged; r in B's change view, the mark then on B's log line.
+  - `u` after a file is written outside jj: the snapshot question; n keeps the file; y: `undo`, the file gone,
+    `Undid operation: ... snapshot working copy` said.
+  - `u` three times in a workspace of its own (`new` empty, b.txt written, `new` again): `Undo jj's last
+    operation, new empty commit?`, y, jj's `Undid operation:` line naming `new empty commit`, b.txt kept; then
+    the snapshot question (the last operation is that undo; jj undo steps back over it to b.txt's snapshot), n:
+    `Nothing undone`, u again, y: `snapshot working copy` undone, b.txt gone; then `Undo jj's operation before
+    that too, new empty commit?`, y: undone, @ described `one`. Three `undo` calls; the op reads in order: `op
+    log`; `op log`, `op show`; `op log`, `op show`; `op log`; `op log`, `op show`; `op log`.
+  - `S` on k.txt in the change view of @ (changing m.txt and adding k.txt) with a changed buffer of m.txt that
+    holds the committed text: `Save m.txt before jj split? (y or n)`, y; m.txt saved, so @ changes k.txt alone,
+    and the pick is refused as every file, no split run, no child made.
+  - `S` on the heading of `q"\x.txt` in the change view of a change of five files (`a b.txt`, `q"\x.txt`,
+    `-lead.txt`, keep.txt and the rename c.txt -> moved.txt): `*jj-split: ws*` with the description and the two
+    `JJ:` lines; C-c C-c gives `split -r change_id(E) --message=the odd one\n -- root-file:"q\"\\x.txt"`; the
+    change keeps its id with that file and the new description, its child the other four with `fifth`.
+  - Visual from `-lead.txt`'s heading down to `a b.txt`'s: both, `root-file:"-lead.txt" root-file:"a b.txt"`;
+    the rename: `root-file:"moved.txt" root-file:"c.txt"`, and the part split off holds the rename whole;
+    keep.txt alone: every file, refused; keep.txt after jj restored it in that change: refused as not changed
+    now, no split run; S in the immutable first change: refused; `jj-split` in the log: `S splits from the
+    change view: ...`.
+  - Under `Ed.proc.replay`, jj-rebase, jj-split, jj-undo and jj-redo: `while the image replays`, no child
+    started.
+  - `nix flake check -L --keep-going`: run whole on d77bd9f, the package's first commit (the first run failed
+    only in `nix build .#edwin`'s tests/gui.rs, `Xvfb did not start`, the known flake, and so in edwin-daemon;
+    run again it passed whole, edwin-bench at 6.4% under its 10%). On b453f87 the reviewer ran it: every check
+    passed but edwin-bench, 11.0% with the other checks building beside it, 8.1% run alone (a load-sensitive
+    timing check; the package touches no interpreter code). On the commit after it (the save before split's
+    file check, u after C-r) it was started and not run to completion: edwin-vc (102 passed) and
+    edwin-typecheck were built alone and passed; the whole run is the reviewer's to report. docs/ is outside the
+    checks' sources.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

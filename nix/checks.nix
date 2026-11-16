@@ -265,7 +265,15 @@ in
   # with one description at once and with both through the buffer as one --message= (a message that starts like
   # -R and --config) and with a parent described by only a space through the buffer too, a merge, immutable
   # changes and a change on an immutable parent refused before anything is written, jj's refusal of the root
-  # said, a divergent change acted on by commit_id(); nothing under the replay.
+  # said, a divergent change acted on by commit_id(); nothing under the replay. jj's rewrites
+  # (test/vc-jj-rewrite.test.mts): r on a change and r on another rebasing it with its descendants (rebase --source
+  # --onto), the whole graph read back, u restoring it commit for commit and C-r the rebased one, the source mark
+  # kept across g r and cleared, n, an immutable source and a cycle jj refuses; u naming a snapshot of the working
+  # copy, and refusing when an operation came while it asked; u after u naming the operation jj undo goes back
+  # over each time, a snapshot among them, as jj then says it undid; S splitting a file at point and the files of a
+  # Visual selection off a change (names with a quote, a backslash, a space and a leading -, as root-file:
+  # filesets after --), a rename with both its names, every file, a stale file and an immutable change refused;
+  # nothing under the replay.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -280,7 +288,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts
         touch $out
       '';
 

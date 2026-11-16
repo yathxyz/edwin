@@ -1569,7 +1569,8 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; point, + reads more, g r reads it again.  Its change view folds, steps
 ;; and visits as git's revision buffer does; RET on a parent shows it.
 ;; In both, majutsu's Evil keys act on the change at point (the one the
-;; view shows): o new, c describe, e edit, x abandon, s squash.
+;; view shows): o new, c describe, e edit, x abandon, s squash, r rebase
+;; (on the source, then on the change to put it on), u undo and C-r redo.
 (evil-define-key 'motion 'jj-log-mode
   "RET" 'git-status-visit
   "+" 'jj-log-more
@@ -1581,8 +1582,15 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
               "c" 'jj-describe
               "e" 'jj-edit
               "x" 'jj-abandon
-              "s" 'jj-squash))
+              "s" 'jj-squash
+              "r" 'jj-rebase
+              "u" 'jj-undo
+              "C-r" 'jj-redo))
           '(jj-log-mode jj-change-mode))
+;; S, majutsu's too, splits the file at point off the change the view
+;; shows, and in Visual state the files selected: bound in Visual state too.
+(evil-define-key '(motion visual) 'jj-change-mode
+  "S" 'jj-split)
 (evil-define-key 'motion 'jj-change-mode
   "TAB" 'git-status-toggle
   "RET" 'git-status-visit

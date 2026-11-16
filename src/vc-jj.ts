@@ -12,7 +12,11 @@
    The everyday operations (docs/steps.md, "jj new, describe, edit, abandon and squash") act on the change at point
    in the log, or the one the change view shows, by that revset alone: o new, c describe, e edit, x abandon (after
    asking), s squash into the parent. A description is written in vc-message-mode and given on standard input, or
-   as one --message= argument; jj itself never opens an editor (JJ_EDITOR is false). */
+   as one --message= argument; jj itself never opens an editor (JJ_EDITOR is false).
+
+   The rewrites (docs/steps.md, "jj rebase, split by file, undo and redo"): r marks the change at point as the
+   source and r on another rebases it and its descendants onto that one; S in the change view splits the files at
+   point or selected off into a change of their own; u undoes jj's last operation after saying which, C-r redoes. */
 
 (function () {
 'use strict';
@@ -164,6 +168,7 @@ function drawLog(g: JjLog, r: VcRepo, d: VcDrawer) {
       const tail = `${shown(c.author)} ${c.date}`;
       text += ' '; add(tail, F.DIM);
     }
+    if (sources.get(r.root)?.rev === revOf(c.change, c.commit, c.divergent)) add('[rebase source]', F.REMOVED);
     d.line(c.commit, text, spans, { show: revOf(c.change, c.commit, c.divergent) });
   }
   if (g.more) { const t = `(more: + or RET here reads the next ${PAGE})`; d.line('more', t, [[0, t.length, F.DIM]], { more: true }); }
@@ -401,6 +406,155 @@ async function jjSquash(): Promise<false> {
   ], msg => operate(r, ['squash', '-r', rev, '--message=' + msg], 'squash'));
 }
 
+/* ---------- rewriting: rebase, split, undo and redo ---------- */
+/* The change r marked as a rebase's source, by workspace root: its revset and how it is named. */
+const sources = new Map<string, { rev: string; name: string }>();
+/* Draw R's open log again, its source mark as it is now. */
+function markLog(r: VcRepo) {
+  for (const b of E.buffers) { const v = b.gitView as { repo: VcRepo; ext?: VcViewKind } | undefined; if (v && v.ext === LOG_VIEW && v.repo.root === r.root) VcView.redraw(b); }
+}
+
+/* r: with no source marked in the workspace, mark the change at point; on the marked change again, unmark it; on
+   another, after asking, rebase the source and its descendants onto it (jj rebase -s SRC -o DEST). The mark goes
+   once a destination is picked, whatever comes of it. */
+async function jjRebase(): Promise<false> {
+  const { r, rev } = target();
+  const src = sources.get(r.root);
+  if (!src) {
+    const i = await readInfo(r, rev);
+    mutable(i, 'rebase');
+    sources.set(r.root, { rev, name: named(i) });
+    markLog(r);
+    Ed.message(`Rebasing ${named(i)} and its descendants: r on the change to put them on, r on it again to stop`);
+    return false;
+  }
+  sources.delete(r.root);
+  markLog(r);
+  if (src.rev === rev) { Ed.message('No rebase'); return false; }
+  let from: JjInfo;
+  try { from = await readInfo(r, src.rev); }
+  catch (e) { if (/No such change/.test(String(Ed.errorText(e)))) signal('user-error', `${src.name} is gone: nothing rebased`); throw e; }
+  mutable(from, 'rebase');
+  const onto = await readInfo(r, rev);
+  if (!await Ed.yesOrNo(`Rebase ${named(from)} and its descendants onto ${named(onto)}?`)) { Ed.message('Nothing rebased'); return false; }
+  await Vc.offerSave(r, 'jj rebase');
+  await operate(r, ['rebase', '--source', src.rev, '--onto', rev], 'rebase');
+  return false;
+}
+
+/* A file name as a jj fileset that names that file alone, from the workspace's root: root-file:"NAME", the name's
+   \ and " escaped. A name with U+FFFD (read lossily: not UTF-8) or a control character is never given back. */
+function fileset(p: string): string {
+  if (/[\u0000-\u001f\u007f\ufffd]/.test(p)) signal('user-error', `${shown(p)}: Edwin does not give this name back to jj; split it from a terminal`);
+  return `root-file:"${p.replace(/[\\"]/g, '\\$&')}"`;
+}
+/* The files the change REV changes now, each its name and, renamed or copied, the name it came from. */
+async function filesOf(r: VcRepo, rev: string): Promise<{ path: string; source: string }[]> {
+  const x = await Vc.run(r, ['log', '--no-graph', '--limit', '2', '-r', rev, '-T', '"[" ++ diff.files().map(|f| "[" ++ json(f.path()) ++ "," ++ json(f.source().path()) ++ "]").join(",") ++ "]\\n"'], READ);
+  if (x.code !== 0 || x.truncated || x.error || x.timedOut) failed(x, 'jj log');
+  const ls = x.out.split('\n').filter(l => l);
+  if (ls.length !== 1) signal('user-error', ls.length ? 'That change is divergent: it names more than one commit' : 'No such change');
+  let a: unknown;
+  try { a = JSON.parse(ls[0]); } catch (e) { return unreadable('jj log'); }
+  if (!Array.isArray(a) || !a.every(f => Array.isArray(f) && f.length === 2 && f.every(x => typeof x === 'string'))) return unreadable('jj log');
+  return (a as [string, string][]).map(([path, source]) => ({ path, source }));
+}
+
+/* S in the change view: split the files at point (in Visual state, those of the selected lines) off the change it
+   shows, into a change of their own before what is left: jj split -r REV --message=TEXT -- FILESETS, the files
+   checked against what the change changes now, its description written first in a buffer. A rename takes the name
+   it came from with it. */
+async function jjSplit(): Promise<false> {
+  refused();
+  const b = cur();
+  if (b.mode !== CHANGE_VIEW.mode) signal('user-error', 'S splits from the change view: RET on a change, then S on its files');
+  const { rev } = VcView.model(b, CHANGE_VIEW) as JjChangeModel, r = (b.gitView as { repo: VcRepo }).repo;
+  const picked = [...new Set(VcView.selected(b, CHANGE_VIEW).map(x => x.visit && x.visit.path).filter((p): p is string => !!p))];
+  if (!picked.length) signal('user-error', 'No file at point');
+  const i = await readInfo(r, rev);
+  mutable(i, 'split');
+  /* the save first: when the change shown is @, a saved file is snapshotted into it and its files change */
+  await Vc.offerSave(r, 'jj split');
+  const files = await filesOf(r, rev), sets: string[] = [];
+  for (const p of picked) {
+    const f = files.find(x => x.path === p);
+    if (!f) signal('user-error', `${shown(p)} is not changed in ${named(i)} now: g r, then pick again`);
+    sets.push(fileset(f!.path));
+    if (f!.source !== f!.path) sets.push(fileset(f!.source));
+  }
+  if (picked.length === files.length) signal('user-error', `Every file of ${named(i)} is picked: nothing would be left`);
+  const list = picked.map(shown).join(', ');
+  return withMessage(r, 'split', i.change, asText(i.description), [
+    `Splitting ${list} off ${i.short} in ${shown(r.root)}: the description of the change that takes them; the rest keeps ${i.short}'s.`,
+    'C-c C-c splits, C-c C-k aborts. Lines starting with JJ: are left out.',
+  ], msg => operate(r, ['split', '-r', rev, '--message=' + msg, '--', ...sets], 'split'));
+}
+
+/* The workspace of the jj log or change view the current buffer is. */
+function viewRepo(): VcRepo {
+  refused();
+  const b = cur();
+  if (b.mode !== LOG_VIEW.mode && b.mode !== CHANGE_VIEW.mode) signal('user-error', 'Not a jj log or change buffer');
+  return (b.gitView as { repo: VcRepo }).repo;
+}
+/* One operation's id and description, read by the jj op command ARGS (op log, op show) with the template. */
+async function readOp(r: VcRepo, args: string[]): Promise<{ id: string; description: string }> {
+  const what = 'jj ' + args.slice(0, 2).join(' ');
+  const x = await Vc.run(r, [...args, '--no-graph', '-T', record(['id', 'description'])], READ);
+  if (x.code !== 0 || x.truncated || x.error || x.timedOut) failed(x, what);
+  const ls = x.out.split('\n').filter(l => l), f = ls.length === 1 ? fieldsOf(ls[0], 'ss') : null;
+  if (!f || !/^[0-9a-f]{12,}$/.test(f[0] as string)) return unreadable(what);
+  return { id: f[0] as string, description: f[1] as string };
+}
+/* jj's last operation, read as every jj command reads, after a snapshot of the working copy. */
+const headOp = (r: VcRepo) => readOp(r, ['op', 'log', '--limit', '1']);
+/* The operation an undo or redo restored to, from its description `undo: restore to operation ID`, read back
+   and checked to be ID. */
+async function restoredTo(r: VcRepo, description: string, prefix: string): Promise<{ id: string; description: string }> {
+  const to = description.slice(prefix.length);
+  if (!/^[0-9a-f]{12,}$/.test(to)) return unreadable('jj op log');
+  const op = await readOp(r, ['op', 'show', to, '--no-op-diff']);
+  if (op.id !== to) return unreadable('jj op show');
+  return op;
+}
+/* The operation jj undo would undo, with jj's last operation's id, and how to name it. That is the last operation
+   (`last`), unless it is an undo itself: then jj undo goes further back and undoes the operation that undo
+   restored to, the one whose state the workspace is in (jj's cli/src/commands/undo.rs), so that one is read
+   (`again`). A redo is undone as any operation, but named by the operation it did again (`redo`): its own
+   description is only that operation's full id. */
+async function undoTarget(r: VcRepo): Promise<{ head: string; op: { id: string; description: string }; how: 'last' | 'again' | 'redo' }> {
+  const head = await headOp(r);
+  if (head.description.startsWith('undo: restore to operation ')) return { head: head.id, op: await restoredTo(r, head.description, 'undo: restore to operation '), how: 'again' };
+  if (head.description.startsWith('redo: restore to operation ')) return { head: head.id, op: await restoredTo(r, head.description, 'redo: restore to operation '), how: 'redo' };
+  return { head: head.id, op: head, how: 'last' };
+}
+/* u: say which operation jj undo undoes and ask; on y, undo it, unless another operation came meanwhile. When it
+   is a snapshot of the working copy (files written since jj last looked), the question says that undoing it puts
+   those files back as they were. After an undo, it names the operation before, the one jj undo goes back over;
+   after a redo, the operation redone. */
+async function jjUndo(): Promise<false> {
+  const r = viewRepo();
+  const { head, op, how } = await undoTarget(r), what = shown(op.description.split('\n')[0]).slice(0, 120);
+  const q = how === 'redo' ? `Undo jj's redo of ${what}?`
+    : op.description === 'snapshot working copy'
+    ? `Undo jj's snapshot of the working copy (the files written since jj last looked go back as they were)?`
+    : how === 'again' ? `Undo jj's operation before that too, ${what}?` : `Undo jj's last operation, ${what}?`;
+  if (!await Ed.yesOrNo(q)) { Ed.message('Nothing undone'); return false; }
+  if ((await headOp(r)).id !== head) signal('user-error', 'jj\'s operations changed while asking: nothing undone');
+  await operate(r, ['undo'], 'undo');
+  return false;
+}
+/* C-r: jj redo, the operation the last undo undid done again. */
+async function jjRedo(): Promise<false> {
+  await operate(viewRepo(), ['redo'], 'redo');
+  return false;
+}
+
+CMD('jj-rebase', '', '', 'Rebase in jj\'s log (r): on a change, mark it as the source; on another, after asking, rebase the source and its descendants onto it (jj rebase -s -o); on the source again, unmark it.', () => jjRebase());
+CMD('jj-split', '', '', 'Split the file at point, or the files selected, off the change the change view shows (S): jj split by file, the new change\'s description written in a buffer first.', () => jjSplit());
+CMD('jj-undo', '', '', 'Undo jj\'s last operation, after saying which (u): jj undo.', () => jjUndo());
+CMD('jj-redo', '', '', 'Redo the operation the last jj undo undid (C-r): jj redo.', () => jjRedo());
+
 CMD('jj-new', '', '', 'Start a new change on the change at point in the jj log, or the one the change view shows (o): jj new, after offering to save the workspace\'s changed buffers.', () => jjNew());
 CMD('jj-describe', '', '', 'Describe the change at point (c): its description, written in a buffer (C-c C-c describes, C-c C-k aborts), given to jj describe --stdin.', () => jjDescribe());
 CMD('jj-edit', '', '', 'Make the change at point the working copy (e): jj edit, after offering to save the workspace\'s changed buffers.', () => jjEdit());
@@ -410,7 +564,7 @@ CMD('jj-squash', '', '', 'Squash the change at point into its parent (s): jj squ
 CMD('jj-log', '', '','Show the log of the jj workspace the current buffer is in (SPC g J; SPC g g there): a change per line, from an explicit template; RET on one shows it with its diff, + reads more, g r reads it again.', () => log(workspace()));
 CMD('jj-log-more', '', '', 'Read the next changes of the jj log (+).', () => logMore(cur()));
 
-for (const n of ['jj-log', 'jj-log-more', 'jj-new', 'jj-describe', 'jj-edit', 'jj-abandon', 'jj-squash']) L.put(intern(n), 'evil-repeat', intern('abort'));
+for (const n of ['jj-log', 'jj-log-more', 'jj-new', 'jj-describe', 'jj-edit', 'jj-abandon', 'jj-squash', 'jj-rebase', 'jj-split', 'jj-undo', 'jj-redo']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['jj-log-mode'] = 'jj Log';
 Ed.MODE_NAMES['jj-change-mode'] = 'jj Change';
 
