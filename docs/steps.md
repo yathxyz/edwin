@@ -1108,7 +1108,7 @@ formatters and language servers will all call it, from TypeScript.
   once the child has ended. `input` is written to its standard input, which is then closed; without it, closed at
   once, so a program that reads its input never waits for the user.
 - **`Ed.proc.available()`** says whether a child can start here now; **`Ed.proc.envFor(dir)`** gives the
-  environment changes for a child run in DIR, none yet: proc-direnv makes it ask direnv. Callers pass it as
+  environment changes for a child run in DIR, what direnv exports there (proc-direnv, "direnv for child processes"). Callers pass it as
   `env`.
 - **Where.** The host gives the processes: `host.proc` (spawn, write, closeStdin, kill), which only the desktop
   program has (`native/js/host-native.ts` over the natives, in edwin and in edwinclient's frames). A web frame
@@ -1139,7 +1139,7 @@ formatters and language servers will all call it, from TypeScript.
     reply) is no longer refused when it goes on; with a prompt, the user is the one who answers it.
 - **Not in it:** no command uses Ed.proc yet (proc-compile and the rest do); no `list-processes` of the frame's
   children and no question on quitting with children running (proc-frame-scheme, declined; the program ends them,
-  proc-host-spawn); no direnv (proc-direnv); no pseudo-terminal. **The limit of the refusal:** a procedure the
+  proc-host-spawn); no pseudo-terminal. **The limit of the refusal:** a procedure the
   image defines and that runs later, outside the replay (a key binding, a hook, a timer), is not told from the
   user's own. Once a command that starts a process exists (proc-compile on), such a procedure that calls it with
   arguments of its own starts that process. Closing it needs procedures to carry where they came from, which the
@@ -1178,7 +1178,7 @@ recompile and kill. The `compile` desktop-only stub in scm/init.scm goes.
 - **The child.** Through `Ed.proc.spawn` only: argv `['sh', '-c', COMMAND]`, output and error merged so they keep
   their order, decoded lossily (a byte that is not UTF-8 shows as U+FFFD instead of killing the build), no byte
   bound (a long build is not killed for its output), standard input closed at once, `TERM=dumb`, and the changes
-  `Ed.proc.envFor` gives for the directory (none yet; proc-direnv). The image never reaches it (R16.15): `start`
+  `Ed.proc.envFor` gives for the directory (what direnv exports, proc-direnv). The image never reaches it (R16.15): `start`
   asks `Ed.proc.envFor` before its first wait, which refuses while the image replays, and only after that wait
   kills the old child and spawns the new one, with nothing waiting in between; a refused start leaves a running
   compilation alone. In a web frame and on edwind's Node host there is no process, and `compile` and
@@ -1739,6 +1739,82 @@ reference's file or URL to the desktop's own application, which Edwin had only a
   check --keep-going` (all 37 checks passed; a first run under load had failed in the package build at gui.rs
   `the_close_button_asks_about_changes` with `Xvfb did not start`, and passed rerun at a quiet time, then again
   on 2026-11-16 on emacs-to-edwin 3a0ea7b).
+
+## direnv for child processes (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-direnv`, on proc-shell-command): `Ed.proc.envFor(dir)`
+asks direnv for the directory's environment, kept per .envrc modification time, for compile, grep, formatters and
+language servers. Risk named: direnv runs project code only where the owner already allowed it; Edwin never calls
+`direnv allow`.
+
+- **`Ed.proc.envFor(dir)`** (src/proc.ts) finds the nearest `.envrc` from DIR up through the host's files
+  (`host.files.stamp`) and runs `direnv export json` there, through `Ed.proc.spawn`, so the image's replay gate and
+  the web frame's and edwind's refusals apply as to any child; it refuses at once, before any wait, as before.
+  What direnv prints on exit 0 is the change set (a value of `null` unsets the variable), which callers pass as
+  `env`. compile, grep and the shell commands already did (proc-compile, proc-shell-command), so they now run in
+  the project's direnv environment with no change of their own.
+- **The plain environment** (`{}`) when there is no `.envrc` from DIR up (direnv is not run at all), when direnv
+  is not on PATH or DIR is gone (nothing said; the caller's own child says a missing directory), and when direnv
+  fails: a blocked `.envrc` exits 1 and still prints its own `DIRENV_` variables, none of which is used, and the
+  echo area gets direnv's error line without its colours, ``direnv: error /p/.envrc is blocked. Run `direnv
+  allow` to approve its content; the plain environment is used``. Output that is not a JSON object of strings and
+  nulls, and a direnv that takes over 120 s (killed), say so in the same way. Only direnv's own `direnv: error`
+  line is ever shown: a failure without one says `direnv ended with code N`, never another line of the error
+  output, which is the `.envrc`'s own and may print a token (the echo area is logged in *Messages*). After a
+  second a load still going says `direnv: loading /p/.envrc`, and the note is cleared when the load ends unless
+  something else was said since.
+- **C-g stops it.** A command awaiting a promise holds every key (pool.ts), so compile, grep and the shell
+  commands would otherwise freeze the frame for as long as direnv takes, up to the 120 s. The wait is
+  `EdPool.interruptible`: C-g kills direnv and the command quits (`Quit`), its own child never started. Nothing
+  is kept, and the stopped run is forgotten at once, so an ask made before the killed direnv has ended starts a
+  direnv of its own. Every envFor wait is interruptible, so C-g quits every caller sharing a run; a stopped run
+  never resolves to the plain environment (it is a process-error for any caller still waiting).
+- **Kept** per directory with the `.envrc`'s stamp (inode, modification time, size), in this frame's memory only:
+  never storage, the image, edwind or a log, since an `.envrc` often exports tokens, and each caller gets its own
+  copy. Two asks for one directory and `.envrc` at once run direnv once. Only an allowed `.envrc`'s result is kept, so a
+  blocked one is asked again each time and works as soon as the owner runs `direnv allow` in a shell, without
+  touching the file.
+- **Choices**, each reversible:
+  - direnv's own `DIRENV_DIR`, `DIRENV_FILE`, `DIRENV_DIFF` and `DIRENV_WATCHES` are passed on, as a shell with
+    the direnv hook would have them, so a child that runs direnv itself sees the environment as loaded.
+  - The key is the `.envrc` alone, as the package says: a file it watches (`watch_file`, a flake.lock under
+    nix-direnv) changing, or `direnv deny`, takes effect when the `.envrc` changes or in a new frame. A host
+    whose files give no stamp asks direnv every time.
+  - direnv from PATH (the frame's: the program's own, the unit's for frames edwind's unit starts); no pinned
+    path. Timeout 120 s, long enough for nix-direnv building a shell the first time.
+- **Not in it:** formatters and language servers (lang-format, lsp-*) do not exist yet; they get the
+  environment by calling `Ed.proc.envFor` as compile does. No `.env` files (direnv's `load_dotenv`), no `direnv
+  allow`, `deny` or `reload` command, no mode-line indicator. With no `.envrc` above DIR direnv is not asked, so
+  a frame started from a shell that had direnv loaded for another project keeps that project's environment for
+  its children there.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-proc` (now with direnv on the suite's PATH), 13 passed,
+  against a stand-in direnv first on PATH that keeps direnv 2.38's protocol (its blocked output measured on
+  ex44 with a throwaway HOME): an allowed `.envrc` puts its bin first on PATH and a program only there runs, by
+  `Ed.proc.run` with the environment and through `compile`, and not without it; no `.envrc` up from a directory
+  runs no direnv; every call is exactly `direnv export json` in DIR; two asks at once run direnv once; a caller
+  changing its copy changes nothing kept; a kept directory runs no direnv again until its `.envrc` is rewritten
+  with a later time; a load past a second shows the loading note and clears it when done, a quick one says
+  nothing; one past the timeout (the suite shortens the 120 s envFor asks to 300 ms in its stand-in host) is said,
+  killed and not kept; C-g during a 60 s direnv rejects envFor with quit and kills it, an ask made at once after
+  starts a direnv of its own, and through M-! in a
+  buffer under the `.envrc` the command ends with `Quit`, its shell never started, and the next M-! loads the
+  environment and runs a program only its PATH has (these three cases failed against the first version of this
+  package, the C-g one by waiting the whole 60 s); a failing `.envrc` whose error output has no `direnv: error`
+  line shows `direnv ended with code 1` and its output reaches neither the echo area nor *Messages*; a blocked
+  `.envrc` gives `{}` (not its `DIRENV_` variables), says direnv's error, compile's
+  program is not found, and it is asked again and loads once a marker says it is allowed; unreadable output is
+  said; no direnv on PATH gives `{}`; an empty directory is refused, and so is envFor in `Ed.proc.replay`, with
+  nothing spawned. And against the real direnv with a throwaway HOME and XDG directories: a blocked `.envrc`
+  that would touch a file gives `{}` and the error line, and the file is not there. A `null` (unset) reaches the
+  desktop program's spawn as a removal: natives.rs maps null to None and native/src/proc.rs calls `env_remove`
+  (read, not run in the program). `edit-grep` failed at first, 13 of 14: its count of stamps per grep ("each
+  file once", 3000) now also met the `.envrc` look from the search's directory up, one stamp per level; the count
+  leaves out `.envrc` stamps and it passed, 14. Also passed: `edwin-typecheck`, `edwin-compile` (39),
+  `edwin-shell-command` (8), `edwin-headless` (21), `edwin-native` (31), `edit-lockdown` (6), `edit-security`
+  (21), `nix flake check --keep-going` and `nix build .#edwin` (unit 22, `tests/gui.rs` 5 with 1 ignored,
+  `tests/terminal.rs` 35). All of these were run again after the C-g fix, with the same counts; in that
+  `nix flake check --keep-going` only `edwin-bench` failed (the shadow stack's cost past its 10% limit, a timing
+  under load on ex44, in the Scheme evaluator this package does not touch), and run again alone it passed (7.8%).
 
 ## The commit message buffer (done)
 

@@ -148,7 +148,8 @@ test('stamping the files of a grep as its rows come does not stall the frame', a
   }
   let stalled = 0, stamps = 0, last = Date.now();
   const tick = setInterval(() => { const now = Date.now(); stalled = Math.max(stalled, now - last); last = now; }, 5);
-  stampFor = (p: string) => { stamps++; return realStamp(p); };
+  /* envFor's look for an .envrc above the search stamps too: only the rows' files count */
+  stampFor = (p: string) => { if (!p.endsWith('/.envrc')) stamps++; return realStamp(p); };
   try { await grep(); } finally { clearInterval(tick); stampFor = null; }
   assert.equal(stamps, 3000, 'each file once');
   assert.equal(gbuf().grepRows.stamps.size, 3000);

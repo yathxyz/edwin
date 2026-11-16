@@ -1726,7 +1726,7 @@ interface EdProcApi {
   available(): boolean;
   spawn(argv: string[], opts?: EdProcOptions): EdProc;
   run(argv: string[], opts?: EdProcSpawnOptions & { input?: string }): Promise<EdProcResult>;
-  /* the environment changes a child run in DIR gets (none yet; proc-direnv asks direnv) */
+  /* the environment changes a child run in DIR gets: what direnv exports for an allowed .envrc above it */
   envFor(dir: string): Promise<Record<string, string | null>>;
   /* run FN as the image's replay (sync.ts): no child starts in it, nor before the next turn of the loop */
   replay<T>(fn: () => T): T;

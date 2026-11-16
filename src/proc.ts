@@ -79,11 +79,102 @@ async function run(argv: string[], opts: EdProcSpawnOptions & { input?: string }
   return { ...x, out: out.join(''), err: err.join('') };
 }
 
-/* The environment changes a child started in DIR gets: none yet (proc-direnv will ask direnv). */
-async function envFor(dir: string): Promise<Record<string, string | null>> {
+/* direnv (docs/steps.md, "direnv for child processes"): the environment of a directory under an .envrc the user
+   has allowed. Only `direnv export json` is ever run, so direnv runs project code only where the user allowed it
+   in a shell; Edwin never allows, denies or edits one. What it gives is kept in this frame's memory alone, never
+   in storage, the image or a log: an .envrc often exports tokens. */
+const DIRENV_ARGV = ['direnv', 'export', 'json'];
+/* How long direnv may take (a nix-direnv shell built for the first time is slow), and when to say it loads. */
+const DIRENV_TIMEOUT = 120_000, DIRENV_SLOW = 1000;
+type Env = Record<string, string | null>;
+/* By directory: its .envrc, the .envrc's stamp and what direnv gave. Only what an allowed .envrc gave is kept,
+   so a blocked one is asked again, and runs once the user has allowed it. */
+const direnvKept = new Map<string, { file: string; stamp: string; env: Env }>();
+/* The direnv running for a directory and .envrc: its result, and C-g's way to stop it. */
+const direnvAsked = new Map<string, { result: Promise<Env>; stop: () => void }>();
+const parentDir = (d: string) => { const i = d.lastIndexOf('/'); return i <= 0 ? '/' : d.slice(0, i); };
+/* The nearest .envrc from DIR up, with its stamp; null when there is none; undefined when the host cannot tell. */
+function envrcOf(dir: string): { file: string; stamp: string } | null | undefined {
+  const files = Ed.host.files;
+  if (!files || !files.stamp) return undefined;
+  for (let d = dir.replace(/\/+$/, '') || '/'; ; d = parentDir(d)) {
+    const file = (d === '/' ? '' : d) + '/.envrc', stamp = files.stamp(file);
+    if (stamp) return { file, stamp };
+    if (d === '/') return null;
+  }
+}
+/* direnv's error: the first line it marks as one, without its colours. Never another line of its error output:
+   that is the .envrc's own, which may print a secret, and the echo area goes to *Messages*. */
+function direnvError(err: string, code: number | null): string {
+  const lines = err.replace(/\x1b\[[0-9;]*m/g, '').split('\n').map(l => l.trim());
+  return lines.find(l => l.startsWith('direnv: error')) || `direnv ended with ${code === null ? 'a signal' : 'code ' + code}`;
+}
+/* direnv started in DIR: what it exports there, or null for the plain environment (said in the echo area when
+   direnv says why); STOP kills it, and then the result is a process-error, never the plain environment. Spawned
+   before this returns, so a refusal (the image's replay) is thrown here, before any wait. */
+function askDirenv(dir: string, file: string | null): { result: Promise<Env | null>; stop: () => void } {
+  const out: string[] = [], err: string[] = [];
+  let p: EdProc;
+  try { p = spawn(DIRENV_ARGV, { cwd: dir, timeout: DIRENV_TIMEOUT, maxBytes: RUN_MAX_BYTES, onOut: s => { out.push(s); }, onErr: s => { err.push(s); } }); }
+  catch (e) {
+    /* direnv not on PATH, or DIR gone (the caller's own child then says so): the plain environment */
+    if (refusal()) throw e;
+    return { result: Promise.resolve(null), stop: () => {} };
+  }
+  try { p.closeStdin(); } catch (e) { /* ended already: its exit says how */ }
+  let stopped = false;
+  const loading = `direnv: loading ${file || dir}`;
+  const slow = setTimeout(() => Ed.message(loading), DIRENV_SLOW);
+  const result = p.exit.then(x => {
+    clearTimeout(slow);
+    /* the loading note goes once direnv is done, unless something was said after it */
+    if (Ed.E.echo === loading) Ed.message('');
+    if (stopped) signal('process-error', 'direnv was stopped');
+    const plain = (why: string) => { Ed.message(`${why}; the plain environment is used`); return null; };
+    if (x.timedOut) return plain(`direnv took longer than ${DIRENV_TIMEOUT / 1000} s for ${file || dir}`);
+    /* A blocked .envrc ends with 1 and still prints direnv's own DIRENV_ variables: none of it is used. */
+    if (x.code !== 0 || x.truncated || x.error) return plain(direnvError(err.join(''), x.code));
+    let env: unknown;
+    const text = out.join('');
+    try { env = text.trim() ? JSON.parse(text) : {}; } catch { env = null; }
+    if (!env || typeof env !== 'object' || Array.isArray(env) || Object.values(env).some(v => v !== null && typeof v !== 'string')) return plain('direnv gave no environment Edwin can read');
+    return env as Env;
+  });
+  return { result, stop: () => { stopped = true; p.kill('KILL'); } };
+}
+
+/* The environment changes a child started in DIR gets: what direnv exports for the .envrc above DIR; none where
+   there is none, direnv is not on PATH or the .envrc is blocked. Refused at once where a child is (the image's
+   replay above all). Kept per directory until its .envrc changes. A command awaiting it holds every key (pool.ts),
+   so the wait is EdPool.interruptible: C-g kills direnv and quits, rather than the frame waiting up to the timeout
+   for a slow nix-direnv. */
+async function envFor(dir: string): Promise<Env> {
   allowed();
   if (typeof dir !== 'string' || !dir) signal('process-error', 'envFor needs a directory');
-  return {};
+  const files = Ed.host.files;
+  if (files) dir = files.resolve(dir);
+  const at = envrcOf(dir);
+  if (at === null) return {};
+  const kept = at && direnvKept.get(dir);
+  if (kept && kept.file === at.file && kept.stamp === at.stamp) return { ...kept.env };
+  /* Two asks for the same directory and .envrc at once run direnv once. */
+  const key = at ? `${dir}\0${at.file}\0${at.stamp}` : dir;
+  let ask = direnvAsked.get(key);
+  if (!ask) {
+    const { result, stop } = askDirenv(dir, at ? at.file : null);
+    /* A stopped run is forgotten at once: an ask made before it has ended starts direnv again. */
+    const forget = () => { if (direnvAsked.get(key) === made) direnvAsked.delete(key); };
+    const made = {
+      result: result.then(env => {
+        if (env && at) direnvKept.set(dir, { ...at, env });
+        return env || {};
+      }).finally(forget),
+      stop: () => { forget(); stop(); },
+    };
+    direnvAsked.set(key, ask = made);
+  }
+  const wait = Object.assign(ask.result.then(env => ({ ...env })), { cancel: ask.stop });
+  return EdPool.interruptible ? EdPool.interruptible(wait) : wait;
 }
 
 /* FN runs as the image's replay: no child starts in it, nor until the loop's next turn, by which time every

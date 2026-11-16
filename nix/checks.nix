@@ -191,8 +191,12 @@ in
 
   # Ed.proc (src/proc.ts): child processes for the core's TypeScript in a served frame against a real edwind, with
   # the desktop program's host.proc stood in by test/fake-proc.mts (coreutils from the build's PATH): run's output
-  # and status, spawn, and the refusals in a web frame, with no host.proc and while the image replays (R16.15).
-  edwin-proc = suite "proc" [ "proc.test.mts" ];
+  # and status, spawn, and the refusals in a web frame, with no host.proc and while the image replays (R16.15);
+  # envFor with a stand-in direnv (an allowed .envrc's PATH reaching a child and compile, kept until the .envrc
+  # changes, a blocked one said and the plain environment used, no direnv on PATH, the loading note, the timeout,
+  # C-g killing a slow direnv through M-!, a failing .envrc's own output never shown) and with the real one, whose
+  # blocked .envrc does not run.
+  edwin-proc = suiteWith [ pkgs.direnv ] "proc" [ "proc.test.mts" ];
 
   # compile (src/compile.ts) in the headless runtime, with host.proc stood in by test/fake-proc.mts: output
   # streamed into *compilation*, the status line on exit, recompile with the same command and directory,
