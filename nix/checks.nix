@@ -217,8 +217,9 @@ in
   ];
 
   # Directories (server/fs.mts, src/dired.ts): the fs-* commands and their refusals, dired and find-file's path
-  # reading in a served Edwin against a real edwind, and dired on the desktop program's own files (the natives
-  # behind them are tested by the package's cargo tests).
+  # reading in a served Edwin against a real edwind, and dired on the desktop program's own files, its listings
+  # following their directories through global-auto-revert-mode (the natives behind them are tested by the
+  # package's cargo tests).
   edit-dired = suite "dired" [
     "fs.test.mts"
     "dired.test.mts"

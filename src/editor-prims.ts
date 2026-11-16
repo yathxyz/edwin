@@ -1158,10 +1158,11 @@ function underTemp(file: string) {
   const t = host.files!.truename(file);
   return (host.files!.temp || []).some(d => t === d || t.startsWith(d.replace(/\/$/, '') + '/'));
 }
-function diskStamp(file: string) {
-  const f = host.files;
-  return !f || !f.stamp || host.private || underTemp(file) ? undefined : f.stamp(file);
-}
+/* Auto-revert looks at PATH, a file or a directory: the desktop program's, outside a --private session and the
+   temporary directory. */
+function looksAt(path: string) { const f = host.files; return !!f && !!f.stamp && !host.private && !underTemp(path); }
+Ed.looksAt = looksAt;
+function diskStamp(file: string) { return looksAt(file) ? host.files!.stamp!(file) : undefined; }
 Ed.diskStamp = diskStamp;
 /* A reader takes the stamp before it reads (STAMP): a write in between then leaves the buffer an older stamp
    than its text, and the next look reads the file again, rather than a newer stamp on older text. */
@@ -1186,6 +1187,7 @@ function armPoll() {
   const s = L.get('auto-revert-interval');
   poll = setInterval(autoRevert, Math.max(1, typeof s === 'number' ? s : 5) * 1000);
 }
+Ed.armPoll = armPoll;
 function disarmPoll() { if (poll !== null) { clearInterval(poll); poll = null; } }
 /* One look at every buffer with a stamp; the number of buffers read again. The revert is an undo step of its
    own, so the look is skipped while one is still open: while a command runs (an operator waiting for its
@@ -1197,6 +1199,9 @@ function autoRevert() {
   if (E.running || E.mini) return 0;
   let looked = false, n = 0;
   for (const b of E.buffers) {
+    /* A buffer that is not a file's and follows by a look of its own (a dired listing): true when it is read
+       again. */
+    if (b.autoRevert) { looked = true; if (b.autoRevert(b)) n++; continue; }
     if (!b.disk) continue;
     looked = true;
     if (b.modified || b.pendingUndo || (Ed.hooks.inSession && Ed.hooks.inSession(b))) continue;
@@ -1222,8 +1227,8 @@ function autoRevert() {
 }
 defineMinorMode({ name: 'global-auto-revert-mode', global: true, pretty: 'Global Auto-Revert mode',
   doc: 'Toggle global-auto-revert-mode: unmodified buffers follow their files when something else changes them.',
-  body: (on: boolean) => { if (!on) disarmPoll(); else if (E.buffers.some(b => b.disk)) armPoll(); } });
-D('auto-revert-buffers', '', 'Look at the visited files once now, as global-auto-revert-mode does every auto-revert-interval seconds. Return the number of buffers read again (0 while a command runs, M-: included).', () => autoRevert());
+  body: (on: boolean) => { if (!on) disarmPoll(); else if (E.buffers.some(b => b.disk || b.autoRevert)) armPoll(); } });
+D('auto-revert-buffers', '', 'Look at the visited files and the listed directories once now, as global-auto-revert-mode does every auto-revert-interval seconds. Return the number of buffers read again (0 while a command runs, M-: included).', () => autoRevert());
 /* Saving over a superseded file: writeTo refuses and queues the question, which runs as a command of its own
    (the minibuffer is a recursive edit there): y saves this buffer over that version of the file. */
 const supersessions: EdBuffer[] = [];

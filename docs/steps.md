@@ -1380,7 +1380,7 @@ temporary directory are never polled.
   (`ask-user-about-supersession-threat` from the lock check) and again on save; Edwin asks on save only. Emacs
   compares the modification time alone; Edwin the inode, time and size. No `auto-revert-mode` per buffer, no
   `auto-revert-tail-mode`, no file notifications (a poll only), no `auto-revert-verbose` switch.
-- **Not in it:** dired following its directory (`proc-dired-auto-revert`); `edwin --private` itself
+- **Not in it:** dired following its directory (since "Dired follows its directory"); `edwin --private` itself
   (`ui-sensitive-session`).
 - **Checked by** `nix build .#checks.x86_64-linux.edwin-autorevert` (new, test/autorevert.test.mts: a real
   directory, the Node host with host.files as host-native.ts shapes it, its stamps and reads counted): a file
@@ -1430,6 +1430,56 @@ set on its PATH (git, rg, direnv, formatters, language servers), as the Emacs un
   output, not its `out`), in that order, keeps every directory of the default PATH, with coreutils after them;
   the desktop without it has neither. The daemon-models suite passed again (5 of 5). With the `path` line taken
   out of the module, the check fails at evaluation. `nix build .#checks.x86_64-linux.edwin-module` passed too.
+
+## Dired follows its directory (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-dired-auto-revert`): dired buffers refresh when the
+directory changes.
+
+- **The look** is global-auto-revert-mode's (src/editor-prims.ts), not a timer of its own: a buffer that is not a
+  file's can carry `b.autoRevert`, a look of its own the mode runs with the visited files every
+  `auto-revert-interval` seconds (and `(auto-revert-buffers)` at once), counted among the buffers read again. The
+  mode's rules hold for it: no look while a command runs or the minibuffer is open (a `D` waiting for its y, an
+  `R` for its destination), the poll armed by the first buffer that needs it and never at boot, off with the mode.
+  `Ed.armPoll` is exported for dired; `Ed.looksAt(path)` is the one test of what the mode may look at, which
+  `Ed.diskStamp` now uses too.
+- **Reading the listing again** (src/dired.ts `follow`): when the directory's names differ from the listing's, it
+  is read again as `g r` does: the marks and flags of the names still there stay on them, a name gone takes its
+  mark with it, and point stays on its entry. A listing not shown in any window follows too. Nothing is said in
+  the echo area.
+- **Fixed on the way:** reading a listing again (`g r`, after D, R, C, +, and now the look) kept point on the
+  line it was on rather than its entry, since the name was looked up after the new entries were in; it is now
+  read first, so a name made above point no longer moves point onto the entry before it.
+- **Polling cost.** A quiet directory costs one lstat a look. The names are read (one readdir, sorted) only when
+  the directory's modification time moved since the last look, or while that time is within 2 s of the look that
+  read them; a listing is read again only when the names differ. A look that reads 10000 names took 16 ms in the
+  Node test; a listing cut at 10000 names is not followed at all.
+- **Choices made where the package left one open:**
+  - The names tell a change, not the directory's time alone: the kernel moves that time in coarse ticks, so a
+    name made in the tick of a read would leave it as it was and the change unseen. The time only spares the
+    readdir once it is 2 s older than the read. The listing keeps the names of the very readdir it was drawn
+    from, so a name made between that read and a look is caught by the look.
+  - Only the desktop program's own directories (the local backend over `host.files.tree`) follow. edwind's
+    listings (served mode, and the notes directory when attached) do not: that would be an `fs-list` round trip
+    every interval. A --private session's (`host.private`) and those under the temporary directory do not, as
+    for files. A directory gone from disk leaves its listing as it was.
+  - A listing cut at 10000 names (MAX_ENTRIES) does not follow: it already says it is partial, and its readdir
+    is the cost that grows.
+  - Silent: no `Reverting buffer` message.
+- **Differences from Emacs:** Emacs (global-auto-revert-non-file-buffers with dired-buffer-stale-p) compares the
+  directory's modification time; Edwin the names. So, as in Emacs, a listed file whose size or time changed while
+  its name stayed is not redrawn until `g r` or a change of names.
+- **Not in it:** following edwind's directories; file notifications (still a poll).
+- **Checked by** `nix build .#checks.x86_64-linux.edit-dired` (test/dired-local.test.mts, four new tests: a file
+  made and one removed by another program show at the next look with the `*` and `D` marks kept on their names
+  and point on its entry, which moved down a line; no change counts 0, a write to a listed file's content is no
+  change; a listing in no window follows; a directory gone leaves its listing; under the temporary directory and
+  under `host.private` no listing is followed; with the mode off nothing follows, on again it does; a directory
+  whose time is a minute old costs no readdir over two looks, a name made then is seen, and one made with the
+  directory's time put back (the same tick) is still seen; a listing of 10000 names follows, the 10001st name is
+  seen and cuts it, and the cut listing then follows no more), with `edwin-autorevert`, `edwin-typecheck`,
+  `edwin-headless`, and, as editor-prims.ts reaches ex44's public edwind, `edit-conformance`, `edit-lockdown` and
+  `edit-security`; and `nix build .#edwin`.
 
 ## Notes into brain: the projector (done)
 

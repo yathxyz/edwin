@@ -854,6 +854,9 @@ interface EdBuffer extends SchemeForeign {
   disk?: { stamp: string | null; ok?: string; seen?: string };
   /* a directory listing (dired.ts) */
   dired?: unknown;
+  /* global-auto-revert-mode's look at a buffer that is not a file's (a dired listing): true when it reads B
+     again (editor-prims.ts) */
+  autoRevert?: (b: EdBuffer) => boolean;
   _cycle?: unknown;
   _gcycle?: unknown;
   _olx?: unknown;
@@ -1623,6 +1626,10 @@ interface EdApi {
   noteDisk(b: EdBuffer, stamp?: string | null): void;
   /* FILE's stamp, or undefined for a file auto-revert never looks at */
   diskStamp(file: string): string | null | undefined;
+  /* auto-revert looks at PATH: the desktop program's, not --private, not under the temporary directory */
+  looksAt(path: string): boolean;
+  /* start global-auto-revert-mode's looks, when the mode is on and they are not running */
+  armPoll(): void;
   /* ask PROMPT with (y or n); true for y */
   yesOrNo(prompt: string): Promise<boolean>;
   servedName(id: string): string;

@@ -16,14 +16,19 @@ const { lineNoB, lineStartB } = Ed;
 
 /* One name of a directory, as fs-list gives it: dir is set on a link that leads to a directory. */
 interface DiredEntry extends EdFileEntry { name: string }
-interface DiredListing { dir: string; home: string; entries: DiredEntry[]; truncated?: boolean }
+/* version: the directory's names as the listing read them, where the listing follows its directory. */
+interface DiredListing { dir: string; home: string; entries: DiredEntry[]; truncated?: boolean; version?: string }
 /* Where the files are. A path is absolute or starts with ~/. resolve says whether PATH is a directory and the
    name Ed.visit takes for it (Ed.servedName of edwind's id); a backend that need not ask answers at once. remove answers false for a
    directory that is not empty and was left alone; rename and copy put the source inside DST when DST is a
-   directory. */
+   directory. version gives a directory's names as a listing's version, to tell that it changed, and mtime its
+   modification time in milliseconds (null: gone): only a backend whose listings follow their directories has
+   them. */
 interface DiredPlace { dir: boolean; name: string }
 interface DiredFs {
   list(dir: string | null): Promise<DiredListing>;
+  version?(dir: string): string;
+  mtime?(dir: string): number | null;
   resolve(path: string): DiredPlace | Promise<DiredPlace>;
   remove(path: string, recursive: boolean): Promise<boolean>;
   rename(src: string, dst: string): Promise<unknown>;
@@ -32,7 +37,8 @@ interface DiredFs {
 }
 /* b.dired: the directory a listing shows (its real path), its entries in the order of the lines, and the marks
    by name ('*' marked, 'D' flagged for deletion). */
-interface Dired { fs: DiredFs; dir: string; home: string; entries: DiredEntry[]; marks: Map<string, string>; truncated: boolean }
+/* version, mtime and quiet: what the last look saw (follow). */
+interface Dired { fs: DiredFs; dir: string; home: string; entries: DiredEntry[]; marks: Map<string, string>; truncated: boolean; version?: string; mtime?: number; quiet?: boolean }
 
 const isDirEntry = (e: EdFileEntry) => e.kind === 'dir' || !!e.dir;
 const join = (dir: string, name: string) => (dir.endsWith('/') ? dir : dir + '/') + name;
@@ -74,13 +80,18 @@ function localFs(f: EdHostFiles, t: EdHostTree): DiredFs {
   };
   /* A path with its directory's links resolved and its last name as written. */
   const real = (p: string) => join(f.truename(parentOf(p)), baseOf(p));
+  /* The names alone: a directory's time moves in the kernel's coarse ticks, so a name made in the tick of the
+     listing would leave it as it was. */
+  const version = (names: string[]) => names.slice().sort().join('\0');
   return {
     async list(dir) {
       const d = f.truename(dir === null ? f.cwd : dir), names = io(() => t.names(d)), truncated = names.length > MAX_ENTRIES;
       const entries: DiredEntry[] = [];
       for (const name of truncated ? names.slice(0, MAX_ENTRIES) : names) { const e = t.entry(join(d, name)); if (e) entries.push({ name, ...e }); }
-      return { dir: d, home, entries, truncated };
+      return { dir: d, home, entries, truncated, version: version(names) };
     },
+    version: dir => version(t.names(dir)),
+    mtime: dir => { const e = t.entry(dir); return e ? e.mtime : null; },
     resolve(p) { const e = t.entry(f.resolve(p)); return { dir: !!e && isDirEntry(e), name: p }; },
     async remove(path, recursive) {
       const p = f.resolve(path), e = need(p);
@@ -167,11 +178,14 @@ function draw(b: EdBuffer, at?: string | null) {
   const i = at === null ? -1 : d.entries.findIndex(e => e.name === at);
   goLine(b, i >= 0 ? i + 2 : line);
 }
+/* Take in listing L, keeping the marks of the names still there. Returns the name point was on, read before
+   the entries change under it. */
 function fill(b: EdBuffer, l: DiredListing) {
-  const d = b.dired as Dired;
-  d.dir = l.dir; d.home = l.home; d.entries = l.entries.slice().sort(byName); d.truncated = !!l.truncated;
+  const d = b.dired as Dired, e = entryAt(b), here = e ? e.name : null;
+  d.dir = l.dir; d.home = l.home; d.entries = l.entries.slice().sort(byName); d.truncated = !!l.truncated; d.version = l.version;
   const names = new Set(d.entries.map(e => e.name));
   for (const n of [...d.marks.keys()]) if (!names.has(n)) d.marks.delete(n);
+  return here;
 }
 /* Show the directory PATH (null: the backend's own, the notes) in the selected window, point on AT. One buffer
    per directory, named by its path. */
@@ -184,11 +198,35 @@ async function show(path: string | null, at?: string | null): Promise<EdBuffer> 
     b.mode = 'dired-mode'; b.readOnly = true; b.evilState = 'motion';
     b.dired = { fs, dir: l.dir, home: l.home, entries: [], marks: new Map(), truncated: false } as Dired;
   }
-  fill(b, l); draw(b, at);
+  const here = fill(b, l); draw(b, at === undefined ? here : at);
+  if (fs.version && l.version !== undefined && Ed.looksAt(l.dir)) { b.autoRevert = follow; Ed.armPoll(); }
   Ed.setWindowBuffer(b); Ed.scheduleRender();
   return b;
 }
-async function refresh(b: EdBuffer, at?: string | null) { const d = diredOf(b); fill(b, await d.fs.list(d.dir)); draw(b, at); }
+async function refresh(b: EdBuffer, at?: string | null) { const d = diredOf(b), here = fill(b, await d.fs.list(d.dir)); draw(b, at === undefined ? here : at); }
+/* global-auto-revert-mode's look at listing B (editor-prims.ts): when the directory's names are no longer the
+   listing's, it is read again; the marks of the names still there stay, and point stays on its entry. Only the
+   desktop program's own directories, and not under a --private session or the temporary directory. A listing cut
+   at MAX_ENTRIES is not followed. The names are read only when the directory's time moved since the last look,
+   or while it is within QUIET_MS of the look that read them: the time moves in the kernel's coarse ticks, so a
+   name made in the tick of that read would leave it as it was. A quiet directory costs one lstat a look. */
+const QUIET_MS = 2000;
+function follow(b: EdBuffer) {
+  const d = b.dired as Dired;
+  if (d.truncated) return false;
+  let now: string, m: number | null;
+  try {
+    m = d.fs.mtime!(d.dir);
+    if (m === null || (m === d.mtime && d.quiet)) return false;
+    const at = Date.now();
+    now = d.fs.version!(d.dir);
+    d.mtime = m; d.quiet = at - m > QUIET_MS;
+  } catch (e) { return false; }
+  if (now === d.version) return false;
+  d.version = now;
+  refresh(b).then(() => Ed.scheduleRender(), () => {});
+  return true;
+}
 /* From listing B to the directory PATH: B goes away unless another window shows it, so walking a tree leaves
    one buffer behind, not one per step. */
 async function enter(b: EdBuffer, path: string, at?: string | null) {
