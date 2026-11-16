@@ -136,6 +136,10 @@ test('a self-recursive global procedure ships by value as by name; a closure ove
   assert.equal(await ed.eval('(thread-run pcount)'), 42);
   assert.equal(await ed.eval('(thread-run (lambda () (pcount)))'), 42);
   assert.equal(ed.eval('(pcount)'), 42, 'the thread changed its copy of n, not the main thread\'s');
+  /* A closure capturing such a global goes again with every job, bound to that job's fresh copy (Codex, PR #5). */
+  ed.eval('(define pwrapped (let ((f pcount)) (lambda () (f))))');
+  const k = await ed.eval('(thread-run (lambda () (thread-id)))');
+  for (let i = 0; i < 3; i++) assert.equal(await ed.eval(`(thread-run pwrapped :worker ${k})`), 43, 'each job sees n as the main thread has it');
 });
 
 test('future-wait on the main thread: the value of a settled future, cannot-block while it runs', async () => {
