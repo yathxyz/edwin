@@ -117,7 +117,6 @@
      (define-command (name) what
        (message "~a runs ~a on the desktop (~a); it is not in Edwin" key 'name what)))))
 
-(desktop-only vile-majutsu-status "SPC g J" "Majutsu log")
 (desktop-only git-timemachine "SPC g t" "git-timemachine")
 (desktop-only consult-eglot-symbols "SPC p s" "LSP symbols")
 (desktop-only citar-open "SPC y o" "citar: open a reference")
@@ -159,9 +158,9 @@
   "SPC p p" 'project-switch-project
   "SPC p s" 'consult-eglot-symbols   ; desktop only
   ;; git and LLM (g)
-  "SPC g g" 'vc-status               ; git's status (vile-vcs-status)
+  "SPC g g" 'vc-status               ; git's status, a jj workspace's log (vile-vcs-status)
   "SPC g G" 'git-status              ; git's status, a colocated jj workspace's too (vile-magit-status)
-  "SPC g J" 'vile-majutsu-status     ; desktop only
+  "SPC g J" 'jj-log                  ; jj's log (vile-majutsu-status)
   "SPC g t" 'git-timemachine         ; desktop only
   "SPC g j" 'gptel-send
   "SPC g l" 'gptel-preset-menu
@@ -229,7 +228,8 @@
 ;; Buffers that start in Motion state (help, the buffer list, the agenda)
 ;; share the same leader keys through their own maps.
 (for-each (lambda (mode) (evil-define-key 'motion mode "SPC" (lookup-key evil-normal-state-map "SPC")))
-          '(special-mode brain-agenda-mode brain-mode dired-mode git-status-mode git-log-mode git-revision-mode))
+          '(special-mode brain-agenda-mode brain-mode dired-mode git-status-mode git-log-mode git-revision-mode
+            jj-log-mode jj-change-mode))
 
 ;; M-s g: grep (rg, grep-command) in the buffer's directory into *grep*, as
 ;; init.el binds it; M-g n steps through the rows, g r in *grep* runs it again.

@@ -303,7 +303,7 @@ test('a repository with no commit yet, a detached HEAD, a branch without upstrea
   assert.equal(E.current.text.split('\n').slice(0, 2).join('\n'), 'Head:     main two\nMerge:    origin/nowhere (gone)');
 });
 
-test('refused: outside a repository, a jj workspace (SPC g G takes its git repository), under the image\'s replay', async () => {
+test('refused: outside a repository; a jj workspace shows jj\'s log (SPC g G takes its git repository); under the image\'s replay', async () => {
   const plain = mkdir('plain');
   from(path.join(plain, 'f.txt'));
   const n = proc.calls.length;
@@ -315,8 +315,8 @@ test('refused: outside a repository, a jj workspace (SPC g G takes its git repos
   write(path.join(jj, 'f.txt'), 'jj file\n');
   from(path.join(jj, 'f.txt'));
   await keys('SPC g g');
-  assert.match(lastMessage(), /is a jj workspace, and Edwin has no jj view yet: SPC g G/);
-  assert.equal(proc.calls.length, n);
+  assert.equal(E.current.mode, 'jj-log-mode', 'jj\'s log, the status view of a jj workspace (test/vc-jj.test.mts)');
+  assert.ok(proc.calls.slice(n).every(c => c.argv[0] === 'jj'), 'jj alone ran');
   await keys('SPC g G');
   assert.equal(E.current.mode, 'git-status-mode', 'the colocated git repository');
   assert.match(E.current.text, /^Head:     /);
@@ -333,10 +333,11 @@ test('refused: outside a repository, a jj workspace (SPC g G takes its git repos
 test('the desktop-only stubs of SPC g g and SPC g G are gone; the keys name the new commands', () => {
   assert.equal(ed.eval("(bound? 'vile-vcs-status)"), false);
   assert.equal(ed.eval("(bound? 'vile-magit-status)"), false);
-  assert.equal(ed.eval("(bound? 'vile-majutsu-status)"), true, 'SPC g J waits for the jj log view');
+  assert.equal(ed.eval("(bound? 'vile-majutsu-status)"), false);
   const L = ed.L;
   assert.equal(L.call('lookup-key', [L.get('evil-normal-state-map'), 'SPC g g']).name, 'vc-status');
   assert.equal(L.call('lookup-key', [L.get('evil-normal-state-map'), 'SPC g G']).name, 'git-status');
+  assert.equal(L.call('lookup-key', [L.get('evil-normal-state-map'), 'SPC g J']).name, 'jj-log');
 });
 
 test('a diff that is not UTF-8 shows its files without hunks; a name with a newline is shown on one line; a refresh of a killed buffer draws nothing', async () => {

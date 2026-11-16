@@ -1496,7 +1496,8 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 
 ;; Dired, as evil-collection binds it.  j and k move; the marks choose what
 ;; D, R and C act on, and with none they act on the file at point.
-(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode git-log-mode git-revision-mode)))
+(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode git-log-mode git-revision-mode
+                                                                jj-log-mode jj-change-mode)))
 (evil-define-key 'motion 'dired-mode
   "RET" 'dired-find-file
   "-" 'dired-up-directory
@@ -1555,6 +1556,24 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; The revision buffer: its files and hunks fold and step as the status
 ;; buffer's do; RET on a parent shows it, on a hunk visits the file.
 (evil-define-key 'motion 'git-revision-mode
+  "TAB" 'git-status-toggle
+  "RET" 'git-status-visit
+  "g r" 'git-status-refresh
+  "C-j" 'git-status-next-section
+  "C-k" 'git-status-previous-section
+  "g j" 'git-status-next-sibling
+  "g k" 'git-status-previous-sibling
+  "q" 'quit-window)
+
+;; jj's log (SPC g J, SPC g g in a jj workspace): RET shows the change at
+;; point, + reads more, g r reads it again.  Its change view folds, steps
+;; and visits as git's revision buffer does; RET on a parent shows it.
+(evil-define-key 'motion 'jj-log-mode
+  "RET" 'git-status-visit
+  "+" 'jj-log-more
+  "g r" 'git-status-refresh
+  "q" 'quit-window)
+(evil-define-key 'motion 'jj-change-mode
   "TAB" 'git-status-toggle
   "RET" 'git-status-visit
   "g r" 'git-status-refresh

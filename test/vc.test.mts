@@ -257,7 +257,7 @@ test('status of a git and a jj repository, in the root, with the fixed argv and 
   const s = await Vc.run(j, ['status'], T);
   assert.equal(s.code, 0, s.err);
   assert.match(s.out, /^Working copy changes:\nA f\.txt$/m);
-  assert.deepEqual(last().argv, ['jj', '--no-pager', '--color=never', '--config', 'ui.diff-formatter=:git', 'status']);
+  assert.deepEqual(last().argv, ['jj', '--no-pager', '--color=never', '--config', 'ui.diff-formatter=:git', '--config', 'ui.log-word-wrap=false', 'status']);
   assert.equal(last().opts.cwd, jjDir);
   assert.deepEqual(last().opts.env, { JJ_EDITOR: 'false', GIT_TERMINAL_PROMPT: '0', GIT_EDITOR: 'false' });
   const d = await Vc.run(j, ['log', '--no-graph', '-r', '@', '-T', 'change_id.short() ++ "|" ++ empty ++ "\\n"'], T);

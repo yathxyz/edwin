@@ -22,6 +22,7 @@
   "src/vc.js",
   "src/vc-diff.js",
   "src/vc-git.js",
+  "src/vc-jj.js",
   "src/compile.js",
   "src/ot.js",
   "src/sync.js",

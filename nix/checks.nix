@@ -250,7 +250,15 @@ in
   # (asserted under the 2 s frame deadline), the hashes compared with git log's; g r from HEAD;
   # a commit's header, message and diff by file and hunk, a root commit, a merge against its first parent, a
   # stash; a repository's own programs (textconv, filters, merge driver, pager, fsmonitor, gpg, aliases, with
-  # log.diffMerges=remerge) run by none of it; nothing under the image's replay.
+  # log.diffMerges=remerge) run by none of it; nothing under the image's replay. jj's log and change view
+  # (test/vc-jj.test.mts): SPC g g in a fixture workspace (a merge with a conflict, an immutable tagged change with
+  # a bookmark, a description with quotes, brackets and a control character) read by Edwin's JSON template under a
+  # user jj config whose own log template, ASCII graph and word wrap would reshape jj's output, the lines compared
+  # with what jj says of each change; RET on a change, a merge's parents and the root, with the header, the diff by
+  # file and hunk, folding and visiting; g r following a change as it is rewritten; RET on the working copy after
+  # a file is written showing the snapshot's commit; a diff past 16 MiB noted, not shown; a bookmark named like
+  # a change id standing for nothing; + over 302 changes, a failed + keeping its limit; a line of another shape
+  # refused; nothing under the replay.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -265,7 +273,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts
         touch $out
       '';
 

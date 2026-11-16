@@ -173,8 +173,9 @@ const GPG_DEFAULT: Record<string, string> = { openpgp: 'gpg', ssh: 'ssh-keygen',
 /* Before every git subcommand: no pager, no fsmonitor hook, no external diff. git's safe.directory check is
    left as it is: a repository it refuses as unsafe stays refused. */
 const GIT_BASE = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'diff.external='];
-/* Before every jj subcommand: no pager, no colour, git's diff format (no external diff tool). */
-const JJ_BASE = ['--no-pager', '--color=never', '--config', 'ui.diff-formatter=:git'];
+/* Before every jj subcommand: no pager, no colour, git's diff format (no external diff tool), and no word wrap
+   (ui.log-word-wrap would break a template's lines at the spaces in them, also when no terminal is there). */
+const JJ_BASE = ['--no-pager', '--color=never', '--config', 'ui.diff-formatter=:git', '--config', 'ui.log-word-wrap=false'];
 /* Switches that would undo the above, refused before a `--`: a caller puts what the user typed after one. For
    git, `describe --dirty` and `--broken` too: they compare a submodule's work tree (describe reads no
    diff.ignoreSubmodules, and no switch of its own keeps it out), which runs the submodule's clean filter. */

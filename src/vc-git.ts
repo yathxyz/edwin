@@ -20,7 +20,10 @@
    view"): the log buffer reads HEAD's history a page at a time, in the background, from the commit HEAD was when
    it opened, so the frame never waits for a long history; the revision buffer is drawn as the status buffer is,
    its files and hunks sections that TAB folds. The three buffers are views: the same drawing, rows, folds and
-   motions, each with its own model. */
+   motions, each with its own model.
+
+   VcView gives that drawing to other version control: jj's log and change buffers (src/vc-jj.ts) are views of
+   kind 'ext', drawn, read again and shown by their VcViewKind, folded, stepped and visited by the same commands. */
 
 (function () {
 'use strict';
@@ -76,7 +79,9 @@ interface GitViewBase { repo: VcRepo; folds: Map<string, boolean>; rows: GitRow[
 interface GitStatus extends GitViewBase { kind: 'status'; model: GitModel }
 interface GitLogView extends GitViewBase { kind: 'log'; log: GitLog }
 interface GitShowView extends GitViewBase { kind: 'show'; show: GitShow }
-type GitView = GitStatus | GitLogView | GitShowView;
+/* a view another module draws (VcView.open): its kind and its model, which only that kind reads */
+interface GitExtView extends GitViewBase { kind: 'ext'; ext: VcViewKind; model: unknown }
+type GitView = GitStatus | GitLogView | GitShowView | GitExtView;
 const VIEW_MODES = new Set(['git-status-mode', 'git-log-mode', 'git-revision-mode']);
 
 const viewOf = (b: EdBuffer) => (b.gitView as GitView | undefined) || signal('user-error', 'Not a git buffer') as never;
@@ -410,7 +415,7 @@ function drawShow(v: GitShowView, d: Drawer) {
 }
 
 /* The buffer's lines and rows for view V. */
-const build = (v: GitView) => drawing(v, d => (v.kind === 'status' ? drawStatus(v, d) : v.kind === 'log' ? drawLog(v, d) : drawShow(v, d)));
+const build = (v: GitView) => drawing(v, d => (v.kind === 'status' ? drawStatus(v, d) : v.kind === 'log' ? drawLog(v, d) : v.kind === 'ext' ? v.ext.draw(v.model, v.repo, d) : drawShow(v, d)));
 
 /* The row of point's line in B, and how far into the line point is. */
 function here(b: EdBuffer): { row: GitRow | undefined; col: number; line: number } {
@@ -439,6 +444,10 @@ async function refresh(b: EdBuffer) {
   const seq = ++v.seq;
   if (v.kind === 'status') {
     const m = await collect(v.repo);
+    if (seq !== v.seq || !E.buffers.includes(b)) return;
+    v.model = m;
+  } else if (v.kind === 'ext') {
+    const m = await v.ext.read(v.repo, v.model);
     if (seq !== v.seq || !E.buffers.includes(b)) return;
     v.model = m;
   } else {
@@ -476,7 +485,7 @@ async function status(only?: 'git'): Promise<false> {
   if (why) signal('process-error', why);
   const dir = directoryOf(cur()), r = dir ? Vc.repo(dir, only) : null;
   if (!r) signal('user-error', `Not in a ${only ? 'git ' : ''}repository: ${dir || 'no directory'}`);
-  if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace, and Edwin has no jj view yet: SPC g G shows its git repository's status when it is colocated`);
+  if (r!.vcs === 'jj') return VcJj.log(r!);
   let b = buffersOf(r!, 'status')[0];
   if (b) { await refresh(b); Ed.setWindowBuffer(b); Ed.scheduleRender(); return false; }
   const m = await collect(r!);
@@ -487,7 +496,7 @@ async function status(only?: 'git'): Promise<false> {
   return false;
 }
 
-CMD('vc-status', '', '', 'Show the status of the repository the current buffer is in (SPC g g): git\'s status buffer. A jj workspace has no view yet.', () => status());
+CMD('vc-status', '', '', 'Show the status of the repository the current buffer is in (SPC g g): git\'s status buffer, or a jj workspace\'s log (jj-log).', () => status());
 CMD('git-status', '', '', 'Show the status of the git repository the current buffer is in, a colocated jj workspace\'s too (SPC g G): the head, the untracked files, the unstaged and staged changes with their hunks, the stashes and the commits not yet pushed or pulled.', () => status('git'));
 CMD('git-status-refresh', '', '', 'Read the repository again (g r), keeping the folds and point; in a log buffer, its log from HEAD again, as many commits as it shows, in the background.', async () => { await refresh(cur()); return false; });
 
@@ -528,8 +537,8 @@ CMD('git-status-next-sibling', '', '', 'Point to the next section at the same de
 CMD('git-status-previous-sibling', '', '', 'Point to the previous section at the same depth (g k).', () => move(cur(), -1, true));
 CMD('git-status-visit', '', '', 'Show or visit what is at point (RET): a commit, in the revision buffer; the log\'s next page on its last line; else the file, on a hunk at its line, an untracked directory\'s listing. A file not in the work tree (deleted) is not visited.', () => {
   const b = cur(), v = viewOf(b), r = here(b).row;
-  if (r && r.show) return revision(v.repo, r.show);
-  if (r && r.more) return logMore();
+  if (r && r.show) return v.kind === 'ext' ? v.ext.show(v.repo, r.show) : revision(v.repo, r.show);
+  if (r && r.more) return v.kind === 'ext' ? v.ext.more!(b) : logMore();
   if (!r || !r.visit) signal('user-error', 'Nothing to visit here');
   /* a commit's tree may name what a work tree cannot hold: a path out of the repository is never visited */
   const rel = r!.visit!.path, p = join(v.repo.root, rel);
@@ -572,7 +581,7 @@ function gitRepo(doing: string): VcRepo {
   const why = Ed.proc.refusal();
   if (why) signal('process-error', why);
   const b = cur();
-  if (b.gitView) return viewOf(b).repo;
+  if (b.gitView && viewOf(b).repo.vcs === 'git') return viewOf(b).repo;
   const dir = directoryOf(b), r = dir ? Vc.repo(dir) : null;
   if (!r) signal('user-error', `Not in a repository: ${dir || 'no directory'}`);
   if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace: ${doing}`);
@@ -611,6 +620,33 @@ async function revision(r: VcRepo, rev: string): Promise<false> {
   Ed.setWindowBuffer(b); Ed.scheduleRender();
   return false;
 }
+
+/* ---------- views for other version control ---------- */
+/* Show MODEL of KIND for R in KIND's buffer for R, `*NAME: REPO*` (with <2> when that name is taken), made when
+   none is open. FRESH: it shows another thing than before (another change), so its folds are forgotten and point
+   goes to its start. A read of it still running draws nothing. */
+function openView(r: VcRepo, kind: VcViewKind, model: unknown, fresh: boolean): EdBuffer {
+  let b = E.buffers.find(x => { const v = x.gitView as GitView | undefined; return !!v && v.kind === 'ext' && v.ext === kind && v.repo.root === r.root; });
+  if (!b) {
+    const name = `*${kind.name}: ${repoName(r)}*`;
+    b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
+    b.mode = kind.mode; b.readOnly = true; b.evilState = 'motion';
+    b.gitView = { ...newView(r), kind: 'ext', ext: kind, model } as GitExtView;
+    b.pt = 0;
+  }
+  const v = b.gitView as GitExtView;
+  ++v.seq;
+  if (fresh) { v.folds.clear(); b.pt = 0; }
+  v.model = model; draw(b);
+  Ed.setWindowBuffer(b); Ed.scheduleRender();
+  return b;
+}
+/* The model of B, a buffer of KIND. */
+function modelOf(b: EdBuffer, kind: VcViewKind): unknown {
+  const v = b.gitView as GitView | undefined;
+  return v && v.kind === 'ext' && v.ext === kind ? v.model : signal('user-error', `Not a ${kind.name} buffer`);
+}
+globalThis.VcView = { faces: F, open: openView, model: modelOf, refresh, hunks, fileHeading, shown };
 
 CMD('git-log', '', '', 'Show the log of HEAD in the current buffer\'s git repository (l l in the status buffer): a commit per line, read a page at a time in the background; RET on a commit shows it, + reads the next page.', () => openLog());
 CMD('git-log-more', '', '', 'Read the log\'s next page (+), in the background.', () => { logOf(cur()); return logMore(); });
@@ -736,7 +772,7 @@ function commitRepo(): VcRepo {
   const why = Ed.proc.refusal();
   if (why) signal('process-error', why);
   const b = cur();
-  if (b.gitView) return viewOf(b).repo;
+  if (b.gitView && viewOf(b).repo.vcs === 'git') return viewOf(b).repo;
   const dir = directoryOf(b), r = dir ? Vc.repo(dir) : null;
   if (!r) signal('user-error', `Not in a repository: ${dir || 'no directory'}`);
   if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace: describe its change with jj, or commit from SPC g G's status buffer`);
@@ -891,10 +927,11 @@ Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';
 interface GitLex { ver: number; from: number; to: number; cls: Uint8Array; names: string[] }
 const prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {
-  if (!VIEW_MODES.has(b.mode) || !b.gitView) return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
+  const gv = b.gitView as GitView | undefined;
+  if (!gv || !(VIEW_MODES.has(b.mode) || gv.kind === 'ext' && gv.ext.mode === b.mode)) return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
   const c = b._glx as GitLex | undefined;
   if (c && c.ver === b.ver && c.from === from && c.to === to) return c;
-  const v = b.gitView as GitView, text = seg as string, cls = new Uint8Array(text.length);
+  const v = gv, text = seg as string, cls = new Uint8Array(text.length);
   let line = lineNoB(b, from);
   /* the first line may start before the segment */
   for (let ls = 0, start = lineStartB(b, line) - from; ls < text.length; line++) {

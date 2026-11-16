@@ -874,7 +874,7 @@ interface EdBuffer extends SchemeForeign {
   _vlx?: unknown;
   /* a commit message an opener waits for (vc.ts) */
   vcMessage?: VcPending;
-  /* a git status, log or revision buffer: its repository, what its last read gave, its folds and its lines (vc-git.ts) */
+  /* a git status, log or revision buffer, or a jj log or change buffer: its repository, what its last read gave, its folds and its lines (vc-git.ts) */
   gitView?: unknown;
   _glx?: unknown;
   _mdf?: unknown;
@@ -2307,6 +2307,50 @@ interface VcDiffApi {
   patch(files: VcDiffFile[], picks: VcDiffPick[], reverse?: boolean): string | null;
 }
 
+/* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is
+   [from, to, face] from its line's start, the face one of VcView.faces. A line's extra says what RET does there:
+   visit a file of the work tree at a line, show a revision (by the kind's show), or read more (by its more). */
+type VcSpans = [number, number, number][];
+interface VcRowExtra {
+  visit?: { path: string; line: number };
+  show?: string;
+  more?: boolean;
+}
+interface VcDrawer {
+  line(key: string, text: string, spans?: VcSpans, extra?: VcRowExtra): void;
+  /* a section under the current one: its heading, then BODY unless it is folded */
+  section(key: string, heading: string, spans: VcSpans, hasBody: boolean, body: () => void, extra?: VcRowExtra): void;
+}
+/* A kind of view: its buffers' name (`*NAME: REPO*`) and major mode, how its model is drawn and read again (g r),
+   and what RET does on a line that shows a revision or (in a kind that draws such a line) reads more. */
+interface VcViewKind {
+  name: string;
+  mode: string;
+  draw(model: unknown, r: VcRepo, d: VcDrawer): void;
+  read(r: VcRepo, model: unknown): Promise<unknown>;
+  show(r: VcRepo, rev: string): Promise<false>;
+  more?(b: EdBuffer): Promise<false>;
+}
+interface VcViewApi {
+  faces: { SECTION: number; DIM: number; BRANCH: number; REMOTE: number; HASH: number; HUNK: number; ADDED: number; REMOVED: number };
+  /* show MODEL in KIND's buffer for R (made when none is open) in the selected window; FRESH forgets its folds */
+  open(r: VcRepo, kind: VcViewKind, model: unknown, fresh: boolean): EdBuffer;
+  /* B's model, B a buffer of KIND; else a user-error */
+  model(b: EdBuffer, kind: VcViewKind): unknown;
+  /* read B again (its kind's read) and draw it, keeping folds and point */
+  refresh(b: EdBuffer): Promise<void>;
+  /* a file's hunks under D's current section, each a section of its lines that RET visits */
+  hunks(d: VcDrawer, path: string, hs: VcDiffHunk[]): void;
+  /* a file's heading: its label padded, then its name (`old -> new` for a rename or copy) */
+  fileHeading(label: string, path: string, orig: string | null): { text: string; spans: VcSpans };
+  /* a name as a line shows it: control characters as ? */
+  shown(s: string): string;
+}
+/* vc-jj.ts: a jj workspace's log, the status view SPC g g shows there */
+interface VcJjApi {
+  log(r: VcRepo): Promise<false>;
+}
+
 /* ---------- native: desktop Edwin (native/js) ---------- */
 
 /* __n: the natives the Rust shell gives (native/src/natives.rs). File calls throw with the system's
@@ -2520,6 +2564,8 @@ declare var Markdown: EdModuleExports;
 declare var Brain: BrainApi;
 declare var Vc: VcApi;
 declare var VcDiff: VcDiffApi;
+declare var VcView: VcViewApi;
+declare var VcJj: VcJjApi;
 /* ot.ts */
 declare var EdOT: EdOTApi;
 /* ai.ts reads it (also as window.claude) */

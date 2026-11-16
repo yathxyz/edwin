@@ -1951,7 +1951,8 @@ jj views) starts its children here, never through `Ed.proc` directly.
   ownership`, exit 128) is shown as such: the exit rejects with a user-error `git refuses ROOT as unsafe: it
   belongs to another user (safe.directory)`, said in the echo area too, and nothing is retried.
 - **jj's hardening.** Every subcommand gets `--no-pager --color=never --config ui.diff-formatter=:git` (no external
-  diff tool), JJ_EDITOR=false and GIT_TERMINAL_PROMPT=0. The plan's "fixed templates" are the callers': Vc sets
+  diff tool) and, since git-jj-log, `--config ui.log-word-wrap=false` (a user's word wrap breaks a template's
+  lines at their spaces even with no terminal), JJ_EDITOR=false and GIT_TERMINAL_PROMPT=0. The plan's "fixed templates" are the callers': Vc sets
   none, and every jj call whose output is parsed (git-status-view, git-jj-log and after) gives its own `-T`, so a
   user's `templates.*` settings never change what is parsed. A template runs no program. jj 0.45 keeps a
   repository's settings beside the user's config, out of the repository, but adopts for good a
@@ -2588,6 +2589,127 @@ commit view with its diff, magit's log and revision buffers.
     there, under load). A first run, before the last fixes, also failed once on `edit-crash` (R16.5, random
     SIGKILLs), which passed (7) on the second. After the review fixes (the Committer column, the lossy revision
     diff, the failed log's heading): `edwin-vc` (72), `edwin-typecheck` and `edwin-display`.
+
+## The jj log and change view (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-jj-log`, on git-log-show): src/vc-jj.ts, the jj log as
+the status view of a jj workspace, with a change view and its diff, in place of the `vile-majutsu-status`
+desktop-only stub; the log parsed from a template, not from graph text.
+
+- **`jj-log`** (SPC g J, where the desktop had majutsu's log; and `vc-status`, SPC g g, in a jj workspace, which
+  said `Edwin has no jj view yet` before) opens `*jj-log: NAME*` in `jj-log-mode` (`jj Log`): a heading `Changes
+  in ROOT`, then a line per change, `NODE CHANGE COMMIT BOOKMARKS TAGS (conflict) (empty) DESCRIPTION  AUTHOR
+  DATE`, in jj log's order. NODE is the one jj's graph would draw: `@` the working copy's, `×` a conflict, `◆`
+  immutable, `○` any other. CHANGE is the change id's first 8 letters, its shortest unique prefix in `git-remote`
+  and the rest dim, `??` after a divergent one; COMMIT the commit id's first 8 (`git-hash`); bookmarks and tags
+  as jj shows them (`main@origin`, `main??`) in `git-branch`; `(no description set)` for an empty description;
+  the root is `◆ zzzzzzzz 00000000 root()`. SPC g G stays git's status of a colocated workspace's repository.
+- **Parsed from a template.** The log is `jj log --no-graph --limit 257 -T TEMPLATE`, TEMPLATE Edwin's own: one
+  JSON array a line, every field through `json()` (the ids, `change_id.shortest(8).prefix()` and `.rest()`, the
+  bookmarks and tags joined, the flags `current_working_copy`, `root`, `empty`, `conflict`, `immutable`,
+  `divergent`, the author's name, the date as `%Y-%m-%d` in the author's offset, `description.first_line()`). No
+  line of graph text is read, so the user's `templates.log`, `ui.graph.style` and date settings change nothing
+  read, and a description holding quotes, brackets, newlines or control characters cannot break a line (a
+  control character is shown as `?`). Each line is checked whole: a JSON array of that length, each field of
+  its type, the change id `[k-z]{32,64}` and the commit id hex; a line of another shape (a user template alias
+  that shadows a keyword, say) refuses the read, `jj log printed what Edwin cannot read (see *vc-process*)`, and
+  the buffer keeps what it showed.
+- **No word wrap.** A user's `ui.log-word-wrap = true` breaks a template's output at its spaces even when jj
+  writes to no terminal, which cut the JSON lines: the runner's fixed jj switches (src/vc.ts JJ_BASE) gain
+  `--config ui.log-word-wrap=false`, for every jj child.
+- **More.** jj log has no `--skip`, so `+` (`jj-log-more`), or RET on the last line `(more: + or RET here reads
+  the next 256)`, reads the log again with a limit 256 larger; at the end it says `No more changes`. `g r`
+  (`git-status-refresh`) reads it again with the limit it has (256 at least), keeping point on its change's line
+  (a line's id is its commit id; a rewritten change's point falls back to the same line number). SPC g g or SPC
+  g J with the log open reads it again in that buffer.
+- **The change view.** RET (`git-status-visit`) on a change shows it in `*jj-change: NAME*` (`jj-change-mode`,
+  `jj Change`), one per workspace, replaced by the next change shown: `Change:` (the full id, `(divergent)`
+  after one), `Commit:`, `Parent:` or `Parents:` (the parent's change id's first 8 and its commit id; RET shows
+  it), `Bookmarks:`, `Tags:`, `State:` (working copy, root, immutable, empty, conflict, those that hold),
+  `Author:` and `Committer:` (when it differs) with ISO 8601 dates in their offsets, each value at column 11; the
+  description indented by four; then the diff, a section per file and hunk, drawn, folded (TAB), stepped (C-j,
+  C-k, `g j`, `g k`) and visited (RET on a hunk line: the work tree's file at that line, a path that is absolute
+  or holds `..` refused) exactly as git's revision buffer is.
+- **Reading a change**, one read after the other: the header by `jj log --no-graph --limit 2 -r REV -T
+  TEMPLATE` (exactly one line, else `No such change` or `That change is divergent`), then the diff by `jj diff
+  --ignore-working-copy --git -r commit_id(HEX)`, parsed by VcDiff.parse (lossy, shown only; 16 MiB, past it a
+  note). Every jj command takes a snapshot of the working copy and writes an operation, so two at once would
+  race: the header's read takes the snapshot, the diff's takes none. REV is the change's id, so when that
+  snapshot rewrites the working copy's change (a file written since the log was drawn), the view shows the
+  rewritten commit, not the one the line was drawn from, which the snapshot hides and `commit_id()` would still
+  name.
+- **What is given back to jj.** Only ids read from the template and checked, and only inside revset functions
+  Edwin writes: `change_id(ID)` for a line's or a parent's change, the first read and `g r` of the view alike (so
+  the view follows the change as it is rewritten, the working copy's as files change), or `commit_id(HEX)` when
+  the change is divergent (the log line's and each parent's `divergent` flag say so). A divergent working copy's
+  view, read by its commit id, can show the commit before a snapshot; `g r` on the log reads it again. A bare id would be a symbol, and jj takes a bookmark or tag of that name first:
+  a bookmark named like a change id then stands for nothing here. Nothing typed reaches a revset.
+- **One drawing.** vc-git.ts gives its drawing to other version control as `VcView` (`open`, `model`, `refresh`,
+  `hunks`, `fileHeading`, `shown`, `faces`): jj's buffers are views of kind `ext` with their own model, drawn,
+  read again and shown by their `VcViewKind`, folded, stepped and visited by the git buffers' commands and faces.
+  vc-git.ts calls `VcJj.log` for SPC g g in a jj workspace; git's `git-log` and commit commands in a jj buffer
+  look up the repository around it as before (a jj buffer's repository is never taken for git's), so they say
+  `ROOT is a jj workspace: ...` and run nothing.
+- **Choices**, each reversible:
+  - No graph: the changes are in jj log's order, a line each, with jj's node glyph but no edges and no `~` for
+    elided parts. A graph read from text is what the package rules out, and one drawn from the parents is not
+    asked.
+  - The changes are those of the user's `revsets.log` (jj's default when unset); no revset is asked for.
+  - `+` reads the whole log again with a larger limit (jj has no skip; a read that fails keeps the limit it had); it waits for jj, as SPC g g does, where
+    git's log reads its pages in the background: a jj log is short by its default revset.
+  - Dates are the author's and committer's own offsets (`%Y-%m-%d` in the log, `%Y-%m-%dT%H:%M:%S%:z` in the
+    view), as git's log shows them.
+  - A merge's diff is jj's, against its parents merged, where git's revision buffer shows the first parent's.
+  - The keys are git's buffers' commands (`git-status-visit`, `git-status-refresh`, the motions), bound in the
+    jj modes as in git-revision-mode; `+` is `jj-log-more`. Motion state, SPC leader and q as in git's buffers.
+- **Not in it:** jj's operations from the log (new, describe, edit, abandon, squash: git-jj-ops; rebase, split,
+  undo: git-jj-rewrite; fetch, push, bookmarks: git-jj-remote), the working copy's changes as a separate section,
+  a revset typed at a prompt, the operation log, the evolution log, other workspaces' working copies.
+- **Image replay and edwind.** `jj-log`, `jj-log-more`, RET and `g r` check `Ed.proc.refusal()` before anything,
+  and every child goes through `Vc.run`, which refuses under the image's replay, in a web frame and in edwind.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (84 passed, test/vc-jj.test.mts's 10 among
+  them) with nixpkgs' jujutsu 0.45.1 and git, under a throwaway HOME whose jj config sets its own `templates.log`,
+  `ui.graph.style = "ascii"` and `ui.log-word-wrap = true` (the control: plain `jj log` prints the user's
+  template on an ASCII graph):
+  - A fixture workspace: an immutable first change (bookmark `main`, tag `v1`, a body), two children, one
+    described `side "quoted" ]["x"]` with a control character on its second line, their merge with a conflict
+    in a.txt, and an empty working copy on it. SPC g g: the whole buffer compared with lines built from what jj
+    itself prints of each change; one child, `jj log --no-graph --limit 257 -T` with the JSON template and no
+    `-r`, after the runner's switches; the order jj's; the faces of the node, the id's prefix and rest, the
+    commit id, the bookmark and tag, `(conflict)`, `@` and the heading.
+  - RET on a change: the whole change view (header, description, a modified and an added file with their
+    hunks), the header read by `change_id(ID)` and then the diff by `commit_id(HEX)` with `--ignore-working-copy`; faces; TAB folds
+    a file, C-j steps to the next file and to its hunk, RET on an added line visits b.txt at line 2.
+  - The merge: `Parents:` with both and `State: empty, conflict`; RET on the second parent shows it in the same
+    buffer, point at its start, its control character as `?`; RET on its parent shows the first change's
+    bookmarks, tags, `State: immutable` and body; then the root.
+  - `g r` after a `jj new` made outside: the new change first, point kept on its change's line; SPC g g again
+    reads it in the same buffer; the working copy's change view after a file is written: `g r` shows the new
+    file and the commit id the snapshot made.
+  - RET on the working copy's line after a file is written since the log was drawn: `Commit:` is @'s commit after
+    the snapshot (not the one the line was drawn from), `State: working copy`, and the new file in the diff.
+  - A 17 MiB file in a change: the view shows its header and `(the diff is not shown: it is larger than 16 MiB)`,
+    no file.
+  - A bookmark named as a change id, on another change: plain jj takes the bookmark (the control); Edwin's view
+    shows the right change, and again after `g r`.
+  - 300 commits imported from the colocated git repository (302 changes): 256 and the more line, `+` reads with
+    `--limit 513` and shows all in jj's order, `+` again says `No more changes`; RET on the more line too. A `+` whose read fails
+    (a line of another shape) keeps the limit: `g r` then reads with `--limit 257`.
+  - Refused: SPC g J outside a repository and in a git-only one, nothing run; `git-log` and `git-commit` in the jj
+    log buffer refused as a jj workspace, nothing run; SPC g G there gives git's status; `jj-log`,
+    `jj-log-more`, RET and `g r` under `Ed.proc.replay`, no child started; `vile-majutsu-status` unbound, SPC g J
+    `jj-log`.
+  - A user template alias `empty` that shadows the keyword: `jj log printed what Edwin cannot read`, the buffer
+    unchanged.
+  - vc-git's refusal test now expects jj's log from SPC g g in a jj workspace; vc.test.mts's runner argv has the
+    word-wrap switch.
+  - The fix of RET on the working copy (read by `change_id()`) and of a failed `+`: `edwin-vc` (84) and
+    `edwin-typecheck` passed; the flake check below was run on the commit before it.
+  - `nix flake check -L --keep-going`: every check passed but `edwin-bench` (shadow stack over its 10% under
+    load) and `edit-crash` (R16.5, random SIGKILLs, `the history lost acked batches`), neither touched here; each
+    passed when run again alone (`edwin-bench` 9.0%, `edit-crash` 7). Among those that passed: `nix build .#edwin`
+    (cargo and gui tests), `edwin-typecheck`, `edwin-vc` (82), `edwin-display` (20), `edwin-headless` (21),
+    `edit-lockdown` (6), `edit-security` (21).
 
 ## Backends declared in init.scm reach edwind's models (done)
 
