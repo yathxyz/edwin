@@ -21,9 +21,11 @@
    index.html in its light and dark themes. A token set with set-face-color! (host.page vars) wins, as it
    does on the page. test/display.test.mts checks both tables against the stylesheets they mirror.
 
-   What a model frame does not show yet: snipe boxes and the pulse are cell faces or nothing (no animation), the
-   display text of markdown block references (a DOM pass in markdown.ts) shows the reference, and the menubar of a
-   console frame is not drawn. */
+   The pulse after a jump is the pulse face over the line's text (the gutter keeps its own, as on the page) until
+   extras.ts clears E.pulse: what the page shows under prefers-reduced-motion, with no fade.
+
+   What a model frame does not show yet: snipe boxes are a cell face (no box), the display text of markdown block
+   references (a DOM pass in markdown.ts) shows the reference, and the menubar of a console frame is not drawn. */
 (function () {
 'use strict';
 type DispTheme = 'light' | 'dark';
@@ -85,7 +87,7 @@ const PALETTE: Record<DispTheme, Record<string, string>> = {
    colours of other writers. A key "a.b" applies when a cell has both classes. */
 const TAG_BG = 'rgb(127 127 127 / 0.12)', BLOCK_BG = 'rgb(127 127 127 / 0.08)';
 const FACES: Record<string, DispFaceSpec> = {
-  default: { fg: 'fg', bg: 'bg', p: 0 }, cl: { bg: 'hl', p: 0 },
+  default: { fg: 'fg', bg: 'bg', p: 0 }, cl: { bg: 'hl', p: 0 }, pulse: { bg: 'pulse', p: 0.5 },
   kw: { fg: 'kw', w: 500 }, fn: { fg: 'fn', w: 500 }, st: { fg: 'st' }, dc: { fg: 'dc', i: 1 }, cm: { fg: 'cm', i: 1 },
   co: { fg: 'co' }, nu: { fg: 'co' }, qu: { fg: 'co' }, pa: { fg: 'pa' },
   'pa.d0': { fg: 'rb0', p: 2 }, 'pa.d1': { fg: 'rb1', p: 2 }, 'pa.d2': { fg: 'rb2', p: 2 }, 'pa.d3': { fg: 'rb3', p: 2 }, 'pa.d4': { fg: 'rb4', p: 2 }, 'pa.d5': { fg: 'rb5', p: 2 },
@@ -404,20 +406,21 @@ function drawWindow(g: Grid, r: DispRect, st: EdWindowState): { x: number; y: nu
   let y = r.y, shownLines = 0, cursor: { x: number; y: number } | null = null;
   for (const x of laid) {
     if (y >= r.y + textRows) break;
-    const l = x.line, rowBase = l.cl && selected ? 'default cl' : 'default';
+    const l = x.line, cl = l.cl && selected, pl = l.pulse ? ' pulse' : '', rowBase = (cl ? 'default cl' : 'default') + pl;
     shownLines++;
     x.rows.forEach((rw, i) => {
       if (skip > 0) { skip--; return; }
       if (y >= r.y + textRows) return;
       g.fill(r.x, y, r.w, 'default');
-      if (gw && i === 0 && l.n !== null && l.n !== undefined) g.text(r.x + gw - 1 - String(l.n).length, y, String(l.n), l.cl && selected ? 'default ln cl' : 'default ln', r.x + gw);
+      if (gw && i === 0 && l.n !== null && l.n !== undefined) g.text(r.x + gw - 1 - String(l.n).length, y, String(l.n), cl ? 'default ln cl' : 'default ln', r.x + gw);
       g.fill(x0, y, Math.min(cols, r.x + r.w - x0), rowBase);
       const pos = new Int32Array(r.w).fill(-1);
       let cx = -hs, lastP = l.o;
       for (const gl of rw) {
         const sx = x0 + cx;
         if (gl.w && cx >= 0 && cx + gl.w <= cols) {
-          const k = !gl.k ? rowBase : rowBase === 'default' ? gl.kd || (gl.kd = 'default ' + gl.k) : gl.kc || (gl.kc = 'default cl ' + gl.k);
+          /* a glyph caches its classes on the two plain row bases; the pulsed line (one at most) is not cached */
+          const k = !gl.k ? rowBase : pl ? rowBase + ' ' + gl.k : cl ? gl.kc || (gl.kc = 'default cl ' + gl.k) : gl.kd || (gl.kd = 'default ' + gl.k);
           g.put(sx, y, gl.t, gl.w, k, x0 + cols);
           for (let j = 0; j < gl.w; j++) pos[sx - r.x + j] = l.o + gl.p;
         } else if (gl.w && cx < cols && cx + gl.w > 0) g.put(sx, y, ' ', 1, rowBase, x0 + cols);

@@ -303,6 +303,45 @@ test('one theme setting reaches every frame: the terminal\'s, the window\'s and 
   D.setTheme(frame, null);
 });
 
+test('a jump pulses its line in the terminal\'s and the window\'s frames, then the pulse clears', async () => {
+  await show('d15.scm', 'scheme-mode', 'one\ntwo\n(define x "s")\nfour\n', 0);
+  ev('(set! display-line-numbers #t)');
+  let wm: Model | null = null;
+  const win = Ed.makeFrame(null, { backend: { gui: true, theme: 'light', size: () => size, draw: (m: Model) => { wm = m; } } });
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  try {
+    for (const [f, last] of [[frame, () => model!], [win, () => wm!]] as const) {
+      Ed.selectFrame(f);
+      Ed.deleteOtherWindows();
+      Ed.setWindowBuffer(Ed.getBufferCreate('d15.scm'));
+      E.current.pt = 0;
+      await feed(['3', 'G']);   // evil-goto-line is on post-command-pulse
+      const m = last(), pulse = D.PALETTE[m.theme].pulse;
+      assert.ok(E.pulse, 'the jump set the pulse');
+      assert.equal(row(m, 2).slice(0, 17), ' 3 (define x "s")');
+      /* fontified cells (keyword, name, string) and plain ones (the space after the text); the parens show
+         the show-paren match face, which outranks the pulse, as on the page */
+      for (const x of [5, 11, 14, 20, size.cols - 1]) assert.equal(faceAt(m, x, 2).bg, pulse, `cell ${x} of the jumped-to line has the pulse face`);
+      assert.equal(faceAt(m, 1, 2).bg, D.PALETTE[m.theme].hl, 'the line number keeps its own face, as on the page');
+      assert.equal(faceAt(m, 5, 2).fg, D.PALETTE[m.theme].kw, 'the keyword keeps its own colour');
+      assert.equal(faceAt(m, 14, 2).fg, D.PALETTE[m.theme].st, 'the string keeps its own colour');
+      assert.equal(faceAt(m, 11, 2).fg, D.PALETTE[m.theme].fn, 'the defined name keeps its own colour');
+      assert.notEqual(faceAt(m, 3, 1).bg, pulse, 'the other lines do not pulse');
+      assert.notEqual(faceAt(m, 3, 3).bg, pulse);
+      await sleep(450);   // extras.ts clears it after 350 ms and redraws
+      const after = last();
+      assert.notEqual(after, m, 'the clearing redrew the frame');
+      assert.equal(E.pulse, null);
+      for (const x of [5, 11, 14]) assert.equal(faceAt(after, x, 2).bg, D.PALETTE[after.theme].hl, `cell ${x} is back to the current-line face`);
+      assert.equal(faceAt(after, 5, 2).fg, D.PALETTE[after.theme].kw, 'the keyword keeps its colour');
+    }
+  } finally {
+    Ed.selectFrame(frame);
+    Ed.deleteFrame(win);
+    ev('(set! display-line-numbers #f)');
+  }
+});
+
 test('a wrapped line taller than the window keeps the cursor row in view', async () => {
   const long = 'x'.repeat(1500);
   const b = await show('d13.txt', 'fundamental-mode', long + '\nend', 1490);
@@ -397,7 +436,7 @@ test('FACES mirror the page\'s stylesheets: index.html, markdown-mode and Org', 
     '.kw': 'kw', '.fn': 'fn', '.st': 'st', '.dc': 'dc', '.cm': 'cm', '.co': 'co', '.nu': 'nu', '.qu': 'qu', '.pa': 'pa',
     '.pa.d0': 'pa.d0', '.pa.d1': 'pa.d1', '.pa.d2': 'pa.d2', '.pa.d3': 'pa.d3', '.pa.d4': 'pa.d4', '.pa.d5': 'pa.d5',
     '.rg': 'rg', '.lz': 'lz', '.im': 'im', '.pm': 'pm', '.px': 'px', '.avy': 'avy', '#snipe div': 'snipe',
-    '.win.selected .ln.cl': 'cl', '.text.numbers .ln::before': 'ln', '.text.numbers .ln.cl::before': 'ln.cl',
+    '.win.selected .ln.cl': 'cl', '.ln.pulse': 'pulse', '.text.numbers .ln::before': 'ln', '.text.numbers .ln.cl::before': 'ln.cl',
     '.modeline': 'modeline', '.win:not(.selected) .modeline': 'modeline.inactive', '.ml-tag': 'ml-tag',
     '.ml-tag[data-state="insert"]': 'ml-tag.insert', '.ml-tag[data-state="visual"]': 'ml-tag.visual', '.ml-tag[data-state="replace"]': 'ml-tag.replace',
     '.ml-tag[data-state="operator"]': 'ml-tag.operator', '.ml-tag[data-state="motion"]': 'ml-tag.motion', '.ml-tag[data-state="emacs"]': 'ml-tag.emacs',

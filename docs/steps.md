@@ -1549,6 +1549,40 @@ terminal's colour-scheme notification and switches theme.
   light report draws nothing light. Also `edwin-typecheck` (core.d.ts's new reply kind) and `edwin-display`.
   Nothing here loads in edwind, so `edit-lockdown` and `edit-security` were not needed.
 
+## The jump pulse in terminal and window frames (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ui-pulse-model-frames`): the jump pulse works from the frame
+model in terminal and window frames.
+
+- **The face.** `FACES.pulse` is `{bg: 'pulse'}`, the `--pulse` token of `index.html` (light `#ffdfa0`, dark
+  `#5f4f2f`), and `set-face-color! 'pulse` sets it as on the page. It is laid over the current-line face and under
+  the text's own classes, the region and the matches (layer 0.5).
+- **Where it goes.** `drawWindow` adds `pulse` to the row base of the line `renderBuffer` marks (`line.pulse`, the
+  line of `E.pulse` in the selected window), so every row of a wrapped line and the cells after its text carry it,
+  as the page's `.ln.pulse` covers the whole line element. The line number keeps its own face: on the page the
+  gutter is the line's `::before`, which draws its own background over the line's.
+- **Clearing** is extras.ts's, unchanged: its timer drops `E.pulse` after 350 ms and calls `Ed.render`, which
+  draws the model frames again; the terminal and the window take the new model with no work of their own.
+- **Choices made where the package left one open:**
+  - The pulse face lies over the current-line face and under the text's own classes, the region and the matches
+    (layer 0.5), as the page's line background lies under its spans.
+  - The line number keeps the current-line face during a pulse, as on the page.
+  - Pulse scope (decision 18, not answered): the plan's default, the selected window of the selected frame only,
+    which is what the page does; the commands on `post-command-pulse` are unchanged.
+  - No fade (below).
+- **Differences from Emacs and the page:** Emacs's pulse fades over several steps, the page fades by a CSS
+  animation of 0.45 s; a cell frame shows the face at full strength until it clears, which is what the page shows
+  under `prefers-reduced-motion`. Redrawing a terminal frame for each fade step was not worth it.
+- **Not in it:** a fade; a pulse in a window other than the selected one (the page does not pulse those either);
+  snipe boxes, still a cell face.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-display`: a new test jumps with `3G` (evil-goto-line is on
+  `post-command-pulse`) in a terminal frame and in a window (gui) frame, asserts the jumped-to line's text cells and
+  the cells after the text have the pulse colour, the line number keeps the current-line face and the other lines
+  do not pulse, then waits 450 ms and asserts the timer redrew the frame with the pulse gone; the face-table test
+  now maps `index.html`'s `.ln.pulse` (its reduced-motion rule gives the background) to `FACES.pulse`. Also
+  `edwin-typecheck`. display.ts does not load in edwind's server, so `edit-lockdown` and `edit-security` were not
+  needed.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
