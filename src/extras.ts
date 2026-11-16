@@ -223,5 +223,5 @@ CMD('bookmark-delete', async () => [await Ed.readMini('Delete bookmark: ', '', (
 D('set-face-color!', 'face color', 'Set the colour of FACE: bg fg dim cursor region kw fn st cm co pa or any CSS token name.', ([f, c]) => { Ed.host.page.setVar(f instanceof L.Sym ? f.name : str(f), str(c)); return false; });
 D('set-font-size!', 'px', 'Set the text size in pixels.', ([n]) => { for (const f of E.frames) for (const v of f.root!.querySelectorAll<HTMLElement>('.text')) v.style.fontSize = n + 'px'; Ed.host.page.setVar('text-size', n + 'px'); E.metricsGen++; return false; });
 D('set-font-family!', 'family', 'Set the text font family.', ([f]) => { Ed.host.page.setVar('font-mono', str(f) + ', ' + 'ui-monospace, monospace'); E.metricsGen++; return false; });
-D('theme-dark?', '', '#t when the page shows the dark theme.', () => { const t = Ed.host.page.getAttr('theme'); return t === 'dark' || (t !== 'light' && Ed.host.page.prefersDark()); });
+D('theme-dark?', '', '#t when the selected frame shows the dark theme (Ed.display.themeOf).', () => Ed.display.themeOf(E.frame) === 'dark');
 })();

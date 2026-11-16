@@ -169,7 +169,8 @@ in
   edwin-prog = suite "prog" [ "prog.test.mts" ];
 
   # The display seam (DT0 of desktop Edwin): model frames laid out on a cell grid for a backend that is not a page,
-  # and the face and palette tables checked against index.html's, markdown-mode's and Org's stylesheets.
+  # and the face and palette tables checked against index.html's, markdown-mode's and Org's stylesheets; one theme
+  # setting (load-theme) reaching the terminal's, the window's and the page's frames.
   edwin-display = suite "display" [ "display.test.mts" ];
 
   # The desktop program's JavaScript (DT1): the terminal encoder and decoder (native/js/term.ts), and the

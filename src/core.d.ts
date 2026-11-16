@@ -2091,6 +2091,8 @@ interface EdDisplayApi {
   posAt(f: EdFrame, x: number, y: number): EdDisplayHit;
   redraw(f: EdFrame): void;
   setTheme(f: EdFrame, theme: string | null): void;
+  /* the theme frame F shows: data-theme (load-theme), else the frame's own, else the host's preference */
+  themeOf(f: EdFrame | null): 'light' | 'dark';
   input(f: EdFrame, ev: EdDisplayEvent): void;
 }
 

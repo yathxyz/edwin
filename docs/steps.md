@@ -1481,6 +1481,43 @@ directory changes.
   `edwin-headless`, and, as editor-prims.ts reaches ex44's public edwind, `edit-conformance`, `edit-lockdown` and
   `edit-security`; and `nix build .#edwin`.
 
+## One theme for every kind of frame (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ui-theme-model-frames`): the light/dark choice lives in the
+frame model, so every frame kind follows one setting.
+
+- **What was wrong.** `load-theme`, `modus-themes-select`, `modus-themes-toggle` and `disable-theme` set the page's
+  `data-theme`, which only the page's stylesheet read. A model frame (the terminal, the window) drew with the
+  theme it found out at start (`EDWIN_THEME`, the terminal's background report, `COLORFGBG`, the window's), so
+  the commands changed nothing there; and `theme-dark?` read the page alone, where the desktop host always says
+  dark, so `modus-themes-toggle` and `custom-enabled-themes` were wrong in a light terminal.
+- **The one resolver** is `Ed.display.themeOf(f)` (src/display.ts), used by `frameModel` for every face and
+  cursor colour and by `theme-dark?` (src/extras.ts) for the selected frame. In order: the page's `data-theme`
+  when it is `light` or `dark` (what the commands set and Meta keeps, or the host page's own in a browser); else,
+  for a model frame, what it found out (`Ed.display.setTheme`) or its backend's `theme`; else the host's
+  preference (`prefers-color-scheme` on a page). The setting stays where the page's stylesheet reads it, so a page
+  frame needs nothing new; `applyTheme`'s `metricsGen` bump redraws the model frames.
+- **Choices made where the package left one open:**
+  - A chosen theme wins over what the terminal or the window reports, and over `EDWIN_THEME` (which only sets
+    the frame's own; the fleet sets it nowhere); `auto` (`disable-theme`) gives each frame its own again.
+    `ui-theme-terminal-follow` feeds the frame's own through `setTheme`, so a terminal's later report changes
+    nothing while a theme is chosen. As the choice is kept (Meta), one `modus-themes-toggle` holds in later
+    sessions too, until `disable-theme`.
+  - A theme saved by an earlier session (Meta `theme`), which a terminal or window ignored until now, applies to
+    them too from now on.
+- **Differences from Emacs:** none in what reaches the frames (Emacs's `load-theme` reaches every frame too);
+  Edwin has only the two Modus tinted palettes.
+- **Not in it:** following the terminal's colour-scheme reports after start (`ui-theme-terminal-follow`); a theme
+  per frame.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-display` (test/display.test.mts, a new test: a terminal
+  frame that found out light and a window frame whose backend says light; `load-theme modus-vivendi-tinted` gives
+  both dark, the terminal frame's faces equal those of a frame that found out dark itself, the window's default
+  face is the dark one, `data-theme` is `dark` for the page and `theme-dark?` is #t, and native/js/term.ts draws
+  the dark background and not the light one; `modus-themes-toggle` gives all of it light; `disable-theme` gives
+  each frame its own again, and `theme-dark?` is the selected frame's. With `frameModel` as it was, the test
+  fails), with `edwin-native`, `edwin-typecheck`, `edwin-headless`, and, as stack.ts and extras.ts load in
+  ex44's public edwind, `edit-lockdown` and `edit-security`; and `nix build .#edwin`.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

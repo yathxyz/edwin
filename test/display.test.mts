@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createHost, loadEdwin } from './headless.mts';
 import type { Edwin } from './headless.mts';
 
@@ -250,6 +251,56 @@ test('themes, set-face-color!, markdown and Org faces resolve to colours', async
   assert.equal(D.resolveFace('default ohs', 'light').fg, D.PALETTE.light.bg, 'transparent text shows the background');
   assert.deepEqual(D.glyphsOf({ text: '* h', runs: [{ s: 0, e: 1, cls: 'ob1' }, { s: 1, e: 3, cls: 'ol1' }] }).map((g: Edwin) => g.t), ['◉', ' ', 'h']);
   assert.deepEqual(D.glyphsOf({ text: '*b*', runs: [{ s: 0, e: 1, cls: 'oh' }, { s: 1, e: 2, cls: 'obb' }, { s: 2, e: 3, cls: 'oh' }] }).map((g: Edwin) => g.w), [0, 1, 0]);
+});
+
+test('one theme setting reaches every frame: the terminal\'s, the window\'s and the page\'s', async () => {
+  await show('d14.scm', 'scheme-mode', '(define (f x) "doc" ; note\n  (+ x 1))\n', 3);
+  /* native/js/term.ts, the terminal renderer, untyped here as in term.test.mts */
+  const T = createRequire(import.meta.url)('../native/js/term.ts') as { encoder(o: { color: string }): { draw(m: Model): string } };
+  const sgr = (hex: string) => { const n = parseInt(hex.slice(1), 16); return `48;2;${n >> 16};${(n >> 8) & 255};${n & 255}`; };
+  let wm: Model | null = null;
+  const win = Ed.makeFrame(null, { backend: { gui: true, theme: 'light', size: () => size, draw: (m: Model) => { wm = m; } } });
+  const both = () => { win._rkey = null; const m = draw(); return [m, wm!] as const; };
+  const dark = () => L.call('theme-dark?', []) === true;
+  /* the faces a frame that found out dark by itself draws: what the setting must give every frame */
+  D.setTheme(frame, 'dark');
+  const own = both()[0];
+  assert.equal(own.theme, 'dark');
+  assert.ok(own.faces.length > 4, 'the buffer shows several faces');
+  D.setTheme(frame, 'light');   // the terminal said light, the window says light
+  assert.equal(both()[0].theme, 'light');
+  assert.equal(host.page.getAttr('theme'), undefined, 'no setting yet');
+
+  ev("(load-theme 'modus-vivendi-tinted)");
+  let [tm, gm] = both();
+  assert.equal(tm.theme, 'dark'); assert.equal(gm.theme, 'dark');
+  assert.deepEqual(tm.faces, own.faces, 'every face of the terminal frame is the dark one');
+  assert.deepEqual(gm.faces[0], D.resolveFace('default', 'dark'), 'the window frame\'s too');
+  assert.equal(host.page.getAttr('theme'), 'dark', 'the page\'s stylesheet (data-theme) follows the same setting');
+  assert.equal(dark(), true);
+  let out = T.encoder({ color: 'truecolor' }).draw(tm);
+  assert.ok(out.includes(sgr(D.PALETTE.dark.bg)) && !out.includes(sgr(D.PALETTE.light.bg)), 'the terminal draws the dark background');
+
+  ev('(modus-themes-toggle)');
+  [tm, gm] = both();
+  assert.equal(tm.theme, 'light'); assert.equal(gm.theme, 'light');
+  assert.equal(host.page.getAttr('theme'), 'light'); assert.equal(dark(), false);
+  out = T.encoder({ color: 'truecolor' }).draw(tm);
+  assert.ok(out.includes(sgr(D.PALETTE.light.bg)) && !out.includes(sgr(D.PALETTE.dark.bg)), 'the terminal draws the light background');
+  assert.notDeepEqual(tm.faces, own.faces);
+
+  /* auto: each frame shows what it found out again */
+  D.setTheme(frame, 'dark');
+  ev('(disable-theme)');
+  [tm, gm] = both();
+  assert.equal(tm.theme, 'dark'); assert.deepEqual(tm.faces, own.faces);
+  assert.equal(gm.theme, 'light', 'the window\'s backend says light');
+  assert.equal(dark(), true, 'theme-dark? is the selected frame\'s');
+  Ed.selectFrame(win);
+  assert.equal(dark(), false);
+  Ed.selectFrame(frame);
+  Ed.deleteFrame(win);
+  D.setTheme(frame, null);
 });
 
 test('a wrapped line taller than the window keeps the cursor row in view', async () => {

@@ -290,8 +290,8 @@ globalThis.Yas = { keyAt, expand, snippets };
 
 /* ---------- themes: the two Modus tinted palettes of the CSS, by name ---------- */
 const THEMES: Record<string, string> = { 'modus-operandi-tinted': 'light', 'modus-vivendi-tinted': 'dark' };
-/* data-theme is shared with the host page: the value Edwin did not set itself is the host's, and
-   auto (disable-theme) puts it back instead of removing the attribute. */
+/* data-theme is the one setting every frame shows (Ed.display.themeOf). It is shared with the host page: the
+   value Edwin did not set itself is the host's, and auto (disable-theme) puts it back instead of removing it. */
 let hostTheme = page.getAttr('theme'), ownTheme: unknown;
 function setThemeAttr(v: string | undefined) {
   const now = page.getAttr('theme');
@@ -309,13 +309,13 @@ ownTheme = hostTheme;
 persistent(() => { const saved = Meta.get('theme', null) as string | null; if (saved && THEMES[saved]) setThemeAttr(THEMES[saved]); });
 const currentTheme = () => (L.call('theme-dark?', []) ? 'modus-vivendi-tinted' : 'modus-operandi-tinted');
 const themeCompleter = (extra: string[]) => () => [...Object.keys(THEMES), ...extra];
-const themeAnnotate = (n: string) => (n === 'auto' ? 'follow the page (prefers-color-scheme or data-theme)' : THEMES[n] === 'light' ? 'light, warm background' : 'dark, blue-black background');
+const themeAnnotate = (n: string) => (n === 'auto' ? 'each frame follows its terminal, window or page' : THEMES[n] === 'light' ? 'light, warm background' : 'dark, blue-black background');
 CMD('load-theme', async () => [await Ed.readMini('Load custom theme: ', '', themeCompleter(['auto']), { kind: 'theme', require: true, annotate: themeAnnotate })], 'THEME',
-  'Enable THEME: modus-operandi-tinted (light), modus-vivendi-tinted (dark), or auto to follow the page.', ([t]: SchemeValue[]) => { const n = nameOf(t); applyTheme(n); Ed.message(n === 'auto' ? 'Following the page theme' : `Loaded ${n}`); return false; });
+  'Enable THEME: modus-operandi-tinted (light), modus-vivendi-tinted (dark), or auto for each frame to follow its terminal, window or page.', ([t]: SchemeValue[]) => { const n = nameOf(t); applyTheme(n); Ed.message(n === 'auto' ? 'Each frame follows its own theme' : `Loaded ${n}`); return false; });
 CMD('modus-themes-select', async () => [await Ed.readMini('Select Modus theme: ', '', themeCompleter([]), { kind: 'theme', require: true, annotate: themeAnnotate })], 'THEME',
   'Switch to one of the Modus tinted themes.', ([t]: SchemeValue[]) => { const n = nameOf(t); applyTheme(n); Ed.message(`Loaded ${n}`); return false; });
 CMD('modus-themes-toggle', '', '', 'Switch between modus-operandi-tinted and modus-vivendi-tinted.', () => { const n = currentTheme() === 'modus-vivendi-tinted' ? 'modus-operandi-tinted' : 'modus-vivendi-tinted'; applyTheme(n); Ed.message(`Loaded ${n}`); return false; });
-CMD('disable-theme', '', '', 'Follow the page theme again.', () => { applyTheme('auto'); Ed.message('Following the page theme'); return false; });
+CMD('disable-theme', '', '', 'Let each frame follow its terminal, window or page again.', () => { applyTheme('auto'); Ed.message('Each frame follows its own theme'); return false; });
 D('custom-enabled-themes', '', 'The theme in effect, as a one-element list.', () => listOf([intern(currentTheme())]));
 
 /* ---------- project: the saved files, by top-level folder ---------- */

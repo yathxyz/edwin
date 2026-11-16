@@ -569,7 +569,7 @@ function presenceOf(g: Grid, rects: DispRect[], out: EdDisplayModel['presence'])
 /* The model of frame F (the frame being drawn: withFrame). */
 function frameModel(f: EdFrame): EdDisplayModel {
   const size: { cols?: number; rows?: number } = f.backend!.size() || {}, cols = Math.max(1, size.cols! | 0), rows = Math.max(1, size.rows! | 0);
-  const theme = f.theme || f.backend!.theme || (host.page.prefersDark && host.page.prefersDark() ? 'dark' : 'light');
+  const theme = themeOf(f);
   const g = new Grid(cols, rows);
   const wins = Ed.windowList(), states = new Map<EdWindow, EdWindowState>(wins.map(w => [w, Ed.windowState(w)]));
   const look = states.get(E.sel!) ? states.get(E.sel!)!.look : {};
@@ -654,6 +654,16 @@ function posAt(f: EdFrame, x: number, y: number): EdDisplayHit {
   }
   return { area: 'divider' };
 }
+/* The theme frame F shows, one setting for every kind of frame: the page's data-theme when it is light or dark
+   (load-theme and modus-themes-toggle set it, and the page's stylesheet reads it; else it is the host page's
+   own), else what a model frame found out (setTheme: EDWIN_THEME, the terminal's report, COLORFGBG) or its
+   backend says, else the host's preference. */
+function themeOf(f: EdFrame | null): DispTheme {
+  const t = host.page.getAttr('theme');
+  if (t === 'dark' || t === 'light') return t;
+  const own = f && f.backend ? f.theme || f.backend.theme : null;
+  return own || (host.page.prefersDark && host.page.prefersDark() ? 'dark' : 'light');
+}
 /* The backend's size or theme changed: draw again. */
 function redraw(f: EdFrame) { if (f && f.backend) { f._rkey = null; Ed.scheduleRender(); } }
 function setTheme(f: EdFrame, theme: string | null) { f.theme = theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : null; redraw(f); }
@@ -712,5 +722,5 @@ function mouse(f: EdFrame, ev: DispMouseEvent, take: () => void) {
   st.from = at.pos; st.win = at.window; Ed.frameEvent('point', f, b); Ed.render();
 }
 
-Ed.display = { PALETTE, FACES, resolveFace, parseColor, charWidth, strWidth, glyphsOf, wrap, frameModel, posAt, redraw, setTheme, input };
+Ed.display = { PALETTE, FACES, resolveFace, parseColor, charWidth, strWidth, glyphsOf, wrap, frameModel, posAt, redraw, setTheme, themeOf, input };
 })();
