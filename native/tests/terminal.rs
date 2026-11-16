@@ -933,6 +933,72 @@ fn terminal_events_clipboard_mouse_paste_resize_suspend() {
     );
 }
 
+/// The default background of the Modus palettes (src/display.ts PALETTE), as truecolor SGR.
+const DARK_BG: &[u8] = b"48;2;13;14;28";
+const LIGHT_BG: &[u8] = b"48;2;251;247;240";
+
+#[test]
+fn the_frame_follows_the_terminals_colour_scheme_reports() {
+    let d = workdir("scheme");
+    std::fs::write(d.join("s.txt"), "scheme\n").unwrap();
+    let mut t = Pty::spawn(&d, &["s.txt"], &[("COLORTERM", "truecolor")]);
+    // The pty answers the background query dark and never the scheme query: a terminal that does not
+    // report its scheme stays on what it found out.
+    t.ready();
+    assert!(
+        contains(&t.out, b"\x1b[?2031h") && contains(&t.out, b"\x1b[?996n"),
+        "edwin asks for colour-scheme reports"
+    );
+    assert!(contains(&t.out, DARK_BG) && !contains(&t.out, LIGHT_BG));
+    t.take();
+    t.send_raw(b"\x1b[?997;2n");
+    t.pump(200);
+    let out = t.take();
+    assert!(
+        contains(&out, LIGHT_BG) && !contains(&out, DARK_BG),
+        "a light report repaints light: {:?}",
+        tail(&out)
+    );
+    t.send_raw(b"\x1b[?997;1n");
+    t.pump(200);
+    let out = t.take();
+    assert!(
+        contains(&out, DARK_BG) && !contains(&out, LIGHT_BG),
+        "a dark report repaints dark: {:?}",
+        tail(&out)
+    );
+    t.keys(":q\r");
+    assert_eq!(t.exit(), 0);
+    assert!(
+        contains(&t.out, b"\x1b[?2031l"),
+        "leaving stops the reports"
+    );
+}
+
+#[test]
+fn edwin_theme_wins_over_the_terminals_scheme_reports() {
+    let d = workdir("scheme-forced");
+    std::fs::write(d.join("s.txt"), "scheme\n").unwrap();
+    let mut t = Pty::spawn(
+        &d,
+        &["s.txt"],
+        &[("COLORTERM", "truecolor"), ("EDWIN_THEME", "dark")],
+    );
+    t.ready();
+    t.take();
+    t.send_raw(b"\x1b[?997;2n");
+    t.pump(200);
+    t.keys("x");
+    assert!(
+        !contains(&t.out, LIGHT_BG),
+        "EDWIN_THEME=dark stays dark: {:?}",
+        tail(&t.out)
+    );
+    assert!(contains(&t.out, DARK_BG), "the edit is drawn dark");
+    t.keys(":q!\r");
+    assert_eq!(t.exit(), 0);
+}
+
 #[test]
 fn the_cold_start_works_as_the_snapshot_does() {
     let d = workdir("cold");

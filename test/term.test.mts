@@ -71,6 +71,12 @@ test('focus events and the background colour reply', () => {
     { type: 'reply', kind: 'background', value: '#fffff0' }, { type: 'reply', kind: 'background', value: '#000000' }]);
 });
 
+test('the colour-scheme report: 1 dark, 2 light, and any other ?n reply is dropped', () => {
+  const d = T.decoder();
+  assert.deepEqual(d.feed('\x1b[?997;1n\x1b[?997;2n\x1b[?997;3n\x1b[?996n\x1b[?6nx'), [
+    { type: 'reply', kind: 'scheme', value: 'dark' }, { type: 'reply', kind: 'scheme', value: 'light' }, { type: 'key', key: 'x' }]);
+});
+
 test('colour depth from the environment, and the 256 and 16 colour mappings', () => {
   assert.equal(T.colorMode({ COLORTERM: 'truecolor', TERM: 'xterm' }), 'truecolor');
   assert.equal(T.colorMode({ TERM: 'xterm-256color' }), '256');
@@ -118,8 +124,10 @@ test('defaultColors draws the default face in the terminal\'s own colours', () =
 test('enter and leave set and undo the terminal modes', () => {
   const e = T.encoder();
   const on = e.enter(), off = e.leave();
-  for (const m of ['?1049', '?1000', '?1002', '?1006', '?2004', '?1004']) { assert.ok(on.includes('\x1b[' + m + 'h'), m); assert.ok(off.includes('\x1b[' + m + 'l'), m); }
+  for (const m of ['?1049', '?1000', '?1002', '?1006', '?2004', '?1004', '?2031']) { assert.ok(on.includes('\x1b[' + m + 'h'), m); assert.ok(off.includes('\x1b[' + m + 'l'), m); }
   assert.ok(on.includes('\x1b[>1u') && off.includes('\x1b[<u'));
+  /* The colour scheme is asked after the background colour, so its answer wins, and before the DA1 fence. */
+  assert.ok(on.indexOf('\x1b]11;?') < on.indexOf('\x1b[?996n') && on.indexOf('\x1b[?996n') < on.indexOf('\x1b[c'));
   assert.ok(off.includes('\x1b[0 q'));
   assert.equal(e.clipboard('hi'), '\x1b]52;c;aGk=\x1b\\');
 });

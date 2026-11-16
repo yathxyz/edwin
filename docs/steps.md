@@ -1518,6 +1518,37 @@ frame model, so every frame kind follows one setting.
   fails), with `edwin-native`, `edwin-typecheck`, `edwin-headless`, and, as stack.ts and extras.ts load in
   ex44's public edwind, `edit-lockdown` and `edit-security`; and `nix build .#edwin`.
 
+## A terminal frame follows the terminal's light/dark switch (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ui-theme-terminal-follow`): terminal Edwin reads the
+terminal's colour-scheme notification and switches theme.
+
+- **The report** is the colour-scheme notification of Contour, kitty, ghostty, foot and others: native/js/term.ts's
+  `enter()` sets mode 2031 (`CSI ? 2031 h`, reports sent unasked whenever the scheme changes) and asks once
+  (`CSI ? 996 n`) after the background colour and before the DA1 fence; `leave()` resets it (`CSI ? 2031 l`), so a
+  suspended edwin's shell gets no stray reports and the resume asks again. The decoder makes `CSI ? 997 ; 1 n` a
+  `{type: 'reply', kind: 'scheme', value: 'dark'}` and `; 2 n` one with `light`; any other `?…n` is dropped.
+- **native/js/main.ts** gives a scheme reply to the frame through `Ed.display.setTheme` as it does the background
+  reply, so `themeOf` (src/display.ts, unchanged) and the repaint are those of `ui-theme-model-frames`.
+- **Choices made where the package left one open:**
+  - The later of the two reports wins; at start that is the scheme, which is asked last. After start only the
+    scheme is sent unasked, so the background colour is not asked again.
+  - `EDWIN_THEME` and a chosen theme (`load-theme`, `modus-themes-toggle`, kept in Meta) win over the reports, as
+    they win over the background colour; `disable-theme` lets the frame follow the terminal again.
+  - A terminal that does not report (or a tmux that does not pass the mode through) keeps what edwin found out at
+    start: the background colour, else `COLORFGBG`, else dark.
+- **Differences from Emacs:** Emacs's terminal frames do not read these reports, so here Edwin does more. Edwin's
+  window frame is not in this package: it keeps the theme its
+  window reported at start.
+- **Not in it:** following the desktop's scheme in a window frame; asking the background colour again on a change.
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-native` (test/term.test.mts: the decoder's `997;1`, `997;2`
+  and dropped `?…n` replies; `enter()`/`leave()` set and reset `?2031`, and ask `?996n` after `OSC 11` and before
+  DA1), and `nix build .#edwin`, whose native/tests/terminal.rs has two new tests: a frame started dark (the pty
+  answers the background query dark and never the scheme query) repaints with the light palette's background after
+  `CSI ? 997 ; 2 n` and with the dark one after `; 1 n`, and resets mode 2031 on leaving; with `EDWIN_THEME=dark` a
+  light report draws nothing light. Also `edwin-typecheck` (core.d.ts's new reply kind) and `edwin-display`.
+  Nothing here loads in edwind, so `edit-lockdown` and `edit-security` were not needed.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

@@ -208,8 +208,9 @@ const backend: EdDisplayBackend = gui ? screen!.backend : {
   draw: m => out(enc!.draw(m)),
   bell: () => out(enc!.bell()),
 };
-/* The theme: EDWIN_THEME, else the background colour the terminal reports (the desktop's, in the window), else
-   COLORFGBG, else dark. */
+/* The theme: EDWIN_THEME, else what the terminal reports (the desktop's, in the window), else COLORFGBG, else
+   dark. A terminal reports its background colour and its colour scheme (asked after the background, and sent
+   again whenever it changes, so the frame follows the terminal); the later report wins. */
 const forced = /^(dark|light)$/.test(envOf('EDWIN_THEME')) ? envOf('EDWIN_THEME') as 'dark' | 'light' : null;
 const fgbg = /;(\d+)$/.exec(envOf('COLORFGBG'));
 let theme = forced || (gui && screen!.theme()) || (fgbg ? (Number(fgbg[1]) === 7 || Number(fgbg[1]) >= 9 ? 'light' : 'dark') : 'dark');
@@ -284,6 +285,8 @@ function dispatch(evs: EdTermEvent[]) {
         const [r, g, b] = [1, 3, 5].map(i => parseInt(ev.value.slice(i, i + 2), 16));
         const t = 0.2126 * r + 0.7152 * g + 0.0722 * b < 128 ? 'dark' : 'light';
         if (t !== theme) { theme = t; if (frame) Ed.display.setTheme(frame, theme); }
+      } else if (ev.kind === 'scheme' && !forced) {
+        if (ev.value !== theme) { theme = ev.value; if (frame) Ed.display.setTheme(frame, theme); }
       } else if (ev.kind === 'da1') fenceDone!();
       continue;
     }

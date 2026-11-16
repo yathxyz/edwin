@@ -4,8 +4,8 @@
 
    EdTerm.encoder({ color, defaultColors }) draws models:
      enter()        the setup string: alternate screen, no autowrap, mouse, bracketed paste, focus events,
-                    the kitty keyboard protocol's "disambiguate" level, and the queries (background colour,
-                    kitty flags, then device attributes as a fence)
+                    the kitty keyboard protocol's "disambiguate" level, colour-scheme reports (mode 2031), and
+                    the queries (background colour, kitty flags, colour scheme, then device attributes as a fence)
      leave()        undoes enter(), the cursor shape and colour too
      draw(model)    the rows that changed since the last draw, then the cursor; one synchronized update
      invalidate()   forget what the screen holds (after a resize, a suspend, or anything that wrote to it)
@@ -15,7 +15,7 @@
    EdTerm.decoder() turns input into events: feed(text) gives the complete events in TEXT and keeps an
    unfinished escape sequence; pending() says one is kept; flush() gives it up as keys (a lone ESC after
    the escape timeout). Events: {type: 'key', key}, {type: 'paste', text}, {type: 'focus', focused},
-   {type: 'mouse', action, x, y, button, shift, meta, ctrl, dy}, {type: 'reply', kind, value}. */
+   {type: 'mouse', action, x, y, button, shift, meta, ctrl, dy}, {type: 'reply', kind, value} (kitty, da1, background or scheme). */
 (function () {
 'use strict';
 type TermRGB = [number, number, number];
@@ -96,14 +96,14 @@ function encoder(opts: { color?: EdColorMode; defaultColors?: boolean } = {}): E
     set defaultColors(v) { defaultColors = !!v; screen = []; },
     get defaultColors() { return defaultColors; },
     enter() {
-      return CSI + '?1049h' + CSI + '?7l' + CSI + '?1000h' + CSI + '?1002h' + CSI + '?1006h' + CSI + '?2004h' + CSI + '?1004h' +
-        CSI + '>1u' + CSI + '?25l' + CSI + '2J' + OSC + '11;?' + ST + CSI + '?u' + CSI + 'c';
+      return CSI + '?1049h' + CSI + '?7l' + CSI + '?1000h' + CSI + '?1002h' + CSI + '?1006h' + CSI + '?2004h' + CSI + '?1004h' + CSI + '?2031h' +
+        CSI + '>1u' + CSI + '?25l' + CSI + '2J' + OSC + '11;?' + ST + CSI + '?u' + CSI + '?996n' + CSI + 'c';
     },
     leave() {
       screen = []; size = null; cursorShape = null;
       const color = cursorColor !== null ? OSC + '112' + ST : '';
       cursorColor = null;
-      return CSI + '<u' + CSI + '?1004l' + CSI + '?2004l' + CSI + '?1006l' + CSI + '?1002l' + CSI + '?1000l' + CSI + '0 q' + color +
+      return CSI + '<u' + CSI + '?2031l' + CSI + '?1004l' + CSI + '?2004l' + CSI + '?1006l' + CSI + '?1002l' + CSI + '?1000l' + CSI + '0 q' + color +
         CSI + '0m' + CSI + '?7h' + CSI + '?25h' + CSI + '?1049l';
     },
     invalidate() { screen = []; size = null; cursorShape = null; cursorColor = null; },
@@ -204,6 +204,8 @@ function decoder(): EdTermDecoder {
     if (params[0] === '?') {
       if (final === 'u') out.push({ type: 'reply', kind: 'kitty', value: Number(params.slice(1)) || 0 });
       else if (final === 'c') out.push({ type: 'reply', kind: 'da1', value: params.slice(1) });
+      /* The colour scheme: the answer to ?996n, and sent unasked whenever it changes after ?2031h; 1 dark, 2 light. */
+      else if (final === 'n' && (params === '?997;1' || params === '?997;2')) out.push({ type: 'reply', kind: 'scheme', value: params === '?997;1' ? 'dark' : 'light' });
       return;
     }
     if (final === 'I' && !params) { out.push({ type: 'focus', focused: true }); return; }

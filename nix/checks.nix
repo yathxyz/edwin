@@ -173,8 +173,8 @@ in
   # setting (load-theme) reaching the terminal's, the window's and the page's frames.
   edwin-display = suite "display" [ "display.test.mts" ];
 
-  # The desktop program's JavaScript (DT1): the terminal encoder and decoder (native/js/term.ts), and the
-  # core's seams it uses (files on a disk, leaving with an exit status, input events). The program itself is
+  # The desktop program's JavaScript (DT1): the terminal encoder and decoder (native/js/term.ts, with the
+  # colour-scheme reports, mode 2031, that a terminal frame follows), and the core's seams it uses (files on a disk, leaving with an exit status, input events). The program itself is
   # tested in a pseudo-terminal by native/tests (cargo test).
   edwin-native = suite "native" [
     "term.test.mts"

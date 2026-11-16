@@ -2309,8 +2309,10 @@ interface EdTermEncoder {
   bell(): string;
 }
 /* A decoded terminal event: a display event, or a reply to a query (the background colour, DA1). */
-/* a reply to a query term.ts sent: the kitty keyboard flags, the background colour, the primary device attributes */
-type EdTermEvent = EdDisplayEvent | { type: 'reply'; kind: 'kitty'; value: number } | { type: 'reply'; kind: 'background' | 'da1'; value: string };
+/* a reply to a query term.ts sent: the kitty keyboard flags, the background colour, the primary device attributes,
+   the colour scheme (also sent unasked when it changes) */
+type EdTermEvent = EdDisplayEvent | { type: 'reply'; kind: 'kitty'; value: number } | { type: 'reply'; kind: 'background' | 'da1'; value: string }
+  | { type: 'reply'; kind: 'scheme'; value: 'dark' | 'light' };
 interface EdTermDecoder {
   feed(text: string): EdTermEvent[];
   pending(): boolean;

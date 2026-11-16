@@ -75,7 +75,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `test/daemon-models.test.mts` | programs.edwin.daemon's settings, credentials, hub and path (`edwin-daemon-models`, whose module part also checks daemon.hub's hubSocket and daemon.path's PATH in the unit file): the module's fragment merged into the edwind.json `edwin-daemon` writes, and no form or frame request (load, include, require, a visit, a symlink, init.scm, the models' introspection) reaching a credential's bytes |
 | `src/proc.ts`, `test/proc.test.mts`, `test/fake-proc.mts` | `Ed.proc`, child processes for the core's TypeScript (argv only; the desktop program's, never a web frame's or edwind's, and none while the image replays), its suite and the stand-in `host.proc` other suites use (`edwin-proc`) |
 | `test/models.test.mts` | the model layer against a real edwind and a loopback backend (`edit-security`): credentials, http-request, backends, sample, gptel, usage, and the backends an init.scm declares, which edwind loads after its modules |
-| `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder, and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
+| `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder (with the colour-scheme reports a terminal frame follows), and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
 | `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
 | `console/manifest.json` | what a page that hosts frames loads, in order: `files` (the scripts) and `scm` (the Scheme sources), with `api` 1; `edwin-web` ships it as `manifest.json` |
 
