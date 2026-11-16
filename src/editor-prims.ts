@@ -1268,6 +1268,7 @@ D('%define-derived-mode', 'child parent name body', 'define-derived-mode: CHILD 
   CMD(child, '', '', `Switch the current buffer to ${typeof nm === 'string' ? nm : child} mode${parent ? `, derived from ${parent}` : ''}.`, () => switchMajorMode(cur(), child));
   return c;
 });
+D('derived-mode-all-parents', 'mode', 'MODE and the modes it derives from, nearest first.', ([m]) => listOf(Ed.modeChain(symName(m, 'derived-mode-all-parents')).map(n => intern(n))));
 D('derived-mode-p', '. modes', 'The first of MODES the current major mode is or derives from, or #f.', ms => { const chain = Ed.modeChain(cur().mode); for (const m of ms) if (m instanceof Sym && chain.includes(m.name)) return m; return false; });
 
 /* The Scheme side of the forms above. */

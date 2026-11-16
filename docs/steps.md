@@ -1218,6 +1218,45 @@ server/models.mts, with a backend naming a credential by its LoadCredential name
   (shadow stack 15.0% against its 10% limit) and `edit-crash` (R16.5's random SIGKILL run: "the history lost
   acked batches"), both under the load of the parallel build; each passed when run again alone (7.8%; 7 of 7).
 
+## Comment syntax per mode (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block
+comment strings, and the comment commands use them: before, `gc` chose `;; ` or `# ` by a `case` on the mode
+and `M-;` (`comment-line`) always wrote `;; `, so a Markdown line became a heading and `.nix` got `;;`.
+
+- **`(set-comment-syntax! MODE LINE [BLOCK-START BLOCK-END])`** in `scm/emacs.scm` declares MODE's comments:
+  LINE starts a line comment (`";;"`, `"#"`), the two block strings open and close a block comment, and LINE
+  is `#f` for a mode with block comments only; it refuses a declaration with neither, and an empty or non-string
+  delimiter. `(comment-syntax)` gives the current buffer's `(LINE BLOCK-START BLOCK-END)`: its major mode's
+  entry, else the nearest entry of the modes it derives from, else fundamental-mode's. A later declaration for a mode replaces the earlier one.
+- **`derived-mode-all-parents`** (`src/editor-prims.ts`, Emacs 30's name) gives a mode and its ancestors,
+  nearest first, so the lookup goes by mode order: `derived-mode-p` answers in the order of its arguments.
+- **The commands:** `gc`/`gcc` (`scm/evil.scm`) and `M-;` (`comment-line`, `scm/emacs.scm`) take
+  `(comment-delimiters)`: the line comment, or a block comment's two strings in a mode with no line comment, and
+  put them, with one space of padding, around each line from its indentation (`<!-- one -->`). Uncommenting
+  removes both ends. Each command keeps its own uncomment rule: `gc` treats a range as commented when every
+  non-blank line starts with the opener (and ends with the closer) and then strips the opener exactly;
+  `M-;` treats a line as commented when it starts with the opener and ends with the closer, as `gc` does (so
+  `<!-- a` is wrapped again, not stripped), and strips any run of an opener made of one repeated character
+  (`;;; Header` and `; x` both uncomment).
+- **Declared:** scheme-mode and scheme-interaction-mode `;;`; org-mode and fundamental-mode `#`; markdown-mode
+  `<!--` `-->` (in `scm/markdown.scm`, beside the mode). text-mode, and every mode with no entry and no
+  ancestor's, take fundamental-mode's `#`, as `gc` did before; Emacs instead refuses where a mode has no
+  comment syntax. .nix, .js and the other languages open in fundamental-mode until lang-prog-mode declares
+  their own through this table.
+- **Not in it (left for se-comment, B6 of docs/emacs-to-edwin/structural-editing-audit.md):** `gc` and `M-;`
+  still differ on runs (`gc` on `;;; Header` gives `; Header`); in Org, `gc` and `M-;` on `#+TITLE` strip the `#`, as `gc` did before
+  (Emacs's `comment-start-skip` would not); nothing looks at strings or the lexer, and no `comment-dwim`,
+  `comment-region` or end-of-line comments. No buffer-local override of a mode's syntax.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-prog`, the new `test/prog.test.mts` (10): the
+  lookup through `derived-mode-all-parents` (a derived mode's own entry beats a newer entry of its parent, one with
+  none takes its parent's), the refusals (no comment, an empty or non-string delimiter, a block with one string),
+  and `gcc`, Visual `gc`, `gcip` and `M-;` driven by keys in Scheme, .nix, Org, Markdown and a block-only mode,
+  with `M-;` still stripping `;;; Header` and `; x` and wrapping an unclosed `<!-- a` again. Also passed:
+  `edwin-markdown` (20), `edwin-headless` (21), `edwin-scheme` (38), `edwin-typecheck`, `edit-lockdown` (6),
+  `edit-security` (21), `nix build .#edwin` (unit 17, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 31) and
+  `nix flake check` (exit 0).
+
 ## Evil keys per minor mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-evil-minor-maps`; it takes in git-evil-minor-keys). lispy's

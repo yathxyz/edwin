@@ -210,18 +210,86 @@ of a line, swap the two characters before point."
                (begin (search-forward (char->string char) #f #f n)
                       (point))))
 
+;;;; Comment syntax per mode
+
+(define comment-syntaxes '()
+  "Each mode's comment syntax, newest first: (MODE LINE BLOCK-START BLOCK-END), #f where the mode has none.")
+
+(define (set-comment-syntax! mode line . block)
+  "Declare MODE's comments: LINE starts a line comment (\";;\", \"#\"), and BLOCK, when given, is the two
+strings that open and close a block comment (\"/*\" \"*/\"). LINE is #f for a mode with block comments only.
+Every string must be non-empty. A mode with no declaration of its own takes the nearest one of the modes it
+derives from."
+  (unless (or line (pair? block))
+    (error "set-comment-syntax!: neither a line comment nor both block delimiters for" mode))
+  (unless (or (not line) (comment--delimiter? line))
+    (error "set-comment-syntax!: the line comment is neither #f nor a non-empty string for" mode line))
+  (unless (or (null? block)
+              (and (= (length block) 2) (comment--delimiter? (car block)) (comment--delimiter? (cadr block))))
+    (error "set-comment-syntax!: a block comment needs two non-empty strings for" mode block))
+  (let ((open (and (pair? block) (car block)))
+        (close (and (pair? block) (cadr block))))
+    (set! comment-syntaxes (cons (list mode line open close) comment-syntaxes))))
+
+(define (comment--delimiter? s)
+  "Whether S can delimit a comment: a non-empty string."
+  (and (string? s) (> (string-length s) 0)))
+
+(define (comment-syntax)
+  "The current buffer's comment syntax, (LINE BLOCK-START BLOCK-END): its major mode's, else the nearest
+mode's it derives from, else fundamental-mode's."
+  (let loop ((modes (derived-mode-all-parents (major-mode))))
+    (cond ((null? modes) (cdr (assq 'fundamental-mode comment-syntaxes)))
+          ((assq (car modes) comment-syntaxes) => cdr)
+          (else (loop (cdr modes))))))
+
+(define (comment-delimiters)
+  "The strings the comment commands put around a line, (OPEN . CLOSE): the line comment's start and \"\",
+or a block comment's two delimiters in a mode with no line comment."
+  (let ((s (comment-syntax)))
+    (if (car s) (cons (car s) "") (cons (cadr s) (caddr s)))))
+
+(define (comment--strip-close close)
+  "Delete CLOSE, and one space before it, from the end of the current line when the line ends with it."
+  (let* ((eol (line-end-position))
+         (text (buffer-substring (line-beginning-position) eol))
+         (n (string-length close)))
+    (when (and (> n 0) (string-suffix? close text))
+      (delete-region (- eol n (if (string-suffix? (string-append " " close) text) 1 0)) eol))))
+
+(define (comment--opener-re open)
+  "A regexp for OPEN: any run of its character when OPEN is one character repeated, else OPEN itself."
+  (let ((c (char->string (string-ref open 0))))
+    (if (string=? open (make-string (string-length open) (string-ref open 0)))
+        (string-append (regexp-quote c) "+")
+        (regexp-quote open))))
+
+(set-comment-syntax! 'fundamental-mode "#")
+(set-comment-syntax! 'scheme-mode ";;")
+(set-comment-syntax! 'scheme-interaction-mode ";;")
+(set-comment-syntax! 'org-mode "#")
+
 (define-command (comment-line n)
-  "Toggle a ;; comment on the current line, or on each line of the region."
+  "Toggle a comment, in the mode's comment syntax, on the current line or on each line of the region."
   (interactive "*p")
-  (let ((count (if (region-active?) (count-lines (region-beginning) (region-end)) n))
-        (start (if (region-active?) (region-beginning) (point))))
+  (let* ((count (if (region-active?) (count-lines (region-beginning) (region-end)) n))
+         (start (if (region-active?) (region-beginning) (point)))
+         (delims (comment-delimiters))
+         (open (car delims))
+         (close (cdr delims))
+         ;; An opener of one repeated character (;; # //) matches any run of it: ;;; Header and ; x uncomment.
+         (open-re (string-append "\\([ \t]*\\)" (comment--opener-re open) " ?")))
     (save-excursion
       (goto-char start)
       (dotimes (_ count)
         (beginning-of-line)
-        (if (looking-at "\\([ \t]*\\);+ ?")
-            (replace-match "\\1")
-            (begin (back-to-indentation) (insert ";; ")))
+        ;; As gc: a line that opens a block comment but does not close it is not commented.
+        (if (and (string-suffix? close (buffer-substring (point) (line-end-position)))
+                 (looking-at open-re))
+            (begin (replace-match "\\1") (comment--strip-close close))
+            (begin (back-to-indentation)
+                   (insert open " ")
+                   (unless (string=? close "") (end-of-line) (insert " " close))))
         (forward-line 1)))))
 
 (define-command (delete-trailing-whitespace)

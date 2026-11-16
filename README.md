@@ -60,6 +60,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `test/headless.mts` | loads and boots the editor in Node on `host-node.cts` (no page objects exist in the process) and drives it with keys |
 | `test/headless.test.mts` | the headless suite: `node --test test/headless.test.mts`, or `nix build .#checks.x86_64-linux.edwin-headless` |
 | `test/scheme.test.mts`, `test/scheme-editor.test.mts` | the Scheme suite: the language, and the editor-level forms (minor modes with their keymaps and their Evil state maps among them). `nix build .#checks.x86_64-linux.edwin-scheme` runs both and the benchmark |
+| `test/prog.test.mts` | programming modes: each mode's comment syntax (`set-comment-syntax!` in `scm/emacs.scm`) and `gc`, `gcc` and `M-;` using it (`edwin-prog`) |
 | `test/scheme-bench.mts` | evaluator benchmarks; fails when the shadow stack costs more than 10% (R4.34) |
 | `src/ot.ts` | the OT library (ops, transform, rebase, undo, markers, hash) shared by edwind and its clients (E1) |
 | `server/*.mts` | edwind, the text daemon (E1; see "Step E1" below) |

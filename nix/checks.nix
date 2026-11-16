@@ -164,6 +164,10 @@ in
   # re-fontifies in 2 ms), in the headless runtime.
   edwin-markdown = suite "markdown" [ "markdown.test.mts" ];
 
+  # Programming modes in the headless runtime: each mode's comment syntax (set-comment-syntax!, found through the
+  # modes it derives from, nearest first) and gc, gcc and M-; using it.
+  edwin-prog = suite "prog" [ "prog.test.mts" ];
+
   # The display seam (DT0 of desktop Edwin): model frames laid out on a cell grid for a backend that is not a page,
   # and the face and palette tables checked against index.html's, markdown-mode's and Org's stylesheets.
   edwin-display = suite "display" [ "display.test.mts" ];

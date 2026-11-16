@@ -46,6 +46,9 @@
 ((block references)), ^anchors, key:: fields and [#A] priorities, folded by heading as Org folds."
   #f)
 
+;; Markdown has no line comment: gc and M-; wrap each line in an HTML comment, as markdown-mode does.
+(set-comment-syntax! 'markdown-mode #f "<!--" "-->")
+
 ;;;; Editing commands (the text work is in markdown.ts)
 
 (define-command (markdown-outline-enter)

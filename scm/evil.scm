@@ -989,34 +989,37 @@ line-local finds.  With ARG, on when it is positive."
 
 ;;;; Comments: gc is an operator, gcc comments the line
 
-(define (comment-prefix)
-  "The comment marker for the current buffer."
-  (case (major-mode)
-    ((scheme-mode scheme-interaction-mode) ";; ")
-    ((org-mode) "# ")
-    (else "# ")))
+(define (evil--line-commented? open close)
+  "Whether the current line, from its indentation, starts with OPEN and ends with CLOSE; a blank line counts."
+  (back-to-indentation)
+  (or (eolp)
+      (and (looking-at (regexp-quote open))
+           (string-suffix? close (buffer-substring (point) (line-end-position))))))
 
 (evil-define-operator (evil-comment-operator beg end type)
-  "Comment the lines from BEG to END out, or back in when they all are (gc)."
-  (let* ((prefix (comment-prefix))
-         (marker (string-trim prefix))
+  "Comment the lines from BEG to END out, in the mode's comment syntax, or back in when they all are (gc)."
+  (let* ((delims (comment-delimiters))
+         (open (car delims))
+         (close (cdr delims))
          (lines (count-lines beg end))
          (all-commented
           (save-excursion
             (goto-char beg)
             (let loop ((i 0))
               (cond ((= i lines) #t)
-                    ((begin (back-to-indentation) (or (looking-at (string-append (regexp-quote marker))) (eolp)))
-                     (forward-line 1) (loop (+ i 1)))
+                    ((evil--line-commented? open close) (forward-line 1) (loop (+ i 1)))
                     (else #f))))))
     (save-excursion
       (goto-char beg)
       (dotimes (_ lines)
         (back-to-indentation)
-        (if all-commented
-            (when (looking-at (string-append (regexp-quote marker) " ?"))
-              (replace-match ""))
-            (unless (eolp) (insert prefix)))
+        (cond (all-commented
+               (when (looking-at (string-append (regexp-quote open) " ?"))
+                 (replace-match "")
+                 (comment--strip-close close)))
+              ((not (eolp))
+               (insert open " ")
+               (unless (string=? close "") (end-of-line) (insert " " close))))
         (forward-line 1)))
     (goto-char beg)
     (evil--first-non-blank)))
