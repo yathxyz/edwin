@@ -2,8 +2,9 @@
 # optionally edwind as a systemd user service (edwin --fg-daemon), so every edwinclient and `edwinclient -c` the
 # user starts is a frame of the same buffers, and EDITOR=edwin. The service is active only once its socket answers
 # (ExecStartPost=edwin-daemon --wait), so a unit ordered After= it can connect at once. daemon.settings is merged
-# into the edwind.json the daemon writes at each start (models, brain, hub), and daemon.credentials are the unit's
-# LoadCredential entries those settings name: the secrets stay in their files, never in the store.
+# into the edwind.json the daemon writes at each start (models, brain), daemon.hub adds hubSocket to them, and
+# daemon.credentials are the unit's LoadCredential entries those settings name: the secrets stay in their files,
+# never in the store.
 self:
 {
   config,
@@ -73,6 +74,17 @@ in
           are named here, never written: the store is world-readable.
         '';
       };
+      hub = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "/run/user/1000/wb/hub.sock";
+        description = ''
+          A Workbench hub socket (docs/hub-protocol.md) for edwind's processes (PTY sessions), written to
+          edwind.json as hubSocket through settings: an absolute path, or one under `~/` (the home of the user the
+          unit runs as). Without it edwind connects to no hub, and processes report the hub unconfigured. The hub
+          runs what edwind asks of it: name only a socket no other user can open.
+        '';
+      };
       credentials = mkOption {
         type = types.attrsOf types.str;
         default = { };
@@ -108,10 +120,17 @@ in
         message = "programs.edwin.daemon.credentials: each file must be an absolute path outside ${builtins.storeDir}, with no colon.";
       }
       {
+        # As edwind's loadConfig takes a path: absolute once a leading ~/ is the home.
+        assertion =
+          cfg.daemon.hub == null || lib.hasPrefix "/" cfg.daemon.hub || lib.hasPrefix "~/" cfg.daemon.hub;
+        message = "programs.edwin.daemon.hub: the socket must be an absolute path or one under ~/.";
+      }
+      {
         assertion = !lib.any (k: cfg.daemon.settings ? ${k}) ownFields;
         message = "programs.edwin.daemon.settings: ${lib.concatStringsSep ", " ownFields} are edwin-daemon's own.";
       }
     ];
+    programs.edwin.daemon.settings = mkIf (cfg.daemon.hub != null) { hubSocket = cfg.daemon.hub; };
     environment.systemPackages = [ cfg.package ];
     environment.variables = mkIf cfg.defaultEditor {
       EDITOR = lib.mkOverride 900 "edwin";

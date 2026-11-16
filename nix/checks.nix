@@ -300,6 +300,7 @@ in
   # desktop with credentials and no settings gets that refusal too); the credentials become the unit's
   # LoadCredential lines; a credential file in the store, a colon in one, a bad name and a
   # fragment that sets the daemon's own fields are refused; a desktop without them renders the unit as before.
+  # daemon.hub is hubSocket in that fragment (merged with the rest), absent unless set, and a relative one is refused.
   # Then test/daemon-models.test.mts runs the package's edwin-daemon with that fragment under a throwaway HOME and
   # XDG_RUNTIME_DIR: the fragment reaches the edwind.json it writes and edwind, and no form or frame request
   # reaches a credential's bytes. The daemon script and edwind only: the program itself is not built here.
@@ -341,6 +342,15 @@ in
       show = v: builtins.unsafeDiscardStringContext (builtins.toJSON v);
       fragment = unit.environment.EDWIND_CONFIG_EXTRA;
       credsOnly = (desktop { programs.edwin.daemon.credentials.k = "/run/k"; }).config.systemd.user.services.edwind;
+      hubOnly = (desktop { programs.edwin.daemon.hub = "/run/hub/hub.sock"; }).config.systemd.user.services.edwind;
+      hubHome = (desktop { programs.edwin.daemon.hub = "~/hub.sock"; }).config.systemd.user.services.edwind;
+      hubCreds =
+        (desktop {
+          programs.edwin.daemon = {
+            hub = "/run/hub/hub.sock";
+            credentials.k = "/run/k";
+          };
+        }).config.systemd.user.services.edwind;
       # The fragment: the settings, their refusals followed by the credentials' files.
       merged = settings // {
         refusePaths = settings.refusePaths ++ [
@@ -376,12 +386,15 @@ in
           creds = plain.serviceConfig ? LoadCredential;
         };
         credsOnly = credsOnly.environment ? EDWIND_CONFIG_EXTRA;
+        hubOnly = hubOnly.environment ? EDWIND_CONFIG_EXTRA;
         refused = {
           store = refused { programs.edwin.daemon.credentials.k = "${builtins.storeDir}/0000-k"; };
           colon = refused { programs.edwin.daemon.credentials.k = "/run/a:b"; };
           relative = refused { programs.edwin.daemon.credentials.k = "run/k"; };
           name = refused { programs.edwin.daemon.credentials.Bad_Name = "/run/k"; };
           own = refused { programs.edwin.daemon.settings.socket = "/run/elsewhere.sock"; };
+          hub = refused { programs.edwin.daemon.hub = "run/hub.sock"; };
+          hubHome = refused { programs.edwin.daemon.hub = "~/hub.sock"; };
           none = refused { };
         };
         system = builtins.seq sys.config.system.build.toplevel.drvPath true;
@@ -403,12 +416,15 @@ in
           creds = false;
         };
         credsOnly = true;
+        hubOnly = true;
         refused = {
           store = [ fileMsg ];
           colon = [ fileMsg ];
           relative = [ fileMsg ];
           name = [ "programs.edwin.daemon.credentials: names must match ^[a-z0-9-]{1,32}$." ];
           own = [ "programs.edwin.daemon.settings: socket, notesDir, stateDir, configDir are edwin-daemon's own." ];
+          hub = [ "programs.edwin.daemon.hub: the socket must be an absolute path or one under ~/." ];
+          hubHome = [ ];
           none = [ ];
         };
         system = true;
@@ -417,11 +433,16 @@ in
     in
     assert lib.assertMsg (got == want) "programs.edwin.daemon evaluated to ${got}, expected ${want}";
     pkgs.runCommand "edwin-daemon-models" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+      # A fragment FILE holds the JSON WANT.
+      same() { node -e 'const [f, want] = process.argv.slice(1); require("assert").deepStrictEqual(JSON.parse(require("fs").readFileSync(f, "utf8")), JSON.parse(want));' \
+          "$1" "$2"; }
       # The fragment in the store is the merged settings, the credentials' files among its refusals.
-      node -e 'const [f, want] = process.argv.slice(1); require("assert").deepStrictEqual(JSON.parse(require("fs").readFileSync(f, "utf8")), JSON.parse(want));' \
-        ${fragment} ${lib.escapeShellArg (builtins.toJSON merged)}
-      node -e 'const [f, want] = process.argv.slice(1); require("assert").deepStrictEqual(JSON.parse(require("fs").readFileSync(f, "utf8")), JSON.parse(want));' \
-        ${credsOnly.environment.EDWIND_CONFIG_EXTRA} '{"refusePaths":["/run/k"]}'
+      same ${fragment} ${lib.escapeShellArg (builtins.toJSON merged)}
+      same ${credsOnly.environment.EDWIND_CONFIG_EXTRA} '{"refusePaths":["/run/k"]}'
+      # daemon.hub is the fragment's hubSocket, alone or beside the other fields.
+      same ${hubOnly.environment.EDWIND_CONFIG_EXTRA} '{"hubSocket":"/run/hub/hub.sock"}'
+      same ${hubHome.environment.EDWIND_CONFIG_EXTRA} '{"hubSocket":"~/hub.sock"}'
+      same ${hubCreds.environment.EDWIND_CONFIG_EXTRA} '{"hubSocket":"/run/hub/hub.sock","refusePaths":["/run/k"]}'
       export HOME=$TMPDIR EDWIN_DAEMON=${daemon} EDWIND_CONFIG_EXTRA=${fragment}
       node --test ${edwin}/edwin/test/daemon-models.test.mts
       touch $out

@@ -1251,6 +1251,37 @@ keys and git's conflict and time-machine modes need Evil keys that hold only whi
   and `nix build .#edwin` (unit 17, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 31). `nix flake check`:
   all checks passed (`edwin-dired` 22, `edwin-front` 9, `edwin-brain` 34, `edwin-lockdown` 6, `edwin-security` 18 among them).
 
+## The desktop daemon can be given a hub (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-daemon-hub-option`; owner decision 3: no desktop hub for
+now, the option is still built, off unless set, and no host sets it): let a desktop say which Workbench hub its
+edwind uses for processes, as `services.edwind.hubSocket` does for ex44's.
+
+- **`programs.edwin.daemon.hub`** (nix/edwin-module.nix), a socket path or null (the default). Set, the module
+  adds `hubSocket` to `daemon.settings`, so it reaches the edwind.json `edwin-daemon` writes through the same
+  fragment (`EDWIND_CONFIG_EXTRA`) as models and brain, merged with whatever else settings hold. Unset, nothing is
+  added: a desktop without it renders the unit exactly as before, and edwind's hub stays `unconfigured`.
+- **Choices.** The path is an absolute one or one under `~/`, the forms edwind's `loadConfig` takes (it expands
+  `~/` from the unit's `$HOME`); anything else fails at evaluation with the module's assertion rather than at the
+  unit's start. The 108-byte socket limit stays `loadConfig`'s: the module cannot measure a `~/` path before it
+  is expanded. No `%t` or `$XDG_RUNTIME_DIR` expansion: the fragment is a JSON file in the store, which systemd
+  does not expand, and making `edwin-daemon` expand it would be built for a hub nobody runs (proc-desktop-hub is
+  declined); a fleet that ever runs one names its socket in full. Setting `daemon.settings.hubSocket` as well,
+  to another path, is the module system's conflicting-definitions error, so the two never disagree silently. No
+  `After=` on a hub unit: Edwin names no hub unit, and edwind's hub client retries until the socket answers.
+- **Security.** The hub runs what edwind asks of it, and edwind's socket is the user's; the description says to
+  name only a socket no other user can open. Nothing changes in edwind or in ex44's public edwind (no server file
+  was touched).
+- **Not in it:** the hub service on desktops (proc-desktop-hub, declined), any host setting the option, and the
+  PATH the unit and hub see (proc-unit-path).
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-daemon-models`, extended: a desktop with `daemon.hub =
+  "/run/hub/hub.sock"` has a fragment of exactly `{"hubSocket": "/run/hub/hub.sock"}`, one with `"~/hub.sock"`
+  keeps it as written, one with a hub and a credential has both `hubSocket` and the credential's refusal; the
+  desktop with settings and no hub still has a fragment equal to its settings (no `hubSocket`) and a desktop with
+  neither has no `EDWIND_CONFIG_EXTRA`; `"run/hub.sock"` fails with the hub assertion and `"~/hub.sock"` with
+  none. The daemon-models suite passed again (5 of 5). With the line that adds `hubSocket` taken out of the
+  module, the check fails at evaluation. `nix build .#checks.x86_64-linux.edwin-module` passed too.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,
