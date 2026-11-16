@@ -21,6 +21,7 @@
   "src/proc.js",
   "src/vc.js",
   "src/vc-diff.js",
+  "src/vc-git.js",
   "src/compile.js",
   "src/ot.js",
   "src/sync.js",

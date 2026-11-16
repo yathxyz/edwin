@@ -204,13 +204,14 @@ function entryOf(p: string): EdFileEntry | null {
 const isDirEntry = (e: EdFileEntry | null) => !!e && (e.kind === 'dir' || e.kind === 'link' && !!e.dir);
 
 /* The repository DIR (an absolute path) is in: the nearest directory up from it that holds `.jj` (a jj
-   workspace, colocated or not) or `.git` (a directory, or the file of a worktree or submodule), `.jj` first.
-   Null outside one, and where the host has no file tree (a web frame, edwind). Read from the file system: no
-   process runs, so nothing in the repository can run either. */
-function repo(dir: string): VcRepo | null {
+   workspace, colocated or not) or `.git` (a directory, or the file of a worktree or submodule), `.jj` first;
+   with ONLY 'git', the nearest `.git` alone (so a colocated workspace's git repository). Null outside one, and
+   where the host has no file tree (a web frame, edwind). Read from the file system: no process runs, so nothing
+   in the repository can run either. */
+function repo(dir: string, only?: 'git'): VcRepo | null {
   if (typeof dir !== 'string' || !dir.startsWith('/') || !(Ed.host.files && Ed.host.files.tree)) return null;
   for (let d = dir.replace(/\/+$/, '') || '/'; ; d = parentOf(d)) {
-    if (isDirEntry(entryOf(inDir(d, '.jj')))) return { vcs: 'jj', root: d };
+    if (only !== 'git' && isDirEntry(entryOf(inDir(d, '.jj')))) return { vcs: 'jj', root: d };
     const g = entryOf(inDir(d, '.git'));
     if (g && g.kind !== 'other') return { vcs: 'git', root: d };
     if (d === '/') return null;

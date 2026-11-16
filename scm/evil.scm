@@ -1496,7 +1496,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 
 ;; Dired, as evil-collection binds it.  j and k move; the marks choose what
 ;; D, R and C act on, and with none they act on the file at point.
-(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode)))
+(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode)))
 (evil-define-key 'motion 'dired-mode
   "RET" 'dired-find-file
   "-" 'dired-up-directory
@@ -1513,6 +1513,19 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "C" 'dired-do-copy
   "+" 'dired-create-directory
   "Y" 'dired-copy-filename-as-kill)
+
+;; git's status buffer (SPC g g), as evil-collection binds magit's: TAB folds
+;; the section at point, g r reads the repository again, C-j and C-k step
+;; through the sections, g j and g k through those of the same depth.
+(evil-define-key 'motion 'git-status-mode
+  "TAB" 'git-status-toggle
+  "RET" 'git-status-visit
+  "g r" 'git-status-refresh
+  "C-j" 'git-status-next-section
+  "C-k" 'git-status-previous-section
+  "g j" 'git-status-next-sibling
+  "g k" 'git-status-previous-sibling
+  "q" 'quit-window)
 
 ;; *compilation*, as evil-collection binds it; q and SPC come from special-mode.
 (evil-define-key 'motion 'compilation-mode

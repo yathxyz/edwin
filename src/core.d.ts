@@ -874,6 +874,9 @@ interface EdBuffer extends SchemeForeign {
   _vlx?: unknown;
   /* a commit message an opener waits for (vc.ts) */
   vcMessage?: VcPending;
+  /* a git status buffer: its repository, what its last refresh read, its folds and its lines (vc-git.ts) */
+  gitStatus?: unknown;
+  _glx?: unknown;
   _mdf?: unknown;
   _mdfm?: unknown;
   /* pool.ts: the word index and running jobs */
@@ -1698,6 +1701,8 @@ interface EdCompileApi {
      DIR; what the error list of a compilation is made of. UNIT is 'screen' (gcc's display columns), 'utf-16'
      (tsc's), 'byte' (nix's UTF-8 bytes) or null (characters). */
   errors(text: string, dir: string | null): [string, number, number | null, string | null, 'screen' | 'utf-16' | 'byte' | null][];
+  /* buffer B's directory, where a grep from it runs; null with no file system */
+  directory(b: EdBuffer): string | null;
 }
 
 /* ---------- editor: child processes for the core's TypeScript (proc.ts) ---------- */
@@ -2256,8 +2261,9 @@ type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'>;
 interface VcApi {
   message(opts: VcMessageOptions): Promise<string | null>;
   cleanMessage(text: string, comment: string): string;
-  /* the repository an absolute directory is in (jj first), from the file system; null outside one */
-  repo(dir: string): VcRepo | null;
+  /* the repository an absolute directory is in (jj first; with 'git', git's alone), from the file system;
+     null outside one */
+  repo(dir: string, only?: 'git'): VcRepo | null;
   start(r: VcRepo, args: string[], opts?: VcRunOptions): Promise<EdProc>;
   run(r: VcRepo, args: string[], opts?: VcRunOptions & { input?: string }): Promise<EdProcResult>;
 }

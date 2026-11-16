@@ -148,6 +148,9 @@ const FACES: Record<string, DispFaceSpec> = {
   'ba-tags': { fg: 'dim', bg: ['org-tag-bg', TAG_BG] },
   /* A commit message (vc.ts CSS); its comment lines are cm */
   'vc-message-summary': { fg: 'fn', w: 600 }, 'vc-message-warning': { fg: 'rb1', u: 1 },
+  /* git's status buffer (vc-git.ts CSS) */
+  'git-section': { fg: 'fn', w: 700 }, 'git-dim': { fg: 'dim' }, 'git-branch': { fg: 'st', w: 600 }, 'git-remote': { fg: 'rb2', w: 600 },
+  'git-hash': { fg: 'dim' }, 'git-hunk': { fg: 'dc', w: 600 }, 'git-added': { fg: 'rb2' }, 'git-removed': { fg: 'rb1' },
 };
 const NAMED: Record<string, string> = { black: '#000000', white: '#ffffff', red: '#ff0000', green: '#008000', blue: '#0000ff', yellow: '#ffff00', cyan: '#00ffff', magenta: '#ff00ff',
   gray: '#808080', grey: '#808080', orange: '#ffa500', purple: '#800080', pink: '#ffc0cb', brown: '#a52a2a' };

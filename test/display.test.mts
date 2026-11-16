@@ -428,7 +428,7 @@ test('PALETTE is index.html\'s palette, light and dark', () => {
   assert.deepEqual(D.PALETTE.dark, tokens(':root:not([data-theme="light"]) {'), 'the dark scheme of prefers-color-scheme');
 });
 
-test('FACES mirror the page\'s stylesheets: index.html, markdown-mode, Org, dired, brain and commit messages', () => {
+test('FACES mirror the page\'s stylesheets: index.html, markdown-mode, Org, dired, brain, commit messages and git\'s status', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const at = html.indexOf('\n<style>'), style = html.slice(at, html.indexOf('</style>', at));   // the page's own sheet, after the skeleton's
   /* index.html selectors and the face each one is */
@@ -448,7 +448,7 @@ test('FACES mirror the page\'s stylesheets: index.html, markdown-mode, Org, dire
   const fromCss: Record<string, Spec> = {};
   const add = (k: string, sp: Spec) => { fromCss[k] = Object.assign(fromCss[k] || {}, sp); };
   for (const [sel, sp] of rules(style)) if (SEL[sel]) add(SEL[sel], sp);
-  for (const id of ['markdown-css', 'org-css', 'dired-css', 'brain-css', 'vc-css']) {
+  for (const id of ['markdown-css', 'org-css', 'dired-css', 'brain-css', 'vc-css', 'vc-git-css']) {
     assert.ok(sheets[id], id + ' was registered');
     for (const [sel, sp] of rules(sheets[id])) { const m = /^\.text \.([\w-]+)$/.exec(sel); if (m) add(m[1], sp); }
   }

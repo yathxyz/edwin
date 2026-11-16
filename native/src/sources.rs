@@ -21,6 +21,7 @@ pub const JS: &[(&str, &str)] = &[
     ("proc", include_str!("../../src/proc.js")),
     ("vc", include_str!("../../src/vc.js")),
     ("vc-diff", include_str!("../../src/vc-diff.js")),
+    ("vc-git", include_str!("../../src/vc-git.js")),
     ("compile", include_str!("../../src/compile.js")),
     ("ot", include_str!("../../src/ot.js")),
     ("sync", include_str!("../../src/sync.js")),

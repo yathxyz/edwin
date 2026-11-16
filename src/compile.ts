@@ -800,5 +800,5 @@ L.put(intern('evil-ex-shell-command'), 'evil-repeat', intern('abort'));
 
 Ed.compile = { start: (command, dir) => start(COMPILATION, command, dir), recompile: () => again(COMPILATION), running: () => running(COMPILATION),
   grep: (command, dir) => start(GREP_KIND, command, dir), regrep: () => again(GREP_KIND), grepping: () => running(GREP_KIND),
-  errors: (text: string, dir: string | null) => scan(newParse(dir), text, false, true) };
+  errors: (text: string, dir: string | null) => scan(newParse(dir), text, false, true), directory: b => directoryFor(b, false) };
 })();

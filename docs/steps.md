@@ -2189,6 +2189,114 @@ files and hunks and build the partial patches staging applies. The status buffer
   had 35 passed. An earlier `nix flake check`, before the review fixes, failed only in `tests/gui.rs`: two tests
   hit "Xvfb did not start", the known flake. Everything else in that run passed.
 
+## The git status buffer (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-status-view`, on git-diff-model): magit's status buffer,
+with sections, folding and refresh, on SPC g g and SPC g G, in place of the desktop-only stubs `vile-vcs-status`
+and `vile-magit-status`. It is the first user of the runner (git-runner) and of `VcDiff.parse` (git-diff-model).
+
+- **`vc-status`** (SPC g g) and **`git-status`** (SPC g G), in src/vc-git.ts (new, through the seven places of the
+  touch list, after `vc-diff`). The commands take Edwin's own names (owner decision 12); the stubs and their names
+  are gone. They look for the repository from the current buffer's directory (`Ed.compile.directory`, new: the
+  directory a grep from the buffer runs in, its listing's or its file's, else the program's own; a status
+  buffer's is its repository's root). `vc-status` takes the nearest repository, jj first, as `vile-vcs-status` did;
+  `git-status` the nearest `.git` alone (`Vc.repo(dir, 'git')`, new), so in a colocated jj workspace it shows the
+  git repository's status, as `vile-magit-status` did.
+- **The buffer** `*git-status: NAME*` (NAME the root's last component; another repository of the same name gets
+  `<2>`), one per repository, in `git-status-mode` (shown as `Git Status`), read-only, in Motion state, with the
+  SPC leader. What it shows, magit's sections in magit's order, each only when it has something:
+  - `Head:` the branch and its last commit's subject; `(no commit yet)` on an unborn branch; a detached HEAD
+    shows its commit's short hash. `Merge:` the upstream and its subject, `(gone)` when it no longer exists.
+  - `Untracked files` (git's normal mode: a new directory as `dir/`), `Unmerged paths` (git's words: both
+    modified, added by us...), `Unstaged changes` and `Staged changes`, each file with its label (modified, new
+    file, deleted, renamed `old -> new`, copied, new type) and, unfolded, its hunks; `Stashes`; `Unpulled from
+    U` and `Unpushed to U` (at most 100 each, then `(N more)`), or `Recent commits` (10) when the branch has no
+    upstream or it is gone.
+  - A folded section with a body ends its heading in `…` (magit's indicator where there is no fringe). Files and
+    the stashes start folded, the rest unfolded.
+- **Reading.** Only read subcommands, each through `Vc.run` with its hardening: `status --porcelain=v2 --branch
+  --show-stash -z --untracked-files=normal --find-renames`, `diff` and `diff --cached` with `VcDiff.gitArgs` and
+  `--find-renames`, then `log --format=%h %s` for the head, the upstream, the unpulled and unpushed or recent
+  commits, and `log --walk-reflogs` of `refs/stash` for the stashes. `git stash list` and `branch -vv` are not
+  used: stash and branch are writes to the runner, which keep the repository's signature programs and drivers.
+  The three of status and the diffs run at once, then the logs at once. Each read is bounded (16 MiB, 120 s).
+- **Folding and redrawing.** There are no text properties, so the text is drawn from the model again (dired's
+  way), each line with a row that says its section, faces and what RET visits. A fold is kept by its section's id
+  (the section, the file's path, the hunk's index), so it survives `g r`, and a section folded keeps the folds
+  of its parts for when it is unfolded again; the fold of a section gone from an unfolded parent is forgotten.
+  Point stays on the line it was on, at the same column, or on the nearest section around it still shown, or on
+  the same line number.
+- **Keys** (scm/evil.scm, as evil-collection binds magit's): TAB `git-status-toggle` (the innermost section at
+  point; a line with nothing under it says `Nothing to fold here`), `g r` `git-status-refresh`, C-j and C-k
+  `git-status-next-section` and `-previous-section` (any depth), `g j` and `g k` the next and previous of the
+  same depth, RET `git-status-visit` (a file at its first line; on a hunk or a hunk line, the file at that line
+  on the new side, a removed line where it was; an untracked directory, its listing; a file not in the work tree,
+  a deleted one, is refused with `PATH is not in the work tree`),
+  `q` quit-window. SPC g g or SPC g G again, from the status buffer or from any file of the repository, reads it
+  again into the same buffer.
+- **Refresh.** A refresh started later wins: one that finishes after a newer one draws nothing, nor does one
+  whose buffer was killed meanwhile.
+- **Faces:** `git-section`, `git-dim` (labels, notes), `git-branch`, `git-remote`, `git-hash`, `git-hunk`,
+  `git-added`, `git-removed`, in display.ts FACES and in the sheet `vc-git-css`, which test/display.test.mts checks
+  against each other.
+- **Choices**, each reversible:
+  - SPC g g in a jj workspace (colocated or not) is refused: `ROOT is a jj workspace, and Edwin has no jj view
+    yet: SPC g G shows its git repository's status when it is colocated`. Emacs opened majutsu's log there;
+    git-jj-log gives `vc-status` its jj view. The `vile-majutsu-status` stub (SPC g J) stays for that package.
+  - Outside a repository the command is refused (`Not in a repository: DIR`), where magit asks for one to
+    initialise or pick.
+  - Names from status, and the commit subjects, are decoded lossily (they are only shown); the diffs strictly:
+    a patch must never be built from a lossy text, so a diff that is not UTF-8 shows its files without hunks and
+    `(the diff is not shown: its text is not UTF-8)`. The same for a diff past 16 MiB, or one VcDiff.parse
+    refuses. The note covers the whole section: one file that is not UTF-8 hides the hunks of all.
+  - A control character in a name shows as `?`, so a name with a newline stays on one line.
+  - Conflicted files are listed with git's words but show no diff: their combined diff is not parsed into hunks
+    (git-diff-model), and conflicts are git-sequencer's and git-conflict's.
+  - Headings show no hashes but a detached HEAD's (magit's default).
+- **For git-stage**, which lives in the same file: the buffer keeps the parsed diffs (`model.diffs.unstaged` and
+  `.staged`, what `VcDiff.patch` picks from) and each file's own part of them, and each line's row its section id
+  (file path, hunk index, line index). A status name read lossily must not be passed back to git; the diff's
+  names are strict.
+- **Not in it:** no staging, discarding, committing or any other write (git-stage on); no commit view (RET on a
+  commit does nothing: git-log-show); no in-progress merge or rebase header (git-sequencer); no TODO section
+  (git-todos); no numbered fold levels (1-4), no S-TAB cycling, no auto-refresh on save; no ignored files; no
+  submodule's own changes (the runner shows a submodule by its commit only).
+- **Image replay and edwind.** The commands check `Ed.proc.refusal()` first, and every child goes through
+  `Vc.run`, which refuses under the image's replay, in a web frame and in edwind (no `host.proc`); `Vc.repo` reads
+  the file tree only. vc-git.ts loads in edwind too (host-node.cts), ex44's public one included, where the
+  commands refuse and no capability is added.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (46 passed: vc.test.mts's 21, vc-diff's 16
+  and test/vc-git.test.mts's 9), with real git and jujutsu:
+  - A fixture repository with an upstream (a bare repository, moved on from another clone and fetched), a local
+    commit, a stash, a conflicting merge in progress, staged addition, deletion, rename and change, unstaged
+    changes (one on a staged file, `sp ace.txt`), an untracked file and directory: SPC g g's text compared whole,
+    line by line; only status, diff, log and the runner's config query run, each with the hooks off; the faces of
+    a heading, the branch, the upstream, a label and a hash.
+  - TAB on a file (its hunk shown, removed and added lines in their faces), on a hunk line (the hunk folds, point
+    to its heading), on a section and on the stashes; a section folded, refreshed and unfolded again keeps a.txt
+    unfolded; a line with nothing under it, the Head line and a blank line say so and change nothing.
+  - `g r` after a new file and a changed one: the new untracked file, a.txt still unfolded with its new hunk,
+    point on the same line and column, and on a blank line between sections the same line; SPC g g from the status buffer and from a file deeper in the repository
+    reading it again into the one buffer.
+  - C-j, C-k, `g j` and `g k`, and their ends; RET on an added and a removed line (the file at lines 4 and 2), on
+    a deleted file (refused) and on an untracked directory (its listing); q.
+  - A repository with no commit yet; a detached HEAD (and `Recent commits`); a branch with no upstream; an
+    upstream that is gone.
+  - Refused with no child started: outside a repository, SPC g g in a jj workspace; SPC g G there shows the
+    colocated git repository; `vc-status` and `git-status` under `Ed.proc.replay`.
+  - The stubs gone (`vile-majutsu-status` kept), SPC g g and SPC g G bound to the new commands.
+  - A modified file that is not UTF-8: the note and the files without hunks; a name with a newline shown with
+    `?`; a refresh whose buffer is killed while it reads.
+  - A repository whose own config names core.fsmonitor, core.pager, diff.external, a diff driver's textconv and
+    command, a filter's clean and smudge, gpg.program with log.showSignature, and alias.status, all marker scripts,
+    with a stash: plain `git diff` runs them (the control); its status buffer, the stash and the unfolded diff
+    (git's own text, not the textconv's) run none.
+  - `edwin-display` (20, FACES against `vc-git-css`), `edwin-typecheck`.
+- **Refresh cost**, measured on ex44 in the headless runtime (a scratch script, not a check): a repository of
+  20,000 files of 50 lines, 500 of them changed and 50 new: a refresh (status, both diffs, log, drawing) took
+  48-57 ms; with all 500 files unfolded (30,000 lines) 52 ms; a TAB there 8.6 ms; the lexer on a 4,000-character
+  segment p50 0.05 ms.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
