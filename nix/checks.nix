@@ -169,6 +169,10 @@ in
   # modes it derives from, nearest first) and gc, gcc and M-; using it.
   edwin-prog = suite "prog" [ "prog.test.mts" ];
 
+  # The error list (scm/next-error.scm) in the headless runtime: a list seeded across files stepped through with
+  # M-g n, M-g p, :cn, :cp and :cc; its ends and refusals, clamping, and a visit that waits for edwind.
+  edwin-next-error = suite "next-error" [ "next-error.test.mts" ];
+
   # The display seam (DT0 of desktop Edwin): model frames laid out on a cell grid for a backend that is not a page,
   # and the face and palette tables checked against index.html's, markdown-mode's and Org's stylesheets; one theme
   # setting (load-theme) reaching the terminal's, the window's and the page's frames; the jump pulse drawn as a

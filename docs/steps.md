@@ -1218,6 +1218,70 @@ server/models.mts, with a backend naming a credential by its LoadCredential name
   (shadow stack 15.0% against its 10% limit) and `edit-crash` (R16.5's random SIGKILL run: "the history lost
   acked batches"), both under the load of the parallel build; each passed when run again alone (7.8%; 7 of 7).
 
+## next-error: one error list, M-g n and :cn (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `proc-next-error`). A shared error list with M-g n / M-g p
+and :cn, :cp, :cc, for the producers that come later (compilation errors, grep, LSP diagnostics).
+
+- **`scm/next-error.scm`** (new; sources.rs SCM, console/manifest.json, both pages' SCM lists, CONFIG as a lazy
+  file after `prog.scm` and before `init.scm`, so init.scm can rebind its keys). The frame holds one list;
+  `(next-error-set-list! ENTRIES)` replaces it, each entry `(FILE LINE [COLUMN [MESSAGE]])` with LINE and COLUMN
+  from 1 and COLUMN in characters, and gives the count. The whole list is checked before it is recorded (a FILE
+  that is not a non-empty string, a LINE or COLUMN that is not a positive integer, a MESSAGE that is not a
+  string, a wrong length), so a refused list leaves the old one. A new list starts again at its first entry. The
+  producers are TypeScript and call it through `L.call`; they expand their relative file names first, since FILE
+  is opened as `find-file` opens it.
+- **Commands.** `next-error` (`M-g n`, `M-g M-n`) and `previous-error` (`M-g p`, `M-g M-p`) take a prefix count;
+  `first-error` goes to the first, or the Nth with a prefix. Ex: `:cn[ext] [N]`, `:cp[revious] [N]` and `:cN[ext]
+  [N]`, `:cc [N]` (`:cc` alone visits the current error again, or the first). Each step visits the error's file,
+  puts point on its line and column, shows `(I of N) MESSAGE` (`FILE:LINE` when there is none) and records where
+  point was in the jump list (`C-o` comes back within that buffer; the jump list is per buffer). A step by key
+  pulses the line; an ex step does not, since the command the pulse hook sees is `evil-ex`. Past either end, with no list, with a count past the list or a count that is
+  not a positive integer, it refuses and point stays. A file that no longer exists is refused by name, `(I of N)
+  FILE: no such file`, with no buffer made and no jump recorded; that error still becomes the current one, so the
+  next step goes past it. Whether it exists is asked by `location-missing?` (src/editor-prims.ts) where the frame
+  opens the file itself: the desktop program asks its file system (`host.files.exists`, the file not read), a page
+  with no edwind its browser store. A file edwind opens is not asked here, since it is on edwind's machine: in a
+  served page every location, in the desktop program attached to edwind (local or remote) one under the notes
+  directory (`hooks.servedPath`, as its visit hook decides). `:h` lists the ex commands.
+- **`visit-location FILENAME LINE [COLUMN]`** (src/editor-prims.ts): visits and puts point on the line and column,
+  each clamped (a line past the end goes to the last line, the empty line after a final newline being none; a
+  column past the end of its line to its end, which Normal state shows on the last character; a bignum line or
+  column is clamped the same way). COLUMN counts characters: a character outside the Basic Multilingual Plane (a
+  surrogate pair) is one. In a served frame a note is opened by edwind and the visit answers with a promise, which
+  frame Scheme cannot wait on: the primitive places point when the buffer arrives and returns the promise, which
+  the command loop waits on; a visit edwind refuses shows edwind's reason and leaves point.
+- **Choices and differences from Emacs and Vim:** an error is found by its line number when it is visited, not
+  followed by a marker from when the list was made, so lines added above it since move it. Counts on the ex
+  commands are an argument (`:cn 3`, `:cc 3`): Vim's leading count (`:3cn`) is parsed as a line range of the
+  current buffer, as for every ex command here, and is not supported. Emacs asks for the directory of a file it
+  cannot find; here it is refused. Steps do not wrap. The list is the frame's own, not shared with edwind or other
+  frames. A note that is gone is not refused: the served visit opens a note as `find-file` does, creating it, so
+  it opens as an empty edwind buffer (the file is written only when it is saved). The jump is recorded before a visit
+  that waits for edwind, so one edwind refuses still leaves a jump at the unmoved point.
+- **Not in it:** the producers (proc-compile-errors, proc-grep, lsp-diagnostics), a list buffer (`:clist`,
+  `:copen`), `:cfirst`, `:clast`, `C-x \``, `next-error-follow-mode`, and RET on a row of a producer's buffer.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-next-error`, `test/next-error.test.mts` (10): a
+  list seeded across three files, two of them not open, stepped through by `M-g n`, `M-g M-n`, `:cn`, `:cnext 3`,
+  `:cp`, `:cp 2`, `:cN`, `M-g p`, `M-g M-p`, `C-u 2 M-g p`, `:cc 1`, `:cc4`, `:cc` and `first-error`, asserting the
+  file, line, column and message each time, and that a visited file opens in its mode; the refusals at both ends,
+  with an empty list, `:cc 5` of 4, `:cn x` and `:cn 0`, point not moving; a new list starting again; clamping of
+  line and column; an edited open buffer counted afresh; a file that is gone; every malformed entry refused with
+  the old list kept; `C-o` back after an `M-g n` and after a `:cn` (the `:cn` case fails on the first version,
+  which marked the commands `evil-jump`: an ex command runs inside `evil-ex`, so nothing was recorded). Added
+  after review, each failing on the version before it: a refused step leaves the jump list as it was; column 3 of
+  `😀😀xy` is `x` and column 2 the second emoji, and a bignum line and column are clamped; a served page's note,
+  absent from the store, goes to a visit hook that answers 20 ms later and gets point, and one the hook refuses
+  leaves point with the hook's message (the version before refused both as `no such file` without calling the
+  hook); in the desktop program attached to edwind, with `host.files` and `hooks.servedPath` set as
+  native/js/main.ts sets them, a gone note goes to edwind unasked, a gone local file is refused with no file read
+  and no buffer made, and a present one is visited.
+  Also passed after the review fixes: `edwin-headless` (21; the page's SCM list), `edwin-prog` (17),
+  `edwin-scheme` (38), `edwin-typecheck`, `edit-security` (21) and `edit-lockdown` (6), since CONFIG also runs on
+  edwind; `nix build .#edwin` (unit 17, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 34; the first try
+  failed with Xvfb not starting under load, the retry passed) and `nix flake check` (all checks passed; a run
+  before that failed `edit-agent` on a 10 s timeout under load, which passed alone and in the full run after).
+
 ## prog-mode and define-language (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-prog-mode`). A base programming mode, and one form that

@@ -35,6 +35,7 @@
   "scm/babel.scm",
   "scm/pi.scm",
   "scm/gptel.scm",
-  "scm/prog.scm"
+  "scm/prog.scm",
+  "scm/next-error.scm"
  ]
 }

@@ -54,13 +54,14 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | Path | What |
 | --- | --- |
 | `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `proc` `ot` `sync` `display` |
-| `scm/*.scm` | the shipped Scheme configuration (`emacs`, `evil`, `org`, `ai`, `init`, `prog` (prog-mode and `define-language`: each language's files, comments and indent), and `notes-syntax`, `address`, `markdown`, `babel` through `require`), fetched by `index.html` and the console from `scm/` |
+| `scm/*.scm` | the shipped Scheme configuration (`emacs`, `evil`, `org`, `ai`, `init`, `prog` (prog-mode and `define-language`: each language's files, comments and indent), `next-error` (the error list: `M-g n`, `M-g p`, `:cn`, `:cp`, `:cc`), and `notes-syntax`, `address`, `markdown`, `babel` through `require`), fetched by `index.html` and the console from `scm/` |
 | `index.html` | the page: styles and the script tags. It loads `src/*.js` and fetches `scm/*.scm` relative to itself, so serving this directory runs it, and a published copy keeps the `src/` and `scm/` paths |
 | `src/host-browser.ts`, `src/host-node.cts` | the host layer (R4.1): storage, the shipped Scheme, page attributes, suspend, clipboard, scheduling. The core reaches the page only through it and through frame objects |
 | `test/headless.mts` | loads and boots the editor in Node on `host-node.cts` (no page objects exist in the process) and drives it with keys |
 | `test/headless.test.mts` | the headless suite: `node --test test/headless.test.mts`, or `nix build .#checks.x86_64-linux.edwin-headless` |
 | `test/scheme.test.mts`, `test/scheme-editor.test.mts` | the Scheme suite: the language, and the editor-level forms (minor modes with their keymaps and their Evil state maps among them). `nix build .#checks.x86_64-linux.edwin-scheme` runs both and the benchmark |
 | `test/prog.test.mts` | programming modes: `define-language` (`scm/prog.scm`), each declared file name opening in its mode with its indent and hooks, and each mode's comment syntax (`set-comment-syntax!` in `scm/emacs.scm`) with `gc`, `gcc` and `M-;` using it (`edwin-prog`) |
+| `test/next-error.test.mts` | the error list (`scm/next-error.scm`): a list seeded across files stepped through by `M-g n`, `M-g p`, `:cn`, `:cp` and `:cc`, its ends and refusals, clamping, and a visit that waits for edwind (`edwin-next-error`) |
 | `test/scheme-bench.mts` | evaluator benchmarks; fails when the shadow stack costs more than 10% (R4.34) |
 | `src/ot.ts` | the OT library (ops, transform, rebase, undo, markers, hash) shared by edwind and its clients (E1) |
 | `server/*.mts` | edwind, the text daemon (E1; see "Step E1" below) |

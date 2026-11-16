@@ -783,6 +783,35 @@ CMD('find-file', async () => [await readFileName('Find file: ')], 'FILENAME', 'V
   if (!name) signal('user-error', 'No file name given');
   return (Ed.hooks.findDirectory && Ed.hooks.findDirectory(name)) || visit(name);
 });
+/* A served frame's visit of a note answers with a promise (sync.ts), which frame Scheme cannot wait on: point is
+   placed here, once the buffer is there, and the command that called this waits on the promise it returns.
+   A line or column too big for a number (a bignum) is clamped like any other past the end. */
+const whole = (x: SchemeValue) => (typeof x === 'bigint' ? Number(x) : num(x));
+D('visit-location', 'FILENAME LINE &optional COLUMN', 'Visit FILENAME and put point on LINE at COLUMN (both from 1, COLUMN in characters, the line start when absent), each clamped to the text. Gives the buffer, or #f when the visit failed.', ([n, l, c]) => {
+  const line = whole(l), col = L.absent(c) || c === false ? 1 : whole(c);
+  const place = (b: unknown) => {
+    if (!(b instanceof Ed.Buffer)) return false;
+    /* The empty line after a final newline is no line of the file. */
+    const t = b.rope, ls = Ed.lastLineStart(t), last = Ed.lineNo(t, ls) - (ls > 0 && ls === t.length ? 1 : 0);
+    const s = Ed.lineStartOf(t, Math.min(Math.max(1, line), last)), e = Ed.eol(t, s);
+    /* Characters, not UTF-16 units: a surrogate pair is one step. */
+    let p = s;
+    for (let k = 1; k < col && p < e; k++) p += (t.charCodeAt(p) & 0xfc00) === 0xd800 && p + 1 < e && (t.charCodeAt(p + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+    b.pt = p;
+    return b;
+  };
+  const r = L.call('find-file', [str(n)]) as SchemeValue;
+  return r && typeof (r as Promise<SchemeValue>).then === 'function' ? (r as Promise<SchemeValue>).then(place) : place(r);
+});
+/* Whether a location's file is gone, asked before it is visited so that a step to it is refused with no buffer
+   made. A file edwind opens is not asked: in a served page every visit goes to edwind, and in the desktop program
+   attached to edwind so does a path under the notes directory (hooks.servedPath), whose file is on edwind's
+   machine. Elsewhere the desktop program asks its file system, a page its store. */
+D('location-missing?', 'FILENAME', 'True when FILENAME is known to be absent; #f for a file edwind opens, which is not asked here.', ([n]) => {
+  const name = str(n);
+  if (Ed.hooks.visit && (!host.files || (Ed.hooks.servedPath && Ed.hooks.servedPath(name)))) return false;
+  return bool(host.files ? !host.files.exists(name) : Ed.Store.get(name) === null);
+});
 L.defvar('require-final-newline', false, 'When true, saving a file adds a newline at its end if it has none (the terminal program sets it, as Vim does).');
 function writeTo(b: EdBuffer, given: string) {
   const name = fileOf(given);
@@ -1396,7 +1425,7 @@ CMD('describe-browser-keys', '', '', 'List the keys the browser keeps for itself
 /* A lazy config (org.scm) is evaluated at boot without a buffer; :e org.scm then shows the shipped text.
    The host reads the shipped files (R4.1): the page's Scheme blocks in a browser, scm/ under Node. */
 /* markdown.scm is loaded when the host has it (package E of E3); the standalone page may not carry it. */
-const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['prog.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
+const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['prog.scm', 'lazy'], ['next-error.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
 const shipped = (name: string) => host.config(name);
 /* In served mode (Ed.bootServed) every shipped file is evaluated lazily: the sources are edwind's files, not
    buffers of this runtime, so the buffer list and the completion word set hold only what the page opened. */

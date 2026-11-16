@@ -1310,6 +1310,7 @@ EX       :w [file]  :q[!]  :wq  :x  :e file  :e!  :sav file  :r file
          :s/re/new/g  :%s//new/g  :&  :g/re/d  :v/re/d  :g/re/normal A;
          :d :y :> :< :j :m 0 :t $ :pu :sort :normal :noh
          :set nu rnu wrap ic scs hls ws sw=4  :reg  :marks  :so
+         :cn :cp :cc N next, previous, Nth error (M-g n, M-g p)
          :(+ 1 2) evaluates Scheme.  :h name describes a procedure.
 
 LEADER   SPC f f find file   SPC b b switch buffer   SPC SPC M-x

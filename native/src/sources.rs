@@ -42,6 +42,7 @@ pub const SCM: &[(&str, &str)] = &[
     ("init.scm", include_str!("../../scm/init.scm")),
     ("markdown.scm", include_str!("../../scm/markdown.scm")),
     ("models.scm", include_str!("../../scm/models.scm")),
+    ("next-error.scm", include_str!("../../scm/next-error.scm")),
     (
         "notes-syntax.scm",
         include_str!("../../scm/notes-syntax.scm"),
