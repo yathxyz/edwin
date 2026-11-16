@@ -1092,6 +1092,76 @@ user unit loaded no credentials. This is the one way every area extends the desk
   passed, `edwin-bench` included. After the rebase onto lang-line-diff, `edwin-daemon-models`, `edit-lockdown`,
   `edit-security`, `edwin-typecheck`, `edwin-module` and `edwind-module` passed again.
 
+## Ed.proc: child processes for the core's TypeScript (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `proc-frame-api`, on proc-host-spawn; owner decision 1: child
+processes from the TypeScript core only, never from image-replayed Scheme, and a `--remote` frame's on its own
+machine). `src/proc.ts` is the one way the core starts a program: compile, grep, shell commands, git, jj,
+formatters and language servers will all call it, from TypeScript.
+
+- **`Ed.proc.spawn(argv, {cwd, env, timeout, maxBytes, lossy, merge, onOut, onErr})`** starts a child and gives
+  `{id, argv, write(text), closeStdin(), kill(signal = 'TERM'), exit}`: `onOut` and `onErr` get its output and
+  error as they come (a function that throws is reported, the child goes on), `exit` is a promise of how it
+  ended (`{code, signal, timedOut, truncated, error?}`, after all of its output). The options are the natives'
+  (proc-host-spawn, above).
+- **`Ed.proc.run(argv, {input, ...})`** gives the whole of it: `{out, err, code, signal, timedOut, truncated}`
+  once the child has ended. `input` is written to its standard input, which is then closed; without it, closed at
+  once, so a program that reads its input never waits for the user.
+- **`Ed.proc.available()`** says whether a child can start here now; **`Ed.proc.envFor(dir)`** gives the
+  environment changes for a child run in DIR, none yet: proc-direnv makes it ask direnv. Callers pass it as
+  `env`.
+- **Where.** The host gives the processes: `host.proc` (spawn, write, closeStdin, kill), which only the desktop
+  program has (`native/js/host-native.ts` over the natives, in edwin and in edwinclient's frames). A web frame
+  (`host.kind` browser) is refused by name; edwind's Node host has no `host.proc`, so edwind still never spawns
+  (R4.45), and neither does anything else on Node but a suite that brings its own.
+- **The image never reaches a process (R16.15).** sync.ts replays the image's forms inside `Ed.proc.replay`, and
+  edwind's init.scm, which a served frame evaluates as it does the image, too. While it runs and until the loop's
+  next turn every entry point (spawn, run, envFor) signals `process-error: No process starts while the image
+  replays`. No Scheme primitive reaches Ed.proc (proc-frame-scheme is declined), so a replayed form could reach a
+  process only by calling a TypeScript command that starts one: that command is refused whether it starts its
+  child at once or after awaits that settle in the same turn.
+- **Errors** are the Scheme condition `process-error` (new, under `error`), so Scheme around a command can catch
+  it: every refusal, an argv that is not a non-empty list of strings with a program first, and what the natives
+  throw (`cannot run PROGRAM: No such file or directory`, 64 already running).
+- **`test/fake-proc.mts`** is `host.proc` for the suites: node:child_process with the natives' shape (argv only,
+  a session per child, signals to its group, a missing program or directory refused at once, timeout, maxBytes,
+  merge, lossy), recording every spawn's argv and options in `calls`. compile, grep and git's suites install it
+  on their Node host as this one does.
+- **Choices**, each reversible:
+  - `run` keeps at most 16 MiB of output and error unless the caller says otherwise (`maxBytes`), so a runaway
+    child cannot fill the frame's memory; past it the result says `truncated`.
+  - The replay's window is closed by a timer, not at the end of the forms, so the microtasks the replay started
+    run under it as well. Both loops order it so: Node's, and the desktop program's (native/src/main.rs), which
+    checks for microtasks after every callback, before the timers' tick.
+  - The window is the whole frame's, not the replayed forms' alone: a child the user starts in the same turn as
+    an image edwind pushes is refused too, with the replay's message, and starts when asked again.
+  - A replayed form's command that waits for something outside the turn (a key in the minibuffer, a timer, a
+    reply) is no longer refused when it goes on; with a prompt, the user is the one who answers it.
+- **Not in it:** no command uses Ed.proc yet (proc-compile and the rest do); no `list-processes` of the frame's
+  children and no question on quitting with children running (proc-frame-scheme, declined; the program ends them,
+  proc-host-spawn); no direnv (proc-direnv); no pseudo-terminal. **The limit of the refusal:** a procedure the
+  image defines and that runs later, outside the replay (a key binding, a hook, a timer), is not told from the
+  user's own. Once a command that starts a process exists (proc-compile on), such a procedure that calls it with
+  arguments of its own starts that process. Closing it needs procedures to carry where they came from, which the
+  evaluator does not; until then the image's forms are only those edwind's own clients wrote.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-proc`, 6 passed: run's output, error, status,
+  timeout and options (`echo '$HOME; touch x' '`id`'` comes back as written); spawn's streamed output, input,
+  kill and closed input; a missing program or directory and a bad argv as `process-error`; envFor; the refusals
+  in a web frame and with no `host.proc`, with nothing spawned; and R16.15 through a real edwind: edwind's
+  init.scm and three image forms sent by another client (`(on-frames (probe))`, the same after two awaits, and a
+  `define` whose value calls it) all refused with nothing spawned, then the same procedures called by the user
+  ran. The gate was checked by taking each defence out: without `Ed.proc.replay` in onImage the at-once probe
+  ran; with the window closed at the end of the forms instead of by the timer the after-awaits probe ran.
+  `edwin-typecheck`, `edwin-native` (boot.ts's FILES equal host-node.cts's), `edwin-headless`, `edit-frame`,
+  `edit-lockdown`, `edit-security`, `edwin-display`, `edit-console` and `edit-image` passed. `nix build .#edwin`:
+  unit tests 17 passed, `tests/gui.rs` 5 passed and 1 ignored, `tests/terminal.rs` 31 passed. And once in the
+  built program, with a throwaway probe in `native/js/main.ts` (a copy, not committed) under a pty with a
+  throwaway HOME and XDG_RUNTIME_DIR: `sh -c 'cat; echo "$X" >&2; exit 3'` with `hi` and `X=y` gave `out hi`,
+  `err y`, code 3; a missing program gave `process-error: cannot run ...`; `cat` echoed `x`, then TERM ended it;
+  `sleep 10` with `timeout: 100` gave `timedOut`; inside `Ed.proc.replay` a spawn was refused, and so was one
+  after two awaits from a replay entered in a timer callback; after the turn `available()` was true again; no
+  child was left once edwin exited.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

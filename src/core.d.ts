@@ -1625,6 +1625,40 @@ interface EdApi {
   bootServed(opts?: { sources?: Record<string, string>; transport?: () => EdTransport; device?: string; cid?: string; pending?: unknown }): Promise<EdSyncApi>;
   /* set by display.ts */
   display: EdDisplayApi;
+  /* set by proc.ts */
+  proc: EdProcApi;
+}
+
+/* ---------- editor: child processes for the core's TypeScript (proc.ts) ---------- */
+
+/* Ed.proc.spawn's options: the host's, and a function for each of output and error as they come. */
+interface EdProcOptions extends EdProcSpawnOptions {
+  onOut?(text: string): void;
+  onErr?(text: string): void;
+}
+/* A running child: its input, signals, and its exit (after all of its output). */
+interface EdProc {
+  readonly id: number;
+  readonly argv: string[];
+  write(text: string): boolean;
+  closeStdin(): void;
+  kill(signal?: EdProcSignal): boolean;
+  readonly exit: Promise<EdProcExit>;
+}
+/* What Ed.proc.run gives back: the exit, and all of the output and error. */
+interface EdProcResult extends EdProcExit {
+  out: string;
+  err: string;
+}
+interface EdProcApi {
+  /* true where a child can start now: in the desktop program, and not while the image replays */
+  available(): boolean;
+  spawn(argv: string[], opts?: EdProcOptions): EdProc;
+  run(argv: string[], opts?: EdProcSpawnOptions & { input?: string }): Promise<EdProcResult>;
+  /* the environment changes a child run in DIR gets (none yet; proc-direnv asks direnv) */
+  envFor(dir: string): Promise<Record<string, string | null>>;
+  /* run FN as the image's replay (sync.ts): no child starts in it, nor before the next turn of the loop */
+  replay<T>(fn: () => T): T;
 }
 
 /* ---------- editor: edwind's client (sync.ts) ---------- */
@@ -1713,6 +1747,16 @@ interface EdHostTree {
   rmdir(path: string, recursive: boolean): void;
   mkdir(path: string): void;
 }
+/* A child's events as its host delivers them: output and error text as they come, then its exit, once. */
+type EdHostProcHandler = (kind: 'out' | 'err' | 'exit', data: string | EdProcExit) => void;
+/* native: child processes (host-native.ts, over the natives of native/src/proc.rs). The core reaches them
+   through Ed.proc only (proc.ts), which refuses what this does not. spawn throws when the child cannot run. */
+interface EdHostProc {
+  spawn(argv: string[], opts: EdProcSpawnOptions, on: EdHostProcHandler): number;
+  write(id: number, text: string): boolean;
+  closeStdin(id: number): void;
+  kill(id: number, signal?: EdProcSignal): boolean;
+}
 interface EdHostFiles {
   read(name: string): string | null;
   write(name: string, text: string): void;
@@ -1759,6 +1803,7 @@ interface EdHost {
   nextFrame(f: () => void): unknown;
   /* native */
   files?: EdHostFiles;
+  proc?: EdHostProc;
   readonly dirs?: { home: string; cwd: string; config: string; state: string };
   init?(): void;
   /* node: worker threads for the pool (host-node.cts) */
@@ -2166,9 +2211,10 @@ interface EdNatives {
   procSpawn(argv: string[], opts?: EdProcSpawnOptions): number;
   procWrite(id: number, text: string): boolean;
   procCloseStdin(id: number): void;
-  procKill(id: number, signal?: 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT' | 'STOP' | 'CONT' | 'USR1' | 'USR2'): boolean;
+  procKill(id: number, signal?: EdProcSignal): boolean;
   procList(): { id: number; pid: number; argv: string[] }[];
 }
+type EdProcSignal = 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT' | 'STOP' | 'CONT' | 'USR1' | 'USR2';
 interface EdProcSpawnOptions {
   cwd?: string;
   env?: Record<string, string | null>;

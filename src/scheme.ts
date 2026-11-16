@@ -255,7 +255,7 @@ function reportWith(r: SchemeValue, c: SchemeValue) { if (typeof r === 'string')
 function conditionIs(e: unknown, kind: string | Sym) { return e instanceof SchemeError && conditionType(e.kind).isa(kind instanceof Sym ? kind.name : kind); }
 const isErrorCondition = (e: unknown) => e instanceof SchemeError && conditionType(e.kind).isa('error');
 defineConditionType('error', null); defineConditionType('quit', null); defineConditionType('scheme-interrupt', null);
-for (const k of ['user-error', 'wrong-type-argument', 'unbound-variable', 'range-error', 'file-error', 'server-only', 'edit-conflict', 'timeout',
+for (const k of ['user-error', 'wrong-type-argument', 'unbound-variable', 'range-error', 'file-error', 'process-error', 'server-only', 'edit-conflict', 'timeout',
   'http-error', 'wrong-number-of-arguments', 'divide-by-zero', 'syntax-error', 'read-error', 'assertion-failed', 'recursion-depth', 'control-error',
   'buffer-read-only', 'search-failed', 'beginning-of-buffer', 'end-of-buffer', 'beginning-of-line', 'end-of-line', 'scan-error', 'void-function',
   'invalid-regexp', 'setting-constant', 'ship-error', 'job-error', 'no-worker', 'thread-died', 'thread-cancelled']) defineConditionType(k, 'error');

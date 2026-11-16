@@ -170,6 +170,11 @@ in
     "native.test.mts"
   ];
 
+  # Ed.proc (src/proc.ts): child processes for the core's TypeScript in a served frame against a real edwind, with
+  # the desktop program's host.proc stood in by test/fake-proc.mts (coreutils from the build's PATH): run's output
+  # and status, spawn, and the refusals in a web frame, with no host.proc and while the image replays (R16.15).
+  edwin-proc = suite "proc" [ "proc.test.mts" ];
+
   # The frame runtime (E3 H1, §6.3, §7, §9.5): Edwin's core as a protocol client against a real edwind:
   # open and snap, batches and acks, transform against pending edits, undo by group, reconnect and resend,
   # image replication, server commands and ask, anchors, server-only stubs.

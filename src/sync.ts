@@ -777,6 +777,11 @@ L.CMD('%sync-ask', '', '', 'Answer the next ask from edwind in the calling frame
 /* ---------- the image (R4.15-R4.18) ---------- */
 function onImage(msg: SyncImageMsg) {
   const forms = Array.isArray(msg.forms) ? msg.forms : [];
+  Ed.proc.replay(() => replayForms(msg, forms));   // R16.15: no form of the image starts a process
+  if (Number.isInteger(msg.gen)) sync.gen = Math.max(sync.gen, msg.gen);
+  Ed.scheduleRender();
+}
+function replayForms(msg: SyncImageMsg, forms: string[]) {
   for (const text of forms) {
     let read: SchemeValue[];
     try { read = L.readAll(String(text)); } catch (e) { Ed.message(`Image #${msg.gen}: unreadable form: ${Ed.errorText(e)}`); continue; }
@@ -785,8 +790,6 @@ function onImage(msg: SyncImageMsg) {
       try { L.resetOps(); L.ev(f); } catch (e) { Ed.message(`Image #${msg.gen}: ${String(text).slice(0, 60)}: ${Ed.errorText(e)}`); }
     }
   }
-  if (Number.isInteger(msg.gen)) sync.gen = Math.max(sync.gen, msg.gen);
-  Ed.scheduleRender();
 }
 
 /* ---------- server commands and evaluation (R4.27, R4.15) ---------- */
@@ -915,7 +918,11 @@ async function bootServed({ sources, transport, device, cid, pending }: { source
   if (pending) importPending(pending as (SyncPending | null)[]);
   await start({ transport, device, cid });
   const ui = await call({ cmd: 'user-init' });
-  if (ui && typeof ui.value === 'string' && ui.value.trim()) { try { for (const f of L.readAll(ui.value)) { L.resetOps(); L.ev(f); } } catch (e) { Ed.message(`Error in ~/.config/edwin/init.scm: ${Ed.errorText(e)}`); } }
+  /* edwind's init.scm comes from edwind as the image does: no process starts from it either (R16.15) */
+  if (ui && typeof ui.value === 'string' && ui.value.trim()) {
+    const text = ui.value;
+    Ed.proc.replay(() => { try { for (const f of L.readAll(text)) { L.resetOps(); L.ev(f); } } catch (e) { Ed.message(`Error in ~/.config/edwin/init.scm: ${Ed.errorText(e)}`); } });
+  }
   await imageQuery(0);
   const prims = await call({ cmd: 'primitives' });
   if (prims && prims.value) defineStubs(prims.value);

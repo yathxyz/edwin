@@ -53,7 +53,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 
 | Path | What |
 | --- | --- |
-| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `ot` `sync` `display` |
+| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `proc` `ot` `sync` `display` |
 | `scm/*.scm` | the shipped Scheme configuration (`emacs`, `evil`, `org`, `ai`, `init`, and `notes-syntax`, `address`, `markdown`, `babel` through `require`), fetched by `index.html` and the console from `scm/` |
 | `index.html` | the page: styles and the script tags. It loads `src/*.js` and fetches `scm/*.scm` relative to itself, so serving this directory runs it, and a published copy keeps the `src/` and `scm/` paths |
 | `src/host-browser.ts`, `src/host-node.cts` | the host layer (R4.1): storage, the shipped Scheme, page attributes, suspend, clipboard, scheduling. The core reaches the page only through it and through frame objects |
@@ -70,6 +70,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `native/` | `edwin`, the desktop program (DT1 to DT4, see below): a Rust crate with its own Cargo workspace that embeds V8 and these files; `native/js/` is its JavaScript (prelude, host, terminal, window, startup), `native/src/gui/` the window, `native/src/proc.rs` its child processes (argv only, for the core's TypeScript), `native/tests/` its pseudo-terminal and virtual-display suites (`cargo test`) |
 | `test/daemon.test.mts` | `edwin --daemon` from the package: it returns once the socket answers, two starts give one edwind, `--wait` (`edwin-daemon`); the command lines of `edwin-daemon` and `edwind` (refusals with status 2, `--help`, bare `edwind`) |
 | `test/daemon-models.test.mts` | programs.edwin.daemon's settings and credentials (`edwin-daemon-models`): the module's fragment merged into the edwind.json `edwin-daemon` writes, and no form or frame request (load, include, require, a visit, a symlink, init.scm, the models' introspection) reaching a credential's bytes |
+| `src/proc.ts`, `test/proc.test.mts`, `test/fake-proc.mts` | `Ed.proc`, child processes for the core's TypeScript (argv only; the desktop program's, never a web frame's or edwind's, and none while the image replays), its suite and the stand-in `host.proc` other suites use (`edwin-proc`) |
 | `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder, and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
 | `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
 | `console/manifest.json` | what a page that hosts frames loads, in order: `files` (the scripts) and `scm` (the Scheme sources), with `api` 1; `edwin-web` ships it as `manifest.json` |

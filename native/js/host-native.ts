@@ -1,6 +1,6 @@
 /* The native host (DT1): the same names as host-browser.ts and host-node.cts (R4.1), for Edwin's core inside
    the desktop shell (native, a Rust program with V8 in it). The shell gives it __n, its natives:
-   files, the terminal, sockets, the environment, exit. Unlike the page and edwind, this host has a file
+   files, the terminal, sockets, child processes (host.proc), the environment, exit. Unlike the page and edwind, this host has a file
    system the user edits directly: host.files, which the core's Store reads and writes (a file name is a
    path, relative to the directory edwin started in).
 
@@ -144,13 +144,34 @@ function deferredStorage(): EdHostStorage & { flush(): void; open(file: string):
   };
 }
 
+/* ---------- child processes: the natives of native/src/proc.rs, for Ed.proc (src/proc.ts) ----------
+   Each child's events go to the function its spawn was given, the exit last. */
+const children = new Map<number, EdHostProcHandler>();
+function deliver(id: number, kind: 'out' | 'err' | 'exit', data: string | EdProcExit) {
+  const on = children.get(id);
+  if (!on) return;
+  if (kind === 'exit') children.delete(id);
+  on(kind, data);
+}
+const proc: EdHostProc = {
+  spawn(argv, opts, on) {
+    globalThis.__native.handlers.proc = deliver;
+    const id = N.procSpawn(argv, opts);
+    children.set(id, on);
+    return id;
+  },
+  write: (id, text) => N.procWrite(id, text),
+  closeStdin: id => N.procCloseStdin(id),
+  kill: (id, signal) => N.procKill(id, signal),
+};
+
 function createHost(opts: { storage?: EdHostStorage; dark?: boolean } = {}): EdHost {
   const attrs = new Map<string, unknown>(), vars = new Map<string, string>(), suspend: (() => void)[] = [];
   const storage = opts.storage || deferredStorage();
   const tryRead = (p: string) => { try { return read(p); } catch (e) { return null; } };
   const host: EdHost = {
     kind: 'native', headless: true,
-    storage, files,
+    storage, files, proc,
     config: name => (Object.prototype.hasOwnProperty.call(globalThis.__scm, name) ? globalThis.__scm[name] : null),
     userConfig: name => tryRead(join(CONFIG_DIR, name)),
     readFile: p => tryRead(p),
