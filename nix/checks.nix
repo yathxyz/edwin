@@ -198,6 +198,12 @@ in
   # `nix build .#edwin` runs.
   edwin-open = suite "open" [ "open.test.mts" ];
 
+  # Version control (src/vc.ts) in the headless runtime. So far the commit message buffer (vc-message-mode): the
+  # faces of the summary, its overlong part, a second line that is not blank and the comment lines (git's # and
+  # jj's JJ:); C-c C-c giving the message cleaned as git stripspace --strip-comments cleans it; C-c C-k and killing
+  # the buffer aborting; an empty message and a name already in use refused.
+  edwin-vc = suite "vc" [ "vc.test.mts" ];
+
   # The frame runtime (E3 H1, §6.3, §7, §9.5): Edwin's core as a protocol client against a real edwind:
   # open and snap, batches and acks, transform against pending edits, undo by group, reconnect and resend,
   # image replication, server commands and ask, anchors, server-only stubs.

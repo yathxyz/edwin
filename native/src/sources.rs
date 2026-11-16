@@ -19,6 +19,7 @@ pub const JS: &[(&str, &str)] = &[
     ("dired", include_str!("../../src/dired.js")),
     ("brain", include_str!("../../src/brain.js")),
     ("proc", include_str!("../../src/proc.js")),
+    ("vc", include_str!("../../src/vc.js")),
     ("ot", include_str!("../../src/ot.js")),
     ("sync", include_str!("../../src/sync.js")),
     ("display", include_str!("../../src/display.js")),

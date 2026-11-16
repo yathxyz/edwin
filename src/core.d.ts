@@ -863,6 +863,9 @@ interface EdBuffer extends SchemeForeign {
   _fences?: unknown;
   _mlx?: unknown;
   _dlx?: unknown;
+  _vlx?: unknown;
+  /* a commit message an opener waits for (vc.ts) */
+  vcMessage?: VcPending;
   _mdf?: unknown;
   _mdfm?: unknown;
   /* pool.ts: the word index and running jobs */
@@ -2184,6 +2187,22 @@ interface BrainApi {
   open(ref: string): Promise<EdBuffer | false>;
   noteTitled(title: string): Promise<string | null>;
 }
+/* vc.ts: the commit message buffer. Vc.message opens one; the promise gives the cleaned message, or null when
+   it is aborted or its buffer killed. */
+interface VcMessageOptions {
+  name: string;
+  text?: string;
+  /* the prefix of a comment line: '#' (git's default), 'JJ:' for jj */
+  comment?: string;
+}
+interface VcPending {
+  comment: string;
+  done(msg: string | null): void;
+}
+interface VcApi {
+  message(opts: VcMessageOptions): Promise<string | null>;
+  cleanMessage(text: string, comment: string): string;
+}
 
 /* ---------- native: desktop Edwin (native/js) ---------- */
 
@@ -2358,7 +2377,7 @@ interface EdClaudeRuntime {
 
 /* ---------- globals ----------
    Set by the file named; read by the files after it in the load order (README: scheme runtime text
-   editor-core editor-prims evil-core pool complete extras stack ai evil-ex org markdown dired ot sync display,
+   editor-core editor-prims evil-core pool complete extras stack ai evil-ex org markdown dired brain proc vc ot sync display,
    after host-browser.ts or the Node or native host). Module objects are typed as present: the readers that
    may run before them check globalThis.X first. */
 
@@ -2396,6 +2415,7 @@ declare var EdAI: EdModuleExports;
 declare var Org: OrgApi;
 declare var Markdown: EdModuleExports;
 declare var Brain: BrainApi;
+declare var Vc: VcApi;
 /* ot.ts */
 declare var EdOT: EdOTApi;
 /* ai.ts reads it (also as window.claude) */

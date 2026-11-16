@@ -19,6 +19,7 @@
   "src/dired.js",
   "src/brain.js",
   "src/proc.js",
+  "src/vc.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

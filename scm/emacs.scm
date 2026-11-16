@@ -452,6 +452,14 @@ or a block comment's two delimiters in a mode with no line comment."
 (define-key special-mode-map "p" 'previous-line)
 (define-key special-mode-map "SPC" 'scroll-up-command)
 
+;; Commit messages (src/vc.ts opens the buffer): C-c C-c gives the message, C-c C-k aborts
+(define-derived-mode vc-message-mode text-mode "Message"
+  "Major mode for writing a commit message: the summary line, the part of it past
+vc-message-summary-max-length and a second line that is not blank are shown, and comment lines are left out."
+  #f)
+(define-key vc-message-mode-map "C-c C-c" 'vc-message-finish)
+(define-key vc-message-mode-map "C-c C-k" 'vc-message-abort)
+
 ;; The minibuffer
 (define-key minibuffer-local-map "RET" 'exit-minibuffer)
 (define-key minibuffer-local-map "C-j" 'exit-minibuffer)

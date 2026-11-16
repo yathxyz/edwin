@@ -1247,6 +1247,68 @@ reference's file or URL to the desktop's own application, which Edwin had only a
   `the_close_button_asks_about_changes` with `Xvfb did not start`, and passed rerun at a quiet time, then again
   on 2026-11-16 on emacs-to-edwin 3a0ea7b).
 
+## The commit message buffer (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-message-modes`, on lang-evil-minor-maps): the buffer a
+commit message is written in, as magit's git-commit-mode gives it: the summary line's length shown, comment lines,
+C-c C-c to finish and C-c C-k to abort. It starts `src/vc.ts`, where git and jj will run (git-runner on).
+
+- **`Vc.message({name, text, comment})`** (src/vc.ts, the global `Vc`, which git-runner extends with `Vc.start`)
+  opens a buffer named NAME holding TEXT, point at its start, in the selected window, in `vc-message-mode`, and
+  gives a promise: the message once the user finishes, null when they abort or kill the buffer. COMMENT is the
+  prefix of a comment line: `#` by default (git's), `JJ:` for jj. The opener runs whatever takes the message (git
+  commit, jj describe) from TypeScript; Scheme can finish or abort a message, never open one or say what is done
+  with it.
+- **`vc-message-mode`** (scm/emacs.scm, so no new .scm), derived from text-mode, shown as `Message`, with
+  `vc-message-mode-hook`. Its lexer (`H.lexSeg`) shows the summary line in `vc-message-summary`, the characters
+  past `vc-message-summary-max-length` (68) and a second line that is not blank in `vc-message-warning`, and the
+  comment lines in `cm`, the comment face every mode uses. The two new faces are in display.ts FACES and in
+  vc.ts's sheet `vc-css`, which test/display.test.mts now checks against each other.
+- **C-c C-c** (`vc-message-finish`) gives the message without its comment lines, cleaned as `git stripspace
+  --strip-comments` cleans it (`Vc.cleanMessage`: trailing white space, git's space, tab and CR only, so a no-break
+  space, \v and \f stay; runs of blank lines go, leading and trailing ones too; one final newline), and kills the buffer, so the window shows what it showed before.
+  **C-c C-k** (`vc-message-abort`) gives null and kills it; killing it any other way (kill-buffer-hook) gives null
+  too. Both keys are vc-message-mode-map's, so they work in Normal and in Insert state.
+- **Choices**, each reversible:
+  - The summary is the first line that is neither blank nor a comment (magit's `git-commit-summary-regexp`), so a
+    template that starts with comment lines still has its summary found; the second line is the one after it.
+  - The limit is magit's default, 68, in a variable the user can set; a segment drawn from inside the summary line
+    counts its columns from the line's start.
+  - An empty message (nothing left once cleaned) is refused with `The message is empty: write one, or abort with
+    C-c C-k`, and the buffer stays: git would abort the commit, here the user chooses.
+  - NAME must not name a live buffer: a second message under the same name, or one over a buffer of the user's, is
+    refused and changes nothing. The commands git-commit and jj describe will name their buffers per repository.
+  - The buffer opens in Normal state, as any text buffer; evil-collection starts an empty message in Insert
+    state, which is left for git-commit to decide.
+  - `vc-message-mode` turned on by hand has no commit waiting: C-c C-c and C-c C-k say so and change nothing.
+  - A signal from the mode's hooks (a broken `vc-message-mode-hook` in init.scm) kills the new buffer before
+    `Vc.message` rethrows it, so no buffer with no message waiting is left to refuse the name.
+- **Not in it:** no ZZ and ZQ (with-editor's Evil keys); no scissors line (`commit -v`'s diff below `>8`); no
+  trailers (Signed-off-by), message history (M-p, M-n) or fill settings; no comment-syntax entry, so gc does not
+  write the opener's prefix. Nothing calls `Vc.message` yet: git-commit and jj describe will. No desktop-only stub
+  goes (git-status-view removes vile-vcs-status and vile-magit-status). This package created `test/vc.test.mts`
+  and the check `edwin-vc`; git-runner adds its cases there.
+- **The limit of the replay refusal.** `vc-message-finish` and `vc-message-abort` are ordinary commands, so a form
+  in edwind's image that a frame replays can finish or abort a message being written. What the opener does with
+  the message then runs in the same turn, where `Ed.proc` refuses (R16.15), so the commit itself cannot start from
+  a replayed form; this relies on that gate and has the limit the Ed.proc section records. The mode, its commands
+  and the faces also load in edwind (host-node.cts), where nothing calls `Vc.message` and no process exists.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (new, test/vc.test.mts, 7 passed):
+  stripspace's cleaning with `#` and `JJ:`; each face, on the whole buffer and on a segment from inside the
+  summary, with the limit at 68 and at 72; a blank or comment second line and jj's prefix; C-c C-c from Insert and
+  from Normal state giving the cleaned message, the buffer gone and the window back; C-c C-k and kill-buffer giving
+  null; an empty message refused with the buffer kept and nothing given; a name in use (a pending message's, a
+  user buffer's) refused with nothing changed; the mode turned on by hand refusing both keys; a signalling
+  vc-message-mode-hook leaving no buffer behind; no-break space, \v and \f kept as git stripspace keeps them.
+  `edwin-display` (20,
+  FACES against `vc-css`), `edwin-typecheck`, `edwin-native` (31, boot.ts's FILES equal host-node.cts's) and
+  `edwin-headless` (21) passed. `nix build .#edwin`: unit tests 22 passed, `tests/gui.rs` 5 passed and 1 ignored,
+  `tests/terminal.rs` 35 passed. The lexer on a 10,000-line message (a `commit -v`-sized buffer), a keystroke
+  then a 4,000-character segment: p50 0.06 ms, at most 1.9 ms over 50 keystrokes, inside the 2 ms budget.
+  `nix flake check --keep-going`: all checks passed (`edit-lockdown` 6, `edit-security` 21, `edit-frame` 24,
+  `edit-console` 4 and `edit-image` 15 among them: vc.ts and the mode load in edwind too, ex44's public one
+  included, and add no server capability).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

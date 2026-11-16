@@ -53,7 +53,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 
 | Path | What |
 | --- | --- |
-| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `proc` `ot` `sync` `display` |
+| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `proc` `vc` `ot` `sync` `display` |
 | `scm/*.scm` | the shipped Scheme configuration (`emacs`, `evil`, `org`, `ai`, `init`, `prog` (prog-mode and `define-language`: each language's files, comments and indent), `next-error` (the error list: `M-g n`, `M-g p`, `:cn`, `:cp`, `:cc`), and `notes-syntax`, `address`, `markdown`, `babel` through `require`), fetched by `index.html` and the console from `scm/` |
 | `index.html` | the page: styles and the script tags. It loads `src/*.js` and fetches `scm/*.scm` relative to itself, so serving this directory runs it, and a published copy keeps the `src/` and `scm/` paths |
 | `src/host-browser.ts`, `src/host-node.cts` | the host layer (R4.1): storage, the shipped Scheme, page attributes, suspend, clipboard, scheduling. The core reaches the page only through it and through frame objects |
@@ -76,6 +76,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `test/daemon-models.test.mts` | programs.edwin.daemon's settings, credentials, hub and path (`edwin-daemon-models`, whose module part also checks daemon.hub's hubSocket and daemon.path's PATH in the unit file): the module's fragment merged into the edwind.json `edwin-daemon` writes, and no form or frame request (load, include, require, a visit, a symlink, init.scm, the models' introspection) reaching a credential's bytes |
 | `src/proc.ts`, `test/proc.test.mts`, `test/fake-proc.mts` | `Ed.proc`, child processes for the core's TypeScript (argv only; the desktop program's, never a web frame's or edwind's, and none while the image replays), its suite and the stand-in `host.proc` other suites use (`edwin-proc`) |
 | `test/open.test.mts` | `Ed.openUrl` (in `src/proc.ts`): a URL or a file in the desktop's application through the host, nothing while the image replays (`edwin-open`; the opener's own checks are `native/src/open.rs`'s cargo tests) |
+| `src/vc.ts`, `test/vc.test.mts` | version control for git and jj; so far the commit message buffer (`Vc.message`, `vc-message-mode` in `scm/emacs.scm`: summary, overlong and second-line faces, comment lines, C-c C-c gives the message, C-c C-k aborts) and its suite (`edwin-vc`) |
 | `test/models.test.mts` | the model layer against a real edwind and a loopback backend (`edit-security`): credentials, http-request, backends, sample, gptel, usage, and the backends an init.scm declares, which edwind loads after its modules |
 | `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder (with the colour-scheme reports a terminal frame follows), and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
 | `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
