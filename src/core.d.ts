@@ -2262,6 +2262,45 @@ interface VcApi {
   run(r: VcRepo, args: string[], opts?: VcRunOptions & { input?: string }): Promise<EdProcResult>;
 }
 
+/* vc-diff.ts: a unified diff as files and hunks, and the partial patches staging applies. A hunk's lines keep
+   their first character (' ', '-', '+', '\'); a path is unprefixed and unquoted, null for /dev/null; a mode is
+   git's octal text. text is the file's part of the diff as it was given. */
+interface VcDiffHunk {
+  header: string;
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: string[];
+}
+type VcDiffStatus = 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'unmerged';
+interface VcDiffFile {
+  oldPath: string | null;
+  newPath: string | null;
+  status: VcDiffStatus;
+  oldMode: string | null;
+  newMode: string | null;
+  binary: boolean;
+  /* a name is not UTF-8 (shown one character per byte): only the whole file can be picked */
+  notUtf8: boolean;
+  header: string[];
+  hunks: VcDiffHunk[];
+  text: string;
+}
+/* a whole file ({file}), a hunk ({file, hunk}) or lines of one by their index in its lines ({file, hunk, lines}) */
+interface VcDiffPick {
+  file: number;
+  hunk?: number;
+  lines?: number[];
+}
+interface VcDiffApi {
+  /* the switches a git diff for parse is taken with, after the subcommand */
+  gitArgs: readonly string[];
+  parse(text: string): VcDiffFile[];
+  /* the patch for the picks, to apply forwards or with --reverse; null when nothing is picked */
+  patch(files: VcDiffFile[], picks: VcDiffPick[], reverse?: boolean): string | null;
+}
+
 /* ---------- native: desktop Edwin (native/js) ---------- */
 
 /* __n: the natives the Rust shell gives (native/src/natives.rs). File calls throw with the system's
@@ -2474,6 +2513,7 @@ declare var Org: OrgApi;
 declare var Markdown: EdModuleExports;
 declare var Brain: BrainApi;
 declare var Vc: VcApi;
+declare var VcDiff: VcDiffApi;
 /* ot.ts */
 declare var EdOT: EdOTApi;
 /* ai.ts reads it (also as window.claude) */

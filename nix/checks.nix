@@ -235,12 +235,28 @@ in
   # and gpg program runs none of it through status, diff, log and show, nor do its signature programs for each
   # format, its merge driver (a remerge diff), its shell alias under a name that is no builtin, a partial clone's
   # transport or a submodule's filter (describe --dirty and --broken refused); jj settings a repository brings refused; git's
-  # unsafe-repository refusal shown, not retried; nothing while the image replays; the *vc-process* log.
-  edwin-vc = suiteWith [
-    pkgs.git
-    pkgs.jujutsu
-    pkgs.util-linux
-  ] "vc" [ "vc.test.mts" ];
+  # unsafe-repository refusal shown, not retried; nothing while the image replays; the *vc-process* log. Diffs
+  # (src/vc-diff.ts): git's and jj's parsed, under a user configuration that would change their shape; fast-check
+  # over random files and picks of files, hunks and lines, each patch passing git apply --cached --check and,
+  # applied forwards (staging), reversed on the index (unstaging) or on the work tree (discarding), leaving there
+  # what the pick means; names that are not UTF-8 picked whole only. VCDIFF_RUNS
+  # raises the run count. fast-check from the dev dependencies, for this suite alone: the edwind suites keep
+  # edwind's own module resolution.
+  edwin-vc =
+    pkgs.runCommand "edwin-vc"
+      {
+        nativeBuildInputs = [
+          pkgs.nodejs
+          pkgs.git
+          pkgs.jujutsu
+          pkgs.util-linux
+        ];
+      }
+      ''
+        export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts
+        touch $out
+      '';
 
   # The frame runtime (E3 H1, §6.3, §7, §9.5): Edwin's core as a protocol client against a real edwind:
   # open and snap, batches and acks, transform against pending edits, undo by group, reconnect and resend,

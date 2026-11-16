@@ -2088,6 +2088,107 @@ jj views) starts its children here, never through `Ed.proc` directly.
   `edit-console` 4 (vc.ts loads in edwind, ex44's public one included, where there is no host.proc and no file
   tree: Vc.repo gives null and Vc.start refuses, so no server capability is added).
 
+## Diffs as files and hunks, and partial patches (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-diff-model`, on git-runner): parse unified diffs into
+files and hunks and build the partial patches staging applies. The status buffer (git-status-view) shows what
+`VcDiff.parse` gives; `s`, `u` and `x` on a file, a hunk or a region (git-stage) apply what `VcDiff.patch` builds.
+
+- **`VcDiff.parse(text)`** (src/vc-diff.ts, new, through the seven places of the touch list, after `vc`; the
+  global `VcDiff`) reads what `git diff` prints, and `jj diff --git`, into files: `oldPath` and `newPath`
+  (unprefixed and unquoted, null for /dev/null), `status` (modified, added, deleted, renamed, copied, unmerged),
+  `oldMode` and `newMode`, `binary`, the `header` lines, the `hunks` and `text`, the file's part of the diff as
+  given. A hunk has its @@ line, its starts and counts (an omitted count is 1), and its `lines`, each keeping its
+  first character (` `, `-`, `+`, `\`). A hunk is read by the counts of its @@ line, never by what its lines look
+  like: a removed `-- x` prints as `--- x`, and a file's line can read `diff --git` or `@@`. A text that is not a
+  diff of this shape signals `error` with the line, rather than giving a part of it.
+- **`VcDiff.gitArgs`** are the switches a git diff for parse is taken with, after the runner's own: `--no-color
+  --src-prefix=a/ --dst-prefix=b/ --no-relative --unified=3 --inter-hunk-context=0`, so the user's or the
+  repository's color.diff, diff.noprefix, diff.mnemonicPrefix, diff.relative, diff.context and diff.interHunkContext
+  cannot change the shape (with diff.context = 0 every patch, even a whole file's, would fail `git apply`; a -U on
+  the command line beats it). diff.algorithm and diff.indentHeuristic still choose which lines pair up, which
+  every patch built here survives. A blank context line (diff.suppressBlankEmpty) is read as the context line
+  it is, and a C-quoted name (core.quotePath, or a quote, backslash or control character in it) is unquoted, its
+  escaped bytes read as UTF-8. A name whose bytes are not UTF-8 is shown one character per byte and the file marked
+  `notUtf8`: written back that name would be another file's, so only the whole file, as git printed it, is picked.
+- **`VcDiff.patch(files, picks, reverse)`** gives the patch for PICKS, each `{file}` (the whole file), `{file,
+  hunk}` or `{file, hunk, lines}` (lines by their index in the hunk's lines), to be applied forwards or, REVERSE,
+  with `--reverse`: `git apply --cached` stages a pick of `git diff`, `git apply --cached --reverse` unstages one of
+  `git diff --cached`, and `git apply --reverse` discards one of `git diff` from the work tree. Null when nothing is
+  picked (git apply refuses empty input). Forwards, a change not picked stays as it was before: a removed line
+  becomes context and an added one goes; reversed, it stays as it is after: an added line becomes context and a
+  removed one goes. The side the patch is applied to keeps every line, so its starts stand, and the other side's
+  move by what the hunks kept before give or take; the counts are the lines written (no `--recount` needed).
+- **Choices**, each reversible:
+  - A pick that takes every change of a file (all its hunks, or all their lines) is the whole file, given as git
+    printed it: its rename, copy, mode change, creation or deletion go with it.
+  - A partial pick carries content only, on the path the patch is applied to (the old one forwards, the new one
+    reversed): a rename, copy or mode change is not carried, so unstaging a hunk of a staged rename keeps the
+    rename staged. A new file staged in part is still created with the lines picked (an intent-to-add entry takes
+    it), and unstaged in part it stays with the lines not picked; a deleted file the other way round.
+  - Refused with `user-error`: a copy staged in part (its lines belong to a file the patch would have to create
+    whole); a pick that would leave a line with no newline before another (a `\ No newline at end of file` line
+    whose change is not picked while a change after it is: the result cannot be a file, so the user picks both);
+    a binary file whose diff has no data (take it with `--binary`); a conflicted file (`diff --cc`, `* Unmerged
+    path`), which is parsed and shown but has no patch. A hunk of a binary file, a mode change or a pure rename
+    cannot be picked: they have none, so only the whole file.
+  - A `diff --git` line names the file only where no ---/+++ or rename line does (an empty file added or
+    deleted, a mode change): unquoted names with spaces are split where the two agree.
+  - Picks out of range signal `args-out-of-range`; context lines picked mean nothing, and a hunk with no change
+    picked is left out.
+- **Not in it:** no buffer, command or key (git-status-view and git-stage). `apply` is on the runner's write
+  list, so the user's or the repository's apply.whitespace still applies to these patches: `fix` would change what
+  is staged, so git-stage should pass `--whitespace=nowarn`; no word diff, `--color-moved` or
+  combined-diff hunks (a conflicted file is whole-only and has no patch); copies need `-C` or diff.renames=copies.
+  A text file that is not UTF-8: `Ed.proc` decodes strictly, so its diff fails as the runner reports, and a
+  lossy decode would corrupt the patch, so callers keep the strict one. The hunk's function context after the @@
+  is kept in `header` but not written into partial patches.
+- **Image replay and edwind.** Pure text: nothing here runs a process, so it adds no capability. vc-diff.ts loads
+  in edwind too (host-node.cts), ex44's public one included, where it is a parser nothing calls.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (37 passed: git-runner's 21 and
+  test/vc-diff.test.mts's 16; edwin-vc is now its own derivation, so fast-check's NODE_PATH reaches this suite
+  alone and not the edwind ones), under a throwaway HOME whose .gitconfig sets color.ui and color.diff always,
+  diff.noprefix, diff.mnemonicPrefix, diff.suppressBlankEmpty, diff.relative, diff.context = 0 and
+  diff.interHunkContext = 10:
+  - A hand-written diff parsed: removed and added lines that read `--- x`, `+++ y`, `@@ -1 +1 @@`, `diff --git`
+    and `\ ...`, a blank context line, an omitted count, a quoted UTF-8 name with a quote and a space, a rename with
+    spaces and no hunk, a mode change, an empty file deleted, a binary file, `diff --cc` and `* Unmerged path`;
+    each file's text is its part, and five malformed texts are refused.
+  - The control: plain `git diff` under that configuration is coloured and has no prefixes. The same diff
+    through Vc with gitArgs parses. Another control: plain `git diff` there gives zero-context hunks; through Vc
+    with gitArgs the same change (lines 3-4 and 21 of 30) gives two hunks of three context lines each side, and a
+    line, a hunk and the whole file of it each pass `git apply --cached --check`. `jj diff --git` parses: a hunk with no newline at the end, an added file.
+  - Picks: null for no pick or for context lines only; refused for picks out of range, a copy staged in part, a
+    binary file without data, and a name that is not UTF-8 picked in part (the whole file is given as printed); a
+    copy unstaged in part is rewritten to its new path; the no-newline refusal, and the pick beside it that is
+    allowed.
+  - The property (fast-check, 100 runs each; `VCDIFF_RUNS` raises it, and `VCDIFF_SEED` with `VCDIFF_PATH`
+    replays a failure). Up to four files, named with a space, a quote, a tab, a backslash, a UTF-8 letter and a
+    directory. Each is changed, added (intent-to-add when staged or discarded), deleted, renamed (unstaging only: a
+    work tree has no renames against the index), changed in mode with or without content, or binary. Lines read
+    like diff syntax, with CR and blank lines, with and without a final newline. The diff runs through Vc.run
+    with gitArgs and `--binary`, and its hunks take each file's old text to its new one. Picks are random: whole
+    files, whole hunks, or random lines. Each pick is staged (`git diff`, `git apply --cached`), unstaged (`git
+    diff --cached`, `git apply --cached --reverse`) and discarded (`git diff`, `git apply --reverse` onto the work
+    tree). Each patch passes `git apply --check` with those switches. Applied, it leaves in the index (or the work
+    tree) exactly the blobs and modes the pick means, worked out from the target's own text. A pick is refused
+    exactly when that text cannot be a file.
+  - Two fixed cases the random runs meet only a few times in a hundred: a line of a staged rename unstaged (the
+    rename stays), and the refused pick. A last test checks that the random runs met every status, binary, mode,
+    and a part of a changed, added and deleted file. In one measured run each was met 27 times or more (before
+    discarding added runs),
+    so a miss is not a flake to expect.
+  - The parser's one finding from the property was a rename whose names have spaces. Its `diff --git` line is
+    ambiguous, so the names now come from the rename lines. The other failures were in the test itself (a tab in a
+    name, an empty restore).
+- **Other checks:** 300 runs of each property also passed locally, before discarding was added.
+  `edwin-typecheck` passed.
+  `nix flake check` passed on the final tree, every check. Among them were `edwin-vc` 36, `edit-lockdown` 6,
+  `edit-security` 21, `edit-console` 4 and `edit-image` 15. vc-diff.ts loads in edwind and adds no capability.
+  `nix build .#edwin` ran too: 22 unit tests passed; `tests/gui.rs` had 5 passed and 1 ignored; `tests/terminal.rs`
+  had 35 passed. An earlier `nix flake check`, before the review fixes, failed only in `tests/gui.rs`: two tests
+  hit "Xvfb did not start", the known flake. Everything else in that run passed.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
