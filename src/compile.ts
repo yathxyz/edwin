@@ -10,11 +10,15 @@
    The buffer keeps at most MAX_LINES lines and MAX_CHARS characters of output: past them the oldest go, below
    the header, and a line there says output was dropped. Output is taken in batches, every FLUSH_MS or at
    MAX_CHARS, so a flood is a few edits a second, not one per chunk, and neither the batch nor the buffer's edit
-   log grows with it. */
+   log grows with it.
+
+   Each line of output is read for the places errors name (file, line, column) in the shapes rustc, tsc, gcc,
+   nix and python print, and those become the frame's error list (scm/next-error.scm), added to as they come, so
+   M-g n steps through them while the command still runs. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
-const { intern, signal, CMD, D } = L;
+const { intern, signal, CMD, D, listOf } = L;
 const cur = () => E.current;
 
 const BUFFER = '*compilation*';
@@ -30,7 +34,7 @@ Ed.MODE_NAMES['compilation-mode'] = 'Compilation';
 Ed.modeParents.set('compilation-mode', 'special-mode');
 
 /* The run *compilation* shows now, or null. gen tells its events from those of a run it replaced. */
-interface Run { gen: number; command: string; dir: string | null; buffer: EdBuffer; proc: EdProc | null; started: number; head: number; lines: number; cut: boolean; pending: string; carry: string; timer: ReturnType<typeof setTimeout> | null; ended: boolean }
+interface Run { gen: number; command: string; dir: string | null; buffer: EdBuffer; proc: EdProc | null; started: number; head: number; lines: number; cut: boolean; pending: string; carry: string; timer: ReturnType<typeof setTimeout> | null; ended: boolean; parse: Parse; owner: string }
 let run: Run | null = null, gens = 0;
 /* The last command and its directory, for recompile. */
 let last: { command: string; dir: string | null } | null = null;
@@ -93,6 +97,100 @@ function clean(r: Run, text: string, final: boolean) {
 /* Where the run of \r that ends S starts. */
 function trimCR(s: string) { let k = s.length; while (k > 0 && s.charCodeAt(k - 1) === 13) k--; return k; }
 
+/* ---- The places errors name ----
+
+   Each complete line of output is read once, as it comes, by the shapes below; a line is read in its first SCAN
+   characters only, every pattern is anchored at the line's start and none nests a quantifier, and a file name
+   never holds a colon, so a line costs time linear in at most SCAN characters. A shape that names its message on
+   the line above (rustc's error[E0425]: ... over its --> line, nix's error: ... over its at line) takes that
+   header; a header holds for the next line only, and a place with none above it has its own line as message.
+   Notes, help and nix's trace frames (… while evaluating) are not errors: their places are skipped, as Emacs
+   skips info by default. A relative name is taken from the directory make last said it entered (at most
+   MAX_DIRS deep: past it the outermost goes), else the run's. At most MAX_ERRORS are kept: the first ones.
+
+   Columns are in the unit the tool counts in, which visit-location converts on the line it visits: gcc's
+   (GNU-shaped) are display columns (a tab to the next multiple of 8, a wide character 2), tsc's UTF-16 units,
+   nix's UTF-8 bytes, the rest characters. */
+const SCAN = 4096;
+const MAX_ERRORS = 20000;
+const MSG_MAX = 500;
+const MAX_DIRS = 64;
+/* A place: [FILE LINE COLUMN MESSAGE UNIT], COLUMN and MESSAGE null when not given, UNIT null for characters. */
+type Unit = 'screen' | 'utf-16' | 'byte' | null;
+type Place = [string, number, number | null, string | null, Unit];
+interface Parse { dir: string | null; dirs: string[]; msg: string | null; info: boolean; carry: string; found: number }
+const newParse = (dir: string | null): Parse => ({ dir, dirs: [], msg: null, info: false, carry: '', found: 0 });
+const MAKE_DIR = /^\S*make(?:\[\d+\])?: (Entering|Leaving) directory [`'‘"](.*)['’"]$/;
+const HEADER = /^\s*(error|warning|note|help)(?:\[[^\]\s]*\])?:/;
+const TRACE = /^\s*… /;
+const RUST = /^\s*--> ([^:]+):(\d+):(\d+)$/;
+const PANIC = /^thread '[^']*' (?:\(\d+\) )?panicked at ([^:]+):(\d+):(\d+):$/;
+const NIX = /^\s*at (\/[^:]+):(\d+):(\d+):$/;
+const PYTHON = /^\s*File "([^"]+)", line (\d+)/;
+const TSC = /^([^\s(:][^(:]*)\((\d+),(\d+)\): ((?:error|warning) .*)$/;
+const TSC_PRETTY = /^([^\s:]+):(\d+):(\d+) - ((?:error|warning) .*)$/;
+const GNU = /^([^\s:"'()<>|]+):(\d+):(?:(\d+):)?(?: (.*))?$/;
+const GNU_INFO = /^(?:note|remark|info):/;
+const MAKEFILE = /^(?:GNUmakefile|[Mm]akefile)$/;
+/* FILE taken from the directory make is in, else the run's; ./ dropped. */
+function place(p: Parse, file: string) {
+  while (file.startsWith('./')) file = file.slice(2);
+  if (file.startsWith('/')) return file;
+  const base = p.dirs.length ? p.dirs[p.dirs.length - 1] : p.dir;
+  return base ? join(base, file) : file;
+}
+const num = (s: string | undefined) => { const n = s === undefined ? NaN : Number(s); return Number.isSafeInteger(n) && n > 0 ? n : null; };
+const clip = (s: string) => { s = s.trim(); return s.length > MSG_MAX ? s.slice(0, MSG_MAX) + '…' : s; };
+/* One line, its trailing white space dropped, into OUT. A line 0 is no place, a column 0 none. The header the
+   line above set (p.msg, p.info) is taken here and goes: a header holds for one line. */
+function parseLine(p: Parse, line: string, out: Place[]) {
+  const msg = p.msg, info = p.info;
+  p.msg = null; p.info = false;
+  const colon = line.includes(':');
+  if (!colon && !line.includes('File "') && !line.includes('…')) return;
+  line = line.trimEnd();
+  const add = (file: string, l: string, c: string | undefined, text: string, unit: Unit = null) => {
+    const n = num(l), col = num(c);
+    if (!n || !file || p.found >= MAX_ERRORS) return;
+    out.push([place(p, file), n, col, clip(text), col === null ? null : unit]); p.found++;
+  };
+  let m: RegExpExecArray | null;
+  if ((m = RUST.exec(line))) { if (!info) add(m[1], m[2], m[3], msg === null ? line : msg); return; }
+  if ((m = NIX.exec(line))) { if (!info) add(m[1], m[2], m[3], msg === null ? line : msg, 'byte'); return; }
+  if ((m = HEADER.exec(line))) { p.msg = line.trim(); p.info = m[1] === 'note' || m[1] === 'help'; return; }
+  if (TRACE.test(line)) { p.msg = line.trim(); p.info = true; return; }
+  if (!colon) { if ((m = PYTHON.exec(line)) && !m[1].startsWith('<')) add(m[1], m[2], undefined, line); return; }
+  if ((m = MAKE_DIR.exec(line))) {
+    if (m[1] === 'Entering') { if (p.dirs.length >= MAX_DIRS) p.dirs.shift(); p.dirs.push(place(p, m[2])); }
+    else p.dirs.pop();
+    return;
+  }
+  if ((m = PANIC.exec(line))) { add(m[1], m[2], m[3], line); return; }
+  if ((m = TSC.exec(line)) || (m = TSC_PRETTY.exec(line))) { add(m[1], m[2], m[3], m[4], 'utf-16'); return; }
+  if ((m = GNU.exec(line))) {
+    const file = m[1], rest = m[4] || '';
+    if (!/[^\d.]/.test(file) || !(file.includes('.') || file.includes('/') || MAKEFILE.test(file)) || GNU_INFO.test(rest)) return;
+    add(file, m[2], m[3], line, 'screen');
+  }
+}
+/* The places in TEXT, output that follows what P has read: complete lines, and the last one too when FINAL.
+   RESTART: TEXT starts the line P holds again. */
+function scan(p: Parse, text: string, restart: boolean, final: boolean) {
+  const out: Place[] = [];
+  if (restart) p.carry = '';
+  let from = 0;
+  for (let nl = text.indexOf('\n'); nl >= 0; nl = text.indexOf('\n', from)) {
+    const line = p.carry + text.slice(from, Math.min(nl, from + SCAN));
+    p.carry = '';
+    if (p.found < MAX_ERRORS) parseLine(p, line.slice(0, SCAN), out);
+    from = nl + 1;
+  }
+  if (from < text.length) p.carry = (p.carry + text.slice(from, from + SCAN)).slice(0, SCAN);
+  if (final && p.carry) { if (p.found < MAX_ERRORS) parseLine(p, p.carry, out); p.carry = ''; }
+  return out;
+}
+const toList = (out: Place[]) => listOf(out.map(([f, l, c, m, u]) => L.list(f, l, c === null ? false : c, m === null ? false : m, u === null ? false : intern(u))));
+
 const live = (r: Run) => run === r && E.buffers.includes(r.buffer);
 /* Put TEXT in place of the buffer's text from FROM to its end: points at the end stay at the end. The buffer is
    read-only and never modified. */
@@ -110,7 +208,14 @@ const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff;
 function flush(r: Run, final = false) {
   if (r.timer) { clearTimeout(r.timer); r.timer = null; }
   const { text, restart } = clean(r, r.pending, final); r.pending = '';
-  if (!live(r) || !text && !restart) return;
+  if (!live(r)) return;
+  const found = scan(r.parse, text, restart, final);
+  if (text || restart) output(r, text, restart);
+  /* After the output is in, so a refused hand-over loses none of it. */
+  if (found.length) { try { L.call('next-error-add-to-list!', [r.owner, toList(found)]); } catch (e) { Ed.reportError(e); } }
+}
+/* TEXT into the buffer (in place of its last line when RESTART), then the bounds. */
+function output(r: Run, text: string, restart: boolean) {
   const b = r.buffer;
   append(b, text, restart ? Math.max(r.head, b.rope.lastIndexOf('\n', b.rope.length - 1) + 1) : b.rope.length);
   r.lines += countLines(text);
@@ -190,7 +295,7 @@ async function start(command: string, dir?: string | null): Promise<EdCompilatio
   const header = `-*- mode: compilation; default-directory: ${JSON.stringify(where ? abbr(where).replace(/\/?$/, '/') : './')} -*-\nCompilation started at ${stamp(Date.now())}\n\n${command}\n`;
   b.text = header; b.pt = 0; b.modified = false; b.undo = []; b.redo = []; Ed.forgetLog(b);
   b.compile = { command, dir: where };
-  const r: Run = { gen: ++gens, command, dir: where, buffer: b, proc: null, started: Date.now(), head: header.length, lines: 0, cut: false, pending: '', carry: '', timer: null, ended: false };
+  const r: Run = { gen: ++gens, command, dir: where, buffer: b, proc: null, started: Date.now(), head: header.length, lines: 0, cut: false, pending: '', carry: '', timer: null, ended: false, parse: newParse(where), owner: `compile ${gens}` };
   let settle: (x: EdProcExit) => void;
   const exit = new Promise<EdProcExit>(res => { settle = res; });
   let p: EdProc;
@@ -202,9 +307,12 @@ async function start(command: string, dir?: string | null): Promise<EdCompilatio
     throw e;
   }
   r.proc = p; run = r; last = { command, dir: where };
-  L.set('compile-command', command);
-  p.closeStdin();
   p.exit.then(x => { if (run === r) { finish(r, x); run = null; } settle(x); });
+  p.closeStdin();
+  /* The error list is this run's from now on, empty until its output names places. A refusal is reported, not
+     thrown: the child runs and is watched, so the caller is told it started and sees the buffer. */
+  try { L.call('next-error-set-list!', [L.list(), r.owner]); } catch (e) { Ed.reportError(e); }
+  L.set('compile-command', command);
   show(b);
   return { command, dir: where, buffer: b, exit, kill: (sig?: EdProcSignal) => (run === r && !r.ended ? p.kill(sig || 'INT') : false) };
 }
@@ -246,5 +354,6 @@ CMD('compilation-mode', '', '', 'Switch the current buffer to Compilation mode.'
 D('compilation--kill-buffer', '', 'Kill the compilation of the current buffer when it is *compilation*.', () => { if (run && run.buffer === cur()) stop('KILL'); return false; });
 L.addHook('kill-buffer-hook', intern('compilation--kill-buffer'));
 
-Ed.compile = { start, recompile, running: () => !!(run && !run.ended) };
+Ed.compile = { start, recompile, running: () => !!(run && !run.ended),
+  errors: (text: string, dir: string | null) => scan(newParse(dir), text, false, true) };
 })();

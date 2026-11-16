@@ -1,0 +1,14 @@
+error:
+       … while evaluating the attribute 'out'
+         at /work/fx/nx/flake-ish.nix:3:13:
+            2|   pkgs = { hello = { name = "hello"; }; };
+            3|   mk = p: { out = p.version; };
+             |             ^
+            4| in
+
+       error: attribute 'version' missing
+       at /work/fx/nx/flake-ish.nix:3:19:
+            2|   pkgs = { hello = { name = "hello"; }; };
+            3|   mk = p: { out = p.version; };
+             |                   ^
+            4| in

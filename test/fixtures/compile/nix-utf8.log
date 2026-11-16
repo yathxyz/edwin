@@ -1,0 +1,6 @@
+error: undefined variable 'zz'
+       at /work/fx/nx/u.nix:2:26:
+            1| # Dépendances — tout
+            2| let a = "ééé"; in a + zz
+             |                          ^
+            3|

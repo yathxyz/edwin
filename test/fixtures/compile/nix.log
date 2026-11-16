@@ -1,0 +1,6 @@
+error: undefined variable 'undefinedThing'
+       at /work/fx/nx/default.nix:2:14:
+            1| let
+            2|   f = x: x + undefinedThing;
+             |              ^
+            3| in

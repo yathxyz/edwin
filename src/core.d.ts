@@ -1679,6 +1679,10 @@ interface EdCompileApi {
   /* the last command again, in its directory */
   recompile(): Promise<EdCompilation>;
   running(): boolean;
+  /* the places errors name in TEXT (lines of output), as [FILE LINE COLUMN MESSAGE UNIT], relative names taken from
+     DIR; what the error list of a compilation is made of. UNIT is 'screen' (gcc's display columns), 'utf-16'
+     (tsc's), 'byte' (nix's UTF-8 bytes) or null (characters). */
+  errors(text: string, dir: string | null): [string, number, number | null, string | null, 'screen' | 'utf-16' | 'byte' | null][];
 }
 
 /* ---------- editor: child processes for the core's TypeScript (proc.ts) ---------- */

@@ -170,7 +170,7 @@ in
   edwin-prog = suite "prog" [ "prog.test.mts" ];
 
   # The error list (scm/next-error.scm) in the headless runtime: a list seeded across files stepped through with
-  # M-g n, M-g p, :cn, :cp and :cc; its ends and refusals, clamping, and a visit that waits for edwind.
+  # M-g n, M-g p, :cn, :cp and :cc; its ends and refusals, clamping, columns in the unit the producer counts in (characters, display cells, UTF-16), and a visit that waits for edwind.
   edwin-next-error = suite "next-error" [ "next-error.test.mts" ];
 
   # The display seam (DT0 of desktop Edwin): model frames laid out on a cell grid for a backend that is not a page,
@@ -194,7 +194,8 @@ in
 
   # compile (src/compile.ts) in the headless runtime, with host.proc stood in by test/fake-proc.mts: output
   # streamed into *compilation*, the status line on exit, recompile with the same command and directory,
-  # kill-compilation, the line cap, and no compilation in a web frame, with no host.proc or while the image replays.
+  # kill-compilation, the line cap, and no compilation in a web frame, with no host.proc or while the image replays;
+  # the error places in each tool's log (test/fixtures/compile) fed to next-error as they come, and the parse budget.
   edwin-compile = suite "compile" [ "compile.test.mts" ];
 
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame

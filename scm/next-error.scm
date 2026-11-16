@@ -2,22 +2,29 @@
 ;;;
 ;;; Whatever finds places in files (compilation output, a search, a language server's diagnostics) hands the
 ;;; list over with next-error-set-list!, which replaces the one before it: as in Emacs, next-error goes through
-;;; the errors of whatever produced them last. M-g n and M-g p (and :cn, :cp) step through it, visiting each
+;;; the errors of whatever produced them last. A producer that finds them as it goes (a compilation) names
+;;; itself as the list's owner and adds to it with next-error-add-to-list!, which keeps the place stepped to and
+;;; adds nothing once another producer's list has replaced its own. M-g n and M-g p (and :cn, :cp) step through it, visiting each
 ;;; error's file with point on its line and column; :cc N goes to the Nth. The list lives in this frame only.
 ;;; Loads after evil.scm (its ex commands) and before init.scm, so init.scm can rebind the keys.
 
 (define next-error--errors (vector)
-  "The error list: a vector of (FILE LINE COLUMN MESSAGE), COLUMN and MESSAGE #f where the producer gave none.")
+  "The error list: a vector of (FILE LINE COLUMN MESSAGE UNIT), COLUMN and MESSAGE #f where the producer gave none,
+UNIT the unit COLUMN counts in (visit-location's), #f for characters.")
 (define next-error--index #f
   "The index in next-error--errors of the error last visited, #f before the first.")
+(define next-error--owner #f
+  "The OWNER next-error-set-list! was given with the list, #f for none.")
 
 (define (next-error--entry e)
-  "E, one of next-error-set-list!'s entries, as (FILE LINE COLUMN MESSAGE); an error naming E when it is not one."
-  (unless (and (list? e) (<= 2 (length e) 4))
-    (error "next-error-set-list!: an entry is not (FILE LINE [COLUMN [MESSAGE]]):" e))
-  (let ((file (car e)) (line (cadr e))
-        (col (if (pair? (cddr e)) (caddr e) #f))
-        (msg (if (and (pair? (cddr e)) (pair? (cdddr e))) (cadddr e) #f)))
+  "E, one of next-error-set-list!'s entries, as (FILE LINE COLUMN MESSAGE UNIT); an error naming E when it is not one."
+  (unless (and (list? e) (<= 2 (length e) 5))
+    (error "next-error-set-list!: an entry is not (FILE LINE [COLUMN [MESSAGE [UNIT]]]):" e))
+  (let* ((file (car e)) (line (cadr e))
+         (rest (cddr e))
+         (col (if (pair? rest) (car rest) #f))
+         (msg (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) #f))
+         (unit (if (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest))) (caddr rest) #f)))
     (unless (and (string? file) (> (string-length file) 0))
       (error "next-error-set-list!: the file is not a non-empty string in" e))
     (unless (and (exact-integer? line) (> line 0))
@@ -26,25 +33,42 @@
       (error "next-error-set-list!: the column is neither #f nor a positive integer in" e))
     (unless (or (not msg) (string? msg))
       (error "next-error-set-list!: the message is neither #f nor a string in" e))
-    (list file line col msg)))
+    (unless (memq unit '(#f screen utf-16 byte))
+      (error "next-error-set-list!: the unit is not #f, screen, utf-16 or byte in" e))
+    (list file line col msg unit)))
 
-(define (next-error-set-list! entries)
-  "Make ENTRIES the error list, each (FILE LINE [COLUMN [MESSAGE]]): LINE and COLUMN count from 1, COLUMN in
-characters. FILE is opened as find-file opens it, so a relative name is taken from the current directory: a
+(define (next-error-set-list! entries . owner)
+  "Make ENTRIES the error list, each (FILE LINE [COLUMN [MESSAGE [UNIT]]]): LINE and COLUMN count from 1, COLUMN in
+characters, or in UNIT: screen (display columns, as gcc counts), utf-16 (as tsc counts) or byte (UTF-8 bytes, as
+nix counts). FILE is opened as find-file opens it, so a relative name is taken from the current directory: a
 producer whose names are relative to somewhere else expands them first. The next M-g n goes to the first entry.
-All of ENTRIES is checked before the list is replaced, so a refused list leaves the old one."
+OWNER, when given and not #f, lets that producer add to the list later (next-error-add-to-list!). All of ENTRIES
+is checked before the list is replaced, so a refused list leaves the old one."
   (unless (list? entries)
     (error "next-error-set-list!: not a list:" entries))
   (let ((v (list->vector (map next-error--entry entries))))
     (set! next-error--errors v)
     (set! next-error--index #f)
+    (set! next-error--owner (and (pair? owner) (car owner)))
     (vector-length v)))
+
+(define (next-error-add-to-list! owner entries)
+  "Add ENTRIES (as next-error-set-list! takes them) to the end of the error list when it is still the one OWNER
+set (equal?), keeping the error last visited; gives the list's new length, or #f, adding nothing, when the list
+is another's. All of ENTRIES is checked before any is added."
+  (unless (list? entries)
+    (error "next-error-add-to-list!: not a list:" entries))
+  (let ((new (list->vector (map next-error--entry entries))))
+    (cond ((not (and owner (equal? owner next-error--owner))) #f)
+          (else (unless (= (vector-length new) 0)
+                  (set! next-error--errors (vector-append next-error--errors new)))
+                (vector-length next-error--errors)))))
 
 (define (next-error--go i)
   "Visit error I (from 0) of the list and show its message, leaving point's place in the jump list (C-o comes back
 in that buffer). It becomes the current error even when its file is gone, so the next step goes past it."
   (let* ((e (vector-ref next-error--errors i))
-         (file (car e)) (line (cadr e)) (col (caddr e)) (msg (cadddr e)))
+         (file (car e)) (line (cadr e)) (col (caddr e)) (msg (cadddr e)) (unit (list-ref e 4)))
     (set! next-error--index i)
     ;; A note edwind opens is not asked (location-missing? gives #f): a gone one opens empty, as find-file opens it.
     (when (location-missing? file)
@@ -54,7 +78,7 @@ in that buffer). It becomes the current error even when its file is gone, so the
     (message "(~a of ~a) ~a" (+ i 1) (vector-length next-error--errors)
              (or msg (string-append file ":" (number->string line))))
     ;; A promise when the visit waits for edwind; the command loop waits on it.
-    (visit-location file line col)))
+    (visit-location file line col unit)))
 
 (define (next-error--move n)
   "Go N errors on from the current one (back when N is negative); refuse to go past either end of the list."

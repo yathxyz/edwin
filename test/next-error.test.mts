@@ -133,6 +133,27 @@ test('next-error-set-list! refuses a bad entry and keeps the list it had', async
   assert.equal(lastMessage(), '(1 of 1) kept');
 });
 
+test('next-error-add-to-list! adds to the list its owner set, keeping the place; nothing once another list replaced it', async () => {
+  ed.Ed.setWindowBuffer(ed.Ed.getBufferCreate('*ne-scratch*'));
+  assert.equal(ev(`(next-error-set-list! '(("ne-a.rs" 2 9 "one")) "producer 1")`), 1);
+  await from('M-g n');
+  assert.deepEqual(here(), ['ne-a.rs', 2, 9]);
+  assert.equal(ev(`(next-error-add-to-list! "producer 1" '(("ne-b.nix" 3 3 "two") ("ne-c.py" 2)))`), 3);
+  assert.equal(ev(`(next-error-add-to-list! "producer 1" '())`), 3);
+  await from('M-g n');
+  assert.deepEqual(here(), ['ne-b.nix', 3, 3], 'the step goes on from the error visited');
+  assert.equal(lastMessage(), '(2 of 3) two');
+  /* A bad entry adds none of them. */
+  assert.throws(() => ev(`(next-error-add-to-list! "producer 1" '(("ne-a.rs" 1) ("ne-a.rs" 0)))`), /next-error/);
+  assert.equal(ev('(vector-length next-error--errors)'), 3);
+  /* Another owner, no owner, and a list set with no owner take nothing. */
+  assert.equal(ev(`(next-error-add-to-list! "producer 2" '(("ne-a.rs" 1)))`), false);
+  ev(`(next-error-set-list! '(("ne-a.rs" 4 5)))`);
+  assert.equal(ev(`(next-error-add-to-list! "producer 1" '(("ne-a.rs" 1)))`), false);
+  assert.equal(ev(`(next-error-add-to-list! #f '(("ne-a.rs" 1)))`), false);
+  assert.equal(ev('(vector-length next-error--errors)'), 1);
+});
+
 test('a step is a jump, by key and by ex command: C-o goes back to where point was in that buffer', async () => {
   ev(`(next-error-set-list! '(("ne-a.rs" 5 1) ("ne-a.rs" 3 5)))`);
   await ed.type(':e ne-a.rs\n');
@@ -177,6 +198,42 @@ test('a column counts characters, a surrogate pair being one; a bignum line or c
   assert.equal(lastMessage(), '(3 of 4) ne-b.nix:100000000000000000000000');
   await from('M-g n');
   assert.deepEqual(here(), ['ne-b.nix', 3, 8], 'the end of the line');
+});
+
+test('a column in unit screen counts display cells (a tab to the next multiple of 8, a wide character 2); in utf-16 UTF-16 units; in byte UTF-8 bytes', async () => {
+  ed.Ed.Store.set('ne-t.c', '\tint x = y;\n\treturn "s";\n日本 z\n');
+  ed.Ed.Store.set('ne-v.nix', 'let a = "ééé"; in a + zz\n');
+  ev(`(next-error-set-list! '(("ne-t.c" 1 17 #f screen) ("ne-t.c" 1 13 #f screen) ("ne-t.c" 2 16 #f screen)
+                               ("ne-t.c" 3 6 #f screen) ("ne-t.c" 3 99 #f screen)
+                               ("ne-u.txt" 1 5 #f utf-16) ("ne-u.txt" 1 2 #f utf-16) ("ne-u.txt" 1 3)
+                               ("ne-v.nix" 1 26 #f byte) ("ne-v.nix" 1 11 #f byte) ("ne-v.nix" 1 99 #f byte) ("ne-u.txt" 1 9 #f byte)))`);
+  const atPoint = () => ev('(buffer-substring (point) (min (point-max) (+ (point) 1)))');
+  await from('M-g n');
+  assert.deepEqual([...here(), atPoint()], ['ne-t.c', 1, 10, 'y'], 'cell 17 is the y after the tab');
+  await from('M-g n');
+  assert.equal(atPoint(), 'x');
+  await from('M-g n');
+  assert.equal(atPoint(), '"');
+  await from('M-g n');
+  assert.equal(atPoint(), 'z', 'each of 日本 takes two cells');
+  await from('M-g n');
+  assert.deepEqual([...here(), atPoint()], ['ne-t.c', 3, 4, 'z'], 'past the end: the end of the line (Normal state: its last character)');
+  await from('M-g n');
+  assert.equal(atPoint(), 'x', 'unit 5 is after two emoji');
+  await from('M-g n');
+  assert.deepEqual(here(), ['ne-u.txt', 1, 1], 'inside a pair: the pair');
+  await from('M-g n');
+  assert.equal(atPoint(), 'x', 'characters: the third');
+  await from('M-g n');
+  assert.deepEqual([...here(), atPoint()], ['ne-v.nix', 1, 23, 'z'], 'byte 26 is the z after three two-byte é (as nix counts)');
+  await from('M-g n');
+  assert.deepEqual([...here(), atPoint()], ['ne-v.nix', 1, 10, 'é'], 'byte 11, the second byte of the first é: that é');
+  await from('M-g n');
+  assert.deepEqual([...here(), atPoint()], ['ne-v.nix', 1, 24, 'z'], 'past the end: the end of the line');
+  await from('M-g n');
+  assert.deepEqual([...here(), atPoint()], ['ne-u.txt', 1, 5, 'x'], 'byte 9 is after two four-byte emoji (column 5 in the rope\'s UTF-16 units)');
+  assert.throws(() => ev(`(next-error-set-list! '(("ne-t.c" 1 1 #f bytes)))`), /unit/);
+  assert.throws(() => ev(`(visit-location "ne-t.c" 1 1 'bytes)`), /unit/);
 });
 
 test('in a served page a note is not looked for in the store: the visit goes to edwind, which may wait or refuse', async () => {

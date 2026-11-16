@@ -1,0 +1,17 @@
+make -C sub a
+make[1]: Entering directory '/work/fx/c/sub'
+cc -Wall -c a.c -o a.o
+a.c: In function ‘main’:
+a.c:3:17: error: ‘y’ undeclared (first use in this function)
+    3 |         int x = y;
+      |                 ^
+a.c:3:17: note: each undeclared identifier is reported only once for each function it appears in
+a.c:4:16: error: returning ‘char *’ from a function with return type ‘int’ makes integer from pointer without a cast [-Wint-conversion]
+    4 |         return "s";
+      |                ^~~
+a.c:3:13: warning: unused variable ‘x’ [-Wunused-variable]
+    3 |         int x = y;
+      |             ^
+make[1]: *** [Makefile:2: a] Error 1
+make[1]: Leaving directory '/work/fx/c/sub'
+make: *** [Makefile:2: all] Error 2

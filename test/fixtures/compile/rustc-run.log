@@ -1,0 +1,16 @@
+   Compiling fx2 v0.1.0 (/work/fx/rs2)
+warning: unused variable: `unused`
+ --> src/main.rs:2:9
+  |
+2 |     let unused = 1;
+  |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_unused`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fx2` (bin "fx2") generated 1 warning (run `cargo fix --bin "fx2" -p fx2` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running `target/debug/fx2`
+
+thread 'main' (4179928) panicked at src/main.rs:4:21:
+index out of bounds: the len is 0 but the index is 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

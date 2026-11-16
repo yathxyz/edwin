@@ -303,3 +303,222 @@ test('no compilation in a web frame or where the host gives no processes; the co
   try { await check(/No process here/); } finally { host.proc = proc; }
   assert.equal(proc.calls.length, n); assert.equal(text(), before);
 });
+
+/* ---- The places errors name (proc-compile-errors) ---- */
+
+const FIXTURES = path.join(path.dirname(new URL(import.meta.url).pathname), 'fixtures', 'compile');
+type Row = [string, number, number | false, string | false];
+/* The frame's error list, as rows, and the unit of each row's column. */
+const entries = (): unknown[][] => L.evalText('(list->vector (map list->vector (vector->list next-error--errors)))');
+const errorList = (): Row[] => entries().map(e => e.slice(0, 4) as Row);
+const units = () => entries().map(e => (e[4] === false ? false : (e[4] as { name: string }).name));
+const compileShows = async (cmd: string, dir: string | null = root) => { const c = await Ed.compile.start(cmd, dir); await c.exit; return errorList(); };
+
+test('each tool\'s log, streamed through compile, gives the exact places of its errors and warnings', async () => {
+  scratch();
+  const D = path.join(root, 'tool'); fs.mkdirSync(D, { recursive: true });
+  const cases: Record<string, Row[]> = {
+    'rustc.log': [
+      [`${D}/src/main.rs`, 3, 20, 'error[E0425]: cannot find value `missing` in this scope'],
+      [`${D}/src/main.rs`, 4, 18, 'error[E0308]: mismatched types'],
+    ],
+    'rustc-run.log': [
+      [`${D}/src/main.rs`, 2, 9, 'warning: unused variable: `unused`'],
+      [`${D}/src/main.rs`, 4, 21, "thread 'main' (4179928) panicked at src/main.rs:4:21:"],
+    ],
+    'tsc.log': [
+      [`${D}/a.ts`, 1, 7, "error TS2322: Type 'string' is not assignable to type 'number'."],
+      [`${D}/a.ts`, 3, 3, "error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."],
+    ],
+    /* tsc --pretty: its colours are dropped, then the same places. */
+    'tsc-pretty.log': [
+      [`${D}/a.ts`, 1, 7, "error TS2322: Type 'string' is not assignable to type 'number'."],
+      [`${D}/a.ts`, 3, 3, "error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."],
+    ],
+    /* make -C sub: the names are taken from the directory make entered; the note is skipped. */
+    'gcc.log': [
+      ['/work/fx/c/sub/a.c', 3, 17, 'a.c:3:17: error: ‘y’ undeclared (first use in this function)'],
+      ['/work/fx/c/sub/a.c', 4, 16, 'a.c:4:16: error: returning ‘char *’ from a function with return type ‘int’ makes integer from pointer without a cast [-Wint-conversion]'],
+      ['/work/fx/c/sub/a.c', 3, 13, 'a.c:3:13: warning: unused variable ‘x’ [-Wunused-variable]'],
+    ],
+    'python.log': [
+      ['/work/fx/py/t.py', 7, false, 'File "/work/fx/py/t.py", line 7, in <module>'],
+      ['/work/fx/py/t.py', 5, false, 'File "/work/fx/py/t.py", line 5, in f'],
+      ['/work/fx/py/t.py', 2, false, 'File "/work/fx/py/t.py", line 2, in g'],
+    ],
+    'nix.log': [['/work/fx/nx/default.nix', 2, 14, "error: undefined variable 'undefinedThing'"]],
+    /* The trace frame (… while evaluating) is skipped: the error is the place nix names under error:. */
+    'nix-trace.log': [['/work/fx/nx/flake-ish.nix', 3, 19, "error: attribute 'version' missing"]],
+    /* nix counts UTF-8 bytes: 26 is the zz at character 23, after three two-byte é (nix 2.34). */
+    'nix-utf8.log': [['/work/fx/nx/u.nix', 2, 26, "error: undefined variable 'zz'"]],
+  };
+  for (const [log, want] of Object.entries(cases)) {
+    assert.deepEqual(await compileShows(`cat '${path.join(FIXTURES, log)}'`, D), want, log);
+    /* gcc counts display columns, tsc UTF-16 units, nix UTF-8 bytes, the rest characters. */
+    const unit = log.startsWith('gcc') ? 'screen' : log.startsWith('tsc') ? 'utf-16' : log.startsWith('nix') ? 'byte' : false;
+    assert.deepEqual(units(), want.map(([, , c]) => (c === false ? false : unit)), log + ': the units');
+    assert.deepEqual(Ed.compile.errors(fs.readFileSync(path.join(FIXTURES, log), 'utf8').replace(/\x1b\[[0-9;]*m/g, ''), D), want.map(([f, l, c, m]) => [f, l, c === false ? null : c, m === false ? null : m, c === false || unit === false ? null : unit]), log + ' through Ed.compile.errors');
+  }
+  /* With no directory (no file system), a relative name stays relative. */
+  assert.deepEqual(await compileShows(`cat '${path.join(FIXTURES, 'tsc.log')}'`, null), cases['tsc.log'].map(([, l, c, m]) => ['a.ts', l, c, m]));
+});
+
+test('the header and the status line are not output: a command that looks like a place gives none', async () => {
+  scratch();
+  assert.deepEqual(await compileShows('a.c:3:4: x 2>/dev/null; true'), []);
+  assert.ok(text().split('\n')[3].startsWith('a.c:3:4: x'), 'the command is in the header');
+  assert.deepEqual(await compileShows("printf 'x.c:1:2: error: y\\n'; exit 1"), [[`${root}/x.c`, 1, 2, 'x.c:1:2: error: y']]);
+  assert.match(text(), /Compilation exited abnormally/);
+});
+
+test('a place split across two batches is read once it is whole; the last line needs no newline', async () => {
+  scratch();
+  assert.deepEqual(await compileShows("printf 'src/a.c:1'; sleep 0.15; printf '2:3: error: split\\nb.c:4:5: error: last'"), [
+    [`${root}/src/a.c`, 12, 3, 'src/a.c:12:3: error: split'], [`${root}/b.c`, 4, 5, 'b.c:4:5: error: last']]);
+  /* A line a carriage return starts again is read as it ends. */
+  assert.deepEqual(await compileShows("printf 'q.c:1:1: error: old\\r'; sleep 0.15; printf 'q.c:9:9: error: new\\n'"), [[`${root}/q.c`, 9, 9, 'q.c:9:9: error: new']]);
+});
+
+test('lines that only look like places are none: line 0, times, versions, URLs, hosts, pseudo-files, huge numbers', async () => {
+  scratch();
+  const lines = ['a.c:0:3: error: zero', 'b.c:2:0: error: column 0', '07:52:09 started', '1.2.3:4: version', 'http://h:80/ x',
+    'localhost:8080: refused', 'Makefile:3: *** missing separator.  Stop.', '<stdin>:1:2: x', '  File "<string>", line 1',
+    'c.c:99999999999999999999: big', '  at «string»:1:1:', 'In file included from d.h:3:2,', 'e.c:5:1: note: a note',
+    'a.c: In function ‘main’:', ' --> f.rs:x:1'];
+  const cmd = `printf '%s\\n' ${lines.map(l => `'${l.replace(/'/g, `'\\''`)}'`).join(' ')}`;
+  assert.deepEqual(await compileShows(cmd), [[`${root}/b.c`, 2, false, 'b.c:2:0: error: column 0'], [`${root}/Makefile`, 3, false, 'Makefile:3: *** missing separator.  Stop.']]);
+});
+
+test('M-g n during the build keeps its place as more errors come; a list another producer set is left alone', async () => {
+  scratch();
+  const D = path.join(root, 'tool'); fs.mkdirSync(D, { recursive: true });
+  Ed.Store.set(`${D}/src/main.rs`, 'fn main() {\n    let unused = 1;\n    println!("{}", missing);\n    let s: u32 = "text";\n}\n');
+  Ed.Store.set(`${D}/a.ts`, 'const n: number = "text";\nfunction f(x: string) { return x; }\nf(3);\n');
+  const c = await Ed.compile.start(`cat '${path.join(FIXTURES, 'rustc.log')}'; sleep 0.5; cat '${path.join(FIXTURES, 'tsc.log')}'`, D);
+  await until(() => errorList().length === 2, 'the first errors');
+  assert.equal(Ed.compile.running(), true);
+  await keys('M-g n');
+  assert.deepEqual([E.current.file, L.evalText('(line-number-at-pos)')], [`${D}/src/main.rs`, 3]);
+  await c.exit;
+  assert.equal(errorList().length, 4, 'the later errors are added');
+  assert.equal(L.evalText('next-error--index'), 0, 'the place stepped to is kept');
+  await keys('M-g n'); await keys('M-g n');
+  assert.deepEqual([E.current.file, L.evalText('(line-number-at-pos)')], [`${D}/a.ts`, 1]);
+  /* Another producer's list, set while a compilation runs, gets none of its errors. */
+  scratch();
+  const d = await Ed.compile.start(`sleep 0.3; cat '${path.join(FIXTURES, 'tsc.log')}'`, D);
+  L.evalText(`(next-error-set-list! '(("x.rs" 1)))`);
+  await d.exit;
+  assert.deepEqual(errorList(), [['x.rs', 1, false, false]]);
+  /* A new compilation takes the list over at once, empty until its output names places. */
+  const e = await Ed.compile.start('sleep 0.2', D);
+  assert.deepEqual(errorList(), []);
+  await e.exit;
+});
+
+test('M-g n on gcc\'s errors lands where gcc points on a tab-indented line: its columns are display columns', async () => {
+  scratch();
+  Ed.Store.set('/work/fx/c/sub/a.c', 'int main(void)\n{\n\tint x = y;\n\treturn "s";\n}\n');
+  await compileShows(`cat '${path.join(FIXTURES, 'gcc.log')}'`);
+  const col = () => L.evalText('(- (point) (line-beginning-position) -1)');
+  const at = () => L.evalText('(buffer-substring (point) (+ (point) 1))');
+  await keys('M-g n');
+  assert.deepEqual([E.current.file, L.evalText('(line-number-at-pos)'), col(), at()], ['/work/fx/c/sub/a.c', 3, 10, 'y'], 'a.c:3:17 is the y');
+  await keys('M-g n');
+  assert.deepEqual([L.evalText('(line-number-at-pos)'), at()], [4, '"'], 'a.c:4:16 is the string');
+  await keys('M-g n');
+  assert.deepEqual([L.evalText('(line-number-at-pos)'), col(), at()], [3, 6, 'x'], 'a.c:3:13 is the x');
+});
+
+test('M-g n on nix\'s error lands where nix points past non-ASCII text: its columns are UTF-8 bytes', async () => {
+  scratch();
+  Ed.Store.set('/work/fx/nx/u.nix', '# Dépendances — tout\nlet a = "ééé"; in a + zz\n');
+  await compileShows(`cat '${path.join(FIXTURES, 'nix-utf8.log')}'`);
+  await keys('M-g n');
+  assert.deepEqual([E.current.file, L.evalText('(line-number-at-pos)'), L.evalText('(- (point) (line-beginning-position) -1)'), L.evalText('(buffer-substring (point) (+ (point) 2))')],
+    ['/work/fx/nx/u.nix', 2, 23, 'zz'], 'u.nix:2:26 is the zz, three characters left of character 26');
+});
+
+test('a header names the place on the line below it only; a nix at line ends in a colon, so a JS stack frame is none', () => {
+  assert.deepEqual(Ed.compile.errors('error: x\n    at /x/z.js:3:4\n', '/w'), []);
+  assert.deepEqual(Ed.compile.errors('note: n\n --> a.rs:1:2\nfoo.py:3: warn\n --> b.rs:5:6\n', '/w'),
+    [['/w/foo.py', 3, null, 'foo.py:3: warn', null], ['/w/b.rs', 5, 6, '--> b.rs:5:6', null]]);
+  /* A line between them, even one with no colon, ends the header. */
+  assert.deepEqual(Ed.compile.errors('error[E1]: old\nbuilding\n --> c.rs:1:1\n', '/w'), [['/w/c.rs', 1, 1, '--> c.rs:1:1', null]]);
+  assert.deepEqual(Ed.compile.errors('error[E1]: now\n --> c.rs:1:1\n', '/w'), [['/w/c.rs', 1, 1, 'error[E1]: now', null]]);
+});
+
+test('make\'s directory stack keeps the innermost 64: past it the outermost goes', () => {
+  let text = '';
+  for (let i = 0; i <= 64; i++) text += `make[${i + 1}]: Entering directory '/d${i}'\n`;
+  for (let i = 64; i >= 1; i--) text += `make[${i + 1}]: Leaving directory '/d${i}'\n`;
+  assert.deepEqual(Ed.compile.errors(text + 'x.c:1:1: error: e\n', '/w'), [['/w/x.c', 1, 1, 'x.c:1:1: error: e', 'screen']]);
+});
+
+test('a refused hand-over to the error list loses no output; a refused new list still starts and shows the compilation', async () => {
+  scratch();
+  L.evalText('(define compile-test--add next-error-add-to-list!)');
+  L.evalText('(define compile-test--set next-error-set-list!)');
+  try {
+    L.evalText('(set! next-error-add-to-list! (lambda args (error "refused")))');
+    await compileShows("printf 'a.c:1:1: error: x\\nafter\\n'");
+    assert.match(output(), /^a\.c:1:1: error: x\nafter\n/);
+    assert.match(text(), STATUS('Compilation finished'));
+    L.evalText('(set! next-error-add-to-list! compile-test--add)');
+    L.evalText('(set! next-error-set-list! (lambda args (error "refused")))');
+    /* The refusal is reported (*Messages*), not thrown: the caller gets the run and *compilation* is shown. */
+    const c = await Ed.compile.start("sleep 0.1; printf 'late\\n'", root);
+    assert.equal(c.buffer, buf()); assert.equal(Ed.compile.running(), true);
+    assert.ok(Ed.windowList().some((w: { buffer: unknown }) => w.buffer === c.buffer), '*compilation* is shown');
+    assert.match(Ed.getBuffer('*Messages*').text, /refused/);
+    await c.exit;
+    await until(() => STATUS('Compilation finished').test(text()), 'the status line');
+    assert.match(output(), /^late\n/);
+  } finally {
+    L.evalText('(set! next-error-add-to-list! compile-test--add)');
+    L.evalText('(set! next-error-set-list! compile-test--set)');
+  }
+});
+
+test('at most 20000 errors are kept, the first ones; handing them over does not stall the frame', async () => {
+  scratch();
+  let stall = 0, at = Date.now();
+  const tick = setInterval(() => { const now = Date.now(); stall = Math.max(stall, now - at); at = now; }, 5);
+  let list: Row[];
+  try { list = await compileShows("printf 'a.c:1:1: error: x%s\\n' $(seq 1 30000)"); } finally { clearInterval(tick); }
+  assert.ok(stall < 250, `the frame stalled ${stall} ms`);
+  console.log(`# 30000 error lines: the longest stall ${stall} ms`);
+  assert.equal(list.length, 20000);
+  assert.deepEqual(list[0], [`${root}/a.c`, 1, 1, 'a.c:1:1: error: x1']);
+  assert.equal(list[19999][3], 'a.c:1:1: error: x20000');
+});
+
+/* The budget: 10,000 lines of mixed output (every tool's log, and plain build noise) are read in under 20 ms, and
+   lines past SCAN characters cost no more than SCAN does, whatever they hold. Best of five, on a busy machine. */
+test('reading 10,000 lines stays within 20 ms; long lines are read in their first 4096 characters only', () => {
+  const logs = fs.readdirSync(FIXTURES).map(f => fs.readFileSync(path.join(FIXTURES, f), 'utf8').replace(/\x1b\[[0-9;]*m/g, '')).join('');
+  const noise = '   Compiling serde v1.0.200\nbuilding \'/nix/store/abc-x.drv\'...\n[ 42%] Building C object src/foo.o\n';
+  let mixed = '';
+  while (mixed.split('\n').length < 10000) mixed += logs + noise;
+  mixed = mixed.split('\n').slice(0, 10000).join('\n') + '\n';
+  const best = (text: string) => { let t = Infinity; for (let i = 0; i < 5; i++) { const t0 = performance.now(); Ed.compile.errors(text, '/w'); t = Math.min(t, performance.now() - t0); } return t; };
+  const mixedMs = best(mixed);
+  assert.ok(Ed.compile.errors(mixed, '/w').length > 1000);
+  assert.ok(mixedMs < 20, `10,000 mixed lines took ${mixedMs.toFixed(2)} ms`);
+  /* And what the frame pays to hand them to the error list: the rows into Scheme, checked and appended. */
+  const handMs = (() => { let t = Infinity; for (let i = 0; i < 5; i++) {
+    L.evalText(`(next-error-set-list! '() "budget")`);
+    const t0 = performance.now(), rows = Ed.compile.errors(mixed, '/w');
+    L.call('next-error-add-to-list!', ['budget', L.listOf(rows.map(([f, l, c, m, u]: [string, number, number | null, string | null, string | null]) => L.list(f, l, c ?? false, m ?? false, u === null ? false : L.intern(u))))]);
+    t = Math.min(t, performance.now() - t0);
+  } return t; })();
+  assert.ok(handMs < 50, `10,000 mixed lines read and handed over in ${handMs.toFixed(2)} ms`);
+  /* Near misses as long as they come: colons, digits and parentheses all along the line. */
+  const longs = ['a'.repeat(100000) + ':1:1: x', ('a:1' + ' ').repeat(25000), 'x('.repeat(50000) + '1,1): error x', ' --> ' + 'b:'.repeat(50000), ':9'.repeat(50000), '  File "' + '"'.repeat(100000)];
+  let long = '';
+  for (let i = 0; i < 1000; i++) long += longs[i % longs.length] + '\n';
+  const longMs = best(long);
+  assert.deepEqual(Ed.compile.errors(long, '/w'), []);
+  assert.ok(longMs < 100, `1,000 lines of 100,000 characters took ${longMs.toFixed(2)} ms`);
+  console.log(`# parse: 10,000 mixed lines ${mixedMs.toFixed(2)} ms (${Ed.compile.errors(mixed, '/w').length} places), handed over ${handMs.toFixed(2)} ms; 1,000 long lines ${longMs.toFixed(2)} ms`);
+});

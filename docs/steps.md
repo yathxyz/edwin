@@ -1223,7 +1223,7 @@ recompile and kill. The `compile` desktop-only stub in scm/init.scm goes.
   `compilation-always-kill`. Killing the buffer does not ask. Colours are dropped, not shown
   (`ansi-color-compilation-filter`). The mode line shows no `:run`/`:exit` process state. Emacs keeps every line;
   here the oldest go past 20000 lines or 4 MiB. One `*compilation*` buffer, not one per project.
-- **Not in it:** error parsing and next-error from the buffer (proc-compile-errors), grep (proc-grep),
+- **Not in it:** error parsing and next-error from the buffer (proc-compile-errors, below), grep (proc-grep),
   `compilation-scroll-output` (point at the end of the buffer follows the output; elsewhere it stays), colours,
   `compile` with a prefix argument (comint input), `project-compile` as a separate command.
 - **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-compile`, `test/compile.test.mts` (18): output
@@ -1254,6 +1254,94 @@ recompile and kill. The `compile` desktop-only stub in scm/init.scm goes.
   `nix build .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35), and `nix flake check`:
   every check passed but `edwin-bench`, which failed on the shadow stack (11.1% against its 10%) under the load of
   the full run and passed when built again alone (7.3%; this package does not touch the evaluator).
+
+## compile errors: the places in *compilation* feed next-error (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-compile-errors`). Parse file:line:col for the owner's
+toolchains (rustc, tsc, gcc, nix, python) and feed next-error; fixture logs from each tool yield exact
+locations, and the parse stays within budget on 10,000 lines.
+
+- **The error list follows the compilation** (src/compile.ts). Each complete line of output is read once, as it
+  comes, and the places it names are added to the frame's error list (scm/next-error.scm), so `M-g n`, `M-g p`,
+  `:cn`, `:cp` and `:cc` step through them while the command still runs, and a step taken mid-build keeps its
+  place as more come. A compilation takes the list over when its child starts (empty until its output names a
+  place); a list another producer sets later (a search, a seeded list) is left alone and gets none of the
+  compilation's errors. Only output is read: not the header (whose command line or time could look like a
+  place), the dropped-output line or the status line. A line cut between two batches is read once it is whole;
+  a line a carriage return starts again is read as it ends; the last line is read at exit even with no newline.
+- **The shapes** (all fixtures are real output, captured on ex44 from rustc 1.98 via cargo, tsc 7.0, gcc 16 under
+  make 4.4, python 3 and nix 2.34, their paths rewritten to /work/fx): rustc's `--> FILE:L:C` under its
+  `error[E…]: …` / `warning: …` header (the header is the message; a header holds for the line right below it
+  only, so a `-->` or `at` line with none above it is still a place, its own line the message), and `thread '…' panicked at FILE:L:C:`;
+  tsc's `FILE(L,C): error TS…` and, with `--pretty` (colours dropped), `FILE:L:C - error TS…`; gcc's and
+  clang's `FILE:L:C: …` and `FILE:L: …` (also go, ghc, mypy, pytest's `FILE:L: Error`); nix's `at /FILE:L:C:`
+  (ending in a colon, so a JavaScript stack frame `at /f.js:3:4` is none) under its `error: …` header; python's `File "FILE", line N` (no column). A relative name is taken from the
+  directory make last said it entered (`make[1]: Entering directory '…'`, popped at `Leaving`; the innermost 64
+  are kept, past that the outermost goes), else from the compilation's directory; `./` is dropped; with no directory it stays relative.
+- **Not places:** gcc's `note:`, rustc's `note:`/`help:` headers and nix's trace frames (`… while evaluating …`)
+  are info, and their places are skipped, as Emacs skips info (`compilation-skip-threshold` 1). A line number 0
+  is no place (the line is skipped), a column 0 is none (the line start), and a number past 2^53 is no place.
+  A gcc-shaped name must hold a `.` or a `/` (or be a Makefile) and not be only digits and dots, so
+  `07:52:09`, `1.2.3:4:`, `localhost:8080:` and URLs are not places; `<stdin>`, `<string>` and nix's `«string»`
+  are not files. Messages over 500 characters are cut.
+- **Budget and bounds.** Every pattern is anchored at the line start, none nests a quantifier, and a file name
+  never holds a colon, so each line costs time linear in what is read of it, and only its first 4096 characters
+  are read. Measured on ex44 (best of five): 10,000 lines of mixed output (every fixture and build noise) in
+  1.7 ms, the check's bound 20 ms, and read and handed to the error list (the rows into Scheme, checked by
+  next-error--entry and appended) in 3.1 ms, bound 50 ms; 1,000 near-miss lines of 100,000 characters (colons,
+  digits, parentheses all along) in 4.1 ms, bound 100 ms; 30000 error lines through a compilation stall the
+  frame at most 9 ms, bound 250 ms. At most 20000 errors are kept, the first ones, so a flood of error lines
+  does not grow the list without bound.
+- **Columns in the tool's unit.** An entry is `(FILE LINE [COLUMN [MESSAGE [UNIT]]])`; UNIT `screen` is a
+  display column (a tab to the next multiple of 8, a wide character 2, as gcc 11+ counts by default), `utf-16`
+  a UTF-16 unit (as tsc counts), `byte` a UTF-8 byte (as nix counts: `u.nix:1:26` on `let a = "ééé"; in a + zz`
+  is the `zz` at character 23), `#f` a character. `visit-location` takes the unit as a fourth argument and
+  converts on the line it visits, so `a.c:3:17` on `\tint x = y;` lands on the `y` (character column 10), as
+  Emacs's `compilation-error-screen-columns` does; a byte or UTF-16 column inside a character is that character.
+  GNU-shaped places are `screen`, tsc's `utf-16`, nix's `byte`, the rest (rustc's `-->` and panics, python)
+  characters.
+- **scm/next-error.scm**: `(next-error-set-list! ENTRIES [OWNER])` records OWNER; new `(next-error-add-to-list!
+  OWNER ENTRIES)` appends when the list is still OWNER's (`equal?`), keeping the error last visited, and gives
+  the new length, else `#f` and adds nothing; all entries are checked before any is added. A compilation's owner
+  is `"compile N"`, one per run. `Ed.compile.errors(TEXT, DIR)` gives the rows the parser finds in TEXT.
+- **Choices and differences from Emacs:** a fixed set of shapes in TypeScript, not
+  `compilation-error-regexp-alist` (no user-defined patterns). The GNU shape cannot tell gcc from the other
+  tools that print it: clang and go count columns in bytes, a tab as one, so on a tab-indented line (all gofmt
+  code) their column, read as gcc's display column, lands left of the place, on the tab itself for a place
+  near the indent (Emacs does the same with screen columns on; gcc with `-fdiagnostics-column-unit=byte` would
+  land right of it). Non-ASCII text before the column moves clang's and go's places the same way. rustc with
+  `--message-format=short` prints the GNU shape too but counts characters, so a tab before its column lands left
+  of the place as well; its default `-->` lines are read in characters and land exactly. Nix store
+  paths stay as printed (they open read-only). Paths holding a colon are not recognised, and in the GNU and
+  tsc --pretty shapes neither are paths holding a space (`my dir/a.c:3:4: …`), which keeps prose such as
+  `In file included from` out; rustc's `-->`, nix's `at` and python's `File "…"` do take spaces. The message of a python frame is its `File` line, not the exception
+  below it. No faces mark the places in `*compilation*`, and `RET` on an error line does not visit it
+  (`compile-goto-error`); `M-g n` and `:cc N` do. Only nix's current error format (`at FILE:L:C:` on its own
+  line) and rustc's current panic format (1.73+) are read.
+- **Not in it:** faces in `*compilation*`, `compile-goto-error` and `compilation-next-error` (moving between
+  errors inside the buffer), warnings-only filtering, the old nix and rustc panic formats, grep (proc-grep).
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-compile`, `test/compile.test.mts` (30): each of
+  the nine fixtures (test/fixtures/compile: rustc, rustc run with a warning and a panic, tsc, tsc --pretty, gcc
+  under make -C, python, nix, nix with a trace frame, nix past non-ASCII text) streamed through `cat` gives its exact rows (file, line,
+  column, message), and the same through `Ed.compile.errors`; with no directory names stay relative; a command
+  shaped like a place gives none (the header is not read); a place split across two batches, a line restarted
+  by `\r` and a last line with no newline; fifteen near misses give only `b.c:2` (column 0 as none) and
+  `Makefile:3`; `M-g n` mid-build visits the first error, the later errors are added and the index kept, and
+  two more steps land on the tsc error; a list set while a compilation runs keeps none of its errors, and a new
+  compilation empties the list; 30000 error lines keep the first 20000 with no stall; the budget above. Added
+  after review: the units each fixture's rows carry; `M-g n` through the gcc fixture on a tab-indented `a.c`
+  lands on `y` (column 10), the string and `x`; a header names only the place on the line below it (a stale
+  header, a note's `info` and a JavaScript stack frame give no wrong place); make's stack keeps 64 levels; a
+  refused hand-over to the error list loses no output and a refused new list is reported, not thrown: the
+  caller gets the run, `*compilation*` is shown and the status line appears. After a second review: `M-g n`
+  through the nix fixture with `ééé` before the error lands on the `zz` (character 23 for nix's byte 26).
+  `nix build .#checks.x86_64-linux.edwin-next-error` (11) adds the owner case: added entries keep the place, a
+  bad entry adds none, another owner, no owner and an ownerless list take nothing; and (12) columns in unit
+  `screen` (tab, wide characters, past the end), `utf-16` (inside a surrogate pair) and `byte` (two-byte and
+  four-byte characters, inside one, past the end), a bad unit refused.
+  Also run on ex44 after the review fixes, all passing: `edwin-typecheck`, `edwin-headless`, `edwin-scheme`,
+  `edit-security`, `edit-lockdown` and `nix build .#edwin` (its install checks included). Not run: the full
+  `nix flake check` and the fleet gate.
 
 ## Opening a file or URL in the desktop's application (done)
 

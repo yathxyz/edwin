@@ -787,16 +787,35 @@ CMD('find-file', async () => [await readFileName('Find file: ')], 'FILENAME', 'V
    placed here, once the buffer is there, and the command that called this waits on the promise it returns.
    A line or column too big for a number (a bignum) is clamped like any other past the end. */
 const whole = (x: SchemeValue) => (typeof x === 'bigint' ? Number(x) : num(x));
-D('visit-location', 'FILENAME LINE &optional COLUMN', 'Visit FILENAME and put point on LINE at COLUMN (both from 1, COLUMN in characters, the line start when absent), each clamped to the text. Gives the buffer, or #f when the visit failed.', ([n, l, c]) => {
+D('visit-location', 'FILENAME LINE &optional COLUMN UNIT', 'Visit FILENAME and put point on LINE at COLUMN (both from 1, the line start when COLUMN is absent), each clamped to the text. COLUMN counts characters, or with UNIT screen display columns (a tab to the next multiple of 8, a wide character 2, as gcc counts), with UNIT utf-16 UTF-16 units (as tsc counts), with UNIT byte UTF-8 bytes (as nix counts). Gives the buffer, or #f when the visit failed.', ([n, l, c, u]) => {
   const line = whole(l), col = L.absent(c) || c === false ? 1 : whole(c);
+  const unit = L.absent(u) || u === false ? null : symName(u, 'visit-location');
+  if (unit !== null && unit !== 'screen' && unit !== 'utf-16' && unit !== 'byte') signal('wrong-type-argument', 'visit-location: the unit is not screen, utf-16 or byte:', u);
   const place = (b: unknown) => {
     if (!(b instanceof Ed.Buffer)) return false;
     /* The empty line after a final newline is no line of the file. */
     const t = b.rope, ls = Ed.lastLineStart(t), last = Ed.lineNo(t, ls) - (ls > 0 && ls === t.length ? 1 : 0);
     const s = Ed.lineStartOf(t, Math.min(Math.max(1, line), last)), e = Ed.eol(t, s);
-    /* Characters, not UTF-16 units: a surrogate pair is one step. */
+    const pair = (p: number) => (t.charCodeAt(p) & 0xfc00) === 0xd800 && p + 1 < e && (t.charCodeAt(p + 1) & 0xfc00) === 0xdc00;
     let p = s;
-    for (let k = 1; k < col && p < e; k++) p += (t.charCodeAt(p) & 0xfc00) === 0xd800 && p + 1 < e && (t.charCodeAt(p + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+    if (unit === 'utf-16') {
+      p = Math.min(e, s + col - 1);
+      if (p > s && pair(p - 1)) p--;
+    } else if (unit === 'screen' || unit === 'byte') {
+      /* Past each character whose cells (or bytes) end at or before COLUMN - 1 (from 0), so a zero-width one
+         too; a byte column inside a multi-byte character is that character. */
+      const cells = (cp: number, c: number) => (cp === 9 ? ((c + 8) & ~7) - c : Ed.display ? Ed.display.charWidth(cp) : 1);
+      const bytes = (cp: number) => (cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4);
+      for (let c = 0; p < e;) {
+        const two = pair(p), cp = two ? (t.charCodeAt(p) - 0xd800) * 0x400 + t.charCodeAt(p + 1) - 0xdc00 + 0x10000 : t.charCodeAt(p);
+        const w = unit === 'byte' ? bytes(cp) : cells(cp, c);
+        if (c + w > col - 1) break;
+        c += w; p += two ? 2 : 1;
+      }
+    } else {
+      /* Characters, not UTF-16 units: a surrogate pair is one step. */
+      for (let k = 1; k < col && p < e; k++) p += pair(p) ? 2 : 1;
+    }
     b.pt = p;
     return b;
   };
