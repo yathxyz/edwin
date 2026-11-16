@@ -437,3 +437,97 @@ test('R16.19: the key appears in no log line, journal, image entry, usage line o
   /* The loopback backend saw the key only on its own origin. */
   assert.ok(A.sawKey > 5); assert.ok(B.requests.every(r => !r.hasKey && !r.keyValue));
 });
+
+/* ---------- init.scm's backends (R4.11): edwind loads it after the models module, through the authority ---------- */
+const INIT_KEY = 'sk-init-' + randomBytes(12).toString('hex');
+/* An edwind whose configDir holds INIT as init.scm, with the credential local-key (bound to the loopback backend's
+   origin in edit.json, its file INIT_KEY) loaded as LoadCredential would load it. */
+async function withInit(init: string, run: (c: EditClient, d: TestDir, e: EdwindChild) => Promise<void>, env: Record<string, string> = {}) {
+  const d = makeDir({ models: { anthropic: { baseUrl: A.origin, credential: 'anthropic-api-key' }, tiers: TIERS, credentials: { 'local-key': { origin: A.origin } } } });
+  const cd = path.join(d.root, 'creds'); fs.mkdirSync(cd, { mode: 0o700 });
+  fs.writeFileSync(path.join(cd, 'anthropic-api-key'), KEY, { mode: 0o400 });
+  fs.writeFileSync(path.join(cd, 'local-key'), INIT_KEY + '\n', { mode: 0o400 });
+  fs.writeFileSync(path.join(d.dirs.config, 'init.scm'), init);
+  const e = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: cd, ...env } });
+  const seen: string[] = [];
+  try {
+    const c = new EditClient(d.cfg.socket); await c.connect();
+    const push = c.push.bind(c); c.push = (m: Msg) => { seen.push(JSON.stringify(m)); push(m); };
+    assert.equal((await c.hello()).t, 'welcome');
+    await run(c, d, e);
+    c.close();
+    await stopEdwind(e);
+    /* R16.19: the key of init.scm's credential is in no message, log line or file edwind kept. */
+    const files: string[] = [];
+    const walk = (p: string) => { for (const x of fs.readdirSync(p, { withFileTypes: true })) { const q = path.join(p, x.name); if (x.isDirectory()) walk(q); else if (x.isFile()) files.push(q); } };
+    walk(d.dirs.state); walk(d.dirs.config);
+    for (const f of files) assert.ok(!fs.readFileSync(f, 'latin1').includes(INIT_KEY), `${f} holds key bytes`);
+    assert.ok(!e.logs.includes(INIT_KEY) && !e.logs.includes(KEY), 'the log holds key bytes');
+    for (const m of seen) assert.ok(!m.includes(INIT_KEY) && !m.includes(KEY), `a protocol message holds key bytes: ${m.slice(0, 200)}`);
+  } finally { await stopEdwind(e); fs.rmSync(d.root, { recursive: true, force: true }); }
+}
+const LOCAL_INIT = (origin: string) => `(when (featurep 'models)
+  (gptel-make-openai "local" :host "${origin}" :key (credential "local-key")
+    :models '("m-init") :tiers '((default . "m-init")))
+  (set! gptel-backend "local"))
+`;
+
+test('R4.11: a backend init.scm declares with a LoadCredential name is listed, current, and used against its endpoint', async () => {
+  await withInit(LOCAL_INIT(A.origin!), async (c, d, e) => {
+    const bs = (await c.call('model-backends')).value;
+    const local = bs.find((b: Msg) => b.name === 'local');
+    assert.ok(local, JSON.stringify(bs));
+    assert.equal(local.kind, 'openai'); assert.equal(local.credential, 'local-key'); assert.equal(local.usable, true);
+    assert.equal(local.url, A.origin + '/v1/chat/completions'); assert.deepEqual(local.models, ['m-init']);
+    assert.equal(await value(c, '(gptel-backends)'), '("anthropic" "local")');
+    assert.equal(await value(c, 'gptel-backend'), '"local"');
+    assert.equal(await value(c, '(assq-ref (gptel-backend-info) (quote name))'), '"local"');
+    /* gptel-request on the current backend: the key goes to the declared origin only, as a bearer token. */
+    const n = A.requests.length;
+    assert.match(await value(c, '(gptel-request "from init" :caller "init-test")'), /\(text . "Local"\).*\(model . "m-init"\)/);
+    const sent = A.requests.slice(n);
+    assert.equal(sent.length, 1); assert.equal(sent[0].path, '/v1/chat/completions');
+    assert.equal(sent[0].headers.authorization, 'Bearer ' + INIT_KEY); assert.equal(sent[0].body.model, 'm-init');
+    /* The agent's sessions start on it too. */
+    assert.equal(await value(c, '(assq-ref (%pi-session-info (%pi-session "init-backend")) (quote backend))'), '"local"');
+    /* The usage line names it. */
+    await sleep(50);
+    const usage = fs.readFileSync(path.join(d.dirs.state, 'usage.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+    assert.ok(usage.some(l => l.backend === 'local' && l.caller === 'init-test' && l.model === 'm-init'), JSON.stringify(usage));
+    assert.doesNotMatch(e.logs, /init_error/);
+  });
+});
+
+test('R4.11: an error in init.scm is reported in *Messages* and the log, the forms before it hold, and edwind serves', async () => {
+  /* A credential name edit.json does not bind to an origin: no form may bind one (R14.4), so the form fails. */
+  const init = `${LOCAL_INIT(A.origin!)}
+(define init-reached #t)
+(when (featurep 'models) (gptel-make-openai "rogue" :host "${B.origin}" :key (credential "not-declared")))
+(define init-after #t)
+`;
+  await withInit(init, async (c, d, e) => {
+    assert.equal((await c.call('status')).value.sample, true);
+    assert.equal(await value(c, '(list init-reached (bound? (quote init-after)))'), '(#t #f)');
+    assert.equal(await value(c, '(gptel-backends)'), '("anthropic" "local")');
+    const msgs = await value(c, '(with-current-buffer "*Messages*" (buffer-string))');
+    assert.match(msgs, /Error in ~\/.config\/edwin\/init.scm: .*no credential named \\"not-declared\\" is configured/);
+    assert.match(e.logs, /"event":"init_error".*not-declared/);
+    /* The rogue origin heard nothing. */
+    assert.ok(B.requests.every(r => !r.hasKey));
+  });
+  /* A file that does not read: edwind starts all the same. */
+  await withInit('(define (broken', async (c, d, e) => {
+    assert.equal((await c.call('status')).value.sample, true);
+    assert.match(e.logs, /"event":"init_error"/);
+    assert.equal(await value(c, '(gptel-backends)'), '("anthropic")');
+  });
+});
+
+test('R4.11: in safe mode edwind does not read init.scm, so its backends are not there', async () => {
+  await withInit(LOCAL_INIT(A.origin!), async (c, d, e) => {
+    assert.match(e.logs, /"event":"safe_mode"/);
+    assert.equal(await value(c, '(gptel-backends)'), '("anthropic")');
+    assert.equal(await value(c, 'gptel-backend'), '"anthropic"');
+    assert.equal(await value(c, '(featurep (quote models))'), '#t');
+  }, { EDWIND_SAFE: '1' });
+});

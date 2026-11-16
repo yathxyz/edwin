@@ -244,11 +244,16 @@ export class Server {
     if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
     this.Ed = loadEdwin(host, { mode: 'gen' });
     this.L = (globalThis as any).L; // any: the core sets globalThis.L
-    this.Ed.boot({ host });
+    this.Ed.boot({ host, deferUserInit: true });
     await this.Ed.whenIdle();
     this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
     this.buffers.reload();
     for (const m of MODULES) { await m.install(this); this.modules.push(m); }
+    /* init.scm (R4.11) after the modules' Scheme, so a backend it declares (gptel-make-openai, credential) is one
+       edwind's models and agent use, and a setting it makes is not overwritten by a module's file. An error is
+       reported in *Messages* and the log, and edwind starts all the same. */
+    const initErr = this.Ed.loadUserInit();
+    if (initErr) this.log.warn('start', { event: 'init_error', error: initErr });
     /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
        module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
     this.image.replay(this);

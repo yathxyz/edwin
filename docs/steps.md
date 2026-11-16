@@ -1162,6 +1162,62 @@ formatters and language servers will all call it, from TypeScript.
   after two awaits from a replay entered in a timer callback; after the turn `available()` was true again; no
   child was left once edwin exited.
 
+## Backends declared in init.scm reach edwind's models (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
+init.scm is what edwind's models and agent use, filling what is missing between scm/models.scm, scm/gptel.scm and
+server/models.mts, with a backend naming a credential by its LoadCredential name.
+
+- **What was missing.** edwind evaluated init.scm inside `Ed.boot`, before its modules were installed, so
+  `gptel-make-openai`, `gptel-make-anthropic` and `credential` were unbound there: a backend in init.scm failed with
+  `Unbound variable: credential`, the rest of the file was skipped, and the error went to edwind's `*Messages*`
+  only. No backend declared in init.scm had ever reached the models.
+- **The fix (server/main.mts, ex44's public edwind too).** edwind boots with `deferUserInit` and runs
+  `Ed.loadUserInit()` after the modules are installed and before the image log is replayed: shipped Scheme, the
+  modules' Scheme, init.scm, then the image log, whose entries were made after init.scm had run. The file is still
+  read through the authority (`host.userConfig`), and safe mode still skips it (`host.userConfig` answers nothing).
+  An error is reported in `*Messages*` as before and now in the log too (`start` `init_error`, the error's text,
+  which is what the evaluator reports, never a credential's bytes: a handle prints as `#<credential NAME>`), and
+  edwind starts all the same. Each form is evaluated with a fresh op budget, as at boot.
+- **Credentials.** `(credential NAME)` is unchanged: NAME must be one edit.json binds to an origin
+  (`models.credentials.NAME.origin`, or a backend's `credential`). No form binds a key to an origin, so a form
+  run by any client sends a key nowhere the configuration did not name (R14.4); an init.scm naming an unbound
+  credential is an error reported as above. On a desktop the fleet gives the file as
+  `programs.edwin.daemon.credentials.NAME` and the origin as `daemon.settings.models.credentials.NAME.origin`
+  (ai-daemon-models), then init.scm names it: `:key (credential "NAME")`.
+- **The guard.** Served frames and the desktop program read the same init.scm without the models module (frames
+  through `user-init`, before their server stubs exist, with one handler around the whole file), so an unguarded
+  `(credential ...)` would end the rest of the owner's init.scm in every frame. Backend forms go under
+  `(when (featurep 'models) ...)`: models.scm provides `models` in edwind only. Its header shows the idiom;
+  ai-fleet-backends is to use it.
+- **What else the new order changes.** The modules' own Scheme (threads.scm, debug.scm, process.scm,
+  notes-syntax.scm, models.scm, pi-tools.scm) used to be evaluated after init.scm and overwrote what init.scm set
+  with `define` (for example `notes-index-ignore`); now init.scm's settings win. The notes index's first scan
+  starts during the notes module's install, so it still uses the shipped ignore list; later scans use
+  init.scm's. The buffers restored from their journals, now before init.scm, run no Scheme (their mode is set by
+  name, no hook runs), so nothing of init.scm is missed there. On ex44's public edwind init.scm can now call the
+  modules' primitives at boot; the image log replayed at the same point already could, and configDir (where
+  init.scm lives, writable by edwind) is unchanged, so no client gains a capability it did not have.
+- **Not in it:** presets (there are none in edwind yet: `gptel-make-preset` is the frame's src/ai.ts, and
+  ai-presets-menus comes later) and mail settings (mail in Edwin was declined, decision 5). gptel.scm and
+  server/agent.mts needed no change: gptel's commands and new pi sessions already take the current
+  `gptel-backend`. No new file, so no new check: the tests are in the suites `edit-security` and `edit-frame`
+  already run.
+- **Checked by** `nix build .#checks.x86_64-linux.edit-security`, whose test/models.test.mts now starts an edwind
+  per case with an init.scm and a credentials directory: a guarded `gptel-make-openai` on the loopback fake
+  endpoint with `:key (credential "local-key")` (bound in edit.json) is listed by `model-backends` and
+  `gptel-backends`, usable and current; `gptel-request` reaches `/v1/chat/completions` with `Bearer <key>`; a new
+  pi session starts on it; the usage line names it. An init.scm naming an unbound credential, and one that does
+  not read, are reported in `*Messages*` and the log, the forms before the error hold, and edwind serves. With
+  `EDWIND_SAFE=1` the file is not read. The key is in no message, log line or file edwind kept. With the
+  main.mts change put back, the first two of these fail (`Unbound variable: credential`). test/frame.test.mts
+  (`edit-frame`) boots a served frame on an edwind whose init.scm has a guarded form: in the frame
+  `(featurep 'models)` is false, the guarded form is skipped and the rest runs with no error; in edwind all three
+  hold.
+  Also passed: `edit-lockdown`, `nix build .#edwin`, and `nix flake check --keep-going` but for `edwin-bench`
+  (shadow stack 15.0% against its 10% limit) and `edit-crash` (R16.5's random SIGKILL run: "the history lost
+  acked batches"), both under the load of the parallel build; each passed when run again alone (7.8%; 7 of 7).
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

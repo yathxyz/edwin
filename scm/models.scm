@@ -3,16 +3,20 @@
 ;; Loaded by server/models.mts into the server image only. The primitives it wraps are server-only
 ;; (R4.49): credential, http-request, %make-backend, %model-request, %model-stream, %model-usage.
 ;;
-;; Backends are objects (R12.1). The module defines `anthropic` from edit.json `models` (R12.3); init.scm may
-;; add more and change gptel-backend, after this file has loaded (it provides the feature `models`):
+;; Backends are objects (R12.1). The module defines `anthropic` from edit.json `models` (R12.3); edwind loads
+;; init.scm after this file (it provides the feature `models`), so init.scm may add more and change gptel-backend.
+;; Frames and the desktop program read the same init.scm without this file, so keep these forms under the guard:
 ;;
-;;   (gptel-make-openai "local" :host "localhost:11434" :protocol "http"
-;;     :models '("qwen3:8b") :tiers '((default . "qwen3:8b")))
-;;   (gptel-make-anthropic "mine" :key (credential "anthropic-api-key") :models '("claude-opus-5-5"))
-;;   (set! gptel-backend "local")
+;;   (when (featurep 'models)
+;;     (gptel-make-openai "local" :host "localhost:11434" :protocol "http"
+;;       :models '("qwen3:8b") :tiers '((default . "qwen3:8b")))
+;;     (gptel-make-anthropic "mine" :key (credential "anthropic-api-key") :models '("claude-opus-5-5"))
+;;     (set! gptel-backend "local"))
 ;;
 ;; Keys are never typed here (R12.2): :key takes only a (credential NAME) handle, which prints as
-;; #<credential NAME> and which only http-request can turn into a header, on the backend's own origin.
+;; #<credential NAME> and which only http-request can turn into a header, on the backend's own origin. NAME is a
+;; LoadCredential name that edit.json binds to an origin (models.credentials.NAME.origin, or a backend's
+;; credential); no form binds one, so Scheme sends a key nowhere the configuration did not name.
 ;;
 ;; gptel-request sends a prompt and streams the answer into a buffer or to a callback on a background thread
 ;; attributed to the agent gptel:<backend> (R12.9), so every frame sees it stream and undo-writer undoes it.

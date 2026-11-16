@@ -209,8 +209,12 @@ function makeDocument() {
   return doc;
 }
 
+/* The owner's init.scm, read by edwind and by every frame: what is for edwind's models alone sits under the guard
+   scm/models.scm names, which only edwind passes. */
+const GUARDED_INIT = "(when (featurep 'models) (define init-models-side #t))\n(define init-tail #t)\n";
 before(async () => {
   dir = makeDir();
+  fs.writeFileSync(path.join(dir.dirs.config, 'init.scm'), GUARDED_INIT);
   child = await startEdwind(dir);
   const host = createHost({ storage: memoryStorage(), workers: false });
   Ed = loadEdwin(host); E = Ed.E; L = (globalThis as unknown as { L: EdwinCore }).L;
@@ -237,6 +241,16 @@ test('E3 H3 gap 4: served boot evaluates the shipped Scheme without buffers; the
   for (const f of ['emacs', 'evil', 'org', 'markdown', 'notes-syntax', 'address', 'ai', 'init']) assert.equal(L.truthy(L.evalText(`(featurep '${f})`)), true, `(provide '${f})`);
   assert.ok(L.isCommand(L.intern('markdown-todo-cycle')) && L.isCommand(L.intern('evil-normal-state')) && L.isCommand(L.intern('org-todo')));
   assert.equal(Ed.getBuffer('emacs.scm'), null); assert.equal(Ed.getBuffer('init.scm'), null);
+});
+
+test('R4.11: the guard of scm/models.scm holds in edwind only, and the rest of init.scm runs in the frame', async () => {
+  assert.equal(L.truthy(L.evalText("(featurep 'models)")), false);
+  assert.equal(L.truthy(L.evalText('init-tail')), true);
+  assert.equal(L.truthy(L.evalText("(bound? 'init-models-side)")), false);
+  assert.doesNotMatch(L.evalText('(with-current-buffer "*Messages*" (buffer-string))'), /init\.scm/);
+  const s = await client();
+  assert.equal((await s.form("(list (featurep 'models) init-models-side init-tail)")).value, '(#t #t #t)');
+  s.close();
 });
 
 test('open, snap, typing becomes one edit batch per command, the ack lands and the server has the text', async () => {
