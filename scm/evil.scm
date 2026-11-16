@@ -1533,6 +1533,13 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "s" 'git-status-stage
   "u" 'git-status-unstage
   "x" 'git-status-discard)
+;; c c, c a, c w and c f commit, amend, reword and fix up, as evil-collection
+;; binds magit's commit transient (c) and its suffixes.
+(evil-define-key 'motion 'git-status-mode
+  "c c" 'git-commit
+  "c a" 'git-commit-amend
+  "c w" 'git-commit-reword
+  "c f" 'git-commit-fixup)
 
 ;; *compilation*, as evil-collection binds it; q and SPC come from special-mode.
 (evil-define-key 'motion 'compilation-mode

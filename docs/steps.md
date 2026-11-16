@@ -2380,6 +2380,94 @@ buffer on files, hunks and selected lines, magit's stage, unstage and discard.
     `edwin-bench`, a timing limit (shadow stack 13.1% against 10% under load; 8.2% on the rerun), which this
     package does not touch.
 
+## Committing from the git status buffer (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-commit`, on git-stage): commit, amend, fixup and reword,
+the message written in the commit message buffer (git-message-modes).
+
+- **`git-commit`** (c c), **`git-commit-amend`** (c a), **`git-commit-reword`** (c w) and **`git-commit-fixup`**
+  (c f), in src/vc-git.ts, bound in git-status-mode's Motion state (scm/evil.scm, evil-collection's magit keys).
+  They also run from any buffer of a git repository by M-x (its repository found as SPC g g finds it); in a jj
+  workspace they are refused (`ROOT is a jj workspace: describe its change with jj, or commit from SPC g G's
+  status buffer`). From a status buffer they act on that buffer's repository, a colocated one's git included.
+- **Before any message is written** the repository is read (as the status buffer reads it) and what git would
+  refuse is refused: `N conflicted file(s): resolve and stage it/them first`; `Nothing staged: stage changes with
+  s first` (c c, c f); `No commit yet: nothing to amend` / `reword` / `fix up`.
+- **Save first: ask** (owner decision 12). The changed buffers visiting a file under the repository's root are
+  offered in one y or n question (`Save a.txt before committing?`, `Save N changed buffers of ROOT before
+  committing?`); y saves them all, n goes on with what the files hold. Buffers outside the repository are not
+  asked about. Reword asks nothing: it takes no file. Saving does not stage: what is committed is the index.
+- **The message buffer** `*git-commit: NAME*` (Vc.message, vc-message-mode; C-c C-c commits, C-c C-k aborts),
+  holding for c c an empty first line, for c a and c w the last commit's message (`git log -1 --format=%B`), then
+  `#` lines saying what is done, on which branch and in which repository, and the staged files (`Changes to be
+  committed:`, for amend `Staged changes it takes as well:`). The command ends once the buffer is open (commands
+  run one at a time, and C-c C-c is another); the commit runs when the message comes, and its failure is
+  reported as a command's.
+- **How each is done**, through `Vc.run` (commit keeps the repository's hooks, filters and signing, as the runner
+  lets commit; GIT_EDITOR stays false, no editor is ever needed):
+  - c c `git commit --cleanup=verbatim -F -`, c a with `--amend`, c w with `--amend --only --no-verify`: the
+    message on standard input, never in the argv or `*vc-process*`. `--cleanup=verbatim`: Vc.message has
+    cleaned it already (git stripspace's way, `#` comments), so the repository's commit.cleanup or
+    core.commentChar cannot clean it again.
+  - c w changes the message alone: `--only` with no paths leaves the staged changes staged and the tree as it
+    was; `--no-verify` (owner decision 12): no pre-commit or commit-msg hook (prepare-commit-msg, post-commit and
+    post-rewrite still run: `--no-verify` does not reach them).
+  - c f `git commit --fixup=HASH`: the commit on the line at point (Recent commits, Unpushed: each commit line now
+    carries its hash; a stash's and an unpulled one's, not in HEAD's history, do not), elsewhere asked for (`Fix up commit (HEAD): `, empty for HEAD).
+    What is typed is resolved by `git rev-parse --verify --quiet --end-of-options REV^{commit}` (a read) into a
+    full hash, so it never reaches `commit` as a switch (`Not a commit: REV`). The fixup also runs after the
+    command ends, its hooks perhaps long.
+  - A commit has no bound on its output, only a time (10 minutes): a hook may print as much as it likes (git
+    sends it to the error output), and a bound would kill the commit partway. Kept are the first 64 KiB of the
+    output (git's summary line first) and the last 64 KiB of the error output (git's or the hook's last words);
+    `*vc-process*` keeps the first 8 KiB of the error output, as for every child.
+- **A refused commit** (a pre-commit or commit-msg hook said no, or the commit could not start): git's last line
+  of error output is said, `git commit failed (exit 1): WHY; the message is kept for the next commit (see
+  *vc-process*)`, and the next command of the same kind in that repository opens with that message. It is
+  taken when the buffer opens: C-c C-k on it lets it go.
+- After a commit, done or not, every status buffer of the repository is read again, and git's line (`[main
+  1234567] Subject`) is said.
+- **Choices**, each reversible:
+  - Reword is of HEAD only; rewording an older commit is a rebase (git-sequencer, git-rebase-todo). Magit's c w
+    rewrites an older one through rebase.
+  - Fixup only: no `--fixup=amend:` or `reword:` (they want an editor), no squash (c s), no instant fixup (c F)
+    or autosquash: the rebase is git-sequencer's.
+  - No extend (c e), no `--allow-empty`, no commit transient with switches (`--signoff`, `--no-verify` and the
+    rest): the owner's repository settings or a terminal give those.
+  - During a merge c c commits the staged resolution with the message written; git's MERGE_MSG is not put in the
+    buffer (git-sequencer).
+  - A shared buffer (one edwind holds) is saved by edwind; the commit does not wait for its answer, so y to the
+    save question does not mean the file is written yet. What is committed is the index all the same; only a hook
+    that reads the working tree (a formatter, a linter) may see the file as it was. Its `Wrote FILE` (or why
+    not) is said when edwind answers.
+- **Not in it:** commit from a jj workspace (git-jj-ops' describe), the diff of what is committed beside the
+  message (magit's), commit message history (M-p/M-n), a GPG passphrase prompt (the child has no terminal: the
+  user's agent and pinentry answer, or the commit fails and the message is kept).
+- **Image replay and edwind.** The commands check `Ed.proc.refusal()` before anything, so under the image's
+  replay nothing is read, asked or opened; `Vc.run` refuses in a web frame and in edwind as well.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (62 passed: vc.test.mts's 21, vc-diff's 16,
+  vc-git's 9, vc-stage's 8 and test/vc-commit.test.mts's 8), with real git, the log and index read after each:
+  - c c: the message buffer's whole text and point; the commit holds the staged file only, its message as written
+    with the comment lines left out and white space inside a line kept; git's line said; the status read again;
+    the argv `commit --cleanup=verbatim -F -`, the message not in it, the hooks on.
+  - c a: the last message in the buffer with the staged file listed; the amended commit holds both files.
+  - c w with a staged change and pre-commit and commit-msg hooks: the message changed, the tree unchanged, the change still
+    staged, neither hook run; then c f on the first commit's line: `fixup! first`, both hooks run, `--fixup=` its
+    full hash.
+  - c f from a file buffer: the prompt; `--amend` typed is refused as no commit, with no commit run; RET fixes up
+    HEAD.
+  - A pre-commit hook that exits 1: its words said, HEAD unchanged, the change still staged; c c again opens with
+    the kept message and commits it; the next c c starts empty; C-c C-k starts no commit.
+  - A pre-commit hook that prints 3 MB: exiting 1, its last line said (not `exit null`), HEAD unchanged;
+    exiting 0, the commit made and git's line said.
+  - Save: one changed buffer of the repository asked about by name, y saves it, a buffer outside the repository
+    is left; two asked about together, n saves neither and the commit takes the index alone.
+  - Refused with no message buffer: nothing staged (c c, c f), no commit yet (c a, c w, c f), then the first
+    commit of that repository; a conflict; a jj workspace; the four commands under `Ed.proc.replay` with no child
+    started.
+  - `nix flake check -L --keep-going`: all checks passed, `nix build .#edwin` among them (its cargo and gui tests
+    run), with `edwin-typecheck`, `edwin-display` (20), `edit-lockdown` (6) and `edit-security` (21).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

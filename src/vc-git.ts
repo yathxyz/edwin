@@ -11,7 +11,10 @@
 
    s, u and x stage, unstage and discard (docs/steps.md, "Staging and discarding"): a whole file or part by its
    name (add, reset, checkout, clean), a hunk or the lines selected by a patch VcDiff.patch builds from the diff
-   shown (apply), each a write through the runner, then the repository read again. */
+   shown (apply), each a write through the runner, then the repository read again.
+
+   c c, c a, c w and c f commit, amend, reword and fix up (docs/steps.md, "Committing"): the message written in
+   Vc.message's buffer, given to `git commit -F -` on its standard input. */
 
 (function () {
 'use strict';
@@ -43,8 +46,8 @@ interface GitModel {
    line past its end, whether it has a body to fold, its parent and children. */
 interface GitSection { id: string; start: number; end: number; body: boolean; parent: GitSection | null; children: GitSection[] }
 /* A line as drawn: its id (what point is kept on across a redraw), the innermost section it is in, its faces as
-   [from, to, face] from the line's start, and the file and line (from 1) RET visits. */
-interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt }
+   [from, to, face] from the line's start, the file and line (from 1) RET visits, and the commit it shows (what c f fixes up). */
+interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt; commit?: string }
 /* What s, u and x act on at a line: a part of the status (its heading: FILE null), a file of it, one of the file's
    hunks (by its index in FILE.diff.hunks), or a line of that hunk (by its index in hunk.lines). */
 type GitPart = 'untracked' | 'unmerged' | 'unstaged' | 'staged';
@@ -182,8 +185,8 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
   /* the sections drawn, and those whose children were all drawn (unfolded) */
   const seen = new Set<string>(), opened = new Set<string>(['']);
   let sec = top;
-  const line = (key: string, text: string, spans: [number, number, number][] = [], visit?: GitRow['visit'], at?: GitAt) => {
-    lines.push(text); rows.push({ id: sec.id + '\0' + key, sec, spans, visit, at });
+  const line = (key: string, text: string, spans: [number, number, number][] = [], visit?: GitRow['visit'], at?: GitAt, commit?: string) => {
+    lines.push(text); rows.push({ id: sec.id + '\0' + key, sec, spans, visit, at, commit });
   };
   const folded = (id: string, key: string) => { const f = v.folds.get(id); return f === undefined ? FOLDED_FIRST(key) : f; };
   /* A section under the current one: its heading, then BODY unless it is folded (the heading then ends in …). */
@@ -200,7 +203,8 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
     sec = outer;
     s.end = lines.length;
   };
-  const commitLine = (c: GitCommit) => line(c.hash, `${c.hash} ${shown(c.subject)}`, [[0, c.hash.length, F.HASH]]);
+  /* a commit's line; with NOFIX (a stash's, an unpulled one: not in HEAD's history) no fixup is for it */
+  const commitLine = (c: GitCommit, noFix = false) => line(c.hash, `${c.hash} ${shown(c.subject)}`, [[0, c.hash.length, F.HASH]], undefined, undefined, noFix ? undefined : c.hash);
   const top_ = (key: string, title: string, n: number, body: () => void, at?: GitAt) => {
     if (!n) return;
     const heading = `${title} (${n})`;
@@ -250,17 +254,17 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
   top_('unmerged', 'Unmerged paths', m.unmerged.length, files('unmerged', m.unmerged, null), { part: 'unmerged', file: null });
   top_('unstaged', 'Unstaged changes', m.unstaged.length, files('unstaged', m.unstaged, m.notes.unstaged), { part: 'unstaged', file: null });
   top_('staged', 'Staged changes', m.staged.length, files('staged', m.staged, m.notes.staged), { part: 'staged', file: null });
-  top_('stashes', 'Stashes', m.stashes.length, () => m.stashes.forEach(commitLine));
+  top_('stashes', 'Stashes', m.stashes.length, () => m.stashes.forEach(c => commitLine(c, true)));
   const up = m.upstream === null ? '' : shown(m.upstream);
-  const ahead = (list: GitCommit[], n: number) => () => {
-    list.forEach(commitLine);
+  const ahead = (list: GitCommit[], n: number, mine: boolean) => () => {
+    list.forEach(c => commitLine(c, !mine));
     if (n > list.length) line('more', `(${n - list.length} more)`, [[0, String(n - list.length).length + 7, F.DIM]]);
   };
-  top_('unpulled', `Unpulled from ${up}`, m.unpulled.length && m.behind, ahead(m.unpulled, m.behind));
-  top_('unpushed', `Unpushed to ${up}`, m.unpushed.length && m.ahead, ahead(m.unpushed, m.ahead));
+  top_('unpulled', `Unpulled from ${up}`, m.unpulled.length && m.behind, ahead(m.unpulled, m.behind, false));
+  top_('unpushed', `Unpushed to ${up}`, m.unpushed.length && m.ahead, ahead(m.unpushed, m.ahead, true));
   {
     const heading = 'Recent commits';
-    if (m.recent.length) { section('recent', heading, [[0, heading.length, F.SECTION]], true, () => m.recent.forEach(commitLine)); line('end:recent', ''); }
+    if (m.recent.length) { section('recent', heading, [[0, heading.length, F.SECTION]], true, () => m.recent.forEach(c => commitLine(c))); line('end:recent', ''); }
   }
   /* the last line is blank: drop it, so the text ends in one newline */
   if (lines.length && lines[lines.length - 1] === '') { lines.pop(); rows.pop(); }
@@ -482,8 +486,170 @@ CMD('git-status-discard', '', '', 'Discard what is at point, after asking (x): d
     await run();
   }));
 
+/* ---------- committing ---------- */
+/* A commit's hooks may run a whole test suite and print as much as they like (git sends what they print to its
+   error output): a commit has no bound on its output, which would kill it partway, only a time. Kept of it are
+   the head of its output (git's `[main 1234567] Subject` line comes first, the files after) and the tail of its
+   error output (why it failed comes last). */
+const COMMIT_TIMEOUT = 600000, OUT_KEPT = 64 * 1024, ERR_KEPT = 64 * 1024;
+type CommitKind = 'commit' | 'amend' | 'reword';
+/* The message of a commit git refused (a hook said no), by repository root and kind: the next commit of that
+   kind there starts from it. Taken when that message buffer opens. */
+const kept = new Map<string, string>();
+
+/* The repository a commit command acts on: a status buffer's, else git's (jj's workspace refused) around the
+   current buffer's directory. */
+function commitRepo(): VcRepo {
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  const b = cur();
+  if (b.gitStatus) return (b.gitStatus as GitStatus).repo;
+  const dir = directoryOf(b), r = dir ? Vc.repo(dir) : null;
+  if (!r) signal('user-error', `Not in a repository: ${dir || 'no directory'}`);
+  if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace: describe its change with jj, or commit from SPC g G's status buffer`);
+  return r!;
+}
+
+/* Offer to save the changed buffers that visit a file in REPO (owner decision 12: ask). One question for them all;
+   n commits what the files hold. */
+async function offerSave(r: VcRepo) {
+  const under = r.root === '/' ? '/' : r.root + '/';
+  const bs = E.buffers.filter(b => b.file && b.modified && b.file.startsWith(under));
+  if (!bs.length) return;
+  const what = bs.length === 1 ? shown(bs[0].file!.slice(under.length)) : `${bs.length} changed buffers of ${shown(r.root)}`;
+  if (!await Ed.yesOrNo(`Save ${what} before committing?`)) return;
+  for (const b of bs) {
+    if (!E.buffers.includes(b)) continue;
+    const was = E.current; E.current = b;
+    try { L.call('save-buffer', []); } finally { E.current = was; }
+  }
+}
+
+/* Read REPO, refusing what git would refuse before anything is written: a conflict left, nothing staged (a
+   commit), no commit yet (amend, reword, fixup). */
+async function ready(r: VcRepo, kind: CommitKind | 'fixup'): Promise<GitModel> {
+  const m = await collect(r);
+  if (m.unmerged.length) signal('user-error', `${m.unmerged.length} conflicted file${m.unmerged.length === 1 ? '' : 's'}: resolve and stage ${m.unmerged.length === 1 ? 'it' : 'them'} first`);
+  if (kind !== 'commit' && m.oid === null) signal('user-error', 'No commit yet: nothing to ' + (kind === 'fixup' ? 'fix up' : kind));
+  if ((kind === 'commit' || kind === 'fixup') && !m.staged.length) signal('user-error', 'Nothing staged: stage changes with s first');
+  return m;
+}
+
+/* The comment lines under a message: what it is for and, but for a reword, the staged files it takes. */
+function template(r: VcRepo, m: GitModel, kind: CommitKind): string {
+  const on = m.branch !== null ? `on branch ${shown(m.branch)}` : 'on a detached HEAD';
+  const head = m.head ? `${m.head.hash} ${shown(m.head.subject)}` : '';
+  const lines = [
+    kind === 'commit' ? `Committing ${on} in ${shown(r.root)}.` : `${kind === 'amend' ? 'Amending' : 'Rewording'} ${head} ${on} in ${shown(r.root)}.`,
+    'C-c C-c commits, C-c C-k aborts. Lines starting with # are left out.',
+  ];
+  if (kind === 'reword') lines.push('Only the message changes: the staged changes stay staged, and no pre-commit or commit-msg hook runs.');
+  else if (m.staged.length) {
+    lines.push('', kind === 'amend' ? 'Staged changes it takes as well:' : 'Changes to be committed:');
+    for (const f of m.staged) lines.push(`\t${(f.label + ':').padEnd(12)}${f.orig !== null ? `${shown(f.orig)} -> ` : ''}${shown(f.path)}`);
+  }
+  return lines.map(l => (l ? '# ' + l : '#')).join('\n').replace(/^# \t/gm, '#\t') + '\n';
+}
+
+/* What a failed commit printed last on its error output, for the message. */
+function lastError(x: EdProcResult): string {
+  const ls = x.err.split('\n').map(l => l.trim()).filter(l => l);
+  return ls.length ? ': ' + shown(ls[ls.length - 1]).slice(0, 200) : '';
+}
+
+/* git commit ARGS in R: its result said ("[main 1234567] subject"), the status buffers of R read again. */
+async function commitWith(r: VcRepo, args: string[], input?: string): Promise<EdProcResult> {
+  let out = '', err = '';
+  const p = await Vc.start(r, ['commit', ...args], {
+    timeout: COMMIT_TIMEOUT, lossy: true,
+    onOut: s => { if (out.length < OUT_KEPT) out += s; },
+    onErr: s => { err += s; if (err.length > 2 * ERR_KEPT) err = err.slice(-ERR_KEPT); },
+  });
+  try {
+    if (input) p.write(input);
+    p.closeStdin();
+  } catch (e) { p.kill('KILL'); throw e; }
+  const x: EdProcResult = { ...await p.exit, out, err };
+  /* (a status that cannot be read again is said, the commit done all the same) */
+  for (const b of E.buffers.filter(b => b.gitStatus && (b.gitStatus as GitStatus).repo.root === r.root)) await refresh(b).catch(Ed.reportError);
+  return x;
+}
+function said(x: EdProcResult) {
+  const l = x.out.split('\n').find(s => /^\[.+\] /.test(s));
+  Ed.message(l ? shown(l) : 'Committed');
+}
+
+/* Commit, amend or reword with a message written in the message buffer. */
+async function commit(kind: CommitKind): Promise<false> {
+  const r = commitRepo();
+  if (kind !== 'reword') await offerSave(r);
+  const m = await ready(r, kind);
+  let text = '\n';
+  const key = r.root + '\0' + kind, last = kept.get(key);
+  if (last !== undefined) text = last;
+  else if (kind !== 'commit') {
+    const x = await Vc.run(r, ['log', '-1', '--format=%B', 'HEAD', '--'], READ);
+    if (x.code !== 0 || x.error || x.truncated) failed(x, 'git log');
+    text = x.out.replace(/\n+$/, '') + '\n';
+  }
+  const name = `*git-commit: ${r.root.slice(r.root.lastIndexOf('/') + 1) || '/'}*`;
+  /* The command ends once the buffer is open (commands run one at a time, and C-c C-c is one): the commit runs
+     when the message comes, its failure reported as a command's would be. */
+  const pending = Vc.message({ name, text: text + '\n' + template(r, m, kind), comment: '#' });
+  kept.delete(key);   // taken: an abort lets it go
+  void pending.then(msg => (msg === null ? undefined : commitMessage(r, kind, key, msg))).catch(Ed.reportError).finally(() => Ed.scheduleRender());
+  return false;
+}
+/* git commit of MSG in R as KIND says. A commit git refuses (a hook said no) keeps MSG under KEY for the next. */
+async function commitMessage(r: VcRepo, kind: CommitKind, key: string, msg: string) {
+  /* The message on standard input, as written: it is cleaned already, and the repository's commit.cleanup or
+     core.commentChar must not clean it again. */
+  const args = ['--cleanup=verbatim', '-F', '-'];
+  if (kind === 'amend') args.unshift('--amend');
+  /* the message alone: --only with no paths leaves the staged changes out; no pre-commit or commit-msg hook (owner decision 12) */
+  if (kind === 'reword') args.unshift('--amend', '--only', '--no-verify');
+  let x: EdProcResult;
+  try { x = await commitWith(r, args, msg); }
+  catch (e) { kept.set(key, msg); throw e; }
+  if (x.code !== 0 || x.error || x.timedOut) {
+    kept.set(key, msg);
+    signal('process-error', `git commit failed (${x.error || (x.timedOut ? 'it took too long' : `exit ${x.code}`)})${lastError(x)}; the message is kept for the next ${kind === 'commit' ? 'commit' : kind} (see *vc-process*)`);
+  }
+  said(x);
+}
+
+/* The commit a fixup is for: the commit on the line at point in a status buffer, else one asked for (HEAD by
+   default), as its full hash. What is typed is given to git only after `--end-of-options`, as one argument. */
+async function fixupTarget(r: VcRepo): Promise<string> {
+  const b = cur(), row = b.gitStatus ? here(b).row : undefined;
+  let rev = row && row.commit;
+  if (!rev) rev = (await Ed.readMini('Fix up commit (HEAD): ', '')).trim() || 'HEAD';
+  const x = await Vc.run(r, ['rev-parse', '--verify', '--quiet', '--end-of-options', rev + '^{commit}'], { ...READ, lossy: true });
+  const hash = x.out.trim();
+  if (x.code !== 0 || !/^[0-9a-f]{40,64}$/.test(hash)) signal('user-error', `Not a commit: ${shown(rev)}`);
+  return hash;
+}
+async function fixup(): Promise<false> {
+  const r = commitRepo();
+  await offerSave(r);
+  await ready(r, 'fixup');
+  const hash = await fixupTarget(r);
+  /* The commit, its hooks perhaps long, runs after the command ends, as a message buffer's does. */
+  void commitWith(r, ['--fixup=' + hash]).then(x => {
+    if (x.code !== 0 || x.error || x.timedOut) signal('process-error', `git commit --fixup failed (${x.error || (x.timedOut ? 'it took too long' : `exit ${x.code}`)})${lastError(x)} (see *vc-process*)`);
+    said(x);
+  }).catch(Ed.reportError).finally(() => Ed.scheduleRender());
+  return false;
+}
+
+CMD('git-commit', '', '', 'Commit the staged changes (c c) with a message written in a buffer (C-c C-c commits, C-c C-k aborts), after offering to save the changed buffers of the repository. A message git refused (a hook) comes back the next time.', () => commit('commit'));
+CMD('git-commit-amend', '', '', 'Amend the last commit (c a): its message, in a buffer, and the staged changes.', () => commit('amend'));
+CMD('git-commit-reword', '', '', 'Change the last commit\'s message only (c w): the staged changes stay staged, and no pre-commit or commit-msg hook runs.', () => commit('reword'));
+CMD('git-commit-fixup', '', '', 'Commit the staged changes as a fixup of the commit at point, or of one asked for (c f): `fixup! SUBJECT`, for git rebase --autosquash.', () => fixup());
+
 for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-toggle', 'git-status-next-section', 'git-status-previous-section',
-  'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard',
+  'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 
 /* ---------- faces ---------- */

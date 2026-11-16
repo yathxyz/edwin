@@ -243,6 +243,8 @@ in
   # raises the run count. git's status buffer (src/vc-git.ts): a fixture repository with every section shown by
   # SPC g g, folded, refreshed, stepped through and visited; s, u and x staging, unstaging and discarding
   # files, hunks and selected lines (test/vc-stage.test.mts), the index compared with the blob each must leave.
+  # Committing (test/vc-commit.test.mts): c c, c a, c w and c f from the status buffer, the log and the index
+  # compared after each; hooks on commit and fixup, off on reword; a message a hook refused kept; save offered.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -257,7 +259,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts
         touch $out
       '';
 
