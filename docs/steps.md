@@ -1162,6 +1162,91 @@ formatters and language servers will all call it, from TypeScript.
   after two awaits from a replay entered in a timer callback; after the turn `available()` was true again; no
   child was left once edwin exited.
 
+## Opening a file or URL in the desktop's application (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `bib-open-external`, on proc-host-spawn): one way to hand a
+reference's file or URL to the desktop's own application, which Edwin had only as a web frame's new tab (`host.openUrl`, false everywhere else).
+
+- **`Ed.openUrl(target, {confirmed})`** (src/proc.ts) gives null when TARGET is on its way, else why not, as a
+  string the caller shows. TARGET is a URL or an absolute file name. It goes to the host's `openUrl(target,
+  confirmed)`: the desktop program's is the native `openExternal` (native/src/open.rs), a web frame's opens a new
+  tab for http, https and mailto only, and edwind's Node host opens nothing. Org's `org-open-at-point` on an https
+  link now goes through it (in a terminal or window frame the link opens in the desktop's browser).
+- **Never while the image replays (R16.15).** Under the same gate as `Ed.proc` (the replay and the rest of its
+  turn): `Nothing opens while the image replays`. No Scheme primitive reaches it, so `edwinclient -e` cannot ask
+  for it either (nor `__n.openExternal`: no Scheme primitive reaches the JavaScript globals). The limit is
+  Ed.proc's: a procedure the image defines and that runs later, outside the replay (a key binding, a hook, a
+  timer), is not told from the user's own. Today the one command that reaches Ed.openUrl is Org's https link, so
+  the most it does is show a web page.
+- **The opener** is `xdg-open` found on PATH, run with an argv of exactly `xdg-open TARGET`, never a shell. It
+  outlives the call and the program, as the viewer it starts does, so it is not one of proc.rs's children (those
+  are ended with the program): its own session (`setsid`, no controlling terminal), SIGPIPE back to its default,
+  `close_range(3, ~0, CLOSE_RANGE_CLOEXEC)`, standard input, output and error on /dev/null (a terminal-only
+  opener such as w3m fails rather than drawing over the terminal Edwin holds), and a thread that waits for it, so
+  it is never a zombie and the loop never waits for it. A missing opener is said at once (`Cannot run xdg-open: No
+  such file or directory`); what the opener itself does once started is not seen.
+- **What it opens.** Refused at once, whatever the caller says: a target holding a control character, one that
+  starts with `-` (it would read as an option), one that is neither a URL nor an absolute file name, a URL holding
+  a space, a scheme other than http, https, mailto and file (`javascript:`, `data:`, `ftp:`, `smb:` ...), a mailto
+  whose query names an attachment (`attach=`, `attachment=`, escaped or not: some mail programs attach the local
+  file it names), a file: URL with a query, a fragment, another machine's host or a broken escape. A file (an
+  absolute name, or a file: URL decoded) is opened by its real path, so a symlink named `x.pdf` that leads to a
+  `.desktop` file is judged as that file, and the opener gets the path that was checked, which never starts with
+  `-`. Never opened: what is not a regular file (a directory, a missing file), a `.desktop` file, a file with any
+  execute bit, and a file that starts `#!` or is ELF whatever its name (the desktop's type detection can read the
+  content). Opened only when the caller passes `confirmed: true` (the user said so): a file whose extension is not
+  on the allow-list of documents (pdf, epub, djvu, ps, eps, odt, ods, odp, odg, doc, docx, xls, xlsx, ppt, pptx,
+  rtf), plain text (txt, md, org, csv, tsv, tex, bib, log), images (png, jpg, jpeg, gif, webp, bmp, tif, tiff,
+  avif, heic, heif), audio (mp3, ogg, oga, opus, flac, wav, m4a, aac) and video (mp4, m4v, mkv, webm, mov, avi,
+  ogv), compared without case.
+- **Choices**, each reversible:
+  - The confirmation lifts only the type allow-list: `.desktop` files, executables and scripts are never opened
+    (as mail-attachments-open has it: a type outside the allow-list can be saved, not opened).
+  - HTML and SVG are off the allow-list (a browser runs their scripts); they open with a confirmation.
+  - The checks are in the native program, beside the spawn, not in the TypeScript: the one place a file is
+    stat'ed and handed on. A file changed between the check and the opener's start (same uid) is not caught.
+  - http, https and mailto URLs are handed on as given; only the file: scheme is decoded and checked.
+  - Directories are refused, not shown in a file manager: no caller needs one.
+  - A web frame's tab is opened with `noopener`, so `window.open` gives null whether or not a popup blocker
+    stopped it: it now says nothing went wrong, where it used to say `Could not open (popup blocked?)` every time.
+- **Differences from Emacs** (`browse-url`, `browse-url-xdg-open`, citar's and mu4e's openers): no per-scheme
+  handler table and no `browse-url-browser-function`; every URL goes to the desktop's default application, and
+  Emacs never refused a type.
+- **WSL** (an owner question, decision 19, with no default for it in the plan): Edwin finds `xdg-open` on PATH
+  and names no other opener. On a WSL host the fleet can put an `xdg-open` on PATH that hands its argument to
+  Windows (wslu's `wslview`), or xdg-utils' own `xdg-open`, which uses `wslview` when it finds one; the by-eye
+  check on WSL is the owner's.
+- **Not in it:** no caller but Org's https links: `SPC y o` and the `citar-open` stub are bib-open-reference's,
+  mail parts (and their 0600 files in a private directory) were declined with mail (decision 5), act-at-point was
+  declined (decision 18). No Scheme command (`browse-url`) and no confirmation prompt of its own: a caller that
+  allows `confirmed` asks first.
+- **Checked by**, on ex44: `nix build .#edwin`, whose cargo unit tests (22 passed) include open.rs's five, with a
+  fake `xdg-open` (a script writing its argv to a file, handed by its absolute path rather than by changing PATH,
+  which the proc tests running beside it read): `the_opener_gets_exactly_its_name_and_the_target` (argv exact for
+  an https URL holding `$HOME;` and backquotes, and for a file by its real path through a symlink, a
+  `file://localhost` URL with `%20` and a plain name with a space; the opener reaped, `/proc/PID` gone),
+  `urls_outside_the_allow_list_and_options_are_refused` (`javascript:` in either case, `data:`, `ftp:`, `-x`,
+  `--help`, spaces, newlines, relative names, mailto attachments, a file: URL with a query, a fragment, another
+  host, a bad or NUL escape; the fake never runs),
+  `programs_scripts_and_desktop_files_are_refused_even_when_confirmed` (a .desktop file, a .pdf with the exec bit,
+  a `#!` script named .txt, a .sh, an ELF named .png, a .pdf symlink to the .desktop file, by name and by file:
+  URL, confirmed or not; a directory; a missing file), `a_type_off_the_allow_list_opens_only_when_confirmed` (an
+  `.HTML` page and an extensionless README refused, then the page allowed when confirmed; a `.PDF` allowed) and
+  `an_opener_that_is_not_there_is_said`. Through the built program and its V8 binding,
+  `tests/terminal.rs`'s `an_org_https_link_goes_to_xdg_open_on_path`: edwin on a pty with a throwaway HOME and a
+  fake `xdg-open` first on PATH (that child's PATH only), whose init.scm makes an Org buffer with an https link
+  holding `$HOME;` and backquotes and runs `org-open-at-point`: the fake gets exactly its own name and the URL
+  (`tests/terminal.rs` 35 passed, `tests/gui.rs` 5 passed and 1 ignored).
+  `nix build .#checks.x86_64-linux.edwin-open` (new, test/open.test.mts, 4 passed): the target and the
+  confirmation reach the host as given (only `true` confirms) and its answer comes back; edwind's init.scm and an
+  image form sent by another client get `Nothing opens while the image replays` and reach no host, then the same
+  procedure typed by the user opens; edwind's Node host opens nothing; an Org https link reaches the host and its
+  answer is shown. With the replay line taken out of `Ed.openUrl` the replay test fails. Also `edwin-typecheck`,
+  `edwin-proc` (6 passed), `edwin-headless`, `edwin-native`, `edit-lockdown` and `edit-security`, and `nix flake
+  check --keep-going` (all 37 checks passed; a first run under load had failed in the package build at gui.rs
+  `the_close_button_asks_about_changes` with `Xvfb did not start`, and passed rerun at a quiet time, then again
+  on 2026-11-16 on emacs-to-edwin 3a0ea7b).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

@@ -192,6 +192,12 @@ in
   # and status, spawn, and the refusals in a web frame, with no host.proc and while the image replays (R16.15).
   edwin-proc = suite "proc" [ "proc.test.mts" ];
 
+  # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
+  # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's
+  # Node host, an Org https link. The opener's own checks and argv (native/src/open.rs) are cargo tests, which
+  # `nix build .#edwin` runs.
+  edwin-open = suite "open" [ "open.test.mts" ];
+
   # The frame runtime (E3 H1, §6.3, §7, §9.5): Edwin's core as a protocol client against a real edwind:
   # open and snap, batches and acks, transform against pending edits, undo by group, reconnect and resend,
   # image replication, server commands and ask, anchors, server-only stubs.

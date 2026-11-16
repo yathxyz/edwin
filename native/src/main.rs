@@ -14,6 +14,7 @@ mod bridge;
 #[cfg(feature = "gui")]
 mod gui;
 mod natives;
+mod open;
 mod proc;
 mod snapshot;
 mod sources;

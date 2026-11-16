@@ -10,7 +10,8 @@
    calls is refused whether it starts its child at once or after an await that settles in the same turn.
 
    Ed.proc.spawn gives a running child (input, signals, its exit as a promise); Ed.proc.run gives a child's
-   whole output, error and exit. A refusal and a child that cannot run signal process-error. */
+   whole output, error and exit. A refusal and a child that cannot run signal process-error. Ed.openUrl hands a
+   URL or a file to the desktop's application, under the same replay gate. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed;
@@ -93,5 +94,17 @@ function replay<T>(fn: () => T): T {
   finally { setTimeout(() => { replays--; }, 0); }
 }
 
+/* TARGET (a URL, or an absolute file name) in the desktop's application, through the host: the desktop
+   program's opener (native/src/open.rs, which checks the scheme and the file), a web page's new tab; edwind's
+   Node host opens nothing. Null when it is on its way, else why not. Like a process, never while the image
+   replays: a replayed form could otherwise hand the desktop a file to run. CONFIRMED says the user asked for a
+   file whose type is not on the opener's allow-list; it never opens a program, a script or a .desktop file. */
+function openUrl(target: string, opts: { confirmed?: boolean } = {}): string | null {
+  if (typeof target !== 'string' || !target) return 'Nothing to open';
+  if (replays > 0) return 'Nothing opens while the image replays';
+  return Ed.host.openUrl(target, opts.confirmed === true);
+}
+
 Ed.proc = { available: () => refusal() === null, spawn, run, envFor, replay };
+Ed.openUrl = openUrl;
 })();

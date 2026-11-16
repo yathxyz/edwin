@@ -1648,6 +1648,9 @@ interface EdApi {
   display: EdDisplayApi;
   /* set by proc.ts */
   proc: EdProcApi;
+  /* set by proc.ts: TARGET in the desktop's application, through the host; null when it is on its way, else
+     why not (refused while the image replays, and by the host's checks) */
+  openUrl(target: string, opts?: { confirmed?: boolean }): string | null;
 }
 
 /* ---------- editor: child processes for the core's TypeScript (proc.ts) ---------- */
@@ -1823,7 +1826,9 @@ interface EdHost {
   setClipboard(s: string): void;
   /* native: the clipboard goes to the terminal or the window */
   onClipboard?: ((s: string) => void) | null;
-  openUrl(url?: string): boolean;
+  /* open TARGET (a URL, or an absolute file name) in the desktop's application: null when it is on its way,
+     else why not. CONFIRMED: the user said to open a file whose type is not on the allow-list */
+  openUrl(target: string, confirmed: boolean): string | null;
   onCspViolation(f?: unknown): void;
   idle(f: () => void): unknown;
   nextFrame(f: () => void): unknown;
@@ -2244,6 +2249,9 @@ interface EdNatives {
   procCloseStdin(id: number): void;
   procKill(id: number, signal?: EdProcSignal): boolean;
   procList(): { id: number; pid: number; argv: string[] }[];
+  /* the desktop's opener (native/src/open.rs): xdg-open TARGET once it passes the checks, not waited for;
+     null when it has started, else why not */
+  openExternal(target: string, confirmed?: boolean): string | null;
 }
 type EdProcSignal = 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT' | 'STOP' | 'CONT' | 'USR1' | 'USR2';
 interface EdProcSpawnOptions {

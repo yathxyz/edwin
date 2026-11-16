@@ -1,7 +1,7 @@
 //! __n: what the JavaScript host gets from Rust. Files throw JS errors with the system's message; reading a
 //! missing file gives null, as host.files.read promises.
 
-use crate::{bridge, proc, sources, sys};
+use crate::{bridge, open, proc, sources, sys};
 use std::cell::{Cell, OnceCell};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -717,6 +717,24 @@ fn proc_list(
     }
     rv.set(arr.into());
 }
+/* ---------- the desktop's opener (open.rs): xdg-open TARGET, after its checks ---------- */
+/// openExternal(target, confirmed = false): null once the opener has started, else why not.
+fn open_external(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let target = args.get(0);
+    if !target.is_string() {
+        return ret_str(scope, &mut rv, "Nothing to open");
+    }
+    let target = target.to_rust_string_lossy(scope);
+    match open::open(&target, args.get(1).boolean_value(scope)) {
+        Ok(()) => rv.set(v8::null(scope).into()),
+        Err(e) => ret_str(scope, &mut rv, &e),
+    }
+}
+
 /// A child's event as the arguments of __native.proc: (id, 'out' | 'err', text) or (id, 'exit', {code, signal,
 /// timedOut, truncated, error?}).
 pub fn proc_event<'s>(
@@ -872,7 +890,8 @@ macro_rules! natives {
             "ttyWrite" tty_write, "ttyFlush" tty_flush, "ttySize" tty_size, "suspend" suspend, "exit" exit,
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
             "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind,
-            "procSpawn" proc_spawn, "procWrite" proc_write, "procCloseStdin" proc_close_stdin, "procKill" proc_kill, "procList" proc_list
+            "procSpawn" proc_spawn, "procWrite" proc_write, "procCloseStdin" proc_close_stdin, "procKill" proc_kill, "procList" proc_list,
+            "openExternal" open_external
         )
     };
 }

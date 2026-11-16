@@ -1520,3 +1520,49 @@ fn dash_a_starts_the_daemon_and_attaches() {
     assert_eq!(o.status.code(), Some(0), "{err}");
     assert_eq!(String::from_utf8_lossy(&o.stdout), "3\n");
 }
+
+/// An Org https link goes to the desktop's opener (native/src/open.rs): the `xdg-open` found on PATH, given
+/// exactly the URL as its one argument, never through a shell.
+#[test]
+fn an_org_https_link_goes_to_xdg_open_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = workdir("open");
+    let bin = d.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("xdg-open");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > {0}/argv.tmp\nmv {0}/argv.tmp {0}/argv\n",
+            d.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let url = "https://example.org/a?b=$HOME;touch%20x&c=`id`";
+    std::fs::create_dir_all(d.join("config/edwin")).unwrap();
+    std::fs::write(
+        d.join("config/edwin/init.scm"),
+        format!("(switch-to-buffer \"links.org\")\n(org-mode)\n(insert \"[[{url}][paper]]\")\n(goto-char 3)\n(org-open-at-point)\n"),
+    )
+    .unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut t = Pty::spawn(&d, &[], &[("PATH", &path)]);
+    t.ready();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !d.join("argv").exists() {
+        assert!(
+            Instant::now() < end,
+            "xdg-open never ran; screen tail: {:?}",
+            tail(&t.out)
+        );
+        t.pump(20);
+    }
+    assert_eq!(read(d.join("argv")), format!("{}\n{url}\n", fake.display()));
+    t.keys(":qa!\r");
+    assert_eq!(t.exit(), 0, "screen tail: {:?}", tail(&t.out));
+}

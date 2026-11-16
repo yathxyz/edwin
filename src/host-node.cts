@@ -38,7 +38,7 @@ interface NodeHost {
   config(name: string): string | null; userConfig(name: string): string | null; readFile(p: string): string | null;
   loadPath: string[]; page: NodeHostPage;
   onSuspend(f: () => void): void; suspend(): void; whenLoaded(f: () => void): void;
-  clipboard: string; setClipboard(s: string): void; openUrl(url?: string): boolean; onCspViolation(f?: unknown): void;
+  clipboard: string; setClipboard(s: string): void; openUrl(target: string, confirmed: boolean): string | null; onCspViolation(f?: unknown): void;
   idle(f: () => void): unknown; nextFrame(f: () => void): unknown;
   workers: boolean; workersUnavailable: string | null; workerCount: number; jobs: NodeHostJobs | null;
   makeWorker(data: NodeHostWorkerData): PoolThread;
@@ -144,7 +144,7 @@ function createHost(opts: NodeHostOpts = {}): NodeHost {
     whenLoaded(f) { f(); },
     clipboard: '',
     setClipboard(s) { this.clipboard = s; },
-    openUrl: () => false,
+    openUrl: () => 'Nothing opens here: the desktop program (edwin, edwinclient) opens files and URLs',
     onCspViolation() {},
     idle: f => setTimeout(f, 0),
     nextFrame: f => setTimeout(f, 0),

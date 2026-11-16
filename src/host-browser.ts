@@ -53,7 +53,12 @@ globalThis.EdHost = {
   onSuspend(f) { addEventListener('pagehide', f); doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') f(); }); },
   whenLoaded(f) { if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', f); else f(); },
   setClipboard(s) { try { navigator.clipboard?.writeText(s).catch(() => {}); } catch (e) { /* not allowed here */ } },
-  openUrl(url) { try { return !!open(url, '_blank', 'noopener'); } catch (e) { return false; } },
+  /* A new tab for a web URL; the page has no files of the machine's to open. */
+  openUrl(target) {
+    if (!/^(https?|mailto):/i.test(target)) return 'Not opened: a web frame opens http, https and mailto URLs only';
+    /* With noopener, open gives null whether or not the tab opened: a blocked popup is not seen here. */
+    try { open(target, '_blank', 'noopener'); return null; } catch (e) { return `Could not open ${target}`; }
+  },
   onCspViolation(f: (ev: SecurityPolicyViolationEvent) => void) { doc.addEventListener('securitypolicyviolation', f); },
   idle: globalThis.requestIdleCallback as typeof requestIdleCallback | undefined ? f => requestIdleCallback(f, { timeout: 1000 }) : f => setTimeout(f, 50),
   nextFrame: f => requestAnimationFrame(f),

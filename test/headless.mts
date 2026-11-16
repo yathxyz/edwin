@@ -38,7 +38,7 @@ export interface NodeHost {
   whenLoaded(f: () => void): void;
   clipboard: string;
   setClipboard(s: string): void;
-  openUrl(url?: string): boolean;
+  openUrl(target: string, confirmed: boolean): string | null;
   onCspViolation(f?: unknown): void;
   idle(f: () => void): unknown;
   nextFrame(f: () => void): unknown;

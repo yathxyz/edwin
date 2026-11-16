@@ -196,7 +196,7 @@ function createHost(opts: { storage?: EdHostStorage; dark?: boolean } = {}): EdH
     /* The clipboard: kept here, and sent to the terminal (OSC 52) by whoever sets onClipboard. */
     clipboard: '', onClipboard: null,
     setClipboard(s) { this.clipboard = String(s); if (this.onClipboard) this.onClipboard(this.clipboard); },
-    openUrl: () => false,
+    openUrl: (target, confirmed) => N.openExternal(target, confirmed),
     onCspViolation() {},
     idle: f => setTimeout(f, 0),
     nextFrame: f => setTimeout(f, 0),

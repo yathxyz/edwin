@@ -909,7 +909,7 @@ async function openLink(target: string) {
     if (b instanceof Ed.Buffer) gotoId(b, id);
     return;
   }
-  if (/^https?:\/\//.test(target)) { const ok = Ed.host.openUrl(target); Ed.message(ok ? `Opened ${target}` : `Could not open ${target} (popup blocked?)`); return; }
+  if (/^https?:\/\//.test(target)) { const why = Ed.openUrl(target); Ed.message(why || `Opened ${target}`); return; }
   if ((m = /^file:(.+)$/.exec(target)) || (m = /^(.+\.(?:org|md|txt|scm))(::.*)?$/.exec(target))) {
     let name = m[1], search: string | null = null;
     const k = name.indexOf('::'); if (k >= 0) { search = name.slice(k + 2); name = name.slice(0, k); }
