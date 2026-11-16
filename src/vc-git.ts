@@ -646,7 +646,13 @@ function modelOf(b: EdBuffer, kind: VcViewKind): unknown {
   const v = b.gitView as GitView | undefined;
   return v && v.kind === 'ext' && v.ext === kind ? v.model : signal('user-error', `Not a ${kind.name} buffer`);
 }
-globalThis.VcView = { faces: F, open: openView, model: modelOf, refresh, hunks, fileHeading, shown };
+/* What the line at point in B, a buffer of KIND, says RET does there. */
+function atPoint(b: EdBuffer, kind: VcViewKind): VcRowExtra | null {
+  modelOf(b, kind);
+  const r = here(b).row;
+  return r && (r.visit || r.show || r.more) ? { visit: r.visit, show: r.show, more: r.more } : null;
+}
+globalThis.VcView = { faces: F, open: openView, model: modelOf, at: atPoint, refresh, hunks, fileHeading, shown };
 
 CMD('git-log', '', '', 'Show the log of HEAD in the current buffer\'s git repository (l l in the status buffer): a commit per line, read a page at a time in the background; RET on a commit shows it, + reads the next page.', () => openLog());
 CMD('git-log-more', '', '', 'Read the log\'s next page (+), in the background.', () => { logOf(cur()); return logMore(); });
@@ -779,21 +785,6 @@ function commitRepo(): VcRepo {
   return r!;
 }
 
-/* Offer to save the changed buffers that visit a file in REPO (owner decision 12: ask). One question for them all;
-   n commits what the files hold. */
-async function offerSave(r: VcRepo) {
-  const under = r.root === '/' ? '/' : r.root + '/';
-  const bs = E.buffers.filter(b => b.file && b.modified && b.file.startsWith(under));
-  if (!bs.length) return;
-  const what = bs.length === 1 ? shown(bs[0].file!.slice(under.length)) : `${bs.length} changed buffers of ${shown(r.root)}`;
-  if (!await Ed.yesOrNo(`Save ${what} before committing?`)) return;
-  for (const b of bs) {
-    if (!E.buffers.includes(b)) continue;
-    const was = E.current; E.current = b;
-    try { L.call('save-buffer', []); } finally { E.current = was; }
-  }
-}
-
 /* Read REPO, refusing what git would refuse before anything is written: a conflict left, nothing staged (a
    commit), no commit yet (amend, reword, fixup). */
 async function ready(r: VcRepo, kind: CommitKind | 'fixup'): Promise<GitModel> {
@@ -851,7 +842,7 @@ function said(x: EdProcResult) {
 /* Commit, amend or reword with a message written in the message buffer. */
 async function commit(kind: CommitKind): Promise<false> {
   const r = commitRepo();
-  if (kind !== 'reword') await offerSave(r);
+  if (kind !== 'reword') await Vc.offerSave(r, 'committing');
   const m = await ready(r, kind);
   let text = '\n';
   const key = r.root + '\0' + kind, last = kept.get(key);
@@ -900,7 +891,7 @@ async function fixupTarget(r: VcRepo): Promise<string> {
 }
 async function fixup(): Promise<false> {
   const r = commitRepo();
-  await offerSave(r);
+  await Vc.offerSave(r, 'committing');
   await ready(r, 'fixup');
   const hash = await fixupTarget(r);
   /* The commit, its hooks perhaps long, runs after the command ends, as a message buffer's does. */

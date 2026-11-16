@@ -2711,6 +2711,99 @@ desktop-only stub; the log parsed from a template, not from graph text.
     (cargo and gui tests), `edwin-typecheck`, `edwin-vc` (82), `edwin-display` (20), `edwin-headless` (21),
     `edit-lockdown` (6), `edit-security` (21).
 
+## jj new, describe, edit, abandon and squash (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-jj-ops`, on git-jj-log): jj's everyday operations from
+the log, each proved by `edwin-vc`.
+
+- **The keys** are majutsu's Evil ones, which the desktop had, bound in `jj-log-mode` and `jj-change-mode`: `o`
+  `jj-new`, `c` `jj-describe`, `e` `jj-edit`, `x` `jj-abandon`, `s` `jj-squash`. In the log each acts on the change
+  on the line at point; in the change view, on the change it shows. Elsewhere: `No change at point` (the heading,
+  the more line), `Not a jj log or change buffer`.
+- **What is given to jj** is the line's revset alone, `change_id(ID)` or, for a divergent change, `commit_id(HEX)`
+  (git-jj-log's revOf), checked again against its shape, after `-r`: `jj new -r REV`, `jj edit -r REV`, `jj
+  abandon -r REV`, `jj describe -r REV --stdin`, `jj squash -r REV [--message=TEXT]`. Nothing typed reaches a
+  revset, and every child goes through `Vc.run` (no pager, no colour, git's diff format, `JJ_EDITOR=false`).
+- **o** starts a new change on the change at point (majutsu's `O`, new on the revision at point; its `o` opens a
+  transient). **e** makes the change the working copy. Both first offer to save the changed buffers visiting
+  files of the workspace (`Save a.txt before jj edit?`, one question, n goes on): the new change takes what the
+  files hold, and edit rewrites the work tree under them. The offer is git's commit's, moved from vc-git.ts to
+  `Vc.offerSave(r, doing)`, its question naming what it is before (`committing` for git, as before).
+- **c** reads the change's whole description (`jj log -r REV -T` a JSON template of the ids, the shortest id,
+  `description`, `immutable` and the parents' descriptions) and opens `*jj-describe: NAME*` in vc-message-mode
+  with it and the comment lines `JJ: Describing ID in ROOT.` and `JJ: C-c C-c describes, C-c C-k aborts. ...`.
+  C-c C-c gives the message, without its `JJ:` lines and cleaned as git stripspace cleans it, to `jj describe
+  --stdin`; C-c C-k leaves the change as it was. A description jj refuses is said and kept: the next `c` on that
+  change starts from it.
+- **x** asks `Abandon ID SUBJECT?` (n: `Nothing abandoned`), offers to save, then runs `jj abandon`; its
+  descendants move onto its parent, as jj does it.
+- **s** squashes the change into its parent. jj asks for the result's description in an editor only when both
+  have one; with `JJ_EDITOR=false` that would fail, so then Edwin opens `*jj-squash: NAME*` with the parent's
+  description above the change's and gives what is written as one `--message=TEXT` argument (never two
+  arguments, which jj could read as a switch: a message that starts `-R` or `--config` stays a message). With one
+  description or none, `jj squash -r REV` runs at once and jj keeps the one there is. "Has one" is jj's own rule,
+  a description that is not the empty string: one of only whitespace (`jj describe -m ' '` stores " \n") counts,
+  so it opens the buffer too rather than letting jj start its editor.
+- **Refused before anything is written**: an immutable change for c, x and s (`ID SUBJECT is immutable: jj does
+  not describe it`), from the template's `immutable`; for s, a change whose parent is immutable (`The parent of ID
+  SUBJECT is immutable: jj does not squash into it`), from the parents' `immutable()`, and a merge (`... is a
+  merge: squash it from a terminal, naming the parent with --into`). jj's own refusals (e on the root, a change that became immutable) are said as
+  `jj edit failed (exit 1): The root commit ... is immutable (see *vc-process*)`, its `Error:` line.
+- **After each**: the workspace's log, then its change view, read again one after the other (every jj command
+  snapshots the working copy, so never two at once); a change view whose change is gone (abandoned, squashed
+  away) is killed. Then the first line jj printed is said (`Working copy (@) now at: ...`, `Abandoned 1
+  commits: ...`), or `jj OP: done`.
+- **Choices**, each reversible:
+  - Majutsu's Evil keys, not magit's; `o` is new on the change at point, with no transient (no insert-before or
+    -after, no several parents, no message given with it).
+  - An empty description cannot be given from the buffer: vc-message-mode refuses an empty message, as for git.
+    Clearing one is left to a terminal.
+  - The squash buffer starts from both descriptions, the parent's first, with Edwin's own `JJ:` lines in place of
+    jj's editor text; squash is into the parent only, never with `--into`, and of the whole change.
+  - Immutable changes, and for s an immutable parent, are refused from the template's flags rather than from
+    jj's error, so no buffer is opened for a description jj would refuse; `--ignore-immutable` is never given.
+    e is left to jj (it reads nothing first).
+  - No save is offered before c: it changes no file.
+  - The operations wait for jj, as the log does; a describe or squash runs once its message is finished, after
+    the command that opened the buffer has ended.
+- **Not in it:** several changes at once (a Visual selection), new with several parents or `--insert-before` /
+  `--insert-after`, squash `--into` or of some files, restore, split, rebase and undo (git-jj-rewrite), bookmarks,
+  fetch and push (git-jj-remote), the operation log.
+- **Image replay and edwind.** Each command checks `Ed.proc.refusal()` before anything, and every child goes
+  through `Vc.run`, which refuses under the image's replay, in a web frame and in edwind.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (94 passed, test/vc-jj-ops.test.mts's 10 among
+  them) with nixpkgs' jujutsu 0.45.1 and git, and `edwin-typecheck`, both passed. The suite's workspace: an
+  immutable first change (tag `v1`), two described children and an empty working copy:
+  - `o` on the second change: `new -r change_id(B)` after the runner's switches; @'s parent is B, the log read
+    again in its buffer with the new @, `Working copy (@) now at:` said, the work tree B's.
+  - `e` on the third with a changed buffer visiting b.txt: `Save b.txt before jj edit? (y or n)`, n; `edit -r
+    change_id(C)`; @ is C, its c.txt in the work tree, b.txt as it was.
+  - `c`: the buffer's whole text (description and the two `JJ:` lines), C-c C-c on a message with trailing
+    space, blank lines and a `JJ:` line gives `describe -r change_id(B) --stdin` and jj's description is the
+    cleaned one; the log shows it. C-c C-k runs nothing. B tagged while its message is written: `jj describe
+    failed (exit 1): Commit ... is immutable`, the description unchanged, the next `c` starts from the refused
+    message, and after an abort from the description again.
+  - `c` in the change view describes the change it shows; the view read again shows it.
+  - The immutable first change: c, x and s refused with `ID first is immutable: jj does not ... it`, only reads
+    run, no buffer; `e` on the root: jj's refusal said, the operation log unchanged; `o` on the heading `No change
+    at point`; `jj-new` in a file's buffer `Not a jj log or change buffer`.
+  - `s` on an undescribed change with a file: `squash -r change_id(D)` at once, D gone, its file in C, C's
+    description kept. On a described child of C: the `*jj-squash: ws*` buffer with C's description above the
+    child's; a message `-R /elsewhere --config ui.editor=evil` and a body given as one `--message=...` argument,
+    jj's description exactly that. On a merge: refused, no squash run.
+  - `x`: the question `Abandon ID doomed? (y or n)`, n `Nothing abandoned` and nothing run; y: `abandon -r
+    change_id(X)`, X gone, its child on X's parent, `Abandoned 1 commits:` said, the open change view of X
+    killed, X's line gone from the log.
+  - A divergent change (described two ways from one operation): x on the `other side` line gives `abandon -r
+    commit_id(HEX)` of that commit; the change id then names the other one alone.
+  - Under `Ed.proc.replay`, jj-new, jj-describe, jj-edit, jj-abandon and jj-squash: `while the image replays`,
+    no child started.
+  - `nix flake check -L --keep-going` on that commit: every check passed but `edwin-bench` (shadow stack 12.7%
+    over its 10% under the flake check's load), not touched here, which passed when run again alone (7.2%).
+    Among those that passed: `nix build .#edwin` (cargo and gui tests), `edwin-typecheck`, `edwin-vc` (94),
+    `edit-lockdown` (6), `edit-security` (21), `edwin-display` (20), `edwin-headless` (21), `edwin-scheme` (38).
+    This entry's last bullet was written after it; docs/ is outside the checks' sources.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

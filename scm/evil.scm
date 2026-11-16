@@ -1568,11 +1568,21 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; jj's log (SPC g J, SPC g g in a jj workspace): RET shows the change at
 ;; point, + reads more, g r reads it again.  Its change view folds, steps
 ;; and visits as git's revision buffer does; RET on a parent shows it.
+;; In both, majutsu's Evil keys act on the change at point (the one the
+;; view shows): o new, c describe, e edit, x abandon, s squash.
 (evil-define-key 'motion 'jj-log-mode
   "RET" 'git-status-visit
   "+" 'jj-log-more
   "g r" 'git-status-refresh
   "q" 'quit-window)
+(for-each (lambda (mode)
+            (evil-define-key 'motion mode
+              "o" 'jj-new
+              "c" 'jj-describe
+              "e" 'jj-edit
+              "x" 'jj-abandon
+              "s" 'jj-squash))
+          '(jj-log-mode jj-change-mode))
 (evil-define-key 'motion 'jj-change-mode
   "TAB" 'git-status-toggle
   "RET" 'git-status-visit

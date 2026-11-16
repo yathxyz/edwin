@@ -7,7 +7,12 @@
    (json()), one change a line: no line of jj's graph text is ever parsed, and the user's log templates, graph
    style and date format do not change what is read. What is given back to jj is a revset Edwin builds,
    `change_id(ID)`, or `commit_id(HEX)` for a divergent change, from ids read that way and checked (revOf); a
-   bookmark or tag of the same name as an id cannot shadow it. */
+   bookmark or tag of the same name as an id cannot shadow it.
+
+   The everyday operations (docs/steps.md, "jj new, describe, edit, abandon and squash") act on the change at point
+   in the log, or the one the change view shows, by that revset alone: o new, c describe, e edit, x abandon (after
+   asking), s squash into the parent. A description is written in vc-message-mode and given on standard input, or
+   as one --message= argument; jj itself never opens an editor (JJ_EDITOR is false). */
 
 (function () {
 'use strict';
@@ -261,10 +266,151 @@ function workspace(): VcRepo {
   return r!;
 }
 
-CMD('jj-log', '', '', 'Show the log of the jj workspace the current buffer is in (SPC g J; SPC g g there): a change per line, from an explicit template; RET on one shows it with its diff, + reads more, g r reads it again.', () => log(workspace()));
+/* ---------- operations on a change ---------- */
+/* What the operations read of a change: its ids, its shortest id, its whole description, whether it is immutable,
+   and its parents' descriptions and whether each is immutable. */
+const INFO_TEMPLATE = record(['change_id', 'commit_id', 'stringify(change_id.shortest(8))', 'description', 'immutable', 'parents.map(|c| c.description())', 'parents.map(|c| stringify(c.immutable()))']);
+interface JjInfo { change: string; commit: string; short: string; description: string; immutable: boolean; parents: string[]; parentsImmutable: boolean[] }
+/* An operation's run: its output is only said, never read. */
+const OP = { timeout: 120000, maxBytes: 1024 * 1024, lossy: true };
+
+async function readInfo(r: VcRepo, rev: string): Promise<JjInfo> {
+  const x = await Vc.run(r, ['log', '--no-graph', '--limit', '2', '-r', rev, '-T', INFO_TEMPLATE], READ);
+  if (x.code !== 0 || x.truncated || x.error || x.timedOut) failed(x, 'jj log');
+  const ls = x.out.split('\n').filter(l => l);
+  if (ls.length !== 1) signal('user-error', ls.length ? 'That change is divergent: it names more than one commit' : 'No such change');
+  const f = fieldsOf(ls[0], 'ssssbll');
+  if (!f || !CHANGE.test(f[0] as string) || !COMMIT.test(f[1] as string) || !/^[k-z]{1,64}$/.test(f[2] as string)) return unreadable('jj log');
+  const [change, commit, short, description, immutable, parents, flags] = f as [string, string, string, string, boolean, string[], string[]];
+  if (flags.length !== parents.length || !flags.every(x => x === 'true' || x === 'false')) return unreadable('jj log');
+  return { change, commit, short, description, immutable, parents, parentsImmutable: flags.map(x => x === 'true') };
+}
+const subjectOf = (description: string) => shown(description.split('\n')[0]) || '(no description set)';
+const named = (i: JjInfo) => `${i.short} ${subjectOf(i.description)}`;
+function mutable(i: JjInfo, doing: string) {
+  if (i.immutable) signal('user-error', `${named(i)} is immutable: jj does not ${doing} it`);
+}
+
+/* The change an operation acts on, and its workspace: in the log, the change on the line at point; in the change
+   view, the change it shows. Always a revset Edwin built (revOf), checked again here. */
+function target(): { r: VcRepo; rev: string } {
+  refused();
+  const b = cur();
+  let rev: string | undefined;
+  if (b.mode === LOG_VIEW.mode) { const x = VcView.at(b, LOG_VIEW); rev = x ? x.show : undefined; }
+  else if (b.mode === CHANGE_VIEW.mode) rev = (VcView.model(b, CHANGE_VIEW) as JjChangeModel).rev;
+  else signal('user-error', 'Not a jj log or change buffer');
+  if (!rev || !REV.test(rev)) signal('user-error', 'No change at point');
+  return { r: (b.gitView as { repo: VcRepo }).repo, rev: rev! };
+}
+
+/* Read R's log and change view again, one after the other: a change view whose change is gone (abandoned,
+   squashed away) is killed. */
+async function reread(r: VcRepo) {
+  const of = (kind: VcViewKind) => E.buffers.filter(b => { const v = b.gitView as { repo: VcRepo; ext?: VcViewKind } | undefined; return !!v && v.ext === kind && v.repo.root === r.root; });
+  for (const b of of(LOG_VIEW)) await VcView.refresh(b).catch(Ed.reportError);
+  for (const b of of(CHANGE_VIEW)) {
+    try { await VcView.refresh(b); }
+    catch (e) {
+      if (/No such change/.test(String(Ed.errorText(e)))) L.call('kill-buffer', [b]);
+      else Ed.reportError(e);
+    }
+  }
+}
+
+/* jj's error, as it printed it: its `Error:` line, else its last line. */
+function jjError(x: EdProcResult): string {
+  const ls = x.err.split('\n').map(l => l.trim()).filter(l => l), e = ls.find(l => l.startsWith('Error:')) || ls[ls.length - 1];
+  return e ? ': ' + shown(e.replace(/^Error: /, '')).slice(0, 200) : '';
+}
+/* jj ARGS in R (an operation WHAT names), then R's buffers read again and what jj said first said. */
+async function operate(r: VcRepo, args: string[], what: string, input?: string) {
+  const x = await Vc.run(r, args, input === undefined ? OP : { ...OP, input });
+  if (x.code !== 0 || x.error || x.timedOut) signal('process-error', `jj ${what} failed (${x.error || (x.timedOut ? 'it took too long' : `exit ${x.code}`)})${jjError(x)} (see *vc-process*)`);
+  await reread(r);
+  const said = x.err.split('\n').find(l => l.trim());
+  Ed.message(said ? shown(said.trim()) : `jj ${what}: done`);
+}
+
+/* A message written in its buffer for an operation on a change jj refused: the next one of that kind on that
+   change starts from it, by workspace root, kind and change id. */
+const kept = new Map<string, string>();
+/* Write a message in `*jj-KIND: NAME*` from TEXT, the comment lines HEAD under it; then DONE with it. The command
+   ends once the buffer is open; DONE runs when the message comes, its failure reported as a command's would be,
+   and a refused message kept for the next. */
+function withMessage(r: VcRepo, kind: string, change: string, text: string, head: string[], done: (msg: string) => Promise<void>): false {
+  const key = r.root + '\0' + kind + '\0' + change, last = kept.get(key);
+  const comments = head.map(l => 'JJ: ' + l).join('\n') + '\n';
+  const name = `*jj-${kind}: ${r.root.slice(r.root.lastIndexOf('/') + 1) || '/'}*`;
+  const pending = Vc.message({ name, text: (last ?? text) + '\n' + comments, comment: 'JJ:' });
+  kept.delete(key);
+  void pending.then(async msg => {
+    if (msg === null) return;
+    try { await done(msg); } catch (e) { kept.set(key, msg); throw e; }
+  }).catch(Ed.reportError).finally(() => Ed.scheduleRender());
+  return false;
+}
+const asText = (d: string) => (d ? d.replace(/\n*$/, '\n') : '\n');
+
+async function jjNew(): Promise<false> {
+  const { r, rev } = target();
+  await Vc.offerSave(r, 'jj new');
+  await operate(r, ['new', '-r', rev], 'new');
+  return false;
+}
+async function jjEdit(): Promise<false> {
+  const { r, rev } = target();
+  await Vc.offerSave(r, 'jj edit');
+  await operate(r, ['edit', '-r', rev], 'edit');
+  return false;
+}
+async function jjAbandon(): Promise<false> {
+  const { r, rev } = target();
+  const i = await readInfo(r, rev);
+  mutable(i, 'abandon');
+  if (!await Ed.yesOrNo(`Abandon ${named(i)}?`)) { Ed.message('Nothing abandoned'); return false; }
+  await Vc.offerSave(r, 'jj abandon');
+  await operate(r, ['abandon', '-r', rev], 'abandon');
+  return false;
+}
+async function jjDescribe(): Promise<false> {
+  const { r, rev } = target();
+  const i = await readInfo(r, rev);
+  mutable(i, 'describe');
+  return withMessage(r, 'describe', i.change, asText(i.description), [
+    `Describing ${i.short} in ${shown(r.root)}.`,
+    'C-c C-c describes, C-c C-k aborts. Lines starting with JJ: are left out.',
+  ], msg => operate(r, ['describe', '-r', rev, '--stdin'], 'describe', msg));
+}
+/* Squash the change into its parent, refused before anything is written when the parent is immutable. When
+   both have a description (jj's rule: not the empty string, so one of only whitespace counts) jj would ask for
+   the one the result gets in an editor: it is written in a buffer instead, from the parent's and then the
+   change's, and given as one --message= argument (never a separate one, which jj could take as a switch). */
+async function jjSquash(): Promise<false> {
+  const { r, rev } = target();
+  const i = await readInfo(r, rev);
+  mutable(i, 'squash');
+  if (i.parents.length !== 1) signal('user-error', `${named(i)} is a merge: squash it from a terminal, naming the parent with --into`);
+  if (i.parentsImmutable[0]) signal('user-error', `The parent of ${named(i)} is immutable: jj does not squash into it`);
+  await Vc.offerSave(r, 'jj squash');
+  const into = i.parents[0];
+  if (into === '' || i.description === '') { await operate(r, ['squash', '-r', rev], 'squash'); return false; }
+  return withMessage(r, 'squash', i.change, asText(into) + '\n' + asText(i.description), [
+    `Squashing ${i.short} into its parent in ${shown(r.root)}: the description of what it makes, the parent's above and ${i.short}'s below.`,
+    'C-c C-c squashes, C-c C-k aborts. Lines starting with JJ: are left out.',
+  ], msg => operate(r, ['squash', '-r', rev, '--message=' + msg], 'squash'));
+}
+
+CMD('jj-new', '', '', 'Start a new change on the change at point in the jj log, or the one the change view shows (o): jj new, after offering to save the workspace\'s changed buffers.', () => jjNew());
+CMD('jj-describe', '', '', 'Describe the change at point (c): its description, written in a buffer (C-c C-c describes, C-c C-k aborts), given to jj describe --stdin.', () => jjDescribe());
+CMD('jj-edit', '', '', 'Make the change at point the working copy (e): jj edit, after offering to save the workspace\'s changed buffers.', () => jjEdit());
+CMD('jj-abandon', '', '', 'Abandon the change at point, after asking (x): jj abandon.', () => jjAbandon());
+CMD('jj-squash', '', '', 'Squash the change at point into its parent (s): jj squash; when both have a description, the one the result gets is written in a buffer.', () => jjSquash());
+
+CMD('jj-log', '', '','Show the log of the jj workspace the current buffer is in (SPC g J; SPC g g there): a change per line, from an explicit template; RET on one shows it with its diff, + reads more, g r reads it again.', () => log(workspace()));
 CMD('jj-log-more', '', '', 'Read the next changes of the jj log (+).', () => logMore(cur()));
 
-for (const n of ['jj-log', 'jj-log-more']) L.put(intern(n), 'evil-repeat', intern('abort'));
+for (const n of ['jj-log', 'jj-log-more', 'jj-new', 'jj-describe', 'jj-edit', 'jj-abandon', 'jj-squash']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['jj-log-mode'] = 'jj Log';
 Ed.MODE_NAMES['jj-change-mode'] = 'jj Change';
 

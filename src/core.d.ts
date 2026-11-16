@@ -2266,6 +2266,8 @@ interface VcApi {
   repo(dir: string, only?: 'git'): VcRepo | null;
   start(r: VcRepo, args: string[], opts?: VcRunOptions): Promise<EdProc>;
   run(r: VcRepo, args: string[], opts?: VcRunOptions & { input?: string }): Promise<EdProcResult>;
+  /* ask once whether to save the changed buffers visiting files in the repository before DOING, and save them on y */
+  offerSave(r: VcRepo, doing: string): Promise<void>;
 }
 
 /* vc-diff.ts: a unified diff as files and hunks, and the partial patches staging applies. A hunk's lines keep
@@ -2337,6 +2339,8 @@ interface VcViewApi {
   open(r: VcRepo, kind: VcViewKind, model: unknown, fresh: boolean): EdBuffer;
   /* B's model, B a buffer of KIND; else a user-error */
   model(b: EdBuffer, kind: VcViewKind): unknown;
+  /* what the line at point in B, a buffer of KIND, says RET does there; null on a line that says nothing */
+  at(b: EdBuffer, kind: VcViewKind): VcRowExtra | null;
   /* read B again (its kind's read) and draw it, keeping folds and point */
   refresh(b: EdBuffer): Promise<void>;
   /* a file's hunks under D's current section, each a section of its lines that RET visits */

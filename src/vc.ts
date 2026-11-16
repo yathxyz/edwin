@@ -385,5 +385,21 @@ async function run(r: VcRepo, args: string[], opts: VcRunOptions & { input?: str
   return { ...x, out: out.join(''), err: err.join('') };
 }
 
-globalThis.Vc = { message, cleanMessage, repo, start, run };
+/* Offer to save the changed buffers that visit a file in REPO before DOING (`committing`, `jj new`), owner
+   decision 12: ask. One question for them all; n goes on with what the files hold. */
+const shown = (s: string) => s.replace(/[\u0000-\u001f\u007f]/g, '?');
+async function offerSave(r: VcRepo, doing: string) {
+  const under = r.root === '/' ? '/' : r.root + '/';
+  const bs = E.buffers.filter(b => b.file && b.modified && b.file.startsWith(under));
+  if (!bs.length) return;
+  const what = bs.length === 1 ? shown(bs[0].file!.slice(under.length)) : `${bs.length} changed buffers of ${shown(r.root)}`;
+  if (!await Ed.yesOrNo(`Save ${what} before ${doing}?`)) return;
+  for (const b of bs) {
+    if (!E.buffers.includes(b)) continue;
+    const was = E.current; E.current = b;
+    try { L.call('save-buffer', []); } finally { E.current = was; }
+  }
+}
+
+globalThis.Vc = { message, cleanMessage, repo, start, run, offerSave };
 })();

@@ -258,7 +258,14 @@ in
   # file and hunk, folding and visiting; g r following a change as it is rewritten; RET on the working copy after
   # a file is written showing the snapshot's commit; a diff past 16 MiB noted, not shown; a bookmark named like
   # a change id standing for nothing; + over 302 changes, a failed + keeping its limit; a line of another shape
-  # refused; nothing under the replay.
+  # refused; nothing under the replay. jj's operations (test/vc-jj-ops.test.mts): o, c, e, x and s on a change of the
+  # log (c in the change view too), each argv checked after the runner's switches and its result read back with
+  # jj's own template: the new change's parent, the working copy edit makes, a description given on standard input
+  # and one jj refused kept, the abandon question and n, a change view of an abandoned change killed, a squash
+  # with one description at once and with both through the buffer as one --message= (a message that starts like
+  # -R and --config) and with a parent described by only a space through the buffer too, a merge, immutable
+  # changes and a change on an immutable parent refused before anything is written, jj's refusal of the root
+  # said, a divergent change acted on by commit_id(); nothing under the replay.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -273,7 +280,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts
         touch $out
       '';
 
