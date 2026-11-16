@@ -1637,6 +1637,8 @@ interface EdApi {
   adviceOf(name: string): { how: string; fn: SchemeValue; name: string | null | undefined }[];
   defineMinorMode(...args: unknown[]): unknown;
   switchMajorMode(b: EdBuffer, mode: string): void;
+  /* turn on a visited buffer's mode when it derives from prog-mode (scm/prog.scm) */
+  turnOnVisitedMode(b: EdBuffer): void;
   /* set by stack.ts: read the persistent tables (recentf, savehist...) from storage again */
   reloadPersistent(): void;
   /* set by sync.ts */

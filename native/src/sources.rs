@@ -49,6 +49,7 @@ pub const SCM: &[(&str, &str)] = &[
     ("org.scm", include_str!("../../scm/org.scm")),
     ("pi.scm", include_str!("../../scm/pi.scm")),
     ("process.scm", include_str!("../../scm/process.scm")),
+    ("prog.scm", include_str!("../../scm/prog.scm")),
     ("threads.scm", include_str!("../../scm/threads.scm")),
 ];
 

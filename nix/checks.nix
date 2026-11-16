@@ -164,7 +164,8 @@ in
   # re-fontifies in 2 ms), in the headless runtime.
   edwin-markdown = suite "markdown" [ "markdown.test.mts" ];
 
-  # Programming modes in the headless runtime: each mode's comment syntax (set-comment-syntax!, found through the
+  # Programming modes in the headless runtime: define-language (scm/prog.scm), each declared file name selecting its
+  # mode, with its indent and hooks on a visit; each mode's comment syntax (set-comment-syntax!, found through the
   # modes it derives from, nearest first) and gc, gcc and M-; using it.
   edwin-prog = suite "prog" [ "prog.test.mts" ];
 

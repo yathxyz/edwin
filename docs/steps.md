@@ -1218,6 +1218,73 @@ server/models.mts, with a backend naming a credential by its LoadCredential name
   (shadow stack 15.0% against its 10% limit) and `edit-crash` (R16.5's random SIGKILL run: "the history lost
   acked batches"), both under the load of the parallel build; each passed when run again alone (7.8%; 7 of 7).
 
+## prog-mode and define-language (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-prog-mode`). A base programming mode, and one form that
+declares a language: the files that open in it, its comment syntax, its indent width and its hooks. Before, every
+file but Scheme, Org and Markdown opened in fundamental-mode.
+
+- **`scm/prog.scm`** (new; sources.rs SCM, console/manifest.json, both pages' SCM lists, and CONFIG as a lazy file
+  after `markdown.scm` and before `init.scm`, so the user's init.scm can declare a language again). `prog-mode` is a
+  `define-derived-mode` with no parent; `prog-mode-hook` runs in every language's buffers.
+- **`(define-language MODE NAME :files REGEXPS [:comment (LINE [BLOCK-START BLOCK-END])] [:indent N] BODY...)`**
+  makes MODE, shown as NAME, a mode derived from prog-mode (so it has MODE-map and MODE-hook), puts `(REGEXP . MODE)`
+  on `auto-mode-alist` after the entries already there (Markdown and Org stay first), declares the comment syntax
+  through `set-comment-syntax!`, and sets `tab-width` (TAB's stops) and `evil-shift-width` (`>` and `<`) to N
+  buffer-locally whenever the mode is turned on; BODY runs then too, after prog-mode's. Option values are
+  evaluated. Declaring MODE again replaces its patterns, comment syntax, indent and body. It refuses: a MODE that
+  is not a symbol, a NAME that is not a non-empty string, no or an empty `:files`, a pattern that is not a
+  non-empty string or does not compile as a JavaScript regexp (with no flags, as `auto-mode-alist`'s lookup
+  compiles it), an `:indent` that is not a positive integer, a `:comment` that is not a list (and what
+  `set-comment-syntax!` refuses), an unknown keyword or one without a value. All of it is checked before anything
+  is recorded, so a refused declaration leaves no entry in `languages`, `comment-syntaxes` or `auto-mode-alist`
+  and makes no mode.
+- **A visit turns the mode on.** `visit` (and the served frame's visit, `src/sync.ts`) set a buffer's mode from
+  its name without running the mode; now a mode derived from prog-mode is turned on (`Ed.turnOnVisitedMode`, by
+  `switchMajorMode`) before `find-file-hook`, as Emacs's set-auto-mode does, so the indent and hooks apply to a
+  file opened by name. `write-file` to a language's name does the same. Other modes (Org, Markdown, Fundamental)
+  are set as before, without running their hooks: changing that is not this package's.
+- **The languages (decision 8: the plan's default, from init-prog.el and the languages later packages name):**
+  Rust 4, Nix 2, Go 4, C (`.c`, `.h`) 4, C++ 4, Java 2 (the Google style init-prog.el formats with), C# 4, Python 4,
+  JavaScript 2, TypeScript 2, TSX 2, JSON 2 (`.json`, `.jsonc`, `flake.lock`), YAML 2, TOML 2, Shell 2 (`.sh`,
+  `.bash`, `.envrc`), Terraform 2 (`.tf`, `.tfvars`, `.tofu`), GDScript 4, Just 4 (`justfile` in any case,
+  `.justfile`, `.just`), Meson 4, NASM 4 (`;`), Nginx 4 (`nginx.conf`, `.conf` under a `nginx/` directory), Typst 2.
+  Comments: `//` with `/* */` for the C family, JavaScript, TypeScript and Typst; `#` for the rest, with `/* */` in
+  Nix and Terraform; `;` in NASM. Patterns are JavaScript regexps anchored at the end, and at a `/` or the start for
+  whole names, because a frame tries the name as given and edwind the base name.
+- **Differences from Emacs:** JSON has no comments in Emacs's json-ts-mode; here it takes `//`, the JSONC comment
+  (tsconfig.json), as js-json-mode does. C takes `//` rather than c-mode's `/* */`. Go and GDScript indent with
+  spaces (gofmt and Godot use tabs; the formatter packages turn them back); there is no `indent-tabs-mode` per
+  language, since `>` only ever inserts spaces. The Emacs ts-mode names (rust-ts-mode) are not used: one name per
+  language. Matching a file name is case-sensitive: `X.RS`, `x.JSON` and `Main.C` open in fundamental-mode, where
+  Emacs retries case-insensitively (`auto-mode-case-fold`) and opens `.C` in c++-mode. A pattern that wants both
+  cases says so, as Just's does.
+- **edwind loads it too** (CONFIG runs on the server), so a file edwind opens gets its language's mode, and every
+  mode is a command in the primitive registry. `edit-security`'s R16.15 test refuses registry names that look like
+  a JavaScript escape hatch, among them any starting with `js`; it now exempts exactly `js-mode` and `json-mode`
+  (Emacs's names, mode switches only) and asserts each is exactly the mode command define-language makes (a
+  command with rust-mode's arguments and source, the mode-switch documentation, a declared language derived from
+  prog-mode), and still refuses every other such name.
+- **Not in it:** highlighting, indentation rules, imenu (the tree-sitter packages of phase 4), formatting, LSP.
+  Scheme, Emacs Lisp, Clojure and Common Lisp stay as they are (`.el` still opens in scheme-mode, `.clj` in
+  fundamental-mode; scheme-mode does not derive from prog-mode): lang-lisp-modes does them. No nushell mode (not in
+  init-prog.el). No `.editorconfig` (lang-editorconfig) and no `interpreter-mode-alist` (`#!` lines).
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-prog`, `test/prog.test.mts` (17, 7 new): every
+  declared language has a sample file name and each opens in its mode by `:e`, and from paths, with names that must
+  not be taken (`site.conf`, `x.json.bak`, `init.el`, `.md`, `.org`); a visit makes the indent buffer-local (`>>`
+  shifts 4 in Rust, 2 in Nix, 2 in a text buffer), runs prog-mode-hook and the mode's hook once, and not again on a
+  second visit; gcc writes `//`, `#` and `;`; BODY sees the indent; a second declaration replaces the first (one with no `:comment` falls back to `#`);
+  write-file to `.go`; the refusals, among them a MODE that is not a symbol, a NAME that is not a string and a
+  pattern that does not compile, each leaving nothing recorded (these fail on the first version, which recorded a
+  string MODE's patterns before define-derived-mode refused it); `X.RS`, `x.JSON` and `Main.C` stay in
+  fundamental-mode. After the review fixes, re-run on ex44: `edwin-prog` (17), `edit-security`, `edwin-headless`,
+  `edwin-scheme`, `edwin-markdown`, `edwin-typecheck`, `edit-lockdown` and `edit-frame`, all exit 0; `nix build
+  .#edwin` and `nix flake check` were not re-run after them. The visit test, BODY, redeclaration and write-file cases fail with
+  `turnOnVisitedMode` disabled. The served frame's visit (`src/sync.ts`) has no test of its own: `edit-frame`
+  passing shows only that it still opens files. Also passed: `edwin-headless` (21), `edwin-markdown` (20), `edwin-scheme` (38),
+  `edwin-typecheck`, `edit-lockdown` (6), `edit-security` (21), `nix build .#edwin` (unit 17, `tests/gui.rs` 5 and 1
+  ignored, `tests/terminal.rs` 32) and `nix flake check` (exit 0).
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

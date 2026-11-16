@@ -766,6 +766,7 @@ function visit(name: string) {
   if (Ed.hooks.visited) Ed.hooks.visited(b, file, true);
   Ed.setWindowBuffer(b);
   if (content === null) Ed.message('(New file)');
+  try { L.resetOps(); turnOnVisitedMode(b); } catch (e) { Ed.reportError(e); }
   { const save = E.current; E.current = b; try { L.resetOps(); L.runHook('find-file-hook'); } catch (e) { Ed.reportError(e); } finally { E.current = save; } }
   return b;
 }
@@ -805,7 +806,9 @@ CMD('save-buffer', async () => (cur().file ? [] : [await Ed.readMini('File to sa
   });
 CMD('write-file', 'FWrite file: ', 'FILENAME', 'Save the current buffer to FILENAME and visit that file.', ([n]) => {
   const b = cur(); writeTo(b, str(n));
-  if (!Ed.getBuffer(n as string) && !b.name.startsWith('*')) b.name = n as string; b.mode = Ed.modeFor(n as string) === 'fundamental-mode' ? b.mode : Ed.modeFor(n as string); return false;
+  if (!Ed.getBuffer(n as string) && !b.name.startsWith('*')) b.name = n as string;
+  const m = Ed.modeFor(n as string); if (m !== 'fundamental-mode' && m !== b.mode) { b.mode = m; turnOnVisitedMode(b); }
+  return false;
 });
 D('file-exists-p', 'FILENAME', 'Non-nil if FILENAME is saved in this browser.', ([n]) => bool(Ed.Store.get(str(n)) !== null));
 D('delete-file', 'FILENAME', 'Remove FILENAME from this browser’s storage.', ([n]) => { Ed.Store.del(str(n)); return false; });
@@ -1262,6 +1265,11 @@ function switchMajorMode(b: EdBuffer, mode: string) {
   return false;
 }
 Ed.switchMajorMode = switchMajorMode;
+/* A visited file's mode is set from its name (modeFor) without running the mode; a programming mode (one
+   derived from prog-mode, scm/prog.scm) is then turned on, so its indent width and hooks apply, as Emacs's
+   set-auto-mode does before find-file-hook. Other modes are left as they were. */
+function turnOnVisitedMode(b: EdBuffer) { if (Ed.modeChain(b.mode).includes('prog-mode')) switchMajorMode(b, b.mode); }
+Ed.turnOnVisitedMode = turnOnVisitedMode;
 D('%define-derived-mode', 'child parent name body', 'define-derived-mode: CHILD is a major mode built on PARENT (#f for none), shown as NAME; BODY is a thunk run when it is turned on.', ([c, p, nm, body]) => {
   const child = symName(c, 'define-derived-mode'), parent = p instanceof Sym && p.name !== 'nil' ? p.name : null;
   if (parent) Ed.modeParents.set(child, parent); else Ed.modeParents.delete(child);
@@ -1388,7 +1396,7 @@ CMD('describe-browser-keys', '', '', 'List the keys the browser keeps for itself
 /* A lazy config (org.scm) is evaluated at boot without a buffer; :e org.scm then shows the shipped text.
    The host reads the shipped files (R4.1): the page's Scheme blocks in a browser, scm/ under Node. */
 /* markdown.scm is loaded when the host has it (package E of E3); the standalone page may not carry it. */
-const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
+const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['prog.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
 const shipped = (name: string) => host.config(name);
 /* In served mode (Ed.bootServed) every shipped file is evaluated lazily: the sources are edwind's files, not
    buffers of this runtime, so the buffer list and the completion word set hold only what the page opened. */

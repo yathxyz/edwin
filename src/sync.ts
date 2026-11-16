@@ -825,6 +825,7 @@ function visit(name: string): SyncBuffer | Promise<SyncBuffer | false> {
   return open(id, { create: true }).then(b => {
     Ed.setWindowBuffer(b);
     if (H.visited) H.visited(b, id, true);
+    try { L.resetOps(); Ed.turnOnVisitedMode(b); } catch (e) { Ed.reportError(e); }
     const save = E.current; E.current = b;
     try { L.resetOps(); L.runHook('find-file-hook'); } catch (e) { Ed.reportError(e); } finally { E.current = save; }
     Ed.scheduleRender();

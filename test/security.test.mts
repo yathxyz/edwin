@@ -20,7 +20,21 @@ test('R16.15 the primitive registry has no JavaScript escape hatch, and the host
   const c = await client();
   const prims = (await c.call('primitives')).value;
   const names: string[] = prims.map((p: Msg) => p.name);
-  for (const n of names) assert.doesNotMatch(n, /^js|js-eval|javascript|->js$|^js->|eval-js|new-function|^globalthis$|^process$/i, n);
+  // Two major-mode commands of scm/prog.scm carry js in Emacs's names; they only switch a buffer's mode.
+  const modes = new Set(['js-mode', 'json-mode']);
+  for (const n of names) if (!modes.has(n)) assert.doesNotMatch(n, /^js|js-eval|javascript|->js$|^js->|eval-js|new-function|^globalthis$|^process$/i, n);
+  // Each is exactly the mode command define-language made: a command with no arguments, defined where every
+  // other language's mode command is (rust-mode's), documented as a switch to the mode, and a declared language.
+  const rust = prims.find((p: Msg) => p.name === 'rust-mode');
+  assert.ok(rust && rust.command, 'rust-mode is a mode command');
+  for (const [n, label] of [['js-mode', 'JavaScript'], ['json-mode', 'JSON']]) {
+    const p = prims.find((q: Msg) => q.name === n);
+    assert.ok(p, `${n} is in the registry`);
+    assert.deepEqual({ command: p.command, args: p.args, blocking: p.blocking, source: p.source, where: p.where },
+      { command: true, args: rust.args, blocking: false, source: rust.source, where: rust.where }, n);
+    assert.equal(p.doc, `Switch the current buffer to ${label} mode, derived from prog-mode.`, n);
+    assert.equal((await c.form(`(and (assq '${n} languages) (eq? (car (derived-mode-all-parents '${n})) '${n}) (memq 'prog-mode (derived-mode-all-parents '${n})) #t)`)).value, '#t', n);
+  }
   for (const sym of ['js-eval', 'globalThis', 'process', 'Function', 'eval-js', 'import', 'window', 'document', 'Reflect', 'Proxy', 'WebAssembly']) {
     const r = await c.form(`(${sym})`);
     assert.ok(r.error && (r.error.condition === 'unbound-variable' || r.error.condition === 'error' || r.error.condition === 'wrong-type-argument'), `${sym}: ${JSON.stringify(r)}`);

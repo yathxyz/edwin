@@ -34,6 +34,7 @@
   "scm/markdown.scm",
   "scm/babel.scm",
   "scm/pi.scm",
-  "scm/gptel.scm"
+  "scm/gptel.scm",
+  "scm/prog.scm"
  ]
 }
