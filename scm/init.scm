@@ -229,7 +229,7 @@
 ;; Buffers that start in Motion state (help, the buffer list, the agenda)
 ;; share the same leader keys through their own maps.
 (for-each (lambda (mode) (evil-define-key 'motion mode "SPC" (lookup-key evil-normal-state-map "SPC")))
-          '(special-mode brain-agenda-mode brain-mode dired-mode git-status-mode))
+          '(special-mode brain-agenda-mode brain-mode dired-mode git-status-mode git-log-mode git-revision-mode))
 
 ;; M-s g: grep (rg, grep-command) in the buffer's directory into *grep*, as
 ;; init.el binds it; M-g n steps through the rows, g r in *grep* runs it again.

@@ -14,7 +14,13 @@
    shown (apply), each a write through the runner, then the repository read again.
 
    c c, c a, c w and c f commit, amend, reword and fix up (docs/steps.md, "Committing"): the message written in
-   Vc.message's buffer, given to `git commit -F -` on its standard input. */
+   Vc.message's buffer, given to `git commit -F -` on its standard input.
+
+   l l shows the log, and RET on a commit the commit with its diff (docs/steps.md, "The git log and commit
+   view"): the log buffer reads HEAD's history a page at a time, in the background, from the commit HEAD was when
+   it opened, so the frame never waits for a long history; the revision buffer is drawn as the status buffer is,
+   its files and hunks sections that TAB folds. The three buffers are views: the same drawing, rows, folds and
+   motions, each with its own model. */
 
 (function () {
 'use strict';
@@ -46,15 +52,38 @@ interface GitModel {
    line past its end, whether it has a body to fold, its parent and children. */
 interface GitSection { id: string; start: number; end: number; body: boolean; parent: GitSection | null; children: GitSection[] }
 /* A line as drawn: its id (what point is kept on across a redraw), the innermost section it is in, its faces as
-   [from, to, face] from the line's start, the file and line (from 1) RET visits, and the commit it shows (what c f fixes up). */
-interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt; commit?: string }
+   [from, to, face] from the line's start, the file and line (from 1) RET visits, the commit it names (what c f fixes
+   up: one in HEAD's history), the revision RET shows (any commit line, a stash's too), and, MORE, that RET there
+   reads the log's next page. */
+interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt; commit?: string; show?: string; more?: boolean }
+type GitExtra = Pick<GitRow, 'visit' | 'at' | 'commit' | 'show' | 'more'>;
 /* What s, u and x act on at a line: a part of the status (its heading: FILE null), a file of it, one of the file's
    hunks (by its index in FILE.diff.hunks), or a line of that hunk (by its index in hunk.lines). */
 type GitPart = 'untracked' | 'unmerged' | 'unstaged' | 'staged';
 interface GitAt { part: GitPart; file: GitFile | null; hunk?: number; line?: number }
-interface GitStatus { repo: VcRepo; model: GitModel; folds: Map<string, boolean>; rows: GitRow[]; top: GitSection; seq: number }
+/* A log entry: the full and the short hash, the refs at it (%D), the author, the date and the subject. */
+interface GitLogEntry { oid: string; hash: string; refs: string; author: string; date: string; subject: string }
+/* The log: the commit it starts from (null: no commit yet), the commits read so far, whether there are more,
+   what is being read (the log again from HEAD, or the next page; null: nothing), and why the last read failed
+   (null: it did not). */
+interface GitLog { tip: string | null; commits: GitLogEntry[]; more: boolean; reading: 'all' | 'next' | null; note: string | null }
+/* A commit as the revision buffer shows it: its hash, parents, author and committer with their dates, the
+   refs at it, its message, and its diff against its first parent (or why it is not shown). */
+interface GitShow { oid: string; parents: string[]; author: string; authorDate: string; committer: string; committerDate: string; refs: string; message: string; files: VcDiffFile[]; note: string | null }
+/* A view: a buffer of the repository REPO drawn from its model, with its folds, the rows drawn last, the
+   sections, and the number of the latest read (a read started earlier draws nothing). */
+interface GitViewBase { repo: VcRepo; folds: Map<string, boolean>; rows: GitRow[]; top: GitSection; seq: number }
+interface GitStatus extends GitViewBase { kind: 'status'; model: GitModel }
+interface GitLogView extends GitViewBase { kind: 'log'; log: GitLog }
+interface GitShowView extends GitViewBase { kind: 'show'; show: GitShow }
+type GitView = GitStatus | GitLogView | GitShowView;
+const VIEW_MODES = new Set(['git-status-mode', 'git-log-mode', 'git-revision-mode']);
 
-const statusOf = (b: EdBuffer) => (b.gitStatus as GitStatus | undefined) || signal('user-error', 'Not a git status buffer') as never;
+const viewOf = (b: EdBuffer) => (b.gitView as GitView | undefined) || signal('user-error', 'Not a git buffer') as never;
+const statusOf = (b: EdBuffer) => { const v = b.gitView as GitView | undefined; return v && v.kind === 'status' ? v : signal('user-error', 'Not a git status buffer') as never; };
+const logOf = (b: EdBuffer) => { const v = b.gitView as GitView | undefined; return v && v.kind === 'log' ? v : signal('user-error', 'Not a git log buffer') as never; };
+const buffersOf = (r: VcRepo, kind: GitView['kind']) => E.buffers.filter(x => { const v = x.gitView as GitView | undefined; return !!v && v.kind === kind && v.repo.root === r.root; });
+const repoName = (r: VcRepo) => r.root.slice(r.root.lastIndexOf('/') + 1) || '/';
 /* A name as a line shows it: a control character would break the line. */
 const shown = (s: string) => s.replace(/[\u0000-\u001f\u007f]/g, '?');
 const join = (root: string, p: string) => (root === '/' ? '/' : root + '/') + p;
@@ -110,13 +139,15 @@ function readStatus(m: GitModel, out: string): number {
   return stashes;
 }
 
-/* `git diff` (ARGS: --cached for the staged one) parsed, or why it is not shown. Strict UTF-8: a patch is never
-   built from a lossy text, so a diff that is not UTF-8 shows its files without hunks. */
-async function readDiff(r: VcRepo, args: string[]): Promise<{ files: VcDiffFile[]; note: string | null }> {
-  const x = await Vc.run(r, ['diff', ...args, ...VcDiff.gitArgs, '--find-renames'], READ);
+/* The diff git HEAD prints (`diff`, `diff --cached` for the staged one, a `show` of a commit), with REVS after its
+   switches, parsed, or why it is not shown. Strict UTF-8 unless LOSSY: a patch is never built from a lossy text,
+   so a diff staging reads that is not UTF-8 shows its files without hunks; one only shown (a commit's) is read
+   lossily, a byte that is not UTF-8 shown as U+FFFD. */
+async function readDiff(r: VcRepo, head: string[], revs: string[] = [], lossy = false): Promise<{ files: VcDiffFile[]; note: string | null }> {
+  const x = await Vc.run(r, [...head, ...VcDiff.gitArgs, '--find-renames', ...revs, '--'], { ...READ, lossy });
   if (x.error) return { files: [], note: 'the diff is not shown: its text is not UTF-8' };
   if (x.truncated) return { files: [], note: `the diff is not shown: it is larger than ${MAX_BYTES / 1024 / 1024} MiB` };
-  if (x.code !== 0) failed(x, 'git diff');
+  if (x.code !== 0) failed(x, `git ${head[0]}`);
   try { return { files: VcDiff.parse(x.out), note: null }; }
   catch (e) { return { files: [], note: 'the diff is not shown: Edwin cannot read what git printed (see *vc-process*)' }; }
 }
@@ -144,7 +175,7 @@ async function collect(r: VcRepo): Promise<GitModel> {
   };
   const [st, un, ix] = await Promise.all([
     Vc.run(r, ['status', '--porcelain=v2', '--branch', '--show-stash', '-z', '--untracked-files=normal', '--find-renames'], { ...READ, lossy: true }),
-    readDiff(r, []), readDiff(r, ['--cached']),
+    readDiff(r, ['diff']), readDiff(r, ['diff', '--cached']),
   ]);
   if (st.code !== 0 || st.truncated) failed(st, 'git status');
   const stashes = readStatus(m, st.out);
@@ -171,83 +202,150 @@ async function collect(r: VcRepo): Promise<GitModel> {
   return m;
 }
 
+/* REV as the full hash of the commit it names, or null when it names none (`--verify --quiet` exits 1 then: an
+   unknown name, an unborn HEAD). Any other failure is git refusing the repository or not running at all (exit 128:
+   an unknown extension, dubious ownership, a corrupt HEAD), and is raised as one, not taken for an empty history.
+   REV is given to git only after `--end-of-options`, as one argument, so what a user types never reaches git as a
+   switch. */
+async function resolve(r: VcRepo, rev: string): Promise<string | null> {
+  const x = await Vc.run(r, ['rev-parse', '--verify', '--quiet', '--end-of-options', rev + '^{commit}'], { ...READ, lossy: true });
+  if (x.code === 1 && !x.error && !x.timedOut) return null;
+  const hash = x.out.trim();
+  if (x.code !== 0 || x.error || x.timedOut || x.truncated || !/^[0-9a-f]{40,64}$/.test(hash)) failed(x, 'git rev-parse');
+  return hash;
+}
+
+/* The log's pages: so many commits each. git is asked for one more, to know whether there are more. No --graph
+   and no --topo-order: both walk the whole history before the first line comes. */
+const PAGE = 256;
+/* N commits of TIP's history (a full hash) past the first SKIP, newest first, in the shape the format fixes: the
+   user's log.date, log.decorate and format.pretty do not count (--date and --format), nor log.showSignature (the
+   runner's), and no signature is verified (no %G). Read lossily: they are only shown. */
+async function readCommits(r: VcRepo, tip: string, skip: number, n: number): Promise<GitLogEntry[]> {
+  const x = await Vc.run(r, ['log', '--no-color', '--encoding=UTF-8', '--date=short', '--format=%H%x00%h%x00%D%x00%an%x00%ad%x00%s',
+    '--skip=' + skip, '--max-count=' + n, tip, '--'], { ...READ, lossy: true });
+  if (x.code !== 0 || x.truncated || x.error) failed(x, 'git log');
+  return x.out.split('\n').filter(l => l).map(l => {
+    const [oid, hash, refs, author, date, ...subject] = l.split('\0');
+    return { oid, hash, refs, author, date, subject: subject.join(' ') };
+  });
+}
+
+/* The commit OID (a full hash) as the revision buffer shows it: its header and message (lossily: shown only),
+   then its diff against its first parent (a merge's too: git's combined diff is not one Edwin reads into hunks,
+   and the user's log.diffMerges must not change what is shown), a root commit's against the empty tree. The diff
+   is read lossily as well: no patch is built from it. */
+async function readShow(r: VcRepo, oid: string): Promise<GitShow> {
+  const [hx, diff] = await Promise.all([
+    Vc.run(r, ['show', '--no-patch', '--no-color', '--encoding=UTF-8', '--date=iso-strict', '--format=%H%x00%P%x00%an <%ae>%x00%ad%x00%cn <%ce>%x00%cd%x00%D%x00%B', oid, '--'], { ...READ, lossy: true }),
+    readDiff(r, ['show', '--format=', '--patch', '--root', '--diff-merges=first-parent'], [oid], true),
+  ]);
+  if (hx.code !== 0 || hx.truncated || hx.error) failed(hx, 'git show');
+  const [h, parents, author, authorDate, committer, committerDate, refs, ...message] = hx.out.split('\0');
+  return { oid: h, parents: parents ? parents.split(' ') : [], author, authorDate, committer, committerDate, refs, message: message.join('\0').replace(/\s+$/, ''), files: diff.files, note: diff.note };
+}
+
 /* ---------- drawing ---------- */
 const FACES = ['', 'git-section', 'git-dim', 'git-branch', 'git-remote', 'git-hash', 'git-hunk', 'git-added', 'git-removed'];
 const F = { SECTION: 1, DIM: 2, BRANCH: 3, REMOTE: 4, HASH: 5, HUNK: 6, ADDED: 7, REMOVED: 8 };
-/* Folded unless the user unfolded them: a file's hunks, and the stashes. */
-const FOLDED_FIRST = (key: string) => key.startsWith('f:') || key === 'stashes';
+type Spans = [number, number, number][];
+/* Folded unless the user unfolded them: in the status buffer a file's hunks, and the stashes; in the revision
+   buffer nothing. */
+const foldedFirst = (v: GitView, key: string) => v.kind === 'status' && (key.startsWith('f:') || key === 'stashes');
 const MARK = '…';
 
-/* The buffer's lines and rows for status V. */
-function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection } {
-  const m = v.model, lines: string[] = [], rows: GitRow[] = [];
+/* What a view's drawing adds lines and sections with. */
+interface Drawer {
+  line(key: string, text: string, spans?: Spans, extra?: GitExtra): void;
+  /* A section under the current one: its heading, then BODY unless it is folded (the heading then ends in …). */
+  section(key: string, heading: string, spans: Spans, hasBody: boolean, body: () => void, extra?: GitExtra): void;
+}
+/* The lines, rows and sections DRAW gives for view V. */
+function drawing(v: GitView, draw: (d: Drawer) => void): { lines: string[]; rows: GitRow[]; top: GitSection } {
+  const lines: string[] = [], rows: GitRow[] = [];
   const top: GitSection = { id: '', start: 0, end: 0, body: true, parent: null, children: [] };
   /* the sections drawn, and those whose children were all drawn (unfolded) */
   const seen = new Set<string>(), opened = new Set<string>(['']);
   let sec = top;
-  const line = (key: string, text: string, spans: [number, number, number][] = [], visit?: GitRow['visit'], at?: GitAt, commit?: string) => {
-    lines.push(text); rows.push({ id: sec.id + '\0' + key, sec, spans, visit, at, commit });
-  };
-  const folded = (id: string, key: string) => { const f = v.folds.get(id); return f === undefined ? FOLDED_FIRST(key) : f; };
-  /* A section under the current one: its heading, then BODY unless it is folded (the heading then ends in …). */
-  const section = (key: string, heading: string, spans: [number, number, number][], hasBody: boolean, body: () => void, visit?: GitRow['visit'], at?: GitAt) => {
-    const s: GitSection = { id: sec.id + '\0' + key, start: lines.length, end: 0, body: hasBody, parent: sec, children: [] };
-    sec.children.push(s);
-    const fold = hasBody && folded(s.id, key);
-    seen.add(s.id);
-    if (hasBody && !fold) opened.add(s.id);
-    const outer = sec;
-    sec = s;
-    lines.push(heading + (fold ? MARK : '')); rows.push({ id: s.id, sec: s, spans, visit, at });
-    if (hasBody && !fold) body();
-    sec = outer;
-    s.end = lines.length;
-  };
+  const folded = (id: string, key: string) => { const f = v.folds.get(id); return f === undefined ? foldedFirst(v, key) : f; };
+  draw({
+    line(key, text, spans = [], extra = {}) { lines.push(text); rows.push({ id: sec.id + '\0' + key, sec, spans, ...extra }); },
+    section(key, heading, spans, hasBody, body, extra = {}) {
+      const s: GitSection = { id: sec.id + '\0' + key, start: lines.length, end: 0, body: hasBody, parent: sec, children: [] };
+      sec.children.push(s);
+      const fold = hasBody && folded(s.id, key);
+      seen.add(s.id);
+      if (hasBody && !fold) opened.add(s.id);
+      const outer = sec;
+      sec = s;
+      lines.push(heading + (fold ? MARK : '')); rows.push({ id: s.id, sec: s, spans, ...extra });
+      if (hasBody && !fold) body();
+      sec = outer;
+      s.end = lines.length;
+    },
+  });
+  /* the last line is blank: drop it, so the text ends in one newline */
+  if (lines.length && lines[lines.length - 1] === '') { lines.pop(); rows.pop(); }
+  top.end = lines.length;
+  /* the folds of sections no longer there are forgotten: those whose parent was drawn unfolded, without them
+     (one under a folded section is kept, so a section unfolded again shows its parts as they were) */
+  for (const id of [...v.folds.keys()]) if (!seen.has(id) && opened.has(id.slice(0, id.lastIndexOf('\0')))) v.folds.delete(id);
+  return { lines, rows, top };
+}
+
+/* A file's HUNKS under D's current section, each a section of its lines; RET on a line visits PATH at that line of
+   the new side (a removed line where it was). AT, when given, says what s, u and x act on at a hunk or a line. */
+function hunks(d: Drawer, path: string, hs: VcDiffHunk[], at?: (hunk: number, line?: number) => GitAt) {
+  hs.forEach((h, k) => {
+    d.section('h' + k, h.header, [[0, h.header.length, F.HUNK]], true, () => {
+      let n = h.newStart;
+      h.lines.forEach((l, j) => {
+        const c = l[0];
+        d.line('l' + j, l, [[0, l.length, c === '+' ? F.ADDED : c === '-' ? F.REMOVED : c === '\\' ? F.DIM : 0]], { visit: { path, line: Math.max(1, n) }, at: at && at(k, j) });
+        if (c === ' ' || c === '+') n++;
+      });
+    }, { visit: { path, line: Math.max(1, h.newStart) }, at: at && at(k) });
+  });
+}
+/* A file's heading: its label padded, then its name (`old -> new` for a rename or copy). */
+function fileHeading(label: string, path: string, orig: string | null): { text: string; spans: Spans } {
+  const name = orig !== null ? `${shown(orig)} -> ${shown(path)}` : shown(path), lab = label ? label.padEnd(label.length < 11 ? 11 : label.length + 1) : '';
+  return { text: lab + name, spans: lab ? [[0, label.length, F.DIM]] : [] };
+}
+const label = (l: string) => l.padEnd(10);
+
+/* The status buffer's lines. */
+function drawStatus(v: GitStatus, d: Drawer) {
+  const m = v.model, { line, section } = d;
   /* a commit's line; with NOFIX (a stash's, an unpulled one: not in HEAD's history) no fixup is for it */
-  const commitLine = (c: GitCommit, noFix = false) => line(c.hash, `${c.hash} ${shown(c.subject)}`, [[0, c.hash.length, F.HASH]], undefined, undefined, noFix ? undefined : c.hash);
+  const commitLine = (c: GitCommit, noFix = false) => line(c.hash, `${c.hash} ${shown(c.subject)}`, [[0, c.hash.length, F.HASH]], { commit: noFix ? undefined : c.hash, show: c.hash });
   const top_ = (key: string, title: string, n: number, body: () => void, at?: GitAt) => {
     if (!n) return;
     const heading = `${title} (${n})`;
-    section(key, heading, [[0, heading.length, F.SECTION]], true, body, undefined, at);
+    section(key, heading, [[0, heading.length, F.SECTION]], true, body, { at });
     line('end:' + key, '');
   };
 
   /* the head and its upstream */
-  const label = (l: string) => l.padEnd(10);
   {
-    const h = 'Head:', head = m.head;
-    if (m.oid === null) line('head', `${label(h)}${shown(m.branch || '')} (no commit yet)`, [[10, 10 + (m.branch || '').length, F.BRANCH]]);
-    else if (m.branch !== null) line('head', `${label(h)}${shown(m.branch)} ${head ? shown(head.subject) : ''}`, [[10, 10 + m.branch.length, F.BRANCH]]);
-    else line('head', `${label(h)}${head ? head.hash + ' ' + shown(head.subject) : m.oid.slice(0, 7)}`, [[10, 10 + (head ? head.hash : m.oid.slice(0, 7)).length, F.HASH]]);
+    const h = 'Head:', head = m.head, dim = (n: number): [number, number, number] => [0, n, F.DIM];
+    if (m.oid === null) line('head', `${label(h)}${shown(m.branch || '')} (no commit yet)`, [dim(5), [10, 10 + (m.branch || '').length, F.BRANCH]]);
+    else if (m.branch !== null) line('head', `${label(h)}${shown(m.branch)} ${head ? shown(head.subject) : ''}`, [dim(5), [10, 10 + m.branch.length, F.BRANCH]], { show: head ? head.hash : undefined });
+    else line('head', `${label(h)}${head ? head.hash + ' ' + shown(head.subject) : m.oid.slice(0, 7)}`, [dim(5), [10, 10 + (head ? head.hash : m.oid.slice(0, 7)).length, F.HASH]], { show: head ? head.hash : undefined });
     if (m.upstream !== null) {
       const u = shown(m.upstream);
-      line('merge', `${label('Merge:')}${u} ${m.gone ? '(gone)' : m.merge ? shown(m.merge.subject) : ''}`, [[10, 10 + u.length, F.REMOTE], ...(m.gone ? [[11 + u.length, 17 + u.length, F.DIM] as [number, number, number]] : [])]);
+      line('merge', `${label('Merge:')}${u} ${m.gone ? '(gone)' : m.merge ? shown(m.merge.subject) : ''}`, [dim(6), [10, 10 + u.length, F.REMOTE], ...(m.gone ? [[11 + u.length, 17 + u.length, F.DIM] as [number, number, number]] : [])], { show: m.merge ? m.merge.hash : undefined });
     }
-    for (const r of rows) r.spans.unshift([0, r.id.endsWith('merge') ? 6 : 5, F.DIM]);
     line('end:head', '');
   }
 
-  const fileHeading = (f: GitFile) => {
-    const name = f.orig !== null ? `${shown(f.orig)} -> ${shown(f.path)}` : shown(f.path), lab = f.label ? f.label.padEnd(f.label.length < 11 ? 11 : f.label.length + 1) : '';
-    return { text: lab + name, spans: lab ? [[0, f.label.length, F.DIM]] as [number, number, number][] : [] };
-  };
   /* FILES of a section, each with its hunks under it */
   const files = (part: GitPart, fs: GitFile[], note: string | null) => () => {
     if (note) line('note', `(${note})`, [[0, note.length + 2, F.DIM]]);
     for (const f of fs) {
-      const { text, spans } = fileHeading(f), hunks = f.diff ? f.diff.hunks : [];
-      section('f:' + f.path, text, spans, hunks.length > 0, () => {
-        hunks.forEach((h, k) => {
-          section('h' + k, h.header, [[0, h.header.length, F.HUNK]], true, () => {
-            let n = h.newStart;
-            h.lines.forEach((l, j) => {
-              const c = l[0];
-              line('l' + j, l, [[0, l.length, c === '+' ? F.ADDED : c === '-' ? F.REMOVED : c === '\\' ? F.DIM : 0]], { path: f.path, line: Math.max(1, n) }, { part, file: f, hunk: k, line: j });
-              if (c === ' ' || c === '+') n++;
-            });
-          }, { path: f.path, line: Math.max(1, h.newStart) }, { part, file: f, hunk: k });
-        });
-      }, { path: f.path, line: 1 }, { part, file: f });
+      const { text, spans } = fileHeading(f.label, f.path, f.orig), hs = f.diff ? f.diff.hunks : [];
+      section('f:' + f.path, text, spans, hs.length > 0, () => hunks(d, f.path, hs, (hunk, l) => (l === undefined ? { part, file: f, hunk } : { part, file: f, hunk, line: l })),
+        { visit: { path: f.path, line: 1 }, at: { part, file: f } });
     }
   };
   top_('untracked', 'Untracked files', m.untracked.length, files('untracked', m.untracked, null), { part: 'untracked', file: null });
@@ -266,24 +364,63 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
     const heading = 'Recent commits';
     if (m.recent.length) { section('recent', heading, [[0, heading.length, F.SECTION]], true, () => m.recent.forEach(c => commitLine(c))); line('end:recent', ''); }
   }
-  /* the last line is blank: drop it, so the text ends in one newline */
-  if (lines.length && lines[lines.length - 1] === '') { lines.pop(); rows.pop(); }
-  top.end = lines.length;
-  /* the folds of sections no longer there are forgotten: those whose parent was drawn unfolded, without them
-     (one under a folded section is kept, so a section unfolded again shows its parts as they were) */
-  for (const id of [...v.folds.keys()]) if (!seen.has(id) && opened.has(id.slice(0, id.lastIndexOf('\0')))) v.folds.delete(id);
-  return { lines, rows, top };
 }
+
+/* The log buffer's lines: a heading, a line per commit (its short hash, the refs at it, its subject, then its
+   author and date), and a last line that says whether more can be read. */
+function drawLog(v: GitLogView, d: Drawer) {
+  const g = v.log, heading = g.tip === null && !g.reading && !g.note ? 'No commit yet' : `Commits in ${shown(v.repo.root)}`;
+  d.line('heading', heading, [[0, heading.length, F.SECTION]]);
+  for (const c of g.commits) {
+    const refs = c.refs ? `(${shown(c.refs)}) ` : '', at = c.hash.length + 1, tail = `  ${shown(c.author)} ${c.date}`;
+    const text = `${c.hash} ${refs}${shown(c.subject)}${tail}`;
+    const spans: Spans = [[0, c.hash.length, F.HASH], [text.length - tail.length + 2, text.length, F.DIM]];
+    if (refs) spans.splice(1, 0, [at, at + refs.length - 1, F.BRANCH]);
+    d.line(c.oid, text, spans, { commit: c.oid, show: c.oid });
+  }
+  const tail = (key: string, text: string, extra?: GitExtra) => d.line(key, text, [[0, text.length, F.DIM]], extra);
+  if (g.note) tail('note', `(${g.note})`);
+  if (g.reading) tail('reading', g.reading === 'next' ? `(reading the next ${PAGE}…)` : '(reading…)');
+  else if (g.more) tail('more', `(more: + or RET here reads the next ${PAGE})`, { more: true });
+}
+
+/* The revision buffer's lines: the commit's header, its message indented, then its diff, a section per file. The
+   header's values start at column COL, one past its longest label, `Committer:`. */
+const COL = 11;
+function drawShow(v: GitShowView, d: Drawer) {
+  const s = v.show, lab = (l: string) => l.padEnd(COL), dim = (n: number): [number, number, number] => [0, n, F.DIM];
+  d.line('commit', `${lab('Commit:')}${s.oid}`, [dim(7), [COL, COL + s.oid.length, F.HASH]]);
+  s.parents.forEach((p, k) => { const l = k ? '' : s.parents.length > 1 ? 'Parents:' : 'Parent:'; d.line('parent' + k, `${lab(l)}${p}`, [dim(l.length), [COL, COL + p.length, F.HASH]], { show: p }); });
+  if (s.refs) d.line('refs', `${lab('Refs:')}${shown(s.refs)}`, [dim(5), [COL, COL + shown(s.refs).length, F.BRANCH]]);
+  d.line('author', `${lab('Author:')}${shown(s.author)} ${s.authorDate}`, [dim(7)]);
+  if (s.committer !== s.author || s.committerDate !== s.authorDate) d.line('committer', `${lab('Committer:')}${shown(s.committer)} ${s.committerDate}`, [dim(10)]);
+  d.line('end:head', '');
+  if (s.message) {   // an empty message (--allow-empty-message) draws no lines of its own: one blank line parts the header from the diff
+    s.message.split('\n').forEach((l, k) => { const t = l ? '    ' + shown(l) : ''; d.line('m' + k, t, k ? [] : [[0, t.length, F.SECTION]]); });
+    d.line('end:message', '');
+  }
+  if (s.note) d.line('note', `(${s.note})`, [[0, s.note.length + 2, F.DIM]]);
+  const LABEL: Record<VcDiffStatus, string> = { modified: 'modified', added: 'new file', deleted: 'deleted', renamed: 'renamed', copied: 'copied', unmerged: 'unmerged' };
+  for (const f of s.files) {
+    const path = (f.newPath ?? f.oldPath)!, orig = f.status === 'renamed' || f.status === 'copied' ? f.oldPath : null;
+    const lab = LABEL[f.status] + (f.binary ? ' (binary)' : f.oldMode && f.newMode && f.oldMode !== f.newMode ? ` (${f.oldMode} -> ${f.newMode})` : '');
+    const { text, spans } = fileHeading(lab, path, orig);
+    d.section('f:' + path, text, spans, f.hunks.length > 0, () => hunks(d, path, f.hunks), { visit: { path, line: 1 } });
+  }
+}
+
+/* The buffer's lines and rows for view V. */
+const build = (v: GitView) => drawing(v, d => (v.kind === 'status' ? drawStatus(v, d) : v.kind === 'log' ? drawLog(v, d) : drawShow(v, d)));
 
 /* The row of point's line in B, and how far into the line point is. */
 function here(b: EdBuffer): { row: GitRow | undefined; col: number; line: number } {
-  const v = b.gitStatus as GitStatus, line = lineNoB(b, b.pt);
+  const v = viewOf(b), line = lineNoB(b, b.pt);
   return { row: v.rows[line - 1], col: b.pt - lineStartB(b, line), line };
 }
 /* Draw B from its model again, point on the row it was on (or the nearest section around it that is still
    shown, or the same line). */
 function draw(b: EdBuffer, at: string | null = null) {
-  const v = b.gitStatus as GitStatus, was = here(b), id = at ?? (was.row ? was.row.id : null);
+  const v = viewOf(b), was = here(b), id = at ?? (was.row ? was.row.id : null);
   const { lines, rows, top } = build(v);
   v.rows = rows; v.top = top;
   b.text = lines.join('\n') + '\n';
@@ -297,17 +434,40 @@ function draw(b: EdBuffer, at: string | null = null) {
 /* ---------- the buffer ---------- */
 /* Read B's repository again and draw it. A refresh started later wins; a buffer killed meanwhile is left. */
 async function refresh(b: EdBuffer) {
-  const v = statusOf(b), seq = ++v.seq;
-  const m = await collect(v.repo);
-  if (seq !== v.seq || !E.buffers.includes(b)) return;
-  v.model = m; draw(b); Ed.scheduleRender();
+  const v = viewOf(b);
+  if (v.kind === 'log') { void loadLog(b, true).catch(Ed.reportError); return; }   // in the background, as l l reads
+  const seq = ++v.seq;
+  if (v.kind === 'status') {
+    const m = await collect(v.repo);
+    if (seq !== v.seq || !E.buffers.includes(b)) return;
+    v.model = m;
+  } else {
+    const s = await readShow(v.repo, v.show.oid);
+    if (seq !== v.seq || !E.buffers.includes(b)) return;
+    v.show = s;
+  }
+  draw(b); Ed.scheduleRender();
 }
 
-/* The directory a status is asked from: a status buffer's repository, else the buffer's directory (a grep's). */
+/* The directory a status is asked from: a git buffer's repository, else the buffer's directory (a grep's). */
 function directoryOf(b: EdBuffer): string | null {
-  if (b.gitStatus) return (b.gitStatus as GitStatus).repo.root;
+  if (b.gitView) return viewOf(b).repo.root;
   return Ed.compile.directory(b);
 }
+
+/* The buffer of KIND for repository R: the one open, else a new one named `*git-NAME: REPO*` (with <2> when that
+   name is taken), in MODE, read-only and in Motion state, its view what MAKE gives. */
+function viewBuffer(r: VcRepo, kind: GitView['kind'], mode: string, make: () => GitView): EdBuffer {
+  let b = buffersOf(r, kind)[0];
+  if (b) return b;
+  const name = `*git-${kind === 'show' ? 'revision' : kind}: ${repoName(r)}*`;
+  b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
+  b.mode = mode; b.readOnly = true; b.evilState = 'motion';
+  b.gitView = make();
+  b.pt = 0;
+  return b;
+}
+const newView = (r: VcRepo) => ({ repo: r, folds: new Map<string, boolean>(), rows: [] as GitRow[], top: null as unknown as GitSection, seq: 0 });
 
 /* Show the status of the repository around the current buffer's directory (jj's first, or with ONLY git's
    alone), reading it again when its buffer is open. */
@@ -317,45 +477,38 @@ async function status(only?: 'git'): Promise<false> {
   const dir = directoryOf(cur()), r = dir ? Vc.repo(dir, only) : null;
   if (!r) signal('user-error', `Not in a ${only ? 'git ' : ''}repository: ${dir || 'no directory'}`);
   if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace, and Edwin has no jj view yet: SPC g G shows its git repository's status when it is colocated`);
-  const find = () => E.buffers.find(x => x.gitStatus && (x.gitStatus as GitStatus).repo.root === r!.root);
-  let b = find();
+  let b = buffersOf(r!, 'status')[0];
   if (b) { await refresh(b); Ed.setWindowBuffer(b); Ed.scheduleRender(); return false; }
   const m = await collect(r!);
-  b = find();   // opened while this one read
-  if (b) { await refresh(b); }
-  else {
-    const name = `*git-status: ${r!.root.slice(r!.root.lastIndexOf('/') + 1) || '/'}*`;
-    b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
-    b.mode = 'git-status-mode'; b.readOnly = true; b.evilState = 'motion';
-    b.gitStatus = { repo: r!, model: m, folds: new Map(), rows: [], top: null, seq: 0 } as unknown as GitStatus;
-    b.pt = 0; draw(b);
-  }
+  b = buffersOf(r!, 'status')[0];   // opened while this one read
+  if (b) await refresh(b);
+  else { b = viewBuffer(r!, 'status', 'git-status-mode', () => ({ ...newView(r!), kind: 'status', model: m })); draw(b); }
   Ed.setWindowBuffer(b); Ed.scheduleRender();
   return false;
 }
 
 CMD('vc-status', '', '', 'Show the status of the repository the current buffer is in (SPC g g): git\'s status buffer. A jj workspace has no view yet.', () => status());
 CMD('git-status', '', '', 'Show the status of the git repository the current buffer is in, a colocated jj workspace\'s too (SPC g G): the head, the untracked files, the unstaged and staged changes with their hunks, the stashes and the commits not yet pushed or pulled.', () => status('git'));
-CMD('git-status-refresh', '', '', 'Read the repository again (g r), keeping the folds and point.', async () => { await refresh(cur()); return false; });
+CMD('git-status-refresh', '', '', 'Read the repository again (g r), keeping the folds and point; in a log buffer, its log from HEAD again, as many commits as it shows, in the background.', async () => { await refresh(cur()); return false; });
 
 /* The innermost section point's line is in. */
 function sectionAt(b: EdBuffer): GitSection | null {
-  statusOf(b);
+  viewOf(b);
   const r = here(b).row;
   return r ? r.sec : null;
 }
 CMD('git-status-toggle', '', '', 'Fold or unfold the section at point (TAB): a part of the status, a file\'s hunks, or a hunk.', () => {
-  const b = cur(), v = statusOf(b), s = sectionAt(b);
+  const b = cur(), v = viewOf(b), s = sectionAt(b);
   if (!s || !s.body || !s.parent) { Ed.message('Nothing to fold here'); return false; }
   const key = s.id.slice(s.id.lastIndexOf('\0') + 1), was = v.folds.get(s.id);
-  v.folds.set(s.id, !(was === undefined ? FOLDED_FIRST(key) : was));
+  v.folds.set(s.id, !(was === undefined ? foldedFirst(v, key) : was));
   draw(b, s.id);
   return false;
 });
 /* Point to the heading of the next (DIR 1) or previous (-1) section, at any depth, or, SIBLING, of the same
    parent. */
 function move(b: EdBuffer, dir: number, sibling: boolean) {
-  const v = statusOf(b), { line } = here(b), at = line - 1;
+  const v = viewOf(b), { line } = here(b), at = line - 1;
   const all: GitSection[] = [];
   const walk = (s: GitSection) => { for (const c of s.children) { all.push(c); walk(c); } };
   walk(v.top);
@@ -373,14 +526,94 @@ CMD('git-status-next-section', '', '', 'Point to the next section\'s heading, at
 CMD('git-status-previous-section', '', '', 'Point to the previous section\'s heading, at any depth (C-k).', () => move(cur(), -1, false));
 CMD('git-status-next-sibling', '', '', 'Point to the next section at the same depth (g j).', () => move(cur(), 1, true));
 CMD('git-status-previous-sibling', '', '', 'Point to the previous section at the same depth (g k).', () => move(cur(), -1, true));
-CMD('git-status-visit', '', '', 'Visit the file at point (RET): on a hunk, at its line; on an untracked directory, its listing. A file not in the work tree (deleted) is not visited.', () => {
-  const b = cur(), v = statusOf(b), r = here(b).row;
-  if (!r || !r.visit) signal('user-error', 'No file to visit here');
-  const p = join(v.repo.root, r!.visit!.path);
+CMD('git-status-visit', '', '', 'Show or visit what is at point (RET): a commit, in the revision buffer; the log\'s next page on its last line; else the file, on a hunk at its line, an untracked directory\'s listing. A file not in the work tree (deleted) is not visited.', () => {
+  const b = cur(), v = viewOf(b), r = here(b).row;
+  if (r && r.show) return revision(v.repo, r.show);
+  if (r && r.more) return logMore();
+  if (!r || !r.visit) signal('user-error', 'Nothing to visit here');
+  /* a commit's tree may name what a work tree cannot hold: a path out of the repository is never visited */
+  const rel = r!.visit!.path, p = join(v.repo.root, rel);
+  if (rel.startsWith('/') || rel.split('/').includes('..')) signal('user-error', `${shown(rel)} is not in the work tree`);
   if (!Ed.host.files || !Ed.host.files.exists(p.replace(/\/$/, ''))) signal('user-error', `${shown(r!.visit!.path)} is not in the work tree`);
   if (p.endsWith('/')) return L.call('dired', [p.slice(0, -1)]);
   return L.call('visit-location', [p, r!.visit!.line]);
 });
+
+/* ---------- the log and the revision buffer ---------- */
+/* Read B's log: with RESET from HEAD again, as many commits as it shows (a page at least), else the next page
+   from the commit it started from. The buffer says it reads, and is drawn again when the page comes; a read
+   started later (g r) wins, and one whose buffer was killed is left. */
+async function loadLog(b: EdBuffer, reset: boolean) {
+  const v = logOf(b), g = v.log;
+  if (!reset && g.reading) { Ed.message('Still reading the log'); return; }
+  if (!reset && !g.more) { Ed.message('No more commits'); return; }
+  const seq = reset ? ++v.seq : v.seq;
+  g.reading = reset ? 'all' : 'next'; g.note = null;
+  draw(b); Ed.scheduleRender();
+  try {
+    const n = reset ? Math.max(PAGE, g.commits.length) : PAGE, skip = reset ? 0 : g.commits.length;
+    const tip = reset ? await resolve(v.repo, 'HEAD') : g.tip;
+    const got = tip === null ? [] : await readCommits(v.repo, tip, skip, n + 1);
+    if (seq !== v.seq) return;
+    if (reset) { g.tip = tip; g.commits = []; }
+    g.commits.push(...got.slice(0, n));
+    g.more = got.length > n;
+  } catch (e) {
+    if (seq === v.seq) g.note = 'the log could not be read: see *vc-process*';
+    throw e;
+  } finally {
+    if (seq === v.seq) { g.reading = null; if (E.buffers.includes(b)) { draw(b); Ed.scheduleRender(); } }
+  }
+}
+
+/* The repository a log or a commit is shown for: a git buffer's, else git's around the current buffer's
+   directory, a jj workspace refused (DOING says what it would do). */
+function gitRepo(doing: string): VcRepo {
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  const b = cur();
+  if (b.gitView) return viewOf(b).repo;
+  const dir = directoryOf(b), r = dir ? Vc.repo(dir) : null;
+  if (!r) signal('user-error', `Not in a repository: ${dir || 'no directory'}`);
+  if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace: ${doing}`);
+  return r!;
+}
+
+/* Show HEAD's log in the repository's log buffer, read again from HEAD when it is open. The command ends at once;
+   the first page comes in the background. */
+function openLog(): false {
+  const r = gitRepo('use jj log, or SPC g G and l l for its git repository\'s log');
+  const b = viewBuffer(r, 'log', 'git-log-mode', () => ({ ...newView(r), kind: 'log', log: { tip: null, commits: [], more: false, reading: null, note: null } }));
+  b.pt = 0;
+  void loadLog(b, true).catch(Ed.reportError);
+  Ed.setWindowBuffer(b); Ed.scheduleRender();
+  return false;
+}
+/* The log's next page, in the background. */
+function logMore(): false {
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  void loadLog(cur(), false).catch(Ed.reportError);
+  return false;
+}
+
+/* Show the commit REV names (a hash or a stash's name from a git buffer's line) in R's revision buffer. */
+async function revision(r: VcRepo, rev: string): Promise<false> {
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  const oid = await resolve(r, rev);
+  if (!oid) signal('user-error', `Not a commit: ${shown(rev)}`);
+  const s = await readShow(r, oid!);
+  const b = viewBuffer(r, 'show', 'git-revision-mode', () => ({ ...newView(r), kind: 'show', show: s })), v = b.gitView as GitShowView;
+  ++v.seq;   // a refresh still reading draws nothing
+  if (v.show.oid !== s.oid) { v.folds.clear(); b.pt = 0; }
+  v.show = s; draw(b);
+  Ed.setWindowBuffer(b); Ed.scheduleRender();
+  return false;
+}
+
+CMD('git-log', '', '', 'Show the log of HEAD in the current buffer\'s git repository (l l in the status buffer): a commit per line, read a page at a time in the background; RET on a commit shows it, + reads the next page.', () => openLog());
+CMD('git-log-more', '', '', 'Read the log\'s next page (+), in the background.', () => { logOf(cur()); return logMore(); });
 /* ---------- staging ---------- */
 /* What s, u or x acts on: a Visual selection (left first), whose changed lines are picked and which must lie
    within one hunk, else the row at point (on a hunk's line, the whole hunk). Null where there is nothing. */
@@ -503,7 +736,7 @@ function commitRepo(): VcRepo {
   const why = Ed.proc.refusal();
   if (why) signal('process-error', why);
   const b = cur();
-  if (b.gitStatus) return (b.gitStatus as GitStatus).repo;
+  if (b.gitView) return viewOf(b).repo;
   const dir = directoryOf(b), r = dir ? Vc.repo(dir) : null;
   if (!r) signal('user-error', `Not in a repository: ${dir || 'no directory'}`);
   if (r!.vcs === 'jj') signal('user-error', `${r!.root} is a jj workspace: describe its change with jj, or commit from SPC g G's status buffer`);
@@ -571,7 +804,7 @@ async function commitWith(r: VcRepo, args: string[], input?: string): Promise<Ed
   } catch (e) { p.kill('KILL'); throw e; }
   const x: EdProcResult = { ...await p.exit, out, err };
   /* (a status that cannot be read again is said, the commit done all the same) */
-  for (const b of E.buffers.filter(b => b.gitStatus && (b.gitStatus as GitStatus).repo.root === r.root)) await refresh(b).catch(Ed.reportError);
+  for (const b of buffersOf(r, 'status')) await refresh(b).catch(Ed.reportError);
   return x;
 }
 function said(x: EdProcResult) {
@@ -621,7 +854,7 @@ async function commitMessage(r: VcRepo, kind: CommitKind, key: string, msg: stri
 /* The commit a fixup is for: the commit on the line at point in a status buffer, else one asked for (HEAD by
    default), as its full hash. What is typed is given to git only after `--end-of-options`, as one argument. */
 async function fixupTarget(r: VcRepo): Promise<string> {
-  const b = cur(), row = b.gitStatus ? here(b).row : undefined;
+  const b = cur(), row = b.gitView ? here(b).row : undefined;
   let rev = row && row.commit;
   if (!rev) rev = (await Ed.readMini('Fix up commit (HEAD): ', '')).trim() || 'HEAD';
   const x = await Vc.run(r, ['rev-parse', '--verify', '--quiet', '--end-of-options', rev + '^{commit}'], { ...READ, lossy: true });
@@ -649,17 +882,19 @@ CMD('git-commit-fixup', '', '', 'Commit the staged changes as a fixup of the com
 
 for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-toggle', 'git-status-next-section', 'git-status-previous-section',
   'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard',
-  'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup', 'git-log', 'git-log-more']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
+Ed.MODE_NAMES['git-log-mode'] = 'Git Log';
+Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';
 
 /* ---------- faces ---------- */
 interface GitLex { ver: number; from: number; to: number; cls: Uint8Array; names: string[] }
 const prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {
-  if (b.mode !== 'git-status-mode' || !b.gitStatus) return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
+  if (!VIEW_MODES.has(b.mode) || !b.gitView) return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
   const c = b._glx as GitLex | undefined;
   if (c && c.ver === b.ver && c.from === from && c.to === to) return c;
-  const v = b.gitStatus as GitStatus, text = seg as string, cls = new Uint8Array(text.length);
+  const v = b.gitView as GitView, text = seg as string, cls = new Uint8Array(text.length);
   let line = lineNoB(b, from);
   /* the first line may start before the segment */
   for (let ls = 0, start = lineStartB(b, line) - from; ls < text.length; line++) {

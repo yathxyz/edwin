@@ -2468,6 +2468,127 @@ the message written in the commit message buffer (git-message-modes).
   - `nix flake check -L --keep-going`: all checks passed, `nix build .#edwin` among them (its cargo and gui tests
     run), with `edwin-typecheck`, `edwin-display` (20), `edit-lockdown` (6) and `edit-security` (21).
 
+## The git log and commit view (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-log-show`, on git-commit): a log buffer with paging and a
+commit view with its diff, magit's log and revision buffers.
+
+- **`git-log`** (`l l` in the status buffer, evil-collection's key for magit's log of the current branch; M-x from
+  any buffer of a git repository, found as SPC g g finds it, a jj workspace refused with `ROOT is a jj workspace:
+  use jj log, or SPC g G and l l for its git repository's log`) opens `*git-log: NAME*` in `git-log-mode` (`Git
+  Log`): a heading `Commits in ROOT`, then a line per commit, `HASH (REFS) SUBJECT  AUTHOR DATE`, newest first,
+  the hash, the refs and the author and date in their faces (`git-hash`, `git-branch`, `git-dim`).
+- **Paging.** The log is read 256 commits a page: HEAD is resolved once, when the log opens, to its full hash
+  (`rev-parse --verify --quiet --end-of-options HEAD^{commit}`), and each page is `git log --no-color
+  --encoding=UTF-8 --date=short --format=%H%x00%h%x00%D%x00%an%x00%ad%x00%s --skip=K --max-count=257 HASH --`,
+  one commit more than the page to know whether more come. A commit made while paging does not shift the pages:
+  no commit is shown twice or skipped. The last line says `(more: + or RET here reads the next 256)`; `+`
+  (`git-log-more`) or RET on that line reads the next page. `g r` reads the log again from HEAD, as many commits as
+  it shows (a page at least), in the background too.
+- **In the background.** `l l`, `+` and `g r` end at once: the buffer says `(reading…)` or `(reading the next 256…)` and
+  the page is drawn when git has printed it, so a long or slow history never holds the frame or the keys after it.
+  A second `+` while a page is read says `Still reading the log`; `+` at the end says `No more commits`. A read
+  started later (`g r`) wins over one still running, and a read whose buffer was killed draws nothing. A read that
+  fails says so in the buffer, `(the log could not be read: see *vc-process*)` under the `Commits in ROOT`
+  heading (never `No commit yet`, which only a read that found no HEAD says), and in the echo area. The two are told
+  apart by `git rev-parse --verify --quiet`'s exit: 1 is no such commit (an unborn HEAD, an unknown name); any
+  other failure (128: an unknown repository extension, dubious ownership, a corrupt HEAD) is raised, so the log
+  keeps the page it shows under the note and RET on a commit says `git rev-parse failed (exit 128)` instead of
+  `Not a commit`. A commit with an empty message has one blank line between its header and its diff.
+- **`git-status-visit`** (RET) shows the commit at point in `*git-revision: NAME*` (`git-revision-mode`, `Git
+  Revision`), one per repository, replaced by the next commit shown: a commit line of the log, of the status
+  buffer (Recent commits, Unpushed, Unpulled, the Head and Merge lines) or a stash's line. The revision buffer
+  shows `Commit:` (the full hash), `Parent:` or `Parents:` (RET on one shows it), `Refs:`, `Author:` with the date
+  (ISO 8601) and `Committer:` when its name, address or date differs (an amended, rebased or cherry-picked
+  commit), each value at column 11, one past the longest label, the message indented by four, then the diff a section per file
+  (`modified`, `new file`, `deleted`, `renamed old -> new`, `copied`, a mode change or `(binary)` after the label)
+  and its hunks. TAB folds a file or a hunk, C-j, C-k, `g j` and `g k` step through them, RET on a hunk or a line
+  visits the work tree's file at that line (a path that is absolute or holds `..`, which a crafted commit's tree
+  can name, is refused as `PATH is not in the work tree`), `g r` reads it again, `q` leaves. The status buffer's commands serve
+  the three buffers: one drawing, one set of rows, folds and motions, each buffer with its own model.
+- **Reading a commit**, two reads at once, like the status buffer's: the header and message by `git show
+  --no-patch --no-color --encoding=UTF-8 --date=iso-strict --format=…` (lossy: only shown), the diff by `git show
+  --format= --patch --root --diff-merges=first-parent` with `VcDiff.gitArgs` and `--find-renames` (16 MiB, the
+  status buffer's notes when it is not shown). The diff is read lossily, where the status buffer's is strict: the
+  revision buffer builds no patch, so a file that is not UTF-8 shows its hunks with U+FFFD for each such byte and
+  hides none of the other files'. The revision comes from a buffer's line, and is still resolved
+  to a full hash by `rev-parse --verify --end-of-options REV^{commit}` before `show` sees it (`Not a commit: REV`);
+  c f's resolution is the same function.
+- **The repository's configuration.** log, show and rev-parse are the runner's reads: the hooks off, no pager,
+  no fsmonitor, no external diff or textconv, the repository's filter and merge drivers emptied, its signature
+  programs the user's, `log.showSignature` off and no `%G` in the format (no signature verified), its aliases of
+  those names emptied. The format, `--date`, `--no-color`, `--encoding` and `--diff-merges` fix the shape against
+  the user's `format.pretty`, `log.date`, `color.ui`, `i18n.logOutputEncoding` and `log.diffMerges` (remerge
+  would merge again with the merge drivers), `--root` against `log.showRoot=false`.
+- **Choices**, each reversible:
+  - No graph and no `--topo-order`: both make git walk the whole history before it prints the first line, which
+    paging is for. Commits are in git log's default order.
+  - A page is appended (`--skip`) where magit's `+` doubles the count and reads the whole log again.
+  - `+` in `git-log-mode` takes the place of evil's `+` motion (next line's first non-blank), which `j` gives.
+  - `l l` makes `l` a prefix in the status buffer, as `c` already is: `l` no longer moves right there (`l j` is
+    undefined), as in evil-collection's magit, where `l` is the log transient.
+  - A merge's diff is against its first parent, where magit shows git's combined diff: the combined diff is not
+    read into hunks (git-diff-model), and the first parent's is what the merge brought to the branch. A stash is
+    a merge too: its diff is the work tree's change against the commit it was made on.
+  - RET on a hunk line of the revision buffer visits the file as the work tree has it, not as the commit had it
+    (magit visits the commit's blob).
+  - The opening of a revision waits for its two reads (as SPC g g waits for its status): it is one commit,
+    bounded at 16 MiB of diff.
+- **Not in it:** the log of another branch, of all refs or of a file (`l o`, `l a`, `l f`), log switches (the
+  transient), the graph, the reflog, margin toggling, showing a commit typed at a prompt, the blob of a file at a
+  commit, the history operations on a log line (git-history-ops), jj's log (git-jj-log).
+- **Image replay and edwind.** `git-log`, `git-log-more` and RET check `Ed.proc.refusal()` before anything, and
+  every child goes through `Vc.run`, which refuses under the image's replay, in a web frame and in edwind.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (72 passed: vc.test.mts's 21, vc-diff's 16,
+  vc-git's 9, vc-stage's 8, vc-commit's 8 and test/vc-log.test.mts's 10), with real git and jujutsu:
+  - A 1,000-commit fixture (one `git fast-import` stream), a tag and a branch: `l l` ends with `(reading…)`
+    shown; then 256 commits, the first line compared whole, their hashes git log's first 256, the more line, the
+    page read as `--skip=0 --max-count=257 FULLHASH --` with the hooks off, no --graph or --topo-order; the faces.
+  - Paged to the end by `+` and by RET on the more line: each key ends with the reading line shown, each page's
+    hashes git log's, all 1,000 once in order, no more line at the end, `No more commits`, the skips 0, 256, 512,
+    768. A probe on a 2 ms timer measured the event loop held at most 4.1-5.1 ms a page, the keys returning in
+    3.6-4.2 ms (the last edwin-vc run, alone on ex44); 20-75 ms a page in the flake check's run, under load. Asserted under the 2 s frame deadline, not near the
+    measure: it is wall-clock time, which a loaded build host stretches; the background read itself is shown
+    deterministically by the reading line after each key. The lexer on 60 lines of the 1,000-line buffer measured
+    at 0.04 ms (printed, not asserted).
+  - A commit made after the first page: the second page continues from the old tip; `g r` shows the new commit
+    first and as many commits as were shown, `(reading…)` while it reads; `+` twice while reading says `Still reading the log` and reads once.
+  - RET on a log line: the revision buffer's whole text (header, refs, author, message, a modified file's hunk, a
+    rename, an added file); its faces; show with the hooks off, `--root` and `--diff-merges=first-parent`; TAB on
+    a file, C-j to its hunk, RET on an added line visits the file at line 2; RET on `Parent:` shows the root
+    commit, its files added, in the same buffer; RET on a row whose path is `../outside.txt`, `/etc/passwd` or
+    `a/../../x` refused; q.
+  - From the status buffer: RET on a recent commit, on the Head line, on a stash (a merge, its work tree change).
+  - A merge: `Parents:` with both, its diff against the first parent only; a repository with no commit yet:
+    `No commit yet`.
+  - An amended commit whose committer and date differ from its author's: the whole revision text, `Committer:
+    Other <…> DATE` aligned with the other lines; in it a file holding the bytes `caf\xe9`, shown as `+caf�`, and a
+    UTF-8 file, both with their hunks.
+  - git not on PATH: `M-x git-log` in a repository with a commit shows `Commits in ROOT` and the could-not-be-read
+    line, the echo area `cannot run git`.
+  - git starting and refusing the repository (`extensions.bogusext` under repositoryformatversion 1, exit 128)
+    after the log was shown: RET on the commit fails `git rev-parse failed (exit 128): see *vc-process*`; `M-x
+    git-log` keeps the commit line and adds the could-not-be-read line under it, the same message in the echo
+    area, git's `unknown repository extension` in `*vc-process*`.
+  - A commit with an empty message (`--allow-empty-message`): header, one blank line, the diff.
+  - Refused: outside a repository and in a jj workspace with no child started; `git-log`, `git-log-more` and RET
+    on a commit under `Ed.proc.replay`, no child started; a revision that is no commit (`--output=/tmp/x`):
+    `Not a commit`.
+  - A repository whose own configuration names core.fsmonitor, core.pager, diff.external, a diff driver's
+    textconv and command, a filter's clean and smudge, a merge driver, gpg.program with log.showSignature,
+    log.diffMerges=remerge and alias.log, alias.show and alias.rev-parse, all a marker script: plain `git show -p`
+    of the side commit runs them (the control); its log, the merge's revision buffer (git's own diff against the
+    first parent) and its parent's run none.
+  - The existing suites unchanged (the status buffer's drawing now shared): vc-git's 9, vc-stage's 8,
+    vc-commit's 8.
+  - `nix flake check -L --keep-going`, before the review fixes: every check passed but `edwin-bench`, a timing
+    limit (shadow stack 16.2% against 10% under load; 8.5% on its rerun, passed), which this package does not
+    touch; `nix build .#edwin` among them (its cargo and gui tests run), with `edwin-typecheck`, `edwin-display`
+    (20), `edit-lockdown` (6), `edit-security` (21) and `edwin-vc` (70; the paging held the loop 20-75 ms a page
+    there, under load). A first run, before the last fixes, also failed once on `edit-crash` (R16.5, random
+    SIGKILLs), which passed (7) on the second. After the review fixes (the Committer column, the lossy revision
+    diff, the failed log's heading): `edwin-vc` (72), `edwin-typecheck` and `edwin-display`.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

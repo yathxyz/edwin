@@ -1496,7 +1496,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 
 ;; Dired, as evil-collection binds it.  j and k move; the marks choose what
 ;; D, R and C act on, and with none they act on the file at point.
-(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode)))
+(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode git-log-mode git-revision-mode)))
 (evil-define-key 'motion 'dired-mode
   "RET" 'dired-find-file
   "-" 'dired-up-directory
@@ -1540,6 +1540,29 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "c a" 'git-commit-amend
   "c w" 'git-commit-reword
   "c f" 'git-commit-fixup)
+;; l l shows HEAD's log, as evil-collection binds magit's log transient (l)
+;; and its suffix.
+(evil-define-key 'motion 'git-status-mode
+  "l l" 'git-log)
+;; The log buffer: RET shows the commit at point, + reads the next page
+;; (evil-collection's key for magit's longer log), g r reads it again from
+;; HEAD.
+(evil-define-key 'motion 'git-log-mode
+  "RET" 'git-status-visit
+  "+" 'git-log-more
+  "g r" 'git-status-refresh
+  "q" 'quit-window)
+;; The revision buffer: its files and hunks fold and step as the status
+;; buffer's do; RET on a parent shows it, on a hunk visits the file.
+(evil-define-key 'motion 'git-revision-mode
+  "TAB" 'git-status-toggle
+  "RET" 'git-status-visit
+  "g r" 'git-status-refresh
+  "C-j" 'git-status-next-section
+  "C-k" 'git-status-previous-section
+  "g j" 'git-status-next-sibling
+  "g k" 'git-status-previous-sibling
+  "q" 'quit-window)
 
 ;; *compilation*, as evil-collection binds it; q and SPC come from special-mode.
 (evil-define-key 'motion 'compilation-mode

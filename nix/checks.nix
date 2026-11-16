@@ -245,6 +245,12 @@ in
   # files, hunks and selected lines (test/vc-stage.test.mts), the index compared with the blob each must leave.
   # Committing (test/vc-commit.test.mts): c c, c a, c w and c f from the status buffer, the log and the index
   # compared after each; hooks on commit and fixup, off on reword; a message a hook refused kept; save offered.
+  # The log and revision buffers (test/vc-log.test.mts): a 1,000-commit fixture paged to its end with l l, + and
+  # RET, each page read in the background from the tip the log opened on, the event loop held a few ms at most
+  # (asserted under the 2 s frame deadline), the hashes compared with git log's; g r from HEAD;
+  # a commit's header, message and diff by file and hunk, a root commit, a merge against its first parent, a
+  # stash; a repository's own programs (textconv, filters, merge driver, pager, fsmonitor, gpg, aliases, with
+  # log.diffMerges=remerge) run by none of it; nothing under the image's replay.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -259,7 +265,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts
         touch $out
       '';
 

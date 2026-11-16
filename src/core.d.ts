@@ -874,8 +874,8 @@ interface EdBuffer extends SchemeForeign {
   _vlx?: unknown;
   /* a commit message an opener waits for (vc.ts) */
   vcMessage?: VcPending;
-  /* a git status buffer: its repository, what its last refresh read, its folds and its lines (vc-git.ts) */
-  gitStatus?: unknown;
+  /* a git status, log or revision buffer: its repository, what its last read gave, its folds and its lines (vc-git.ts) */
+  gitView?: unknown;
   _glx?: unknown;
   _mdf?: unknown;
   _mdfm?: unknown;
