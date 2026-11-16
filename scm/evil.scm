@@ -1526,6 +1526,13 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "g j" 'git-status-next-sibling
   "g k" 'git-status-previous-sibling
   "q" 'quit-window)
+;; s, u and x stage, unstage and discard the file, hunk or part at point, and
+;; in Visual state the lines selected within one hunk: bound in Visual state
+;; too, where evil's own s, u and x would come first.
+(evil-define-key '(motion visual) 'git-status-mode
+  "s" 'git-status-stage
+  "u" 'git-status-unstage
+  "x" 'git-status-discard)
 
 ;; *compilation*, as evil-collection binds it; q and SPC come from special-mode.
 (evil-define-key 'motion 'compilation-mode

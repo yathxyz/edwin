@@ -241,8 +241,10 @@ in
   # applied forwards (staging), reversed on the index (unstaging) or on the work tree (discarding), leaving there
   # what the pick means; names that are not UTF-8 picked whole only. VCDIFF_RUNS
   # raises the run count. git's status buffer (src/vc-git.ts): a fixture repository with every section shown by
-  # SPC g g, folded, refreshed, stepped through and visited. fast-check from the dev dependencies, for this suite
-  # alone: the edwind suites keep edwind's own module resolution.
+  # SPC g g, folded, refreshed, stepped through and visited; s, u and x staging, unstaging and discarding
+  # files, hunks and selected lines (test/vc-stage.test.mts), the index compared with the blob each must leave.
+  # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
+  # resolution.
   edwin-vc =
     pkgs.runCommand "edwin-vc"
       {
@@ -255,7 +257,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts
         touch $out
       '';
 

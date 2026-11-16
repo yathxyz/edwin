@@ -2297,6 +2297,89 @@ and `vile-magit-status`. It is the first user of the runner (git-runner) and of 
   48-57 ms; with all 500 files unfolded (30,000 lines) 52 ms; a TAB there 8.6 ms; the lexer on a 4,000-character
   segment p50 0.05 ms.
 
+## Staging and discarding in the git status buffer (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-stage`, on git-status-view): s, u and x in the status
+buffer on files, hunks and selected lines, magit's stage, unstage and discard.
+
+- **`git-status-stage`** (s), **`git-status-unstage`** (u) and **`git-status-discard`** (x), in src/vc-git.ts. Each
+  acts on what the line at point shows: a part's heading (Untracked files, Unstaged changes, Staged changes,
+  Unmerged paths: all its files), a file, or a hunk (its heading or any of its lines: the whole hunk, as in
+  magit). In Visual state (v or V) they act on the changed lines selected, which must lie within one hunk
+  (`The selection must lie within one hunk`); a selection of context lines only says `No change selected`. The
+  selection is left first, back to Motion state. After each, done or failed, the repository is read again.
+- **How each is done**, every child through `Vc.run` (the runner's hardening, its log in `*vc-process*`):
+  - Whole files and parts by name: stage `git add -- PATHS` (untracked, unstaged and conflicted files; a
+    deletion is staged too); unstage `git reset -q -- PATHS` (a rename's or copy's both names; with no commit yet
+    reset empties the index entry); discard an unstaged file `git checkout -q -- PATHS` (back to the index), an
+    untracked file or directory `git clean -f -d -q -- PATHS`.
+  - Hunks and lines by a patch `VcDiff.patch` builds from the diff shown, on standard input of `git apply
+    --whitespace=nowarn --no-ignore-whitespace` with `--cached` (stage), `--cached --reverse` (unstage),
+    `--reverse` (discard unstaged) or `--reverse --index` (discard staged).
+  - Discarding anything staged (a file, a hunk, lines, the whole part) is the reverse patch with `--index`: it
+    leaves the index and the work tree as HEAD has them there. git refuses it (`does not match index`) when the
+    work tree has further changes to that file, and the refusal is shown as git's (`git apply failed (exit 1):
+    see *vc-process*`), nothing changed: the unstaged changes are never thrown away with the staged ones.
+- **Discard asks first**, a y or n question naming what goes: `Delete untracked NAME?`, `Delete untracked N
+  files?`, `Discard the unstaged changes to NAME?`, `Discard this hunk of NAME?`, `Discard the selected lines of
+  NAME?`. n says `Nothing discarded` and runs nothing. The patch is built before the question, so a pick that
+  cannot be applied is refused before anything is asked.
+- **Names.** Every path goes after `--` as a literal pathspec (`:(literal)NAME`), so `star*.txt` names that file
+  and not `starX.txt`; `Vc.start` takes no global `--literal-pathspecs`. The names come from status, read
+  lossily (git-status-view): a name holding U+FFFD (one that is not UTF-8, or one that has that character) is
+  refused (`NAME: its name is not UTF-8, so Edwin does not give it back to git; use a terminal`), never passed
+  back. Hunks and lines come from the diff, read strictly; a part whose diff is not shown (its note) has no hunks
+  to pick, and x on one of its staged files is refused for the same reason.
+- **The repository's configuration.** `apply` runs with the hooks off. With `--cached` it touches only the index
+  and runs no filter; without it, it writes the work tree through the repository's filters, as the runner lets
+  every write.
+  `--whitespace=nowarn` and `--no-ignore-whitespace` keep a repository's `apply.whitespace=fix` from changing
+  the lines staged and `apply.whitespace=error` from refusing them, and `apply.ignoreWhitespace` from matching
+  context loosely. add, reset, checkout and clean are the runner's writes: they keep the repository's filter
+  drivers (a clean filter on add, a smudge filter on checkout), as git in a terminal does, with the hooks off.
+- **Keys** (scm/evil.scm): s, u and x for git-status-mode in Motion and in Visual state (Visual state's own s, u
+  and x would come first otherwise).
+- **Choices**, each reversible:
+  - A conflict: s stages it (`git add`, so it is marked resolved, as magit does); u says `Not staged`; x refuses
+    (`A conflict is not discarded here: resolve it, then stage it with s`), where magit offers ours or theirs:
+    conflicts are git-sequencer's and git-conflict's.
+  - s on a staged line says `Already staged`, u on one that is not `Not staged`, where magit offers the reverse.
+  - A selection must lie within one hunk; magit also stages a selection of several files' headings. Not built.
+  - `git clean -f -d` leaves an untracked directory that is a repository of its own (it would take `-f -f`), and
+    the ignored files under an untracked directory.
+  - A staged binary file is unstaged by name, but cannot be discarded (`a binary file needs its diff taken with
+    --binary`): the diff shown is read without --binary.
+- **Not in it:** S and U (stage or unstage everything from anywhere), stage with intent to add (`git add -N`),
+  the lines of an untracked file, discarding a conflict, magit's `k` alias, trash instead of delete, undo of a
+  discard.
+- **Image replay and edwind.** The commands check `Ed.proc.refusal()` before anything, so under the image's
+  replay nothing is asked and no child starts; `Vc.run` refuses there too, in a web frame and in edwind.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (54 passed: vc.test.mts's 21, vc-diff's 16, vc-git's 9 and test/vc-stage.test.mts's 8), test/vc-stage.test.mts with
+  real git, each result compared with `git show :PATH` and its blob id with `git hash-object` of the expected text:
+  - s on a hunk stages it alone (the other hunk and the work tree left), u on the staged hunk unstages it; both
+    by `git apply --cached` with the whitespace switches and the hooks off.
+  - V j over two removed lines stages them alone; V on one staged line and u unstages it alone; u on a staged
+    line with no selection unstages its hunk; V on an added line alone stages it after the line it replaces; a
+    selection across two hunks refused, one of context only says so; the index unchanged by both.
+  - s on a file, u on a staged rename (old name back, new name untracked), s on the untracked `star*.txt` (not
+    `starX.txt`), s on the Untracked heading (a directory's files too), u on the Staged heading, s on the Unstaged
+    heading (a deletion staged); `Already staged`, `Not staged`, `Nothing to stage here`.
+  - x on an unstaged hunk: the question, n changes nothing and runs no write; y takes the hunk out of the work
+    tree, the index untouched; V x on one added line; x on a modified file and on a deleted one; on `star*.txt`
+    alone, on an untracked directory and on the Untracked heading.
+  - x on a staged hunk: out of the index and the work tree; on a staged file whose work tree differs, refused
+    with nothing changed; on a new file staged (gone from both); on a staged rename (both names back).
+  - A conflict: x refused without a question, u `Not staged`, s resolves it. A branch with no commit yet: s and u
+    on a file.
+  - `apply.whitespace=fix` and `=error` with `apply.ignoreWhitespace=change`: added lines with trailing spaces
+    staged as they are.
+  - A name that is not UTF-8 refused with nothing added; the three commands under `Ed.proc.replay` refused with no
+    child started.
+  - `nix flake check -L --keep-going`: all checks passed, `nix build .#edwin` among them (gui tests run), with
+    `edwin-typecheck`, `edit-lockdown` (6) and `edit-security` (21). A first `nix flake check` failed only on
+    `edwin-bench`, a timing limit (shadow stack 13.1% against 10% under load; 8.2% on the rerun), which this
+    package does not touch.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

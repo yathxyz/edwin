@@ -7,7 +7,12 @@
    Everything is read through the runner (src/vc.ts) with read subcommands only (status, diff, log), so nothing
    the repository's configuration names runs; `stash list` and `branch -vv` would be writes there. There are no
    text properties: the buffer's text is drawn from the model again on each change, and each line's row says
-   what it shows (dired's way). */
+   what it shows (dired's way).
+
+   s, u and x stage, unstage and discard (docs/steps.md, "Staging and discarding"): a whole file or part by its
+   name (add, reset, checkout, clean), a hunk or the lines selected by a patch VcDiff.patch builds from the diff
+   shown (apply), each a write through the runner, then the repository read again. */
+
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -39,7 +44,11 @@ interface GitModel {
 interface GitSection { id: string; start: number; end: number; body: boolean; parent: GitSection | null; children: GitSection[] }
 /* A line as drawn: its id (what point is kept on across a redraw), the innermost section it is in, its faces as
    [from, to, face] from the line's start, and the file and line (from 1) RET visits. */
-interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number } }
+interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt }
+/* What s, u and x act on at a line: a part of the status (its heading: FILE null), a file of it, one of the file's
+   hunks (by its index in FILE.diff.hunks), or a line of that hunk (by its index in hunk.lines). */
+type GitPart = 'untracked' | 'unmerged' | 'unstaged' | 'staged';
+interface GitAt { part: GitPart; file: GitFile | null; hunk?: number; line?: number }
 interface GitStatus { repo: VcRepo; model: GitModel; folds: Map<string, boolean>; rows: GitRow[]; top: GitSection; seq: number }
 
 const statusOf = (b: EdBuffer) => (b.gitStatus as GitStatus | undefined) || signal('user-error', 'Not a git status buffer') as never;
@@ -173,12 +182,12 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
   /* the sections drawn, and those whose children were all drawn (unfolded) */
   const seen = new Set<string>(), opened = new Set<string>(['']);
   let sec = top;
-  const line = (key: string, text: string, spans: [number, number, number][] = [], visit?: GitRow['visit']) => {
-    lines.push(text); rows.push({ id: sec.id + '\0' + key, sec, spans, visit });
+  const line = (key: string, text: string, spans: [number, number, number][] = [], visit?: GitRow['visit'], at?: GitAt) => {
+    lines.push(text); rows.push({ id: sec.id + '\0' + key, sec, spans, visit, at });
   };
   const folded = (id: string, key: string) => { const f = v.folds.get(id); return f === undefined ? FOLDED_FIRST(key) : f; };
   /* A section under the current one: its heading, then BODY unless it is folded (the heading then ends in …). */
-  const section = (key: string, heading: string, spans: [number, number, number][], hasBody: boolean, body: () => void, visit?: GitRow['visit']) => {
+  const section = (key: string, heading: string, spans: [number, number, number][], hasBody: boolean, body: () => void, visit?: GitRow['visit'], at?: GitAt) => {
     const s: GitSection = { id: sec.id + '\0' + key, start: lines.length, end: 0, body: hasBody, parent: sec, children: [] };
     sec.children.push(s);
     const fold = hasBody && folded(s.id, key);
@@ -186,16 +195,16 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
     if (hasBody && !fold) opened.add(s.id);
     const outer = sec;
     sec = s;
-    lines.push(heading + (fold ? MARK : '')); rows.push({ id: s.id, sec: s, spans, visit });
+    lines.push(heading + (fold ? MARK : '')); rows.push({ id: s.id, sec: s, spans, visit, at });
     if (hasBody && !fold) body();
     sec = outer;
     s.end = lines.length;
   };
   const commitLine = (c: GitCommit) => line(c.hash, `${c.hash} ${shown(c.subject)}`, [[0, c.hash.length, F.HASH]]);
-  const top_ = (key: string, title: string, n: number, body: () => void) => {
+  const top_ = (key: string, title: string, n: number, body: () => void, at?: GitAt) => {
     if (!n) return;
     const heading = `${title} (${n})`;
-    section(key, heading, [[0, heading.length, F.SECTION]], true, body);
+    section(key, heading, [[0, heading.length, F.SECTION]], true, body, undefined, at);
     line('end:' + key, '');
   };
 
@@ -219,7 +228,7 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
     return { text: lab + name, spans: lab ? [[0, f.label.length, F.DIM]] as [number, number, number][] : [] };
   };
   /* FILES of a section, each with its hunks under it */
-  const files = (fs: GitFile[], note: string | null) => () => {
+  const files = (part: GitPart, fs: GitFile[], note: string | null) => () => {
     if (note) line('note', `(${note})`, [[0, note.length + 2, F.DIM]]);
     for (const f of fs) {
       const { text, spans } = fileHeading(f), hunks = f.diff ? f.diff.hunks : [];
@@ -229,18 +238,18 @@ function build(v: GitStatus): { lines: string[]; rows: GitRow[]; top: GitSection
             let n = h.newStart;
             h.lines.forEach((l, j) => {
               const c = l[0];
-              line('l' + j, l, [[0, l.length, c === '+' ? F.ADDED : c === '-' ? F.REMOVED : c === '\\' ? F.DIM : 0]], { path: f.path, line: Math.max(1, n) });
+              line('l' + j, l, [[0, l.length, c === '+' ? F.ADDED : c === '-' ? F.REMOVED : c === '\\' ? F.DIM : 0]], { path: f.path, line: Math.max(1, n) }, { part, file: f, hunk: k, line: j });
               if (c === ' ' || c === '+') n++;
             });
-          }, { path: f.path, line: Math.max(1, h.newStart) });
+          }, { path: f.path, line: Math.max(1, h.newStart) }, { part, file: f, hunk: k });
         });
-      }, { path: f.path, line: 1 });
+      }, { path: f.path, line: 1 }, { part, file: f });
     }
   };
-  top_('untracked', 'Untracked files', m.untracked.length, files(m.untracked, null));
-  top_('unmerged', 'Unmerged paths', m.unmerged.length, files(m.unmerged, null));
-  top_('unstaged', 'Unstaged changes', m.unstaged.length, files(m.unstaged, m.notes.unstaged));
-  top_('staged', 'Staged changes', m.staged.length, files(m.staged, m.notes.staged));
+  top_('untracked', 'Untracked files', m.untracked.length, files('untracked', m.untracked, null), { part: 'untracked', file: null });
+  top_('unmerged', 'Unmerged paths', m.unmerged.length, files('unmerged', m.unmerged, null), { part: 'unmerged', file: null });
+  top_('unstaged', 'Unstaged changes', m.unstaged.length, files('unstaged', m.unstaged, m.notes.unstaged), { part: 'unstaged', file: null });
+  top_('staged', 'Staged changes', m.staged.length, files('staged', m.staged, m.notes.staged), { part: 'staged', file: null });
   top_('stashes', 'Stashes', m.stashes.length, () => m.stashes.forEach(commitLine));
   const up = m.upstream === null ? '' : shown(m.upstream);
   const ahead = (list: GitCommit[], n: number) => () => {
@@ -368,8 +377,113 @@ CMD('git-status-visit', '', '', 'Visit the file at point (RET): on a hunk, at it
   if (p.endsWith('/')) return L.call('dired', [p.slice(0, -1)]);
   return L.call('visit-location', [p, r!.visit!.line]);
 });
+/* ---------- staging ---------- */
+/* What s, u or x acts on: a Visual selection (left first), whose changed lines are picked and which must lie
+   within one hunk, else the row at point (on a hunk's line, the whole hunk). Null where there is nothing. */
+interface GitTarget extends GitAt { lines?: number[] }
+function target(b: EdBuffer): GitTarget | null {
+  const v = statusOf(b);
+  if (EvilCore.stateOf(b) === 'visual') {
+    const [s, e] = EvilCore.visualRange(b, true);
+    EvilCore.setState(b, 'motion');
+    const rows = v.rows.slice(lineNoB(b, s) - 1, lineNoB(b, Math.max(s, e - 1))), first = rows.length ? rows[0].at : undefined;
+    if (!first || first.hunk === undefined || rows.some(r => !r.at || r.at.file !== first.file || r.at.hunk !== first.hunk))
+      signal('user-error', 'The selection must lie within one hunk');
+    return { part: first!.part, file: first!.file, hunk: first!.hunk, lines: rows.filter(r => r.at!.line !== undefined).map(r => r.at!.line!) };
+  }
+  return here(b).row?.at || null;
+}
+
+/* The names of FILES (with WITHORIG, a rename's or copy's old name too) as git's literal pathspecs, so a name
+   with `*` or `:(...)` names that file alone. Names come from status, read lossily: one with U+FFFD (a name that
+   is not UTF-8, or one that holds that character) is never given back to git. */
+function pathspecs(files: GitFile[], withOrig: boolean): string[] {
+  const out: string[] = [];
+  for (const f of files) for (const p of withOrig && f.orig !== null ? [f.orig, f.path] : [f.path]) {
+    if (p.includes('�')) signal('user-error', `${shown(p)}: its name is not UTF-8, so Edwin does not give it back to git; use a terminal`);
+    out.push(':(literal)' + p);
+  }
+  return out;
+}
+
+/* The patch of what T picks of its part's diff (the whole part, a file, a hunk or the selected lines), for
+   `git apply` forwards or, REVERSE, with --reverse. Null when the pick holds no change. */
+function patchOf(v: GitStatus, t: GitTarget, reverse: boolean): string | null {
+  const diffs = v.model.diffs[t.part as 'unstaged' | 'staged'], files = t.file ? [t.file] : v.model[t.part];
+  const picks: VcDiffPick[] = files.map(f => {
+    const k = f.diff ? diffs.indexOf(f.diff) : -1;
+    if (k < 0) signal('user-error', `${shown(f.path)}: its diff is not read (${v.model.notes[t.part as 'unstaged' | 'staged'] || 'it has none'}); use a terminal`);
+    return t.hunk === undefined ? { file: k } : t.lines ? { file: k, hunk: t.hunk, lines: t.lines } : { file: k, hunk: t.hunk };
+  });
+  return VcDiff.patch(diffs, picks, reverse);
+}
+
+/* git ARGS in V's repository, a write, with INPUT on its standard input; signals when it fails. */
+async function git(v: GitStatus, args: string[], input?: string) {
+  const x = await Vc.run(v.repo, args, { timeout: 120000, maxBytes: 1024 * 1024, lossy: true, input });
+  if (x.code !== 0 || x.error || x.timedOut) failed(x, `git ${args[0]}`);
+}
+/* `git apply` of PATCH with FLAGS: the user's apply.whitespace (which `fix` would make change the lines) and
+   apply.ignoreWhitespace (which would match context loosely) do not count. */
+const apply = (v: GitStatus, flags: string[], patch: string) => git(v, ['apply', ...flags, '--whitespace=nowarn', '--no-ignore-whitespace'], patch);
+
+/* What T names, for a message: the selected lines, a hunk, a file or a whole part. */
+function named(v: GitStatus, t: GitTarget): string {
+  const n = t.file ? 1 : v.model[t.part].length, what = t.file ? shown(t.file.orig !== null ? `${t.file.orig} -> ${t.file.path}` : t.file.path) : `${n} file${n === 1 ? '' : 's'}`;
+  if (t.lines) return `the selected lines of ${what}`;
+  if (t.hunk !== undefined) return `this hunk of ${what}`;
+  return t.part === 'untracked' ? `untracked ${what}` : `the ${t.part} changes to ${what}`;
+}
+
+/* Run ACT on the status buffer B's target, then read the repository again, whether it worked or not. */
+async function act(what: string, actOn: (v: GitStatus, t: GitTarget) => Promise<void>) {
+  const b = cur(), v = statusOf(b);
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  const t = target(b);
+  if (!t) { Ed.message(`Nothing to ${what} here`); return false; }
+  let err: unknown = null;
+  try { await actOn(v, t); } catch (e) { err = e; }
+  if (E.buffers.includes(b)) await refresh(b);
+  if (err) throw err;
+  return false;
+}
+
+CMD('git-status-stage', '', '', 'Stage what is at point (s): an untracked, unstaged or conflicted file (a conflict is then marked resolved), a hunk, a whole part of the status on its heading; in Visual state, the changed lines selected within one hunk.', () =>
+  act('stage', async (v, t) => {
+    if (t.part === 'staged') { Ed.message('Already staged'); return; }
+    if (t.hunk === undefined) return git(v, ['add', '--', ...pathspecs(t.file ? [t.file] : v.model[t.part], false)]);
+    const p = patchOf(v, t, false);
+    if (!p) { Ed.message('No change selected'); return; }
+    return apply(v, ['--cached'], p);
+  }));
+CMD('git-status-unstage', '', '', 'Unstage what is at point (u): a staged file (a rename\'s both names), a hunk, all staged changes on their heading; in Visual state, the changed lines selected within one hunk.', () =>
+  act('unstage', async (v, t) => {
+    if (t.part !== 'staged') { Ed.message('Not staged'); return; }
+    if (t.hunk === undefined) return git(v, ['reset', '-q', '--', ...pathspecs(t.file ? [t.file] : v.model.staged, true)]);
+    const p = patchOf(v, t, true);
+    if (!p) { Ed.message('No change selected'); return; }
+    return apply(v, ['--cached', '--reverse'], p);
+  }));
+CMD('git-status-discard', '', '', 'Discard what is at point, after asking (x): delete an untracked file or directory; put an unstaged file, hunk or the selected lines back as the index has them; take a staged one out of both the index and the work tree (refused where the work tree has other changes there). A conflict is not discarded.', () =>
+  act('discard', async (v, t) => {
+    if (t.part === 'unmerged') signal('user-error', 'A conflict is not discarded here: resolve it, then stage it with s');
+    const files = t.file ? [t.file] : v.model[t.part];
+    let run: () => Promise<void>;
+    if (t.part === 'untracked') { const ps = pathspecs(files, false); run = () => git(v, ['clean', '-f', '-d', '-q', '--', ...ps]); }
+    else if (t.part === 'unstaged' && t.hunk === undefined) { const ps = pathspecs(files, false); run = () => git(v, ['checkout', '-q', '--', ...ps]); }
+    else {
+      const p = patchOf(v, t, true);
+      if (!p) { Ed.message('No change selected'); return; }
+      run = () => apply(v, t.part === 'staged' ? ['--reverse', '--index'] : ['--reverse'], p);
+    }
+    const it = named(v, t);
+    if (!await Ed.yesOrNo(`${t.part === 'untracked' ? 'Delete' : 'Discard'} ${it}?`)) { Ed.message('Nothing discarded'); return; }
+    await run();
+  }));
+
 for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-toggle', 'git-status-next-section', 'git-status-previous-section',
-  'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 
 /* ---------- faces ---------- */
