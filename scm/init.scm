@@ -233,6 +233,10 @@
 (for-each (lambda (mode) (evil-define-key 'motion mode "SPC" (lookup-key evil-normal-state-map "SPC")))
           '(special-mode brain-agenda-mode brain-mode dired-mode))
 
+;; M-s g: grep (rg, grep-command) in the buffer's directory into *grep*, as
+;; init.el binds it; M-g n steps through the rows, g r in *grep* runs it again.
+(global-set-key "M-s g" 'grep)
+
 ;; C-c keys: i in Insert sends the buffer to the LLM; c in Normal state opens
 ;; a chat (agent-shell on the desktop, gptel here, as SPC g a).
 (define-key evil-insert-state-map "C-c i" 'gptel-send)

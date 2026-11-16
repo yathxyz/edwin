@@ -1343,6 +1343,78 @@ locations, and the parse stays within budget on 10,000 lines.
   `edit-security`, `edit-lockdown` and `nix build .#edwin` (its install checks included). Not run: the full
   `nix flake check` and the fleet gate.
 
+## grep: rg into *grep*, its rows next-error's (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-grep`, absorbing ui-grep-buffer). `M-s g` runs rg into
+`*grep*` with next-error rows; rg must be on PATH, with a clear message when it is not.
+
+- **`grep`** (src/compile.ts, `M-s g` in scm/init.scm, as init.el binds it): reads `Run grep (like this): ` with
+  `grep-command`, default `rg -nSH --no-heading --column `, and its own history (`grep-command`, not
+  `project-find-regexp`'s), then runs the line as compile does, with `sh` from PATH, in the current buffer's
+  directory (its file's or its listing's; in `*grep*` or `*compilation*` the directory its run started in, so
+  `M-s g` from `*grep*` refines the last search where it ran, as Emacs's `default-directory` there; else the
+  program's), not the project's. `Ed.compile.grep(COMMAND, [DIR])`,
+  `Ed.compile.regrep()` and `Ed.compile.grepping()` are the same from code.
+- **One machinery, two runs.** compile.ts now has two kinds of run, compilation and grep, each with its own
+  buffer, mode, last command and running child: a grep started while a build runs leaves the build alone, and a
+  new grep replaces only a running grep. Everything else is compile's: Ed.proc only (the image never reaches it,
+  R16.15; no grep in a web frame or on edwind, said before the command is read), output streamed in batches,
+  escapes dropped, the line and size bounds, the header (`-*- mode: grep; default-directory: "DIR/" -*-`, `Grep
+  started at TIME`, the command), killing `*grep*` kills its child.
+- **Standard input is /dev/null** for a grep: the child is `sh -c 'exec </dev/null` + newline + COMMAND`. compile
+  closes a pipe, and rg given no path searches a pipe on its standard input instead of the directory, finding
+  nothing; `/dev/null` is no pipe, so rg searches the directory.
+- **`*grep*`** is in `grep-mode`, derived from `compilation-mode`, so `g r` (recompile: the grep again, in its
+  directory), `C-c C-k` (kill-compilation: the grep), `q` and the `SPC` leader keys work there as in
+  `*compilation*`. The status line: `Grep finished with matches found` (exit 0), `Grep finished with no matches
+  found` (exit 1, no failure), `Grep exited abnormally with code N` (2: a bad pattern, a file it cannot read),
+  `Grep interrupted` and the other signals; each with time and duration, in the echo area too.
+- **rg not on PATH.** The shell says so (`sh: line 2: rg: command not found`, or dash's and busybox's `not found`)
+  and exits 127; then the status line and the echo area say `Grep failed: rg is not on PATH (exit 127)`, naming
+  the program the shell did not find (also another one in a pipeline).
+- **The rows.** Each line `FILE:LINE:TEXT` is a row of the error list, owner `"grep N"`, so `M-g n`, `M-g p`,
+  `:cn`, `:cp` and `:cc` step through them as they come; with `--column` (or `--vimgrep`) in the command,
+  `FILE:LINE:COLUMN:TEXT`, the column in rg's unit, UTF-8 bytes (unit `byte`), so a row past a tab or past
+  `ééé` lands on the match. Without it a row has no column (`12:30 needle` is text, not a column). The message is
+  the matched text. Only grep's shape is read, not compile's: a matched line `x.c:3:4: error: …` is a row of its
+  own file, not a place in x.c. FILE is the shortest prefix followed by `:LINE:`; a FILE of digits only is none
+  (rg's `LINE:TEXT` for one file searched without `-H`). Relative names are taken from the directory, `./`
+  dropped. At most 20000 rows, the first. A carriage return is not a terminal's here, as it is in
+  `*compilation*`: rg prints file text raw, so `\r\n` is a newline and a bare `\r` inside a matched line is kept
+  (shown `^M`, as Emacs shows it); the row keeps its `FILE:LINE:` prefix and its column.
+- **Choices and differences from Emacs:** the default command adds `-H` (with one file named rg would print no
+  file name; Emacs appends /dev/null for that) and `--column` (Emacs finds the match column from grep's colour
+  escapes, which are dropped here) to the owner's `rg -nS --no-heading `. `grep-command` is not changed by a run;
+  the minibuffer history keeps earlier lines. The directory is the buffer's, as Emacs's `grep`
+  (`default-directory`); `SPC p g` (project-find-regexp) is the project search. No faces on matches, no
+  `RET` on a row (`compile-goto-error`), no context lines read (`-C`), no `--null` parsing: a file name holding
+  `:DIGITS:` is misread, and a pattern argument spelled `--column` turns columns on. Exit 127 is named only when
+  the shell's own line says which program it did not find. In a file that is not UTF-8, rg's column counts the
+  file's raw bytes while the visited buffer holds the lossily decoded text (each bad byte a U+FFFD, three UTF-8
+  bytes), so a row past such bytes lands early on its line (two characters per bad byte before it): fixing it
+  needs the file's raw bytes, which the buffer no longer has.
+- **Not in it:** `rgrep`/`lgrep`/`zgrep` and the find-based commands, editing the results (ui-grep-edit),
+  `grep-find-ignored-directories` (rg follows .gitignore itself), match faces.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-compile` (39), with ripgrep in the check's
+  sandbox (nix/checks.nix `suiteWith`) over a copy of `test/fixtures/grep`: `M-s g` offers `grep-command`, the
+  typed line runs as `sh -c 'exec </dev/null⏎rg …'` in the buffer's directory with no path given and finds the
+  six rows (exact file, line, byte column, message, unit `byte`), the header and `Grep finished with matches
+  found`, a gcc-shaped matched line giving its own file's row; `M-g n` six times lands on `needle` each time
+  (past two spaces, `12:30 `, a gcc-shaped prefix, `ééé ` and a tab); no match gives `Grep finished with no
+  matches found` and an empty list, `'('` gives exit 2 with rg's error in the buffer, without `--column` no
+  column, without `-H` no row, `./src` resolved; with only `sh` on PATH the buffer has the shell's line and the
+  status and echo area `Grep failed: rg is not on PATH (exit 127)`; a grep run during a compilation leaves it
+  running, `g r` in `*grep*` reruns the grep's argv in its directory, `C-c C-k` there gives `Grep interrupted`,
+  killing `*grep*` kills only its child, recompile reruns the compilation's command; inside `Ed.proc.replay`
+  `Ed.compile.grep`, `regrep` and `(grep …)` spawn nothing, and in a web frame `M-s g` refuses before the
+  minibuffer; a matched line `abc\rneedle cr` in `cr file.txt` is a row with its column and `M-g n` lands on
+  `needle`, a CRLF file's row has no `\r`, a `\r\n` split between two batches is one newline; `M-s g` from
+  `*grep*` with the program's directory elsewhere runs in the last grep's directory; 30000 rows keep the first 20000 with the frame stalled at most 7 ms (bound 250 ms). The 30 earlier
+  compile cases pass unchanged. Also passed: `edwin-typecheck`, `edwin-next-error` (12), `edwin-headless` (21),
+  `edwin-scheme` (38), `edit-security` (21) and `edit-lockdown` (6), since scm/init.scm also runs on edwind;
+  `nix build .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35). Not run: the full
+  `nix flake check`.
+
 ## Opening a file or URL in the desktop's application (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `bib-open-external`, on proc-host-spawn): one way to hand a

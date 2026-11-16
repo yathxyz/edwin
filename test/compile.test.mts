@@ -1,6 +1,6 @@
 // compile (src/compile.ts): a shell command's output streamed into *compilation*, the line that says how it
 // ended, recompile with the same command and directory, kill-compilation, the cap on lines, and the refusals
-// (a web frame, no host.proc, the image's replay). Headless Edwin on the Node host, with the desktop
+// (a web frame, no host.proc, the image's replay); the places errors name; grep (M-s g) with rg into *grep*. Headless Edwin on the Node host, with the desktop
 // program's host.proc stood in by fake-proc.mts (sh, seq, printf and sleep from PATH).
 // One Edwin per process, so the cases run in order.
 // Run: node --test test/compile.test.mts
@@ -521,4 +521,192 @@ test('reading 10,000 lines stays within 20 ms; long lines are read in their firs
   assert.deepEqual(Ed.compile.errors(long, '/w'), []);
   assert.ok(longMs < 100, `1,000 lines of 100,000 characters took ${longMs.toFixed(2)} ms`);
   console.log(`# parse: 10,000 mixed lines ${mixedMs.toFixed(2)} ms (${Ed.compile.errors(mixed, '/w').length} places), handed over ${handMs.toFixed(2)} ms; 1,000 long lines ${longMs.toFixed(2)} ms`);
+});
+
+/* ---- grep with ripgrep (proc-grep) ----
+
+   rg from PATH (the check puts ripgrep in the sandbox) over a copy of test/fixtures/grep. --sort=path where rows
+   from several files are compared: rg walks the tree in parallel, so its order is not fixed otherwise. */
+
+const GREP_FIXTURES = path.join(path.dirname(new URL(import.meta.url).pathname), 'fixtures', 'grep');
+const G = path.join(root, 'grep-tree');
+fs.cpSync(GREP_FIXTURES, G, { recursive: true });
+const gbuf = () => Ed.getBuffer('*grep*');
+const gtext = (): string => gbuf().text;
+const grepShows = async (cmd: string, dir: string | null = G) => { const c = await Ed.compile.grep(cmd, dir); await c.exit; return errorList(); };
+const ROWS: Row[] = [
+  [`${G}/alpha.txt`, 2, 1, 'needle here'],
+  [`${G}/alpha.txt`, 4, 5, 'a needle again'],
+  [`${G}/clock.txt`, 1, 7, '12:30 needle at noon'],
+  [`${G}/fake.txt`, 1, 17, 'x.c:3:4: error: needle in prose'],
+  [`${G}/notes/utf8.md`, 2, 8, 'ééé needle'],
+  [`${G}/src/beta.rs`, 2, 6, 'let needle = 1;'],
+];
+
+test('M-s g reads the command, offering grep-command; rg searches the buffer\'s directory and its rows are the error list', async () => {
+  scratch();
+  assert.equal(L.get('grep-command'), 'rg -nSH --no-heading --column ');
+  host.files = { cwd: root, exists: (p: string) => fs.existsSync(p), resolve: (p: string) => path.resolve(root, p) };
+  E.current.file = path.join(G, 'alpha.txt');
+  try {
+    await keys('M-s g'); await type('--sort=path needle\n');
+    await until(() => !Ed.compile.grepping() && /\n\nGrep /.test(gtext()), 'the status line');
+  } finally { E.current.file = null; delete host.files; }
+  const call = proc.calls[proc.calls.length - 1];
+  assert.deepEqual(call.argv, ['sh', '-c', 'exec </dev/null\nrg -nSH --no-heading --column --sort=path needle'], 'standard input is /dev/null, so rg given no path searches the directory');
+  assert.equal(call.opts.cwd, G, 'the buffer\'s directory');
+  const b = gbuf();
+  assert.equal(b.mode, 'grep-mode'); assert.equal(b.readOnly, true);
+  assert.equal(E.current.name, '*compile-scratch*', 'shown in another window, not selected');
+  const lines = gtext().split('\n');
+  assert.equal(lines[0], `-*- mode: grep; default-directory: "${G}/" -*-`);
+  assert.match(lines[1], /^Grep started at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+  assert.equal(lines[3], 'rg -nSH --no-heading --column --sort=path needle');
+  assert.equal(lines[4], 'alpha.txt:2:1:needle here');
+  assert.match(gtext(), STATUS('Grep finished with matches found'));
+  assert.equal(E.echo, 'Grep finished with matches found');
+  assert.deepEqual(errorList(), ROWS, 'a line in a file shaped like a gcc error is a row of that file, not a place in x.c');
+  assert.deepEqual(units(), ROWS.map(() => 'byte'), 'rg counts columns in UTF-8 bytes');
+  assert.equal(L.get('grep-command'), 'rg -nSH --no-heading --column ', 'grep-command stays as it is');
+  assert.equal(Ed.getBuffer('*compilation*') && Ed.getBuffer('*compilation*').mode, 'compilation-mode', '*compilation* is left alone');
+});
+
+test('M-g n steps through the rows, each landing on the match: past a tab and past non-ASCII text too', async () => {
+  scratch();
+  for (const f of ['alpha.txt', 'clock.txt', 'fake.txt', 'notes/utf8.md', 'src/beta.rs']) Ed.Store.set(path.join(G, f), fs.readFileSync(path.join(G, f), 'utf8'));
+  await grepShows('rg -nSH --no-heading --column --sort=path needle');
+  for (const [file, line] of ROWS) {
+    await keys('M-g n');
+    assert.deepEqual([E.current.file, L.evalText('(line-number-at-pos)'), L.evalText('(buffer-substring (point) (+ (point) 6))')], [file, line, 'needle'], `${file}:${line}`);
+  }
+});
+
+test('no match is no failure; a bad pattern exits abnormally; without --column a row has no column', async () => {
+  scratch();
+  assert.deepEqual(await grepShows('rg -nSH --no-heading --column zzzqqq'), []);
+  assert.match(gtext(), STATUS('Grep finished with no matches found'));
+  assert.equal(E.echo, 'Grep finished with no matches found');
+  await grepShows("rg -nSH --no-heading '('");
+  assert.match(gtext(), STATUS('Grep exited abnormally with code 2'));
+  assert.match(gtext(), /regex parse error/, 'rg\'s error is in the buffer');
+  /* 12:30 is text, not a line and a column, when rg was not asked for columns. */
+  assert.deepEqual(await grepShows('rg -nSH --no-heading needle clock.txt'), [[`${G}/clock.txt`, 1, false, '12:30 needle at noon']]);
+  /* Without -H rg names no file when it searches one: such a line is no row (no file named 1, line 12). */
+  assert.deepEqual(await grepShows('rg -n --no-heading needle clock.txt'), []);
+  assert.match(gtext(), /\n1:12:30 needle at noon\n/);
+  /* A relative path given to rg is taken from the directory, ./ dropped. */
+  assert.deepEqual((await grepShows('rg -nSH --no-heading --column needle ./src')).map(r => r[0]), [`${G}/src/beta.rs`]);
+});
+
+test('a bare \\r in a matched line is a character of it, not a terminal\'s restart; \\r\\n is a newline', async () => {
+  scratch();
+  const d = path.join(root, 'grep-cr'); fs.mkdirSync(d);
+  fs.writeFileSync(path.join(d, 'cr file.txt'), 'abc\rneedle cr\n');
+  fs.writeFileSync(path.join(d, 'crlf.txt'), 'x needle crlf\r\n');
+  const rows = await grepShows('rg -nSH --no-heading --column --sort=path needle', d);
+  assert.deepEqual(rows, [[`${d}/cr file.txt`, 1, 5, 'abc\rneedle cr'], [`${d}/crlf.txt`, 1, 3, 'x needle crlf']]);
+  assert.match(gtext(), /\ncr file\.txt:1:5:abc\rneedle cr\ncrlf\.txt:1:3:x needle crlf\n/, 'the \\r is kept, the \\r\\n is a newline');
+  Ed.Store.set(path.join(d, 'cr file.txt'), 'abc\rneedle cr\n');
+  await keys('M-g n');
+  assert.deepEqual([E.current.file, L.evalText('(buffer-substring (point) (+ (point) 6))')], [path.join(d, 'cr file.txt'), 'needle']);
+  /* A \r\n cut between two batches is one newline still. */
+  const c = await Ed.compile.grep("printf 'a.txt:1:x\\r'; sleep 0.1; printf '\\na.txt:2:y\\r\\n'", d); await c.exit;
+  assert.deepEqual(errorList(), [[`${d}/a.txt`, 1, false, 'x'], [`${d}/a.txt`, 2, false, 'y']]);
+  assert.match(gtext(), /\na\.txt:1:x\na\.txt:2:y\n/);
+});
+
+test('M-s g from *grep* searches the directory that grep ran in, not the program\'s', async () => {
+  scratch();
+  await grepShows('rg -nSH --no-heading --column --sort=path needle');
+  host.files = { cwd: root, exists: (p: string) => fs.existsSync(p), resolve: (p: string) => path.resolve(root, p) };
+  Ed.selectWindow(Ed.windowList().find((w: { buffer: unknown }) => w.buffer === gbuf()));
+  try {
+    const c = await Ed.compile.grep('rg -nSH --no-heading --column --sort=path needle src'); await c.exit;
+  } finally { delete host.files; }
+  assert.equal(proc.calls[proc.calls.length - 1].opts.cwd, G);
+  assert.deepEqual(errorList().map(r => r[0]), [`${G}/src/beta.rs`]);
+});
+
+test('30000 rows keep the first 20000; handing them over does not stall the frame', async () => {
+  scratch();
+  let stall = 0, at = Date.now();
+  const tick = setInterval(() => { const now = Date.now(); stall = Math.max(stall, now - at); at = now; }, 5);
+  let list: Row[];
+  try { list = await grepShows("printf 'a.txt:%s:x\\n' $(seq 1 30000)"); } finally { clearInterval(tick); }
+  assert.ok(stall < 250, `the frame stalled ${stall} ms`);
+  console.log(`# 30000 grep rows: the longest stall ${stall} ms`);
+  assert.equal(list.length, 20000);
+  assert.deepEqual(list[0], [`${G}/a.txt`, 1, false, 'x']);
+  assert.deepEqual(list[19999], [`${G}/a.txt`, 20000, false, 'x']);
+});
+
+test('rg not on PATH: the last line and the echo area say so', async () => {
+  scratch();
+  const bin = path.join(root, 'only-sh'); fs.mkdirSync(bin);
+  const sh = (process.env.PATH || '').split(':').map(d => path.join(d, 'sh')).find(p => fs.existsSync(p))!;
+  fs.symlinkSync(sh, path.join(bin, 'sh'));
+  const saved = process.env.PATH;
+  process.env.PATH = bin;
+  try { await grepShows('rg -nSH --no-heading needle'); } finally { process.env.PATH = saved; }
+  assert.match(gtext(), /not found\n/, 'the shell\'s line is in the buffer');
+  assert.match(gtext(), STATUS('Grep failed: rg is not on PATH \\(exit 127\\)'));
+  assert.equal(E.echo, 'Grep failed: rg is not on PATH (exit 127)');
+});
+
+test('a grep and a compilation run side by side; g r, C-c C-k and killing the buffer act on the one it shows', async () => {
+  scratch();
+  const build = await Ed.compile.start('sleep 10', root);
+  const buildId = proc.calls[proc.calls.length - 1].id;
+  await grepShows('sleep 0.2; rg -nSH --no-heading --column --sort=path needle');
+  assert.equal(Ed.compile.running(), true, 'the grep did not kill the compilation');
+  assert.deepEqual(errorList(), ROWS, 'the error list is the grep\'s, the last one started');
+  /* g r in *grep* runs the grep again, in its directory, and asks nothing: no grep runs. */
+  const n = proc.calls.length;
+  Ed.selectWindow(Ed.windowList().find((w: { buffer: unknown }) => w.buffer === gbuf()));
+  await keys('g r');
+  await until(() => proc.calls.length === n + 1 && !Ed.compile.grepping() && /Grep finished/.test(gtext()), 'the grep again');
+  assert.deepEqual(proc.calls[n].argv, proc.calls[n - 1].argv); assert.equal(proc.calls[n].opts.cwd, G);
+  assert.equal(Ed.compile.running(), true);
+  /* C-c C-k in *grep* interrupts the grep only. */
+  scratch();
+  await Ed.compile.grep('echo started; sleep 10', G);
+  await until(() => gtext().includes('started'), 'the output');
+  Ed.selectWindow(Ed.windowList().find((w: { buffer: unknown }) => w.buffer === gbuf()));
+  await keys('C-c C-k');
+  await until(() => !Ed.compile.grepping(), 'the end');
+  assert.match(gtext(), STATUS('Grep interrupted'));
+  assert.equal(Ed.compile.running(), true);
+  /* Killing *grep* kills its child only. */
+  scratch();
+  await Ed.compile.grep('sleep 10', G);
+  const grepId = proc.calls[proc.calls.length - 1].id;
+  L.call('kill-buffer', [gbuf()]);
+  await until(() => !proc.running().includes(grepId), 'the grep gone');
+  assert.equal(Ed.compile.grepping(), false); assert.equal(gbuf(), null);
+  assert.ok(proc.running().includes(buildId) && Ed.compile.running(), 'the compilation still runs');
+  /* recompile from *compilation* runs the compilation again, not the grep. */
+  const m = proc.calls.length;
+  const c = await Ed.compile.recompile();
+  assert.deepEqual(proc.calls[m].argv, ['sh', '-c', 'sleep 10']);
+  assert.equal(build.kill(), false, 'the old compilation was replaced');
+  c.kill('KILL'); await c.exit;
+  await until(() => proc.running().length === 0, 'no child left');
+});
+
+test('R16.15 and the web frame: no grep starts while the image replays, nor where there are no processes', async () => {
+  scratch();
+  const n = proc.calls.length;
+  await assert.rejects(Ed.proc.replay(() => Ed.compile.grep('rg needle', G)), (e: unknown) => isProcErr(e) && /while the image replays/.test(Ed.errorText(e)));
+  await assert.rejects(Ed.proc.replay(() => Ed.compile.regrep()), isProcErr);
+  let r: unknown;
+  try { r = Ed.proc.replay(() => L.evalText('(grep "rg needle")')); } catch (e) { r = e; }
+  if (r instanceof Promise) await r.catch(() => {});
+  await sleep(20);
+  assert.equal(proc.calls.length, n, 'nothing spawned');
+  Ed.host.kind = 'browser';
+  try {
+    await keys('M-s g');
+    assert.match(E.echo, /No process here: grep runs commands in the desktop program/); assert.equal(E.current.name, '*compile-scratch*', 'no minibuffer');
+  } finally { Ed.host.kind = 'node'; }
+  assert.equal(proc.calls.length, n);
 });

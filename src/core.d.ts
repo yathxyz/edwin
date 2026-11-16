@@ -854,7 +854,7 @@ interface EdBuffer extends SchemeForeign {
   disk?: { stamp: string | null; ok?: string; seen?: string };
   /* a directory listing (dired.ts) */
   dired?: unknown;
-  /* *compilation*: the command it shows and its directory (compile.ts) */
+  /* *compilation* and *grep*: the command it shows and its directory (compile.ts) */
   compile?: { command: string; dir: string | null };
   /* global-auto-revert-mode's look at a buffer that is not a file's (a dired listing): true when it reads B
      again (editor-prims.ts) */
@@ -1665,7 +1665,7 @@ interface EdApi {
 
 /* A compilation: its command, the directory it runs in (null: where the program runs), its buffer, its exit
    (after all of its output is in the buffer), and kill (INT unless told), false once it has ended or another
-   compilation replaced it. */
+   compilation replaced it. A grep is one too, in *grep*. */
 interface EdCompilation {
   command: string;
   dir: string | null;
@@ -1679,6 +1679,11 @@ interface EdCompileApi {
   /* the last command again, in its directory */
   recompile(): Promise<EdCompilation>;
   running(): boolean;
+  /* grep: the shell line COMMAND in DIR (absent: the current buffer's directory) into *grep*, with standard
+     input /dev/null; regrep runs the last again, grepping says whether one runs */
+  grep(command: string, dir?: string | null): Promise<EdCompilation>;
+  regrep(): Promise<EdCompilation>;
+  grepping(): boolean;
   /* the places errors name in TEXT (lines of output), as [FILE LINE COLUMN MESSAGE UNIT], relative names taken from
      DIR; what the error list of a compilation is made of. UNIT is 'screen' (gcc's display columns), 'utf-16'
      (tsc's), 'byte' (nix's UTF-8 bytes) or null (characters). */

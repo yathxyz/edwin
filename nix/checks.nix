@@ -70,9 +70,11 @@ let
     '';
   };
   # A suite run in the stripped tree: `node --test` over FILES, with a writable HOME for the edwind ones.
-  suite =
-    name: files:
-    pkgs.runCommand "edwin-${name}" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+  suite = suiteWith [ ];
+  # The same, with TOOLS on PATH as well.
+  suiteWith =
+    tools: name: files:
+    pkgs.runCommand "edwin-${name}" { nativeBuildInputs = [ pkgs.nodejs ] ++ tools; } ''
       export HOME=$TMPDIR
       node --test ${lib.concatMapStringsSep " " (f: "${edwin}/edwin/test/${f}") files}
       touch $out
@@ -195,8 +197,9 @@ in
   # compile (src/compile.ts) in the headless runtime, with host.proc stood in by test/fake-proc.mts: output
   # streamed into *compilation*, the status line on exit, recompile with the same command and directory,
   # kill-compilation, the line cap, and no compilation in a web frame, with no host.proc or while the image replays;
-  # the error places in each tool's log (test/fixtures/compile) fed to next-error as they come, and the parse budget.
-  edwin-compile = suite "compile" [ "compile.test.mts" ];
+  # the error places in each tool's log (test/fixtures/compile) fed to next-error as they come, and the parse budget;
+  # grep (M-s g) with a real rg over test/fixtures/grep into *grep*, its rows the error list, and rg missing from PATH.
+  edwin-compile = suiteWith [ pkgs.ripgrep ] "compile" [ "compile.test.mts" ];
 
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
   # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's

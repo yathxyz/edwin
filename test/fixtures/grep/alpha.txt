@@ -1,0 +1,4 @@
+first line
+needle here
+no
+  a needle again
