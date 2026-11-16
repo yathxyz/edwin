@@ -1218,6 +1218,39 @@ server/models.mts, with a backend naming a credential by its LoadCredential name
   (shadow stack 15.0% against its 10% limit) and `edit-crash` (R16.5's random SIGKILL run: "the history lost
   acked batches"), both under the load of the parallel build; each passed when run again alone (7.8%; 7 of 7).
 
+## Evil keys per minor mode (done)
+
+Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-evil-minor-maps`; it takes in git-evil-minor-keys). lispy's
+keys and git's conflict and time-machine modes need Evil keys that hold only while a minor mode is on, as
+`evil-define-key` on a minor mode's keymap gives them in Emacs.
+
+- **`evil-define-key`** takes a minor mode as its KEYMAP, by the mode's name (`'zap-mode`), its keymap's name
+  (`'zap-mode-map`) or the keymap itself (`zap-mode-map`), as it took a major mode. The keys go to that mode's
+  map for each state named, operator state included.
+- **Lookup order** (`src/evil-core.ts`, `mapsFor`): for each state the current state searches (Normal: normal then
+  motion; Visual: visual, normal, motion; operator-pending: operator then motion; and so on, unchanged), the maps
+  of the minor modes on in the buffer come first, then the major mode's and its parents', then the state's global
+  map. A minor mode that is off, or on in another buffer only, adds nothing. Operator-pending reads its motion
+  through the same order, so a minor mode's operator and motion keys apply after `d`, `c` or `y`.
+- **Choices:** among several minor modes that are on, the one defined first wins (Emacs: the one first in
+  `minor-mode-map-alist`). As before, a state's global map still comes before the next state's per-mode maps
+  (a global Normal key beats a minor mode's Motion key), which is Evil's order too. A keymap passed by value is
+  found by its name, so a mode whose `:keymap` is a keymap made under another name gets the keys under that
+  name, not the mode's. No `evil-define-minor-mode-key`: `evil-define-key` on the mode does the same.
+- **Not in it:** no `evil-make-overriding-map` or intercept maps; no minor mode uses this yet (lang-lispy-operators,
+  the git conflict and time-machine modes do). Every `evil-define-key` already shipped names a major mode, so no
+  existing key changes precedence. `scm/evil.scm` and `src/stack.ts` needed no change: `evil-snipe-override-mode`
+  is global and rebinds the global Motion map, and j and k under visual-line-mode test the mode in the motion
+  itself; neither is a per-buffer key.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-scheme` with two new tests in
+  `test/scheme-editor.test.mts`: a minor mode's Normal key (bound by name, by keymap name and by keymap value)
+  wins over the major mode's and the global one while the mode is on, and the major mode's or the global one
+  comes back when it is off or in another buffer; a minor mode's operator-state key gives `dQ` its motion while
+  the mode is on, and the global operator key's motion when it is off. Both fail with the old lookup. The
+  suite (38) passed, and so did `edwin-headless` (21), `edwin-typecheck`, `edwin-display` (18), `edit-frame` (23)
+  and `nix build .#edwin` (unit 17, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 31). `nix flake check`:
+  all checks passed (`edwin-dired` 22, `edwin-front` 9, `edwin-brain` 34, `edwin-lockdown` 6, `edwin-security` 18 among them).
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

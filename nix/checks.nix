@@ -83,7 +83,7 @@ in
   edwin-headless = suite "headless" [ "headless.test.mts" ];
 
   # Edwin's Scheme: the language (R4.3-R4.10, R4.31-R4.34), the editor-level forms (hooks, advice,
-  # minor modes, buffer-locals, markers) and the shadow-stack cost bound (R4.34, at most 10%).
+  # minor modes and their Evil keys, buffer-locals, markers) and the shadow-stack cost bound (R4.34, at most 10%).
   edwin-scheme = suite "scheme" [ "scheme*.test.mts" ];
 
   # The evaluator budgets (E2 gate): the shadow stack at most 10% (R4.34) and generator mode at most 3x direct

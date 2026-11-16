@@ -87,26 +87,30 @@ function aux(mode: string, st: string, create?: boolean) {
   if (!m && create) { m = new Ed.Keymap(`${mode}-${st}-state`); E.aux.set(key, m); }
   return m || null;
 }
-H.stateMaps = b => {
-  const st = stateOf(b);
-  if (!st) return [];
-  const out: EdKeymap[] = [];
-  const modes = Ed.modeParents.size ? Ed.modeChain(b.mode) : [b.mode];
-  const add = (s: string) => { for (const m of modes) { const a = aux(m, s, false); if (a) out.push(a); } const g = KM(`evil-${s}-state-map`); if (g) out.push(g); };
-  ({ normal: ['normal', 'motion'], visual: ['visual', 'normal', 'motion'], motion: ['motion'], insert: ['insert'],
-     replace: ['replace', 'insert'], emacs: ['emacs'], operator: ['operator', 'motion'] })[st].forEach(add);
-  return out;
-};
-function opMaps(b: EdBuffer) {
-  const out: EdKeymap[] = [];
-  const modes = Ed.modeParents.size ? Ed.modeChain(b.mode) : [b.mode];
-  for (const s of ['operator', 'motion']) { for (const m of modes) { const a = aux(m, s, false); if (a) out.push(a); } const g = KM(`evil-${s}-state-map`); if (g) out.push(g); }
+/* The modes whose per-state maps apply in B: the minor modes on in B, then the major mode and the
+   modes it derives from. Within each state their maps come before the state's global map. */
+function auxModes(b: EdBuffer) {
+  const out: string[] = [];
+  for (const m of Ed.minorModes.values()) if (Ed.minorOn(b, m)) out.push(m.name);
+  out.push(...(Ed.modeParents.size ? Ed.modeChain(b.mode) : [b.mode]));
   return out;
 }
+const STATE_CHAIN: Record<EdEvilState, string[]> = { normal: ['normal', 'motion'], visual: ['visual', 'normal', 'motion'], motion: ['motion'],
+  insert: ['insert'], replace: ['replace', 'insert'], emacs: ['emacs'], operator: ['operator', 'motion'] };
+function mapsFor(b: EdBuffer, st: EdEvilState) {
+  const out: EdKeymap[] = [], modes = auxModes(b);
+  for (const s of STATE_CHAIN[st]) {
+    for (const m of modes) { const a = aux(m, s, false); if (a) out.push(a); }
+    const g = KM(`evil-${s}-state-map`); if (g) out.push(g);
+  }
+  return out;
+}
+H.stateMaps = b => { const st = stateOf(b); return st ? mapsFor(b, st) : []; };
+const opMaps = (b: EdBuffer) => mapsFor(b, 'operator');
 function modeNameOf(m: SchemeValue) {
   if (m instanceof Sym) return m.name.replace(/-map$/, '');
   if (m instanceof Ed.Keymap && m.name) return m.name.replace(/-map$/, '');
-  signal('wrong-type-argument', 'expected a keymap or major mode, got', m);
+  signal('wrong-type-argument', 'expected a keymap, a major or minor mode, or global, got', m);
 }
 function stateTargets(states: SchemeValue, map: SchemeValue) {
   const sts = states instanceof L.Pair || states === NIL ? arr(states) : [states];
@@ -117,7 +121,7 @@ function stateTargets(states: SchemeValue, map: SchemeValue) {
     return aux(modeNameOf(map)!, name, true);
   });
 }
-D('evil-define-key', 'STATE KEYMAP KEY DEF &rest BINDINGS', 'Bind KEY to DEF in STATE (a state or a list of states) for KEYMAP: a major mode, its keymap, or global.',
+D('evil-define-key', 'STATE KEYMAP KEY DEF &rest BINDINGS', 'Bind KEY to DEF in STATE (a state or a list of states) for KEYMAP: a major or minor mode, its keymap, or global. A minor mode\'s keys apply while it is on and come before the major mode\'s.',
   ([states, map, ...pairs]: SchemeValue[]) => {
     for (const target of stateTargets(states, map))
       for (let k = 0; k + 1 < pairs.length; k += 2) Ed.defineKey(target!, str(pairs[k]), pairs[k + 1]);

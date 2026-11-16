@@ -1105,7 +1105,8 @@ const KM = (name: string) => { const v = L.get(name); return v instanceof Keymap
    global. Edwin Scheme has one binding per name, so the variable cannot share the command's name as in
    Emacs: it is NAME without -mode plus -enabled (electric-pair-mode sets electric-pair-enabled),
    unless define-minor-mode names one with :variable. Its keymap, the
-   variable NAME-map, is searched after the Evil state maps and before the major mode's map. A derived
+   variable NAME-map, is searched after the Evil state maps and before the major mode's map. Its own
+   Evil state maps (evil-define-key on the mode) are among the state maps, before the major mode's. A derived
    major mode records its parent: its keymap inherits the parent's, and Evil's per-mode maps of the
    parent apply to it too. */
 const minorModes = new Map<string, EdMinorMode>();

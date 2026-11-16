@@ -253,6 +253,50 @@ test('define-minor-mode: buffer-local by default, :global, :lighter, keymap betw
   assert.equal(ev('everywhere-enabled'), true);
 });
 
+test('Evil keys per minor mode: a state key wins over the major mode and global ones while the mode is on', async t => {
+  t.after(() => ev(`(evil-define-key 'normal 'global "g z" #f)`));
+  await fresh('text');
+  ev(`(define-minor-mode zap-mode "Zapping.")
+      (define-command (global-z) (interactive) (insert "global"))
+      (define-command (major-z) (interactive) (insert "major"))
+      (define-command (minor-z) (interactive) (insert "minor"))
+      (define-command (minor-v) (interactive) (insert "byvalue"))
+      (evil-define-key 'normal 'global "g z" 'global-z)
+      (evil-define-key 'normal 'text-mode "g z" 'major-z)
+      (evil-define-key 'normal 'zap-mode-map "g z" 'minor-z)
+      (evil-define-key 'normal zap-mode-map "g Z" 'minor-v)
+      (fundamental-mode)`);
+  const key = async (k: string) => { ev('(erase-buffer)'); await ed.type(k); return ed.text(); };
+  assert.equal(await key('gz'), 'global');
+  ev('(zap-mode 1)');
+  assert.equal(await key('gz'), 'minor');
+  assert.equal(await key('gZ'), 'byvalue', 'bound through the keymap value');
+  ev('(text-mode) (zap-mode 1)');
+  assert.equal(await key('gz'), 'minor', 'before the major mode');
+  ev('(zap-mode -1)');
+  assert.equal(await key('gz'), 'major');
+  ev('(fundamental-mode)');
+  assert.equal(await key('gz'), 'global');
+  // Buffer-local: on in one buffer only.
+  ev('(zap-mode 1)');
+  await fresh();
+  assert.equal(await key('gz'), 'global');
+});
+
+test('Evil keys per minor mode: an operator-state key applies after an operator only while the mode is on', async t => {
+  t.after(() => ev(`(evil-define-key 'operator 'global "Q" #f)`));
+  await fresh();
+  ev(`(define-minor-mode reach-mode "Reaching.")
+      (evil-define-key 'operator 'global "Q" 'evil-beginning-of-line)
+      (evil-define-key 'operator 'reach-mode "Q" 'evil-end-of-line)`);
+  const del = async () => { ev('(erase-buffer) (insert "abc def") (goto-char 5)'); await ed.type('dQ'); return ed.text(); };
+  assert.equal(await del(), 'def');
+  ev('(reach-mode 1)');
+  assert.equal(await del(), 'abc ');
+  ev('(reach-mode -1)');
+  assert.equal(await del(), 'def');
+});
+
 test('the five ad hoc toggles are minor modes now', async () => {
   const modes = ed.L.arr(ev('(minor-mode-list)')).map(sym);
   for (const m of ['auto-fill-mode', 'visual-line-mode', 'electric-pair-mode', 'centered-view-mode', 'rainbow-delimiters-mode']) assert.ok(modes.includes(m), m);
