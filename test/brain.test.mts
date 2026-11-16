@@ -6,7 +6,7 @@
 // what only brain knows; a daily is made on disk through edwind. Tasks: edwind reads with the read token and
 // writes with the task token, a task's fields only; the agenda shows the week and every open task; its keys
 // change the task at point against the revision shown, say what brain replaced and what it refused;
-// brain-task-add sends the selection and the note's id.
+// a task is written in a buffer of its own, its fields in the front matter, from a selection and the note's id.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -935,35 +935,122 @@ test('q closes a window made for the agenda, and gives a window the agenda took 
   Ed.deleteOtherWindows();
 });
 
-test('SPC o adds a task with the tags of brain-task-tags: the selection is its body, and the note at point is named by its id alone', async () => {
-  resetTasks();
-  await visit('host.org');
-  await saying('task:8 added', () => answer('SPC o', 'Buy milk'));
-  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Buy milk' } });
-  const w = written.length;
-  await saying('No title', () => answer('SPC o', '  '));
-  assert.equal(written.length, w);
+/* The buffer a task is written in, shown by KEY. */
+const TASK_BUFFER = '*Task*', BLANK = '---\ntitle: \nstate: todo\npriority: \nscheduled: \ndue: \ntags: \n---\n\n';
+const evilState = (b: EdwinCore): string => (globalThis as unknown as { EvilCore: EdwinCore }).EvilCore.stateOf(b);
+async function capture(key = 'SPC o') { await keys(key); await until(() => cur().name === TASK_BUFFER, 'the buffer of the task'); return cur(); }
+const fieldLine = (key: string) => Ed.getBuffer(TASK_BUFFER).text.split('\n').find((l: string) => l.startsWith(key + ':'));
 
-  const b = await visit('alpha.org');
-  b.pt = b.text.indexOf('Under the section.');
-  await keys('V'); await keys('SPC o'); await until(() => E.mini, 'the minibuffer');
-  assert.equal(E.mini.prompt, 'Task: ');
-  L.set('brain-task-tags', 'prv  Home');
-  try { await saying('task:9 added :home:prv:', () => type('Follow this up\n')); } finally { L.set('brain-task-tags', ''); }
-  assert.deepEqual(lastWrite().body, { title: 'Follow this up', tags: ['prv', 'Home'], body: 'Under the section.\n\n[[id:a-section]]' });
-  assert.notEqual((globalThis as unknown as { EvilCore: EdwinCore }).EvilCore.stateOf(b), 'visual', 'the selection is over');
-  b.pt = 0;
-  await saying('task:10 added', () => L.call('brain-task-add', ['From Scheme', 'Its body']));
-  assert.deepEqual(lastWrite().body, { title: 'From Scheme', body: 'Its body' });
-  L.set('brain-task-tags', 'own');
-  try { await assert.rejects(L.call('brain-task-add', ['Private']), /^Error: brain: outside your clearance: own$/); } finally { L.set('brain-task-tags', ''); }
-  assert.equal(TASKS.length, 10);
+test('SPC o writes a task in a buffer of its own: Markdown with its fields in the front matter; C-c C-c adds it, C-c C-k drops it', async () => {
+  resetTasks();
+  const host = await visit('host.org');
+  const b = await capture();
+  assert.equal(b.mode, 'markdown-mode'); assert.equal(L.call('minor-mode-active-p', [L.intern('brain-capture-mode')]), true);
+  assert.equal(b.text, BLANK);
+  assert.equal(evilState(b), 'insert'); assert.equal(b.pt, '---\ntitle: '.length, 'point is where the title goes');
+  assert.equal(Ed.windowList().length, 2, 'the note is still shown');
+  assert.ok(messages().endsWith('C-c C-c adds the task, C-c C-k drops it\n'));
+  await type('Buy milk');
+  await saying('task:8 added', () => keys('C-c C-c'));
+  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/tasks', auth: `Bearer ${TASK_TOKEN}`, session: 'edwind', body: { title: 'Buy milk', state: 'todo' } });
+  assert.equal(Ed.getBuffer(TASK_BUFFER), null, 'the buffer is gone');
+  assert.equal(cur(), host); assert.equal(Ed.windowList().length, 1, 'the windows are as they were');
+
+  // No title: nothing is sent and the buffer stays. C-c C-k drops it.
+  const w = written.length;
+  await capture(); await keys('ESC G'); await type('oIts text');
+  await saying('No title', () => keys('C-c C-c'));
+  assert.equal(cur().name, TASK_BUFFER); assert.equal(cur().text, BLANK + 'Its text\n');
+  await saying('The task is dropped', () => keys('C-c C-k'));
+  assert.equal(written.length, w); assert.equal(Ed.getBuffer(TASK_BUFFER), null);
+  assert.equal(cur(), host); assert.equal(Ed.windowList().length, 1);
+  await saying('No task is being written', () => L.call('brain-capture-finalize', []).catch((e: Error) => Ed.message(e.message)));
 });
 
-test('a in the agenda adds a task, and an agenda that is shown follows a task added from another window', async () => {
+test('a task starts with the tags of brain-task-tags, the selection and the id of the note at point; its keys set its fields', async () => {
+  OrgCore().ORG.now = () => new Date(2026, 10, 10, 9, 0);
+  resetTasks();
+  const note = await visit('alpha.org');
+  note.pt = note.text.indexOf('Under the section.');
+  await keys('V');
+  L.set('brain-task-tags', 'prv  Home');
+  let b: EdwinCore;
+  try { b = await capture(); } finally { L.set('brain-task-tags', ''); }
+  assert.equal(b.text, BLANK.replace('tags: ', 'tags: prv Home') + 'Under the section.\n\n[[id:a-section]]\n');
+  assert.notEqual(evilState(note), 'visual', 'the selection is over');
+  await type('Follow this up');
+  await saying('state: next', () => pick('C-c C-t', 'n'));
+  await saying('priority: A', () => pick('C-c ,', 'a'));
+  await saying('scheduled: 2026-11-18', () => answer('C-c C-s', '2026-11-18'));
+  await saying('due: 2026-11-13T17:00', () => answer('C-c C-d', 'fri 17:00'));
+  await keys('C-c C-q'); await until(() => E.mini, 'the minibuffer');
+  assert.equal(E.mini.prompt, 'Tags: '); assert.equal(E.minibuf.text, 'prv Home');
+  await saying('tags: prv Home work', () => type(' work\n'));
+  assert.equal(b.text, '---\ntitle: Follow this up\nstate: next\npriority: A\nscheduled: 2026-11-18\ndue: 2026-11-13T17:00\ntags: prv Home work\n---\n\nUnder the section.\n\n[[id:a-section]]\n');
+  // #f clears a date, space a priority; a field whose line was deleted is written on a new one.
+  await saying('No scheduled', () => L.call('brain-capture-schedule', [false]));
+  await saying('No priority', () => pick('C-c ,', 'SPC'));
+  assert.equal(fieldLine('scheduled'), 'scheduled: '); assert.equal(fieldLine('priority'), 'priority: ');
+  b.text = b.text.replace('scheduled: \n', '');
+  await saying('scheduled: 2026-11-12T08:30', () => L.call('brain-capture-schedule', ['+2d 8:30']));
+  assert.ok(b.text.includes('tags: prv Home work\nscheduled: 2026-11-12T08:30\n---\n'));
+  await saying('task:8 added :home:prv:work:, scheduled 2026-11-12 08:30, due 2026-11-13 17:00', () => keys('C-c C-c'));
+  assert.deepEqual(lastWrite().body, { title: 'Follow this up', state: 'next', scheduled: '2026-11-12T08:30', due: '2026-11-13T17:00', tags: ['prv', 'Home', 'work'], body: 'Under the section.\n\n[[id:a-section]]' });
+  assert.equal(cur(), note);
+});
+
+test('fields typed by hand are read as the keys write them; a line brain cannot take is said by its number, and the buffer stays', async () => {
+  OrgCore().ORG.now = () => new Date(2026, 10, 10, 9, 0);
+  resetTasks();
+  await visit('host.org');
+  const b = await capture(); await keys('ESC');
+  const refused = async (text: string, said: string) => { b.text = text; await saying(said, () => keys('C-c C-c')); assert.equal(cur(), b); assert.equal(b.text, text); };
+  await refused('---\ntitle: Typed\nstate: Later\n---\n', 'Line 3: Later is not a state (todo, next, waiting, hold, someday, done, cancelled)');
+  await refused('---\ntitle: Typed\n\npriority: D\n---\n', 'Line 4: D is not a priority (A, B or C)');
+  await refused('---\ntitle: Typed\ndue: 2026-11-20 or so\n---\n', 'Line 3: 2026-11-20 or so is not a date');
+  await refused('---\ntitle: Typed\nscheduled: whenever\n---\n', 'Line 3: whenever is not a date');
+  await refused('---\ntitle: Typed\ncolour: red\n---\n', 'Line 3 is not a field of a task (title, state, priority, scheduled, due, tags, recur, waiting_on)');
+  await refused('---\ntitle: Typed\ntitle: Twice\n---\n', 'Line 3: title is there twice');
+  await refused('title: Typed\n', 'The fields of the task are between two lines of ---, the first at the top');
+  await refused('---\ntitle: Typed\n', 'The fields of the task are between two lines of ---, the first at the top');
+  assert.equal(written.length, 0);
+  // What brain refuses is said in its words, and the buffer stays too.
+  await refused('---\ntitle: Private\ntags: own\n---\n', 'brain: outside your clearance: own');
+  assert.equal(written.length, 1); assert.equal(TASKS.length, 7);
+  // SPC o again goes on with the task being written.
+  Ed.selectWindow(Ed.windowList().find((w: EdwinCore) => w.buffer !== b));
+  await saying('A task is being written already: C-c C-c adds the task, C-c C-k drops it', () => keys('SPC o'));
+  assert.equal(cur(), b); assert.equal(b.text, '---\ntitle: Private\ntags: own\n---\n');
+  b.text = '---\ntitle:   Typed by hand  \nstate: WAITING\npriority:b\nscheduled: +2d\ndue: 2026-11-20T17:00\ntags: [x, y]\nrecur: +1w\nwaiting_on: the bank\n---\n\n\nFirst line.\n\n- [ ] a box\n\n';
+  // A second C-c C-c while brain is asked adds nothing.
+  const from = messages().length, first = L.call('brain-capture-finalize', []);
+  await assert.rejects(Promise.resolve(L.call('brain-capture-finalize', [])), /^Error: The task is being added$/);
+  await first;
+  assert.ok(messages().slice(from).includes('task:8 added :x:y:, scheduled 2026-11-12, due 2026-11-20 17:00'));
+  assert.equal(TASKS.length, 8); assert.equal(written.length, 2);
+  assert.deepEqual(lastWrite().body, { title: 'Typed by hand', state: 'waiting', priority: 'B', scheduled: '2026-11-12', due: '2026-11-20T17:00', tags: ['x', 'y'], recur: '+1w', waiting_on: 'the bank', body: 'First line.\n\n- [ ] a box' });
+});
+
+test('brain-task-add adds a task from Scheme with the tags of brain-task-tags, and M-x reads its title', async () => {
+  resetTasks();
+  await visit('host.org');
+  await saying('task:8 added', () => L.call('brain-task-add', ['From Scheme', 'Its body']));
+  assert.deepEqual(lastWrite().body, { title: 'From Scheme', body: 'Its body' });
+  await keys('M-x'); await type('brain-task-add\n'); await until(() => E.mini && E.mini.prompt === 'Task: ', 'the title prompt');
+  L.set('brain-task-tags', 'prv');
+  try { await saying('task:9 added :prv:', () => type('Read in the minibuffer\n')); } finally { L.set('brain-task-tags', ''); }
+  assert.deepEqual(lastWrite().body, { title: 'Read in the minibuffer', tags: ['prv'] });
+  L.set('brain-task-tags', 'own');
+  try { await assert.rejects(L.call('brain-task-add', ['Private']), /^Error: brain: outside your clearance: own$/); } finally { L.set('brain-task-tags', ''); }
+  assert.equal(TASKS.length, 9);
+});
+
+test('a in the agenda writes a task, and an agenda that is shown follows a task added from another window', async () => {
   await showTasks('t');
   onTask(1);
-  await saying('task:8 added', () => answer('a', 'Ring the bank'));
+  await capture('a'); await type('Ring the bank');
+  await saying('task:8 added', () => keys('C-c C-c'));
+  assert.equal(cur(), agenda(), 'the agenda is selected again');
   assert.ok(body().includes('  task:8    TODO Ring the bank'), 'the list shows the new task');
   assert.equal(body()[0], 'Open tasks (7)');
   assert.equal(lineAt(), '  task:1    TODO [#A] Pay the invoice  :prv:  due 2026-11-07', 'point stays on its task');

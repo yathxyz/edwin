@@ -10,7 +10,8 @@
    A note opens as its file, with point on its entry. Anything else opens as a record: a read-only buffer in
    brain-mode, written as Org so its links are links. The backlinks of the note at point are such a buffer too,
    in a side window that follows point. The agenda is a read-only buffer in brain-agenda-mode, a line a task;
-   while a window shows it, it follows brain: a task changed anywhere is in it without r. */
+   while a window shows it, it follows brain: a task changed anywhere is in it without r. A new task is written
+   in a Markdown buffer of its own, its fields in the front matter (brain-task-capture). */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, EC = globalThis.EvilCore;
@@ -568,7 +569,10 @@ CMD('brain-agenda-quit', '', '', 'Leave the agenda: close its window when it was
 });
 CMD('brain-agenda-open', '', '', 'Open the record of the task at point (RET).', async () => { await open(taskAt().id); return false; });
 /* TASK in the commands below is the id of a task the agenda shows, for the task at point when it is not given. */
-CMD('brain-task-state', async () => { const id = taskAt().id; return [STATE_KEYS[await Org.keyOf('State: [t]odo [n]ext [w]aiting [h]old [s]omeday [d]one [c]ancelled ', Object.keys(STATE_KEYS))], id]; },
+const readState = async () => STATE_KEYS[await Org.keyOf('State: [t]odo [n]ext [w]aiting [h]old [s]omeday [d]one [c]ancelled ', Object.keys(STATE_KEYS))];
+/* A priority read as one key: "A", "B" or "C", and false for none. */
+const readPriority = async () => { const k = await Org.keyOf('Priority: [a] [b] [c], space for none ', ['a', 'b', 'c', 'A', 'B', 'C', ' ']); return k === ' ' ? false : k.toUpperCase(); };
+CMD('brain-task-state', async () => { const id = taskAt().id; return [await readState(), id]; },
   'STATE &optional TASK', 'Set the state of the task at point: todo, next, waiting, hold, someday, done or cancelled (t).',
   ([st, id]: SchemeValue[]) => change({ state: given(st, 'state') }, t => taskState(t), id));
 CMD('brain-task-done', '', '', 'Close the task at point as done. A task that repeats moves to its next date instead (x).',
@@ -578,7 +582,7 @@ for (const [name, field, key, prompt] of [['brain-task-schedule', 'scheduled', '
     'WHEN &optional TASK', `Set when the task at point is ${field}: WHEN is a day (2026-10-20) or a day and a time (2026-10-20T10:00), read in the minibuffer, today by default. With WHEN #f, or C-u, it has none (${key}).`,
     ([w, id]: SchemeValue[]) => change({ [field]: orNull(w, 'date') }, t => (prop(t, field) ? `${field} ${prop(t, field).replace('T', ' ')}` : `not ${field}`), id));
 }
-CMD('brain-task-priority', async () => { const id = taskAt().id, k = await Org.keyOf('Priority: [a] [b] [c], space for none ', ['a', 'b', 'c', 'A', 'B', 'C', ' ']); return [k === ' ' ? false : k.toUpperCase(), id]; },
+CMD('brain-task-priority', async () => { const id = taskAt().id; return [await readPriority(), id]; },
   'PRIORITY &optional TASK', 'Set the priority of the task at point: "A", "B" or "C", or #f for none (p).',
   ([pr, id]: SchemeValue[]) => change({ priority: orNull(pr, 'priority') }, t => (prop(t, 'priority') ? `priority ${prop(t, 'priority')}` : 'no priority'), id));
 CMD('brain-task-title', async () => { const t = taskAt(); return [await Ed.readMini('Title: ', oneLine(t.title)), t.id]; },
@@ -595,25 +599,172 @@ CMD('brain-task-tag', async () => { const id = taskAt().id; return [await Ed.rea
     }
     return change({ ...(add.length ? { add_tags: add } : {}), ...(remove.length ? { remove_tags: remove } : {}) }, t => tagText(t.tags) || 'no tags', id);
   });
+/* The tags a new task starts with: those of brain-task-tags. */
+function namedTags(): string[] {
+  const named = L.get('brain-task-tags');
+  if (typeof named !== 'string') signal('user-error', 'brain-task-tags is not a string of tags');
+  return (named as string).split(/\s+/).filter(x => x);
+}
+/* What a new task is about, from where it is asked for: the Visual selection of B, then a link to the note at
+   point when it has an Org id. The note is named by its id alone: a tag may hide its title from those who can
+   read the task. */
+function about(b: EdBuffer) {
+  const id = Org.idAtPoint(b);
+  const sel = EC.stateOf(b) === 'visual' && b.mark !== null ? (([s, e]) => b.rope.slice(s, e).trim())(EC.visualRange(b, true)) : '';
+  return [sel, id ? `[[id:${id}]]` : ''].filter(x => x).join('\n\n');
+}
+const addedText = (t: BrainTask) => `${refOfTask(t)} added${tagText(t.tags) ? ' ' + tagText(t.tags) : ''}${['scheduled', 'due'].map(k => (prop(t, k) ? `, ${k} ${prop(t, k).replace('T', ' ')}` : '')).join('')}`;
 CMD('brain-task-add', async () => {
   /* Before a title is typed for a task that cannot be added. */
   if (!attached()) signal('user-error', NO_EDWIND);
-  const b = cur(), id = Org.idAtPoint(b);
-  const sel = EC.stateOf(b) === 'visual' && b.mark !== null ? (([s, e]) => b.rope.slice(s, e).trim())(EC.visualRange(b, true)) : '';
-  const title = await Ed.readMini('Task: ', '');
-  /* The note is named by its id alone: a tag may hide its title from those who can read the task. */
-  return [title, [sel, id ? `[[id:${id}]]` : ''].filter(x => x).join('\n\n') || false];
-}, 'TITLE &optional BODY', 'Add a task titled TITLE to brain, with the tags of brain-task-tags and the text BODY. Interactively the title is read in the minibuffer, and the body is the Visual selection, then a link to the note at point when it has an Org id (SPC o, a in the agenda).',
+  const body = about(cur());
+  return [await Ed.readMini('Task: ', ''), body || false];
+}, 'TITLE &optional BODY', 'Add a task titled TITLE to brain, with the tags of brain-task-tags and the text BODY. Interactively the title is read in the minibuffer, and the body is the Visual selection, then a link to the note at point when it has an Org id. brain-task-capture (SPC o) writes a task with its other fields.',
   async ([title, body]: SchemeValue[]) => {
-    const named = L.get('brain-task-tags');
-    if (typeof named !== 'string') signal('user-error', 'brain-task-tags is not a string of tags');
-    const tags = (named as string).split(/\s+/).filter(x => x);
+    const tags = namedTags();
     const t = taskOf(await ask('brain-task-add', { title: given(title, 'title'), ...(tags.length ? { tags } : {}), ...(typeof body === 'string' && body.trim() ? { body } : {}) }));
-    Ed.message(await refreshed(`${refOfTask(t)} added${tagText(t.tags) ? ' ' + tagText(t.tags) : ''}`));
+    Ed.message(await refreshed(addedText(t)));
     return false;
   });
+
+/* ---------- writing a task ---------- */
+/* A new task is written in a buffer of its own, *Task*, in markdown-mode: its fields in the front matter, a
+   line each, and its text below. brain-capture-mode is on there, and its keys add the task (C-c C-c), drop it
+   (C-c C-k) and set a field as the agenda's keys do. A field is typed as well as set: a date as org-read-date
+   takes one (fri 17:00, +2d), the tags with spaces between. A field left empty is not sent.
+   CAPTURE.win: the windows as they were before the buffer was shown. SENDING: brain is being asked to add it. */
+const CAPTURE = '*Task*';
+interface Capture { win: EdWinConfig; sending: boolean }
+interface Matter { lines: string[]; close: number; fields: Map<string, { value: string; line: number }> }
+/* The fields a new buffer lists, and after them those it takes when they are written in. */
+const LISTED = ['title', 'state', 'priority', 'scheduled', 'due', 'tags'], FIELDS = [...LISTED, 'recur', 'waiting_on'];
+const STATES = Object.values(STATE_KEYS);
+const CAPTURE_KEYS = 'C-c C-c adds the task, C-c C-k drops it';
+Ed.defineMinorMode({ name: 'brain-capture-mode', lighter: ' Capture', pretty: 'Task capture', doc: 'The keys of a buffer a task is written in (brain-task-capture): C-c C-c adds the task to brain and C-c C-k drops it; C-c C-t sets its state, C-c , its priority, C-c C-s and C-c C-d when it is scheduled and due, C-c C-q its tags. The state is brain-capture-enabled.' });
+function capturing(): EdBuffer {
+  const b = Ed.getBuffer(CAPTURE);
+  if (!b || !b.capture) signal('user-error', 'No task is being written (SPC o writes one)');
+  return b!;
+}
+/* The front matter of B, a line a field. A line that is no field of a task is an error that names it, so
+   nothing typed is left out of the task without a word. */
+function matter(b: EdBuffer): Matter {
+  const lines = b.text.split('\n'), close = lines[0].trim() === '---' ? lines.findIndex((l, i) => i > 0 && l.trim() === '---') : -1;
+  if (close < 0) signal('user-error', 'The fields of the task are between two lines of ---, the first at the top');
+  const fields: Matter['fields'] = new Map();
+  for (let i = 1; i < close; i++) {
+    if (!lines[i].trim()) continue;
+    const m = /^([a-z_]+):(.*)$/.exec(lines[i]);
+    if (!m || !FIELDS.includes(m[1])) signal('user-error', `Line ${i + 1} is not a field of a task (${FIELDS.join(', ')})`);
+    if (fields.has(m![1])) signal('user-error', `Line ${i + 1}: ${m![1]} is there twice`);
+    fields.set(m![1], { value: m![2].trim(), line: i });
+  }
+  return { lines, close, fields };
+}
+/* A day, or a day and a time, as brain takes it: written so already, or as org-read-date reads one. null for
+   what is neither; a text that starts as a full date is not read as that date and the rest dropped. */
+const WHEN = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:\d{2})?)?$/;
+function whenOf(v: string) {
+  if (WHEN.test(v)) return v;
+  if (/^\d{4}-/.test(v) && !/^\d{4}-\d{1,2}-\d{1,2}(\s+\d{1,2}:\d{2})?$/.test(v)) return null;
+  const d = Org.parseDate(v);
+  return d ? Org.strftime(d.time ? '%FT%H:%M' : '%F', d.date) : null;
+}
+/* The value VALUE of the field KEY as brain takes it and as the buffer shows it, or an error that starts with
+   WHERE. Tags may be written as a list ([a, b]), as a note's front matter has them. */
+function fieldValue(key: string, value: string, where = ''): string {
+  const no = (what: string) => signal('user-error', `${where}${value} is not ${what}`);
+  if (key === 'state') { const s = value.toLowerCase(); return STATES.includes(s) ? s : no(`a state (${STATES.join(', ')})`); }
+  if (key === 'priority') { const p = value.toUpperCase(); return /^[ABC]$/.test(p) ? p : no('a priority (A, B or C)'); }
+  if (key === 'scheduled' || key === 'due') return whenOf(value) ?? no('a date (2026-10-20, 2026-10-20T10:00, or as fri 10:00, +2d)');
+  if (key === 'tags') return value.replace(/^\[|\]$/g, '').split(/[\s,]+/).filter(x => x).join(' ');
+  return key === 'title' ? oneLine(value) : value;
+}
+/* What B says of its task, as brain-task-add takes it. */
+function taskFields(b: EdBuffer): Record<string, unknown> {
+  const { lines, close, fields } = matter(b), out: Record<string, unknown> = {};
+  for (const [k, f] of fields) {
+    const v = f.value && fieldValue(k, f.value, `Line ${f.line + 1}: `);
+    if (v) out[k] = k === 'tags' ? v.split(' ') : v;
+  }
+  if (!out.title) signal('user-error', 'No title');
+  const body = lines.slice(close + 1).join('\n').trim();
+  return body ? { ...out, body } : out;
+}
+/* Write VALUE as the field KEY of the task being written, on its line or on a new last line of the front
+   matter; '' leaves the field empty. */
+function setField(key: string, value: string) {
+  const b = capturing(), { lines, close, fields } = matter(b), f = fields.get(key);
+  const at = (n: number) => lines.slice(0, n).reduce((a, l) => a + l.length + 1, 0);
+  if (f) Ed.replaceText(b, at(f.line), at(f.line) + lines[f.line].length, `${key}: ${value}`);
+  else Ed.replaceText(b, at(close), at(close), `${key}: ${value}\n`);
+  Ed.message(value ? `${key}: ${value}` : `No ${key}`);
+  return false;
+}
+/* Leave B: it is killed and the windows are as they were before it was shown. */
+function leaveCapture(b: EdBuffer) {
+  const win = (b.capture as Capture).win;
+  b.capture = undefined;
+  L.call('kill-buffer', [b]);
+  try { Ed.restoreWinConfig(win); } catch (e) { /* the windows are not those any more */ }
+}
+CMD('brain-task-capture', '', '', 'Write a task for brain in a buffer of its own: Markdown, with its title, state, priority, dates and tags in the front matter and its text below. It starts with the tags of brain-task-tags and, as its text, the Visual selection, then a link to the note at point when it has an Org id. C-c C-c adds the task and C-c C-k drops it; one task is written at a time (SPC o, a in the agenda).', () => {
+  /* Before a task is written that cannot be added. */
+  if (!attached()) signal('user-error', NO_EDWIND);
+  const from = cur(), old = Ed.getBuffer(CAPTURE);
+  if (old && old.capture) {
+    const w = Ed.windowFor(old);
+    if (w) Ed.selectWindow(w); else Ed.popToBuffer(old, true);
+    Ed.message(`A task is being written already: ${CAPTURE_KEYS}`);
+    return false;
+  }
+  const tags = namedTags(), text = about(from);
+  if (EC.stateOf(from) === 'visual') EC.setState(from, 'normal');
+  const win = Ed.winConfig(), b = Ed.getBufferCreate(CAPTURE), head = '---\ntitle: ';
+  Ed.switchMajorMode(b, 'markdown-mode');
+  b.text = `${head}\n${LISTED.slice(1).map(k => `${k}: ${k === 'state' ? 'todo' : k === 'tags' ? tags.join(' ') : ''}`).join('\n')}\n---\n\n${text ? text + '\n' : ''}`;
+  b.modified = false; b.undo = []; b.redo = [];
+  b.capture = { win, sending: false } satisfies Capture;
+  Ed.makeLocal(b, 'brain-capture-enabled'); b.locals!.set('brain-capture-enabled', true);
+  Ed.popToBuffer(b, true);
+  b.pt = head.length;
+  if (E.evil && EC.stateOf(b) !== 'insert') EC.enterInsert(b, 1, false);
+  Ed.message(CAPTURE_KEYS);
+  return false;
+});
+CMD('brain-capture-finalize', '', '', 'Add the task being written to brain, and leave its buffer. A field brain cannot take is said with its line, and what brain refuses in its words: the buffer stays as it is (C-c C-c).', async () => {
+  const b = capturing(), c = b.capture as Capture;
+  if (c.sending) signal('user-error', 'The task is being added');
+  const fields = taskFields(b);
+  c.sending = true;
+  let t: BrainTask;
+  try { t = taskOf(await ask('brain-task-add', fields)); } finally { c.sending = false; }
+  leaveCapture(b);
+  Ed.message(await refreshed(addedText(t)));
+  return false;
+});
+CMD('brain-capture-kill', '', '', 'Drop the task being written: nothing is added, and its buffer is left (C-c C-k).', () => {
+  leaveCapture(capturing());
+  Ed.message('The task is dropped');
+  return false;
+});
+CMD('brain-capture-state', async () => { capturing(); return [await readState()]; },
+  'STATE', 'Set the state of the task being written: todo, next, waiting, hold, someday, done or cancelled (C-c C-t).',
+  ([st]: SchemeValue[]) => setField('state', fieldValue('state', given(st, 'state'))));
+CMD('brain-capture-priority', async () => { capturing(); return [await readPriority()]; },
+  'PRIORITY', 'Set the priority of the task being written: "A", "B" or "C", or #f for none (C-c ,).',
+  ([pr]: SchemeValue[]) => setField('priority', pr === false ? '' : fieldValue('priority', given(pr, 'priority'))));
+for (const [name, field, key, prompt] of [['brain-capture-schedule', 'scheduled', 'C-c C-s', 'Schedule on'], ['brain-capture-due', 'due', 'C-c C-d', 'Due on']]) {
+  CMD(name, async () => { capturing(); return [await readWhen(`${prompt} (default today): `)]; },
+    'WHEN', `Set when the task being written is ${field}: WHEN is a day (2026-10-20) or a day and a time (2026-10-20T10:00), read in the minibuffer, today by default. With WHEN #f it has none, as when its line is emptied by hand (${key}).`,
+    ([w]: SchemeValue[]) => setField(field, w === false ? '' : fieldValue(field, given(w, 'date'))));
+}
+CMD('brain-capture-tags', async () => [await Ed.readMini('Tags: ', matter(capturing()).fields.get('tags')?.value ?? '')],
+  'TAGS', 'Set the tags of the task being written: TAGS is words with spaces between, "" for none (C-c C-q).',
+  ([tags]: SchemeValue[]) => setField('tags', fieldValue('tags', typeof tags === 'string' ? tags : '')));
 for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
-  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-tag', 'brain-task-add']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-tag', 'brain-task-add',
+  'brain-task-capture', 'brain-capture-finalize', 'brain-capture-kill', 'brain-capture-state', 'brain-capture-priority', 'brain-capture-schedule', 'brain-capture-due', 'brain-capture-tags']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 globalThis.Brain = { open, noteTitled };
 })();

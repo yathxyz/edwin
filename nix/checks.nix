@@ -210,7 +210,8 @@ in
   # stand-in for brain. The read token is sent and never logged, nor is what was asked; finding, linking and
   # opening a node; the backlinks window; id: and title links; a new note and a daily made on disk through
   # edwind. Tasks are read with the read token and written with the task token, a task's fields only; the
-  # agenda's two views, its keys, what brain replaced and what it refused; a new task from a selection.
+  # agenda's two views, its keys, what brain replaced and what it refused; a new task written in a buffer of its
+  # own, from a selection, with its fields in the front matter.
   edit-brain = suite "brain" [ "brain.test.mts" ];
 
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved

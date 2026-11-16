@@ -622,7 +622,7 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   today, a typed time is kept; `C-u s` and `C-u d` clear the date, so `C-u` is the prefix argument in this
   buffer and not a scroll); `p` sets the priority (`a b c`, space for none); `e` edits the title; `:` changes its
   tags (it reads `Tags (+a -b): `: `+a` or `a` adds the tag `a`, `-b` removes `b`, and the echo area says the
-  tags the task has then; brain refuses a tag that hides and that the token is not cleared for); `a` adds a task; `r` and `g r` ask again; `q` leaves. Each has a command that takes
+  tags the task has then; brain refuses a tag that hides and that the token is not cleared for); `a` writes a new task (below); `r` and `g r` ask again; `q` leaves. Each has a command that takes
   the value as an argument (`brain-task-state`, `-done`, `-schedule`, `-due`, `-priority`, `-title`, `-tag`), and after it, optionally, the id of a task the agenda shows: a key that reads in the minibuffer
   names the task it was pressed on, so the change is made to that one wherever point is when the answer comes.
   For a date or a priority `#f` is none; a value that is neither that nor text is an error and nothing is
@@ -635,11 +635,42 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   When the change was made and the view could not be asked for again, the echo area says both, and the agenda
   takes no further change until `r` has asked again: its lines are of revisions brain has moved on from, and
   closing a repeating task from one would move it on a second time.
-- **`brain-task-add` (`SPC o`, `a` in the agenda)** reads `Task: ` and adds the task with the tags
-  of `brain-task-tags`, a string of tags with spaces between (`""` by default: no tags, a task every client of
-  brain can read). The echo area says `task:N added` and the tags of the task. A Visual selection is its body.
-  When the note at point has an Org id the body ends with `[[id:ORG-ID]]`: the id alone, since a tag may hide
-  the note's title from those who can read the task. An agenda that a window shows is asked for again.
+- **`brain-task-capture` (`SPC o`, `a` in the agenda)** writes a task in a buffer of its own (asked
+  2026-11-16: the minibuffer took a title and nothing else). The buffer is `*Task*` in `markdown-mode`, in a
+  window below, in Insert state on the title:
+
+      ---
+      title: 
+      state: todo
+      priority: 
+      scheduled: 
+      due: 
+      tags: 
+      ---
+
+  The front matter has a field a line, named as brain names them, and the text under it is the task's body.
+  `tags` starts with those of `brain-task-tags`, a string of tags with spaces between (`""` by default: no
+  tags, a task every client of brain can read). A Visual selection is the body, and when the note at point has
+  an Org id the body ends with `[[id:ORG-ID]]`: the id alone, since a tag may hide the note's title from those
+  who can read the task. The minor mode `brain-capture-mode` is on there (`brain-capture-mode-map`, ahead of
+  markdown-mode's keys): `C-c C-c` adds the task (`brain-capture-finalize`) and `C-c C-k` drops it
+  (`brain-capture-kill`); either kills the buffer and puts the windows back as they were. `C-c C-t` sets the
+  state, `C-c ,` the priority, `C-c C-s` and `C-c C-d` when it is scheduled and due, `C-c C-q` the tags, with
+  the agenda's prompts, and each writes its line (`brain-capture-state`, `-priority`, `-schedule`, `-due`,
+  `-tags`, which take the value as an argument; `#f` empties a date or a priority).
+- **What is typed there is read as the keys write it.** A state in any case, a priority `a` to `c`, tags with
+  spaces or commas between or as a list (`[a, b]`), and a date as brain takes one (`2026-11-20`,
+  `2026-11-20T17:00`) or as `org-read-date` reads one (`fri 17:00`, `+2d`), sent as the day it names. `recur`
+  and `waiting_on` are taken when a line names them. A field left empty is not sent, so brain's default
+  stands. Nothing is dropped without a word: a line that is no field of a task, a field twice, a value brain
+  could not take (`Line 3: Later is not a state (…)`), no title, or no front matter is a user error, and so is
+  what brain refuses, in brain's words; the buffer stays as it is. The echo area says `task:N added`, the
+  task's tags and its dates, and an agenda that a window shows is asked for again. One task is written at a
+  time: `SPC o` while one is goes back to its buffer. `C-u` is Evil's in this buffer, so a date is cleared by
+  emptying its line.
+- **`brain-task-add TITLE [BODY]`** adds a task in one call, for Scheme, with the tags of `brain-task-tags`;
+  as a command it reads `Task: ` in the minibuffer and takes the body from the selection and the note at
+  point, as it did on `SPC o` before the buffer.
 - **The agenda follows brain** (added 2026-11-11). A task changed anywhere (the CLI, a phone, an agent,
   another frame) is in an agenda that a window shows, without `r`. The frame calls `brain-tasks-follow ON`
   with true while `*Agenda*` is in a window and with false when it no longer is (looked at after each

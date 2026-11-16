@@ -175,7 +175,7 @@
   "SPC n j j" 'org-journal-new-entry ; desktop only
   "SPC m I" 'org-id-get-create
   "SPC m a" 'brain-agenda
-  "SPC o"   'brain-task-add
+  "SPC o"   'brain-task-capture
   ;; eval
   "SPC m e e" 'eval-last-sexp
   "SPC m e d" 'eval-defun

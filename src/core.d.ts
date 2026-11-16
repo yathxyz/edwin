@@ -863,6 +863,8 @@ interface EdBuffer extends SchemeForeign {
   brain?: unknown;
   agenda?: unknown;
   _balx?: unknown;
+  /* brain.ts: the task being written in the buffer (brain-task-capture) */
+  capture?: unknown;
   /* ai.ts */
   _avail?: unknown;
   gptel?: unknown;
@@ -2089,6 +2091,8 @@ interface OrgApi extends EdModuleExports {
   /* the clock (a test sets it), dates as text, a date and a key read in the minibuffer */
   ORG: { now(): Date };
   strftime(format: string, d: Date): string;
+  /* org-read-date's reading of INPUT, from the day of BASE (now when absent); null for what is no date */
+  parseDate(input: string, base?: Date): { date: Date; time: string | null } | null;
   readDate(prompt: string, def?: string): Promise<{ date: Date; time: string | null }>;
   keyOf(prompt: string, keys: string[]): Promise<string>;
 }

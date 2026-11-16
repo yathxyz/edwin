@@ -38,7 +38,8 @@
       '(("d" "daily" entry "* %<%H:%M> %?"
          :target (file+head "%<%Y-%m-%d>.org" "#+title: %<%Y-%m-%d>\n"))))
 
-;; A task added with brain-task-add (SPC o) carries these tags: a string of them with spaces between.
+;; A task written with brain-task-capture (SPC o) starts with these tags, and one added with brain-task-add
+;; carries them: a string of them with spaces between.
 (define brain-task-tags "")
 
 ;; Agenda and brain buffers are read only and start in Motion state.
@@ -46,6 +47,7 @@
 (define brain-agenda-mode-map (make-sparse-keymap "brain-agenda-mode-map"))
 (define brain-mode-map (make-sparse-keymap "brain-mode-map"))
 (define markdown-mode-map (make-sparse-keymap "markdown-mode-map"))
+(define brain-capture-mode-map (make-sparse-keymap "brain-capture-mode-map"))
 
 ;; TAB cycles the subtree at point, S-TAB the whole buffer, as outline folding in Emacs.
 ;; t stays evil-find-char-to: evil-org's default key themes leave out `todo'; C-c C-t sets the state.
@@ -132,13 +134,23 @@
   "p" 'brain-task-priority
   "e" 'brain-task-title
   ":" 'brain-task-tag
-  "a" 'brain-task-add
+  "a" 'brain-task-capture
   "r" 'brain-agenda-redo
   "g r" 'brain-agenda-redo
   "q" 'brain-agenda-quit)
 (evil-define-key 'motion 'brain-mode
   "RET" 'brain-follow
   "q" 'quit-window)
+
+;; A task being written (brain-task-capture): a Markdown buffer, its fields in the front matter.  The keys
+;; that set a field are Org's for an entry; a minor mode's map comes before markdown-mode's.
+(define-key brain-capture-mode-map "C-c C-c" 'brain-capture-finalize)
+(define-key brain-capture-mode-map "C-c C-k" 'brain-capture-kill)
+(define-key brain-capture-mode-map "C-c C-t" 'brain-capture-state)
+(define-key brain-capture-mode-map "C-c ," 'brain-capture-priority)
+(define-key brain-capture-mode-map "C-c C-s" 'brain-capture-schedule)
+(define-key brain-capture-mode-map "C-c C-d" 'brain-capture-due)
+(define-key brain-capture-mode-map "C-c C-q" 'brain-capture-tags)
 
 ;; markdown-mode (markdown.scm, R10.1-R10.5) builds on these outline keys: it loads here, after Org and
 ;; before init.scm, so the user's init can change both.
