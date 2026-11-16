@@ -646,7 +646,8 @@ export async function install(server: Server): Promise<void> {
   D('current-thread', '', 'The running thread.', () => cur() || false);
   D('thread?', 'x', '#t if X is a thread.', ([x]) => x instanceof Thread);
   D('thread-name', 'thread', 'The name of THREAD.', ([t]) => thr(t, 'thread-name').name);
-  D('thread-id', 'thread', 'The number of THREAD.', ([t]) => thr(t, 'thread-id').id);
+  /* thread-number, not thread-id: (thread-id) is the pool thread's index (src/pool.ts), #f outside a pool thread. */
+  D('thread-number', 'thread', 'The number of THREAD: its id in %thread-info, unique for the life of the server.', ([t]) => thr(t, 'thread-number').id);
   D('thread-state', 'thread', 'One of runnable, running, blocked, suspended, done.', ([t]) => S.intern(thr(t, 'thread-state').state));
   D('thread-alive?', 'thread', '#t while THREAD has not finished.', ([t]) => thr(t, 'thread-alive?').alive);
   D('all-threads', '', 'Every live thread.', () => S.listOf([...sched.threads.values()]));
@@ -668,6 +669,19 @@ export async function install(server: Server): Promise<void> {
     if (r.e instanceof Aborted || r.e instanceof S.Unwind) throw new S.SchemeError('thread-cancelled', `Thread ${t.name} was aborted`, [t]);
     if (r.e instanceof S.SchemeError) { const c = new S.SchemeError('thread-died', `Thread ${t.name}: ${S.errorMessage(r.e)}`, [t]); c.payload = r.e; throw c; }
     throw new S.SchemeError('thread-died', `Thread ${t.name}: ${r.e && r.e.message ? r.e.message : String(r.e)}`, [t]);
+  });
+  /* A future of the worker pool (src/pool.ts: thread-run, future, parallel-map ...) is a thenable; the thread waits
+     for it as for a promise. A timeout leaves the job running: future-cancel stops it. */
+  const isFuture = (x: SchemeValue) => { const P = (globalThis as { EdPool?: { Future: new () => object } }).EdPool; return !!P && x instanceof P.Future; };
+  blocking('future-wait', 'future [timeout]', 'Wait for FUTURE to settle and return its value; its failure is signalled here; TIMEOUT seconds give the timeout condition (the job goes on running).', function* ([f, to]) {
+    if (!isFuture(f)) throw S.typeErr('future', f, 'future-wait');
+    const TIMEOUT = {};
+    /* then runs here, inside the thread's step: a future queued on the main thread (no pool) runs now. */
+    let p: Promise<unknown> = new Promise((res, rej) => { (f as PromiseLike<unknown>).then(res, rej); });
+    if (to !== undefined && to !== false) p = Promise.race([p, sleep(secs(to, 'future-wait') * 1000).then(() => TIMEOUT)]);
+    const r = yield new S.Block(p, S.write(f));
+    if (r === TIMEOUT) throw new S.SchemeError('timeout', `future-wait: ${S.write(f)} did not settle in time`, [f]);
+    return r;
   });
   blocking('thread-yield', '', 'Let other threads and waiting edits run; a blocking point (R4.41).', function* () { return yield new S.Block(Promise.resolve(S.UNSPEC), 'thread-yield'); });
   const sleepG = (who: string) => function* ([s]: SchemeValue[]): SchemeGen { yield new S.Block(sleep(secs(s, who) * 1000), `${who} ${s}`); return S.UNSPEC; };

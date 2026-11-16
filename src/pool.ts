@@ -1062,6 +1062,13 @@ function converter(names: Set<string> | null, meta: PoolCodecMeta): PoolConverte
       if (p.recordType && p.procName) { recordType(p.recordType); return sy(p.procName); }
       throw err('cannot send ' + L.write(p) + ' to a thread: ' + (isGlobal ? 'it is an editor primitive' : 'it has no source'));
     }
+    /* A global procedure passed by value ((thread-run fib 10), (parallel-map fib xs)) goes by its name, as
+       (thread-run 'fib 10) does: global reserves the name first, so a recursive one does not convert itself again.
+       Not while global is converting that very definition (its key is reserved then). */
+    if (p.procName && !converting.has(p) && !defs.has('g:' + p.procName)) {
+      const g = S.globals.get(p.procName);
+      if (g && !isMagic(g) && g.value === p) { global(p.procName); procData = false; return sy(p.procName); }
+    }
     if (converting.has(p)) throw err('cannot ship a procedure that refers to itself through its environment');
     converting.add(p);
     try {
@@ -1612,6 +1619,13 @@ D('future-catch', 'F ON-ERROR', 'Call ON-ERROR with the condition when F fails. 
 D('future-finally', 'F THUNK', 'Call THUNK when F settles either way. Returns F.', ([f, t]: SchemeValue[]) => addHandler(fut(f), { onFinally: t }));
 D('future-progress', 'F ON-PROGRESS', 'Call ON-PROGRESS with each value the job reports with thread-report, before the value. Returns F.', ([f, h]: SchemeValue[]) => { fut(f).progressH.push(h); return f; });
 D('future-value', 'F [DEFAULT]', 'The value of F when it is done, DEFAULT (#f) while it runs; a failure is signalled again. Never waits.', ([f, d]: SchemeValue[]) => { fut(f); if ((f as Future).status === 'done') return (f as Future).value; if ((f as Future).status === 'failed' || (f as Future).status === 'cancelled') throw (f as Future).error; return d === undefined ? false : d; });
+D('future-wait', 'F [TIMEOUT]', 'The value of F, waiting for it to settle; a failure is signalled here. Only an edwind thread can wait (there TIMEOUT seconds give the timeout condition); elsewhere a future still running signals cannot-block: return it from the command, which the command loop awaits, or use future-then.', ([f]: SchemeValue[]) => {
+  fut(f);
+  if ((f as Future).localQueued) runLocalNow(f as Future);
+  if ((f as Future).status === 'done') return (f as Future).value;
+  if ((f as Future).settled) throw (f as Future).error;
+  throw new SchemeError('cannot-block', 'future-wait: cannot wait here for ' + (f as Future).__print() + ': return the future from the command, or use future-then', [f]);
+});
 D('future-error', 'F', 'The condition F failed with, or #f.', ([f]: SchemeValue[]) => fut(f).error || false);
 D('future-versions', 'F', 'An alist ((BUFFER . VERSION) ...) of the buffer mirrors the job of F read.', ([f]: SchemeValue[]) => listOf([...fut(f).versions].map(([id, v]) => new Pair(bufferById(id) || id, v))));
 D('future-cancel', 'F', 'Cancel F: #t if it was queued or running (a running job stops when its thread is restarted). F then fails with kind thread-cancelled.', ([f]: SchemeValue[]) => {
