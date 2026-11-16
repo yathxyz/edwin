@@ -1724,6 +1724,8 @@ interface EdProcResult extends EdProcExit {
 interface EdProcApi {
   /* true where a child can start now: in the desktop program, and not while the image replays */
   available(): boolean;
+  /* why no child can start now (a web frame, a host with none, the image replaying), or null */
+  refusal(): string | null;
   spawn(argv: string[], opts?: EdProcOptions): EdProc;
   run(argv: string[], opts?: EdProcSpawnOptions & { input?: string }): Promise<EdProcResult>;
   /* the environment changes a child run in DIR gets: what direnv exports for an allowed .envrc above it */
@@ -2243,9 +2245,21 @@ interface VcPending {
   comment: string;
   done(msg: string | null): void;
 }
+/* vc.ts: running git and jj. A repository is its program and its root; Vc.start and Vc.run give the child's
+   options but its directory (the root) and environment, which are Vc's. */
+type VcTool = 'git' | 'jj';
+interface VcRepo {
+  vcs: VcTool;
+  root: string;
+}
+type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'>;
 interface VcApi {
   message(opts: VcMessageOptions): Promise<string | null>;
   cleanMessage(text: string, comment: string): string;
+  /* the repository an absolute directory is in (jj first), from the file system; null outside one */
+  repo(dir: string): VcRepo | null;
+  start(r: VcRepo, args: string[], opts?: VcRunOptions): Promise<EdProc>;
+  run(r: VcRepo, args: string[], opts?: VcRunOptions & { input?: string }): Promise<EdProcResult>;
 }
 
 /* ---------- native: desktop Edwin (native/js) ---------- */

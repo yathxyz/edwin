@@ -1878,6 +1878,216 @@ C-c C-c to finish and C-c C-k to abort. It starts `src/vc.ts`, where git and jj 
   `edit-console` 4 and `edit-image` 15 among them: vc.ts and the mode load in edwind too, ex44's public one
   included, and add no server capability).
 
+## Running git and jj (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-runner`, on proc-frame-api and git-message-modes; owner
+decision 12): the one way Edwin runs git and jj. Every later git and jj package (status, stage, commit, log, the
+jj views) starts its children here, never through `Ed.proc` directly.
+
+- **`Vc.repo(dir)`** (src/vc.ts) gives the repository an absolute directory is in, `{vcs, root}`: the nearest
+  directory up from it that holds `.jj` (a jj workspace, colocated or not) or `.git` (a directory, or a worktree's
+  or submodule's file), `.jj` first, so a colocated workspace is jj's and a git repository inside a jj workspace is
+  git's. It reads the file system through `host.files.tree` and runs nothing, so nothing a repository holds can run
+  while it is found; null outside a repository and where the host has no file tree (a web frame, edwind). The
+  package text's "host.vcs" is read as this: no new host surface, the processes stay `host.proc`'s through
+  `Ed.proc`, so its refusals apply unchanged.
+- **`Vc.start(repo, args, opts)`** gives the running child (as `Ed.proc.spawn` does) and **`Vc.run(repo, args,
+  opts)`** its whole output, error and exit. Only `git` and `jj` run; ARGS starts with a subcommand name (so no
+  global option of the caller's comes before or after Vc's); the child runs in the root, with an environment Vc
+  fixes (OPTS can give timeout, maxBytes, lossy, merge, onOut, onErr and input, not cwd or env). The replay
+  refusal is checked before anything that waits (`Ed.proc.refusal()`, new), so a call from the image's replay
+  starts nothing, at once or after awaits in the same turn.
+- **git's hardening.** Every subcommand gets `--no-pager -c core.fsmonitor=false -c core.pager=cat -c
+  diff.external= -c alias.SUB=` (SUB the subcommand: git runs a builtin by its name, but looks any other name up
+  as the repository's `alias.NAME`, a shell command when it starts with `!`; with the alias emptied git refuses
+  the name, `expansion of alias failed`, so a name that is no builtin, a typo or a subcommand an older git
+  lacks, runs nothing), and `-c core.hooksPath=/dev/null` unless it is commit, push or the sequencer (merge, rebase,
+  cherry-pick, revert, am), which keep the repository's hooks; a subcommand named nowhere gets no hooks. Every
+  subcommand is a read unless it is on the write list (commit, push, the sequencer and add, apply, bisect, branch,
+  checkout, checkout-index, clean, clone, fetch, hash-object, init, ls-remote, merge-file, mv, notes, pull,
+  read-tree, remote, reset, restore, rm, stash, submodule, switch, tag, update-index, worktree: they change the
+  work tree, the index, the history or a remote, and keep the repository's drivers, signature programs and
+  transport). A read, a name on no list included (reflog, annotate, format-patch, range-diff, grep, verify-commit),
+  also gets:
+  - `--no-lazy-fetch` (right after `--no-pager`): a partial clone fetches no object it lacks, so a read never runs
+    the remote's transport, its core.sshCommand, `remote.*.uploadpack` or credential helper. git passes it on to the
+    gits it runs (as GIT_NO_LAZY_FETCH). A git too old to know the switch refuses it and runs nothing. `-c
+    protocol.allow=never` stays, but it does not stop such a fetch alone: git gives a repository's
+    `protocol.NAME.allow=always` (ext, ssh) precedence over it from any scope.
+  - `-c log.showSignature=false`, and each signature program the repository's own configuration names
+    (`gpg.program`, `gpg.openpgp.program`, `gpg.ssh.program`, `gpg.x509.program`) set back to the user's (the last
+    value from global, system or command scope; git's `gpg`, `ssh-keygen` or `gpgsm` when none). A format such as
+    `%G?`, `%GS` or `%GK` verifies the commit's signature with the program of its format, which log.showSignature
+    does not cover.
+  - each filter driver the repository's own configuration declares (local and worktree scope, include.path files
+    included) emptied: `-c filter.NAME.clean= -c filter.NAME.smudge= -c filter.NAME.process= -c
+    filter.NAME.required=false`; and each merge driver it declares emptied, `-c merge.NAME.driver=`: `show
+    --remerge-diff`, `log --remerge-diff` or `--diff-merges=remerge`, and `-m` or `--diff-merges=on` under a
+    `log.diffMerges=remerge` (the repository's or the user's), merge a merge commit's parents again, with the
+    driver the `merge` attribute names for each conflicting file. With the driver emptied git fails to run the
+    empty command (`error: cannot run : No such file or directory` in *vc-process*), keeps the file as `remerge
+    CONFLICT`, shows the diff and exits 0. Each diff driver it declares is emptied too, `-c diff.NAME.textconv=
+    -c diff.NAME.command=`: `status -v` prints a diff with the textconv driver and takes no `--no-textconv`. git
+    then fails to run the empty program, so `status -v` in such a repository exits 128 and runs nothing. Drivers
+    and signature programs are read first, in one `git config --show-scope --null --get-regexp
+    '^(filter|merge|diff|gpg)\.'` (a driver's key has three parts; merge's and diff's own settings,
+    merge.conflictStyle, diff.external, two).
+  - after the subcommand: diff, show, log, diff-tree, diff-files and diff-index get `--no-ext-diff --no-textconv
+    --submodule=short`; status, diff, diff-files and diff-index `--ignore-submodules=dirty`; blame and annotate
+    `--no-textconv`. A read with no such switch (`reflog -p`, `range-diff`) is held by the emptied diff drivers:
+    git fails to run the empty textconv program (`reflog -p` exits 128) rather than run the repository's.
+    The submodule switches keep a read out of a submodule's work tree: the git that would look there runs under
+    the submodule's own configuration, and its filter drivers are not the superproject's to empty. On the command
+    line they beat a repository's `submodule.NAME.ignore` and `diff.submodule=diff`. describe has no such switch
+    and reads no diff.ignoreSubmodules, and its `--dirty` and `--broken` compare a submodule's work tree (through
+    its clean filter) when the submodule's commit has not moved, so those two are refused (below); `describe`
+    itself looks at no work tree.
+
+  The environment:
+  GIT_TERMINAL_PROMPT=0, GIT_OPTIONAL_LOCKS=0, GIT_EDITOR=false and GIT_SEQUENCE_EDITOR=false (a repository's
+  sequence.editor beats GIT_EDITOR), GIT_PAGER=cat, no GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE from Edwin's own
+  environment, and LC_MESSAGES=C with LC_ALL and LANGUAGE unset, so git's messages are English.
+- **safe.directory.** Vc never sets it. A repository git refuses as owned by someone else (`detected dubious
+  ownership`, exit 128) is shown as such: the exit rejects with a user-error `git refuses ROOT as unsafe: it
+  belongs to another user (safe.directory)`, said in the echo area too, and nothing is retried.
+- **jj's hardening.** Every subcommand gets `--no-pager --color=never --config ui.diff-formatter=:git` (no external
+  diff tool), JJ_EDITOR=false and GIT_TERMINAL_PROMPT=0. The plan's "fixed templates" are the callers': Vc sets
+  none, and every jj call whose output is parsed (git-status-view, git-jj-log and after) gives its own `-T`, so a
+  user's `templates.*` settings never change what is parsed. A template runs no program. jj 0.45 keeps a
+  repository's settings beside the user's config, out of the repository, but adopts for good a
+  `.jj/repo/config.toml` or `.jj/workspace-config.toml` it finds in the repository with no config id beside it
+  (checked on the pinned jujutsu: it moves the file beside the user's config and runs its diff tool). Vc looks for
+  that first (through a secondary workspace's `.jj/repo` file too) and refuses, running nothing: `jj not run in
+  ROOT: FILE is jj settings the repository brings, which jj would take as yours for good (they may run programs).
+  Look at them, then run jj there once in a terminal to take them`.
+- **Switches that would undo it** are refused before a `--`: `--ext-diff`, `--textconv`, `--paginate`,
+  `--show-signature`, `--submodule`, `--ignore-submodules` and `--recurse-submodules` (git takes the last of a
+  switch given twice, and `ls-files --recurse-submodules` reads inside submodules), and `--dirty` and `--broken`
+  (describe's, which look into a submodule's work tree) for git, and for git any prefix
+  of one of them too (`--textc`, `--ignore-sub=none`, `--dirt`): status, cat-file, ls-files and other subcommands take a
+  long switch by a prefix, so `--text` is refused as well and a caller says `-a`; `--config`, `--config-file`, `--config-toml`, `--color`, `--tool`, and `-R` and
+  `--repository` (another repository than the one looked at) for jj. A caller puts what the user typed (revisions,
+  paths) after a `--`.
+- **Refused subcommands:** `difftool`, `mergetool`, `help`, `instaweb` and `web--browse` start nothing: each runs a
+  program the repository's configuration names (`difftool.NAME.cmd`, `mergetool.NAME.cmd`, `man.NAME.cmd`,
+  `browser.NAME.cmd`) and no setting turns that off. `whatchanged` (deprecated) runs nothing either: git 2.55
+  looks its name up as an alias first, which Vc empties.
+- **`*vc-process*`** logs every child: `$ ` and its whole argv (quoted where a shell would need it), its id and
+  root, then its error output (the first 8 KiB) and how it ended (`exit N`, `killed by SIG`, `timed out`, `stopped:
+  ...`). Nothing from the environment. The buffer is read-only, never modified, keeps no undo and keeps its last
+  256 KiB from a line's start.
+- **`edwin-vc`** (nix/checks.nix) uses the existing `suiteWith` (programs on PATH) to bring nixpkgs' git and jujutsu, so the jj option names tested are those of that jujutsu (0.45.1).
+- **Choices**, each reversible:
+  - Filter drivers are emptied only for read subcommands and only when the repository's own configuration
+    declares them: the user's global ones (git-lfs) stay, and add, commit, checkout and the rest keep the
+    repository's filters, as the owner expects for writes. The cost: in a repository whose own config declares its
+    filter (git-crypt), the read views show what is stored, not the decrypted text; one whose own config declares
+    `filter.lfs.*` (`git lfs install --local`) loses LFS in them, so a pointer file whose time changed shows as
+    modified.
+  - Merge drivers the same way: a repository whose own config declares one gets a plain text merge where a remerge
+    diff would have used it, with git's `cannot run` error line in *vc-process*. Refusing `--remerge-diff` and
+    `--diff-merges` instead would still have left `-m` under a `log.diffMerges=remerge`, and a log view may well
+    pass `-m` or `--diff-merges=first-parent`.
+  - Each read subcommand runs one `git config` first to find those drivers and programs (about 2 ms); nothing is
+    cached, so a config changed between two reads is never missed.
+  - `describe --dirty` and `--broken` are refused rather than made safe: git has no switch that keeps describe out
+    of a submodule's work tree, and `-c submodule.NAME.ignore=all` would need the submodules listed first. A
+    package that wants a dirty mark reads status, which `--ignore-submodules=dirty` covers.
+  - The subcommand is not checked against a list of git's builtins; its alias is emptied instead, so the rule is
+    git's own (a builtin runs, anything else is refused) and holds for a subcommand this git lacks. A `git-NAME`
+    program on PATH or in git's exec path still runs for a non-builtin NAME: those are the user's programs, not
+    the repository's.
+  - A repository's own signature program is replaced, not refused: the read views still show a signature's status,
+    checked by the user's program.
+  - Submodules show in the read views by their commit only, unlike magit: a submodule whose work tree has changes
+    but whose commit has not moved shows as unchanged, and a moved one as `Subproject commit` lines, not as the
+    diff inside it. Looking inside would run a git under the submodule's configuration.
+  - In a partial clone a read of an object the clone lacks fails (git's `missing blob` error, in *vc-process*);
+    a fetch (git-remote) or a write that fetches brings it.
+  - A jj repository's own settings are refused, not overridden key by key: jj would keep them for good, and a
+    setting such as a signing program would run on the next describe whatever Vc overrides. The plan allowed a
+    prompt; a refusal is stricter and simpler, and a question asked from outside a running command (a refresh, a
+    timer, two jj calls at once) would contend with the command loop for the next key. The user takes the settings
+    by running jj there once in a terminal; Vc then runs, and its `ui.diff-formatter=:git` still holds.
+  - Output is UTF-8 as Ed.proc gives it (a child whose output is not is stopped) unless the caller passes `lossy`:
+    the views (git-status-view, git-log-show) choose for their own commands; a patch built from a diff must not be
+    lossy.
+- **Not in it:** no command uses the runner yet (git-status-view is the first); no status view, so no
+  desktop-only stub goes. `git stash show -p` is a write here (stash is on the write list, by its other
+  subcommands) and so runs the repository's textconv driver: a package that shows a stash runs `diff` or `show`
+  on it instead. `range-diff` and `format-patch` get no `--no-ext-diff`/`--no-textconv`/submodule switches (a
+  package that runs them adds them; the emptied drivers hold meanwhile). `--output=FILE` on diff, log and show is
+  not refused: a caller's switch, not the repository's. jj's own git calls (`jj git fetch`, `push`) run git
+  under the repository's git config: git-jj-remote decides their hardening. No version floor for git or jj but
+  that git knows `--no-lazy-fetch` (one that does not refuses every read).
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (test/vc.test.mts, 20 passed: the 7 of the
+  message buffer and 13 of the runner): Vc.repo from a subdirectory, a colocated jj workspace found as jj, a git
+  repository inside a jj workspace, a worktree's .git file, none outside one or without a file tree; git status
+  (porcelain v2) and jj status with the exact argv (`alias.status=` in it), root and environment, `--no-lazy-fetch`, the driver and signature query first, the diff
+  and submodule switches after the subcommand, a jj fixed template, Vc.start's running child; hg, sh, a relative root, a global
+  option as the subcommand, `--ext-diff`, `--textconv`, `--ignore-submodules(=none)`, `--submodule=diff`,
+  `--recurse-submodules`, describe's `--dirty`, `--dirty=*` and `--broken`, the prefixes `--ignore-sub=none`, `--recurse`, `--textc`, `--text`, `--show-sig` and `--dirt`, jj's `--config=`, `--tool`, `-R`, `-RPATH` and
+  `--repository=` refused with no child started, `--ext-diff` after `--` taken as a path; a hostile git fixture
+  whose .git/config names marker scripts as core.fsmonitor, core.pager, diff.external, diff.evil.command and
+  textconv, filter.evil.clean, smudge and process, gpg.program (log.showSignature on) and, through include.path,
+  filter.inc.clean: plain git on it runs fsmonitor, the diff command, textconv, the process filter and the included
+  clean filter (the control), and status, diff, log -p and show through Vc exit 0 and run none, the diff still
+  shown; the pager on a terminal: plain git log and show under util-linux `script` run core.pager (the control),
+  the argv and environment Vc gave log and show, run again under `script`, run nothing of the repository's
+  (through Vc itself git writes to a pipe and starts no pager either way); post-checkout runs for plain checkout
+  and not through Vc, pre-commit runs for commit through Vc; signature programs: three commits with an OpenPGP,
+  an SSH and an x509 signature header and the repository's gpg.program, gpg.ssh.program and gpg.x509.program as
+  marker scripts: plain `git log --format=%G?` runs each format's and plain `git log` (log.showSignature) the
+  OpenPGP one (the control), and through Vc `%G?` for each, log and show run none; with a global gpg.program the
+  read runs the user's program and the argv sets all four keys back; a `--filter=blob:none` clone whose origin is
+  `ext::sh -c touch% MARKER` with `protocol.ext.allow=always`: plain git show HEAD~1 runs it (the control), and
+  show, log -p, diff HEAD~1 HEAD and cat-file through Vc do not; a superproject whose submodule's own config sets
+  a marker clean filter and textconv: with the submodule's file changed and its commit in place, plain `describe
+  --dirty` and `--broken` run the clean filter (the control), through Vc both are refused with no child and
+  `describe --tags` runs nothing and gives the tag; then the submodule moved on a commit and changed again,
+  diff.submodule=diff: plain status runs the clean filter (the control), status, diff, diff-files -p, diff-index
+  -p, log -p and show through Vc run nothing, status shows the submodule's new commit and diff its `Subproject
+  commit` lines; a repository with a merge commit whose parents conflict on a file with `merge=evil`, and
+  merge.evil.driver a marker script: plain `show --remerge-diff`, and plain `log -p -m -1` once
+  log.diffMerges=remerge is set, run the driver (the control), and `show --remerge-diff`, `log -p --remerge-diff
+  -1`, `log -p --diff-merges=remerge -1`, `log -p -m -1` and `show -m` through Vc exit 0, run nothing, show the
+  `remerge CONFLICT` line and carry `merge.evil.driver=`; a repository whose config sets shell aliases `zz`, `st`
+  and `status` to marker scripts: plain `git zz` and `git st` run them (the control), through Vc `zz` and `st`
+  fail with git's `expansion of alias failed`, running nothing, and status is git's own. Run against the code
+  before the review fixes, the signature, partial-clone, submodule, describe, merge-driver and alias cases fail
+  (the pager case passes there too: the hardening it proves was already in place); a  hostile jj fixture with a planted .jj/repo/config.toml (pager and diff-formatter scripts): plain jj on a copy
+  adopts it and runs the diff tool (the control), Vc refuses it from the workspace, from a secondary workspace and
+  for a planted .jj/workspace-config.toml, starting nothing and leaving the file where it was; once plain jj has
+  taken it, status, diff, log -p and show through Vc run no tool of it and diff is git's format; an unsafe
+  repository (GIT_TEST_ASSUME_DIFFERENT_OWNER) refused as unsafe with one status, no retry, no safe.directory, the
+  message in the echo area and git's in *vc-process* (the suite sets a German LC_ALL, but the sandbox likely has no
+  German locale data, so this shows the environment Vc sets more than locale independence); under
+  Ed.proc.replay, Vc.run of git and jj, Vc.start of commit and a run after two awaits all refused with no child,
+  and without host.proc refused; *vc-process*'s argv, id, root, error output and exit, shell quoting, read-only
+  with no undo, and kept to 256 KiB from a line's start after 30 runs of 10,000-character arguments.
+  `edwin-typecheck`, `edwin-proc` (6), `edit-lockdown` (6) and `edit-security` (21) passed, re-run after the review fixes.
+  After the third review's fix (diff drivers emptied; a `status -v` case in the hostile-repository test, whose
+  control runs the textconv driver): `edwin-vc` (20) and `nix flake check` passed, every check (`nix build .#edwin`'s
+  GUI test failed once at Xvfb startup, then passed on rerun).
+  After the fourth review: the submodule test's controls now compare the file's content every time. They had
+  failed about one run in eight: the changed file's size differed from its index entry's, so plain git called it
+  changed unread and ran the clean filter only when the entry was racily clean. A new case covers reads on no list:
+  plain `reflog -p` and `annotate` run the textconv driver, and through Vc they run nothing. A name on no list is a
+  read and `add` is a write. Plain `difftool -y`, `difftool HEAD~1 -- a.txt`, `mergetool` (a conflicted merge)
+  and `help log` run the repository's tool, man viewer and merge tool. Through Vc, those and `instaweb` and
+  `web--browse` are refused with no child started. That case fails against the code before this fix.
+  `node --test test/vc.test.mts` passed 60 of 60 runs (21 tests), and the superproject case alone 100 of 100,
+  where it had failed 4 of 30 before the fix. `edwin-vc` passed on one build and five `--rebuild` runs, and
+  `edwin-typecheck` passed. `nix flake check` failed once, only in `nix build .#edwin`'s gui test (Xvfb did not
+  start, so edwin-daemon failed with it), and passed on its rerun.
+  Before the review fixes: `nix build .#edwin`: unit tests 22 passed, `tests/gui.rs` 5 passed
+  and 1 ignored, `tests/terminal.rs` 35 passed. `nix flake check --keep-going`: every check passed but
+  `edwin-bench`, which failed on the shadow-stack budget (19.4% against 10%) while edwin-crash and `nix build
+  .#edwin` ran beside it; run again alone it passed (8.6%, generator mode 1.17x). This package does not touch the
+  evaluator. Among the passes: `edit-lockdown` 6, `edit-security` 21, `edit-frame` 24, `edit-image` 15,
+  `edit-console` 4 (vc.ts loads in edwind, ex44's public one included, where there is no host.proc and no file
+  tree: Vc.repo gives null and Vc.start refuses, so no server capability is added).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

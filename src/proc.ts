@@ -196,6 +196,6 @@ function openUrl(target: string, opts: { confirmed?: boolean } = {}): string | n
   return Ed.host.openUrl(target, opts.confirmed === true);
 }
 
-Ed.proc = { available: () => refusal() === null, spawn, run, envFor, replay };
+Ed.proc = { available: () => refusal() === null, refusal, spawn, run, envFor, replay };
 Ed.openUrl = openUrl;
 })();
