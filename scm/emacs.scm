@@ -460,6 +460,13 @@ vc-message-summary-max-length and a second line that is not blank are shown, and
 (define-key vc-message-mode-map "C-c C-c" 'vc-message-finish)
 (define-key vc-message-mode-map "C-c C-k" 'vc-message-abort)
 
+;; *grep* (src/compile.ts), out of Evil and in Emacs state: C-c C-p makes it editable once its grep has ended;
+;; then C-c C-c or C-x C-s write its rows, C-c C-k gives them up
+(define-key grep-mode-map "C-c C-p" 'grep-change-to-grep-edit-mode)
+(define-key grep-edit-mode-map "C-c C-c" 'grep-edit-finish)
+(define-key grep-edit-mode-map "C-x C-s" 'grep-edit-finish)
+(define-key grep-edit-mode-map "C-c C-k" 'grep-edit-abort)
+
 ;; The minibuffer
 (define-key minibuffer-local-map "RET" 'exit-minibuffer)
 (define-key minibuffer-local-map "C-j" 'exit-minibuffer)

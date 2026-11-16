@@ -1515,6 +1515,17 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "g r" 'recompile
   "C-c C-k" 'kill-compilation)
 
+;; *grep* can be edited once its grep has ended, as wgrep (C-c C-p) does it: C-c C-c,
+;; C-x C-s or ZZ write the changed rows to their files, C-c C-k or ZQ give the edits up.
+(evil-define-key 'motion 'grep-mode "C-c C-p" 'grep-change-to-grep-edit-mode)
+(evil-define-key '(normal insert visual) 'grep-edit-mode
+  "C-c C-c" 'grep-edit-finish
+  "C-x C-s" 'grep-edit-finish
+  "C-c C-k" 'grep-edit-abort)
+(evil-define-key 'normal 'grep-edit-mode
+  "Z Z" 'grep-edit-finish
+  "Z Q" 'grep-edit-abort)
+
 ;; Surround, snipe and comments take s, S and gc from the default bindings above.
 (define-key evil-normal-state-map "s" 'evil-snipe-s)
 (define-key evil-normal-state-map "S" 'evil-snipe-S)

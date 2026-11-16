@@ -19,7 +19,13 @@
    grep (M-s g) is the same with its own buffer, *grep*, and its own run: a shell line (rg by default) run in the
    buffer's directory, its rows FILE:LINE:[COLUMN:]TEXT the error list. A grep and a compilation run side by side,
    and neither kills the other. The shell's standard input is /dev/null, not the closed pipe compile has, since
-   rg given no path searches a pipe on its standard input instead of the directory. */
+   rg given no path searches a pipe on its standard input instead of the directory.
+
+   Once a grep has ended, *grep* can be edited (grep-edit-mode, C-c C-p): the text after each row's
+   FILE:LINE:[COLUMN:] is that line of its file, and C-c C-c writes the changed lines back, one whole write per
+   file. A file is written only when it is as the search saw it: its stamp the one taken when its first row came
+   (where the host gives stamps), and each of its rows' lines still the text rg printed; else nothing of it is
+   written and the echo area says why. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -44,7 +50,7 @@ Ed.modeParents.set('grep-mode', 'compilation-mode');
    and what its exit status means. */
 interface Kind { buffer: string; mode: string; word: string; label: string; owner: string; read: Reader; restarts: boolean; ending(x: EdProcExit, r: Run): string }
 /* The run of a kind its buffer shows now, or null. gen tells its events from those of a run it replaced. */
-interface Run { kind: Kind; gen: number; command: string; dir: string | null; buffer: EdBuffer; proc: EdProc | null; started: number; head: number; lines: number; cut: boolean; pending: string; carry: string; timer: ReturnType<typeof setTimeout> | null; ended: boolean; parse: Parse; owner: string }
+interface Run { kind: Kind; gen: number; command: string; dir: string | null; buffer: EdBuffer; proc: EdProc | null; started: number; head: number; lines: number; cut: boolean; pending: string; carry: string; timer: ReturnType<typeof setTimeout> | null; ended: boolean; parse: Parse; owner: string; stamps: Map<string, string | null> }
 const runs = new Map<Kind, Run>();
 let gens = 0;
 /* The last command of each kind and its directory, for recompile. */
@@ -255,6 +261,8 @@ function flush(r: Run, final = false) {
   const { text, restart } = clean(r, r.pending, final); r.pending = '';
   if (!live(r)) return;
   const found = scan(r.parse, text, restart, final);
+  /* A row's file is stamped as its first row comes, as close to rg's read of it as the output lets. */
+  if (r.kind === GREP_KIND && canStamp()) for (const [f] of found) if (!r.stamps.has(f)) r.stamps.set(f, stampOf(f));
   if (text || restart) output(r, text, restart);
   /* After the output is in, so a refused hand-over loses none of it. */
   if (found.length) { try { L.call('next-error-add-to-list!', [r.owner, toList(found)]); } catch (e) { Ed.reportError(e); } }
@@ -323,6 +331,9 @@ function finish(r: Run, x: EdProcExit) {
   if (!live(r)) return;
   const b = r.buffer, now = Date.now(), why = r.kind.ending(x, r);
   const out = b.rope.length && b.rope.at(b.rope.length - 1) !== '\n' ? '\n' : '';
+  /* The rows as line numbers (from 0), which an edit of a row's text leaves as they are: the line count of *grep*
+     cannot change while it is edited. */
+  if (r.kind === GREP_KIND) { const from = countLines(b.rope.slice(0, r.head)); b.grepRows = { from, to: from + r.lines + (out ? 1 : 0), columns: r.parse.columns, dir: r.dir, stamps: r.stamps }; }
   append(b, `${out}\n${why} at ${stamp(now)}, duration ${((now - r.started) / 1000).toFixed(2)} s${x.error ? ` (${x.error})` : ''}\n`);
   Ed.message(why);
   Ed.scheduleRender();
@@ -349,12 +360,13 @@ async function start(kind: Kind, command: string, dir?: string | null): Promise<
   /* From here to the spawn nothing waits. */
   stop(kind, 'KILL');
   const b = Ed.getBufferCreate(kind.buffer);
+  editDone(b); delete b.grepRows;
   b.mode = kind.mode; b.readOnly = true; b.evilState = 'motion';
   const header = `-*- mode: ${kind.word}; default-directory: ${JSON.stringify(where ? abbr(where).replace(/\/?$/, '/') : './')} -*-\n${kind.label} started at ${stamp(Date.now())}\n\n${command}\n`;
   b.text = header; b.pt = 0; b.modified = false; b.undo = []; b.redo = []; Ed.forgetLog(b);
   b.compile = { command, dir: where };
   const grep = kind === GREP_KIND;
-  const r: Run = { kind, gen: ++gens, command, dir: where, buffer: b, proc: null, started: Date.now(), head: header.length, lines: 0, cut: false, pending: '', carry: '', timer: null, ended: false, parse: newParse(where, kind.read, grep && GREP_COLUMNS.test(command)), owner: `${kind.owner} ${gens}` };
+  const r: Run = { kind, gen: ++gens, command, dir: where, buffer: b, proc: null, started: Date.now(), head: header.length, lines: 0, cut: false, pending: '', carry: '', timer: null, ended: false, parse: newParse(where, kind.read, grep && GREP_COLUMNS.test(command)), owner: `${kind.owner} ${gens}`, stamps: new Map() };
   let settle: (x: EdProcExit) => void;
   const exit = new Promise<EdProcExit>(res => { settle = res; });
   let p: EdProc;
@@ -392,6 +404,10 @@ const running = (kind: Kind) => { const r = runs.get(kind); return !!(r && !r.en
 /* A running compilation or grep is killed when asked (yes), else the command stops there. */
 async function confirmKill(kind: Kind) {
   if (running(kind) && !await Ed.yesOrNo(`A ${kind.word} process is running; kill it?`)) signal('user-error', `A ${kind.word} is running in ${kind.buffer}`);
+  /* A new grep starts *grep* again: edits not yet written go only when the user says so. */
+  const g = kind === GREP_KIND ? Ed.getBuffer(kind.buffer) : null;
+  if (g && g.grepEdit && g.grepEdit.writing) signal('user-error', WRITING);
+  if (g && g.grepEdit && g.modified && !await Ed.yesOrNo(`${kind.buffer} has edits not written to their files; discard them?`)) signal('user-error', `The edits in ${kind.buffer} are kept: C-c C-c writes them, C-c C-k gives them up`);
 }
 /* No child where none can start: said before the command is read. */
 function needProc(what: string) { if (!Ed.proc.available()) signal('process-error', `No process here: ${what} runs commands in the desktop program (edwin, edwinclient)`); }
@@ -421,12 +437,206 @@ CMD('kill-compilation', '', '', 'Interrupt the running compilation (C-c C-k in *
 });
 CMD('compilation-mode', '', '', 'Switch the current buffer to Compilation mode.', () => Ed.switchMajorMode(cur(), 'compilation-mode'));
 CMD('grep-mode', '', '', 'Switch the current buffer to Grep mode.', () => Ed.switchMajorMode(cur(), 'grep-mode'));
+/* grep-mode's own keys, outside Evil and in Emacs state (scm/emacs.scm binds C-c C-p there). */
+L.set('grep-mode-map', new Ed.Keymap('grep-mode-map'));
 /* Killing *compilation* or *grep* kills its child: none is left behind. */
 D('compilation--kill-buffer', '', 'Kill the compilation or grep of the current buffer when it shows one.', () => {
   for (const [kind, r] of runs) if (r.buffer === cur()) stop(kind, 'KILL');
   return false;
 });
 L.addHook('kill-buffer-hook', intern('compilation--kill-buffer'));
+
+/* ---- Editing *grep* (grep-edit-mode) ----
+
+   C-c C-p in *grep*, once its grep has ended, makes the buffer editable; C-c C-c (C-x C-s, ZZ) writes each
+   changed row to its file and C-c C-k (ZQ) gives the edits up. A row is a line FILE:LINE:[COLUMN:]TEXT of the
+   output, read as the error list reads it, but whole (not cut at SCAN, nor trimmed); its TEXT is that line of
+   FILE as rg printed it. Only the text after a row's prefix is written. A changed line that is no row (the
+   command line, which holds the pattern a wide :s changes too) is put back; a row whose prefix changed refuses
+   its file; lines added or taken away refuse the whole write, and nothing is written.
+
+   A file is written in one write (the native host's is atomic: a file renamed over it), and only when
+   - its stamp, before and after it is read, is the one taken during the search (a file past the error list's
+     MAX_ERRORS rows is stamped when the editing begins), where the host gives stamps;
+   - every row of it still holds, on its line, the text the search found (a CRLF line's \r aside);
+   - no buffer visiting it has unsaved changes, and it is not edwind's;
+   - none of its rows' prefixes changed, and rows of one line (rg --vimgrep gives one per match) were not
+     changed to different texts.
+   Otherwise nothing of that file is written, the others are, and the echo area names each file left and why.
+   The editing then goes on with the written rows taken as the search's, so a second C-c C-c writes the rest once
+   their files are right, and C-c C-k gives back the refused rows' text. A buffer visiting a written file, not
+   modified, takes its new text through the line diff, as a revert would. */
+const EDIT_VAR = 'grep-edit-enabled';
+/* A C-c C-c's writes run in slices of this many ms, one per turn of the event loop (a background slice's). */
+const WRITE_SLICE_MS = 5;
+const WRITING = 'The rows of *grep* are being written: wait for it to end';
+const canStamp = () => !!(Ed.host.files && Ed.host.files.stamp);
+function stampOf(f: string) { try { return Ed.host.files!.stamp!(f); } catch (e) { return null; } }
+function editMode(b: EdBuffer, on: boolean) { Ed.makeLocal(b, EDIT_VAR); b.locals!.set(EDIT_VAR, on); }
+/* Back to a read-only *grep*, its text as it is now. */
+function editDone(b: EdBuffer) {
+  if (!b.grepEdit) return;
+  delete b.grepEdit; editMode(b, false);
+  b.readOnly = true; if (b.evilState !== 'emacs') b.evilState = 'motion'; b.modified = false; b.undo = []; b.redo = []; Ed.forgetLog(b);
+}
+function editBegin(b: EdBuffer) {
+  if (b.grepEdit) return;
+  const r = runs.get(GREP_KIND);
+  if (r && r.buffer === b && !r.ended) signal('user-error', 'The grep is still running: its rows can be edited once it has ended');
+  const g = b.grepRows;
+  if (b.mode !== GREP_KIND.mode || !g) signal('user-error', 'Not a grep\'s output: grep-edit-mode edits *grep* once its grep has ended');
+  if (!Ed.host.files) signal('user-error', 'No files here: grep-edit-mode writes files in the desktop program');
+  const text = b.text, lines = text.split('\n'), p = newParse(g!.dir, grepLine, g!.columns);
+  const out = lines.slice(g!.from, g!.to);
+  const rows: EdGrepRow[] = [];
+  out.forEach((line, k) => {
+    const m = GREP.exec(line), n = m ? num(m[2]) : null;
+    if (!m || !n || !/\D/.test(m[1])) return;
+    const c = g!.columns ? GREP_COLUMN.exec(m[3]) : null, rest = c ? c[2] : m[3];
+    rows.push({ line: g!.from + k, prefix: line.slice(0, line.length - rest.length), file: place(p, m[1]), n, text: rest });
+  });
+  if (!rows.length) signal('user-error', 'No rows in *grep* to edit');
+  if (canStamp()) for (const row of rows) if (!g!.stamps.has(row.file)) g!.stamps.set(row.file, stampOf(row.file));
+  b.grepEdit = { text, lines, rows };
+  b.readOnly = false; if (b.evilState !== 'emacs') b.evilState = 'normal'; b.modified = false; b.undo = []; b.redo = [];
+  Ed.message('Editing *grep*: C-c C-c writes the changed rows to their files, C-c C-k gives the edits up');
+  Ed.scheduleRender();
+}
+function editAbort(b: EdBuffer) {
+  const e = b.grepEdit;
+  if (!e) signal('user-error', 'Not editing *grep*');
+  if (e!.writing) signal('user-error', WRITING);
+  if (b.text !== e!.text) Ed.applyLineDiff(b, e!.text);
+  editDone(b);
+  Ed.message('Edits in *grep* given up');
+  Ed.scheduleRender();
+}
+/* The rows of one file, and the new text of each of its lines that changed. BAD: why none of it may be written
+   (a row's prefix changed, or a line was given two texts). */
+interface FileEdit { rows: EdGrepRow[]; to: Map<number, string>; bad: string | null }
+function editFinish(b: EdBuffer) {
+  const e = b.grepEdit!;
+  if (!e) signal('user-error', 'Not editing *grep*: C-c C-p there begins');
+  if (e.writing) signal('user-error', WRITING);
+  const lines = b.text.split('\n');
+  if (lines.length !== e.lines.length) signal('user-error', 'Lines were added to *grep* or taken from it: only the text of its rows can change (C-c C-k gives the edits up)');
+  const rowAt = new Map(e.rows.map(row => [row.line, row] as [number, EdGrepRow]));
+  /* A changed line that is no row reaches no file: it is put back. */
+  let back = 0;
+  for (let i = 0; i < lines.length; i++) if (lines[i] !== e.lines[i] && !rowAt.has(i)) { lines[i] = e.lines[i]; back++; }
+  const files = new Map<string, FileEdit>();
+  for (const row of e.rows) {
+    let f = files.get(row.file);
+    if (!f) files.set(row.file, f = { rows: [], to: new Map(), bad: null });
+    f.rows.push(row);
+    const line = lines[row.line];
+    if (line === e.lines[row.line]) continue;
+    if (!line.startsWith(row.prefix)) { f.bad = f.bad || `its row on line ${row.line + 1} of *grep* had its ${row.prefix} changed`; continue; }
+    const now = line.slice(row.prefix.length);
+    if (now === row.text) continue;
+    const was = f.to.get(row.n);
+    if (was !== undefined && was !== now) f.bad = f.bad || `two rows of its line ${row.n} were changed to different texts`; else f.to.set(row.n, now);
+  }
+  const stamps = b.grepRows ? b.grepRows.stamps : new Map<string, string | null>(), left: string[] = [];
+  /* The buffers visiting files: by name, taken afresh each slice (a buffer may open or die between slices); by
+     true name on demand, each buffer's true name looked up once per C-c C-c, not once per file. */
+  const fh = Ed.host.files!, truename = (n: string) => { try { return fh.truename(n); } catch (e) { return n; } };
+  const trueOf = new Map<string, string>();
+  let byName = new Map<string, EdBuffer>(), byTrue: Map<string, EdBuffer> | null = null;
+  const refresh = () => { byName = new Map(); byTrue = null; for (const x of E.buffers) if (x.file && !byName.has(x.file)) byName.set(x.file, x); };
+  const visitor = (file: string) => {
+    const v = byName.get(file);
+    if (v) return v;
+    if (!byTrue) {
+      byTrue = new Map();
+      for (const [n, x] of byName) { let t = trueOf.get(n); if (t === undefined) trueOf.set(n, t = truename(n)); if (!byTrue.has(t)) byTrue.set(t, x); }
+    }
+    return byTrue.get(truename(file));
+  };
+  const queue = [...files].filter(([, f]) => f.to.size || f.bad), asked = queue.length;
+  let wrote = 0, changed = 0;
+  /* The writes run in slices of WRITE_SLICE_MS, one per turn of the event loop, each file still its own fsync'd
+     write: thousands of files do not hold the frame for seconds. *grep* is read-only until the last slice, and no
+     second C-c C-c, C-c C-k or new grep gets in; a slice that finds the editing gone (the buffer killed, a grep
+     started from code) writes no more. */
+  const finish = () => {
+    const shown = lines.join('\n');
+    if (shown !== b.text) Ed.applyLineDiff(b, shown);
+    e.text = e.lines.join('\n'); e.writing = false;
+    const put = back ? `; ${back} changed line${back === 1 ? '' : 's'} that ${back === 1 ? 'is' : 'are'} no row put back` : '';
+    const said = `Wrote ${changed} line${changed === 1 ? '' : 's'} in ${wrote} file${wrote === 1 ? '' : 's'}${put}`;
+    if (!asked) { editDone(b); Ed.message(`(No changes to write${put})`); }
+    else if (!left.length) { editDone(b); Ed.message(said); }
+    else { b.readOnly = false; if (b.evilState !== 'emacs') b.evilState = 'normal'; b.modified = true; b.undo = []; b.redo = []; Ed.message(`${said}; not written: ${left.join('; ')}`); }
+    Ed.scheduleRender();
+  };
+  const slice = () => {
+    if (b.grepEdit !== e || !E.buffers.includes(b)) return;
+    refresh();
+    const t0 = performance.now();
+    while (queue.length && performance.now() - t0 < WRITE_SLICE_MS) {
+      const [file, f] = queue.shift()!;
+      let why: string | null;
+      /* What writeRows throws (its host calls are caught there) ends this file, not the write of the rest. */
+      try { why = writeRows(file, f, stamps, visitor); } catch (x) { why = thrown(x); }
+      if (why) { left.push(`${Ed.fileLabel(file)}: ${why}`); continue; }
+      wrote++; changed += f.to.size;
+      /* The written rows are the search's now; a row of a written line left as it was shows the new text too. */
+      for (const row of f.rows) {
+        const t = f.to.get(row.n);
+        if (t !== undefined) { row.text = t; lines[row.line] = e.lines[row.line] = row.prefix + t; }
+      }
+    }
+    if (!queue.length) { finish(); return; }
+    E.echo = `Writing the rows of ${b.name}: ${asked - queue.length} of ${asked} files`;
+    setTimeout(() => Ed.runCallback(slice), 0);
+  };
+  e.writing = true; b.readOnly = true; if (b.evilState !== 'emacs') b.evilState = 'motion';
+  slice();
+}
+/* What a host file call threw: its message, as the host gives it (not a non-UTF-8 file's stack on the console). */
+const thrown = (e: unknown) => String(e && (e as Error).message ? (e as Error).message : e);
+/* FILE's changed lines into it, in one write; null when written, else why not (and nothing of it is written). */
+function writeRows(file: string, f: FileEdit, stamps: Map<string, string | null>, visitor: (file: string) => EdBuffer | undefined): string | null {
+  if (f.bad) return f.bad;
+  if (Ed.sync && Ed.sync.started && H.servedPath && H.servedPath(file)) return 'it is edwind\'s: edit it there';
+  const v = visitor(file);
+  if (v && v.shared) return 'it is edwind\'s: edit it there';
+  if (v && v.modified) return `${v.name} has unsaved changes to it`;
+  const stamped = canStamp(), s = stamped ? stampOf(file) : null;
+  if (stamped && (s === null || s !== stamps.get(file))) return s === null ? 'it is gone' : 'it changed since the search';
+  let text: string | null;
+  try { text = Ed.Store.get(file); } catch (e) { return `it cannot be read (${thrown(e)})`; }
+  if (text === null) return 'it is gone';
+  if (stamped && stampOf(file) !== s) return 'it changed since the search';
+  const fl = text.split('\n'), cr = new Set<number>();
+  for (const row of f.rows) {
+    const l = fl[row.n - 1];
+    if (row.n > fl.length || (l !== row.text && l !== row.text + '\r')) return `its line ${row.n} is not what the search found`;
+    if (l !== row.text) cr.add(row.n);
+  }
+  for (const [n, to] of f.to) fl[n - 1] = to + (cr.has(n) ? '\r' : '');
+  const out = fl.join('\n');
+  try { Ed.Store.set(file, out); } catch (e) { return `it could not be written (${thrown(e)})`; }
+  const now = stamped ? stampOf(file) : null;
+  if (stamped) stamps.set(file, now);
+  if (v) {
+    if (v.text !== out) { v.undo.push(Ed.snap(v)); v.redo = []; Ed.applyLineDiff(v, out, 'disk'); }
+    Ed.markSaved(v);
+    if (v.disk && now !== null) v.disk = { stamp: now };
+  }
+  return null;
+}
+Ed.defineMinorMode({ name: 'grep-edit-mode', variable: EDIT_VAR, lighter: ' Edit', keymap: new Ed.Keymap('grep-edit-mode-map'),
+  doc: 'Toggle grep-edit-mode in *grep*: on, its rows can be edited (C-c C-c writes them to their files); off, the edits are given up.',
+  body: (on: boolean, b: EdBuffer) => {
+    if (!on) { if (b.grepEdit) editAbort(b); return; }
+    try { editBegin(b); } catch (e) { editMode(b, false); throw e; }
+  } });
+CMD('grep-change-to-grep-edit-mode', '', '', 'Make *grep* editable, once its grep has ended (C-c C-p): change the text of its rows, then C-c C-c writes them to their files, C-c C-k gives the edits up.', () => { L.call('grep-edit-mode', [1]); return false; });
+CMD('grep-edit-finish', '', '', 'Write each changed row of *grep* to its file and leave grep-edit-mode (C-c C-c, C-x C-s, ZZ). A file changed since the search, or one whose row lines are no longer what it found, is not written.', () => { editFinish(cur()); return false; });
+CMD('grep-edit-abort', '', '', 'Give up the edits in *grep* not yet written and leave grep-edit-mode (C-c C-k, ZQ).', () => { editAbort(cur()); return false; });
+for (const n of ['grep-change-to-grep-edit-mode', 'grep-edit-finish', 'grep-edit-abort']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
 Ed.compile = { start: (command, dir) => start(COMPILATION, command, dir), recompile: () => again(COMPILATION), running: () => running(COMPILATION),
   grep: (command, dir) => start(GREP_KIND, command, dir), regrep: () => again(GREP_KIND), grepping: () => running(GREP_KIND),

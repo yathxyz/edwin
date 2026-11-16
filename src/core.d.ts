@@ -856,6 +856,12 @@ interface EdBuffer extends SchemeForeign {
   dired?: unknown;
   /* *compilation* and *grep*: the command it shows and its directory (compile.ts) */
   compile?: { command: string; dir: string | null };
+  /* *grep* once its grep has ended: the lines its output fills (from 0, TO excluded), whether its rows carry
+     columns, its directory, and each row's file's stamp as the search saw it (null: none); *grep* being edited:
+     its text when the editing began (the written rows' since), its lines, its rows, and whether a C-c C-c is
+     writing them in slices (compile.ts) */
+  grepRows?: { from: number; to: number; columns: boolean; dir: string | null; stamps: Map<string, string | null> };
+  grepEdit?: { text: string; lines: string[]; rows: EdGrepRow[]; writing?: boolean };
   /* global-auto-revert-mode's look at a buffer that is not a file's (a dired listing): true when it reads B
      again (editor-prims.ts) */
   autoRevert?: (b: EdBuffer) => boolean;
@@ -1662,6 +1668,10 @@ interface EdApi {
 }
 
 /* ---------- editor: compile (compile.ts) ---------- */
+
+/* A row of *grep* being edited: its line in the buffer (from 0), its FILE:LINE:[COLUMN:] prefix, the file and
+   line it names, and the text the search found there. */
+interface EdGrepRow { line: number; prefix: string; file: string; n: number; text: string }
 
 /* A compilation: its command, the directory it runs in (null: where the program runs), its buffer, its exit
    (after all of its output is in the buffer), and kill (INT unless told), false once it has ended or another

@@ -1393,7 +1393,7 @@ Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-grep`, absorbing ui-gre
   file's raw bytes while the visited buffer holds the lossily decoded text (each bad byte a U+FFFD, three UTF-8
   bytes), so a row past such bytes lands early on its line (two characters per bad byte before it): fixing it
   needs the file's raw bytes, which the buffer no longer has.
-- **Not in it:** `rgrep`/`lgrep`/`zgrep` and the find-based commands, editing the results (ui-grep-edit),
+- **Not in it:** `rgrep`/`lgrep`/`zgrep` and the find-based commands, editing the results (since "Editing *grep* and writing it back"),
   `grep-find-ignored-directories` (rg follows .gitignore itself), match faces.
 - **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-compile` (39), with ripgrep in the check's
   sandbox (nix/checks.nix `suiteWith`) over a copy of `test/fixtures/grep`: `M-s g` offers `grep-command`, the
@@ -1414,6 +1414,147 @@ Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-grep`, absorbing ui-gre
   `edwin-scheme` (38), `edit-security` (21) and `edit-lockdown` (6), since scm/init.scm also runs on edwind;
   `nix build .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35). Not run: the full
   `nix flake check`.
+
+## Editing *grep* and writing it back (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ui-grep-edit`): a `*grep*` buffer can be made editable;
+applying writes each changed line to its file, refusing files changed since the search. Risk named: data loss if
+line numbers drift, so the original line text is checked before writing. The owner's Emacs had wgrep.
+
+- **Where.** src/compile.ts, beside grep: there is no Scheme grep source, and Scheme has no primitive that writes
+  a file, so the writing is TypeScript; the keys are in scm/evil.scm and scm/emacs.scm.
+- **`grep-edit-mode`**, a buffer-local minor mode of `*grep*`, which stays in `grep-mode`, so `g r` and the other
+  grep keys still act on the grep. `C-c C-p` in `*grep*` (wgrep's key; `grep-change-to-grep-edit-mode`) turns it on
+  once the grep has ended (refused while it runs, and in any buffer that is not a finished grep's output). The
+  buffer becomes writable, in Normal state, lighter ` Edit`. `C-c C-c`, `C-x C-s` and `ZZ` (`grep-edit-finish`)
+  write. `C-c C-k` and `ZQ` (`grep-edit-abort`, also `M-x grep-edit-mode` off) give the edits up and put back the
+  text as it was. Outside Evil and in Emacs state the keys are in scm/emacs.scm: `C-c C-p` in `grep-mode-map`
+  (made in src/compile.ts), `C-c C-c`, `C-x C-s` and `C-c C-k` in the mode's own keymap. Emacs state stays Emacs
+  state while editing; otherwise the buffer goes to Normal state and back to Motion state.
+- **The rows.** A row is an output line `FILE:LINE:[COLUMN:]TEXT`, read as the error list reads it (the same
+  shortest-prefix rule, the column only when the command asked rg for one, FILE from the grep's directory). It is
+  read whole: the error list cuts lines at 4096 characters and trims them, the editor does neither. Only the lines
+  the output filled are read, kept as line numbers (not offsets, which a written row's new length would move), so
+  neither the command line nor the status line can be taken for a row. TEXT is the line of FILE as rg printed it.
+- **What can change.** Only the text after a row's prefix is written. A changed line that is no row (the
+  header, the command line, the status line) reaches no file, so `C-c C-c` puts it back and says how many. This is
+  what lets `:%s/needle/pin/g` over the whole buffer work: the command line holds the pattern and changes too. A
+  row whose prefix changed (a file named after the pattern, under that `:%s`) cannot be split into prefix and text
+  again, so its file is refused (named, with the line of `*grep*`) and the other files are written. Lines added or
+  taken away refuse the whole write, since the rows are found by line number; nothing is written and the echo
+  area says so. Deleting a file line through `*grep*` is not possible.
+- **When a file is written.** Each file with a changed row is checked on its own, and it is written in one
+  `Store.set`. The native write is atomic (a file renamed over it, or written in place for a symbolic link or a
+  hard-linked file, as saving does), so a file is either untouched or wholly new. It is written only when all of
+  these hold:
+  - **Stamp.** Its stamp (`host.files.stamp`: inode, modification time to the nanosecond, size) is the one taken
+    during the search, both before and after it is read. The stamp is taken when the file's first row reaches the
+    buffer. Files past the error list's 20000 rows are stamped when editing begins.
+  - **Text.** Each of its rows' lines in the file read now is still the row's TEXT (a CRLF line's `\r` aside).
+    This catches drift even where the host gives no stamp, and also between rg's read and the stamp.
+  - **Buffers.** No buffer visiting it (by name or true name) has unsaved changes, and it is not edwind's (a
+    shared buffer, or a path the served frame sends to edwind).
+  - **Prefixes.** None of its rows had its `FILE:LINE:[COLUMN:]` changed.
+  - **Agreement.** Rows of one line (`rg --vimgrep` gives one per match) were not changed to different texts. When
+    only one of them changed, that text is written.
+  - **Readable.** The file can be read as UTF-8 (a file that is not throws, and it is refused rather than written
+    back from a lossy decoding) and it still exists.
+  The buffers visiting files are looked up by true name once per `C-c C-c`, not once per file.
+  The changed lines are replaced in the text just read. A line that ended in `\r` keeps it, and the native host
+  keeps a CRLF file's line ends and byte order mark, as saving does.
+- **After `C-c C-c`.** The echo area says `Wrote N lines in M files`, then `; not written: FILE: why` for each
+  refused file (`it changed since the search`, `its line N is not what the search found`, `BUFFER has unsaved
+  changes to it`, `it is gone`, `it cannot be read (…)`, `two rows of its line N were changed to different texts`,
+  `its row on line N of *grep* had its PREFIX changed`, `it is edwind's: edit it there`). Changed lines that are
+  no row add `; N changed lines that are no row put back` after the count. With nothing refused the buffer is
+  read-only again. With a refusal the editing goes on: the written rows count as the search's from then on (a
+  stamp refreshed to the write's), so fixing the cause and pressing `C-c C-c` again writes the rest. `C-c C-k`
+  then puts back the refused rows' original text and keeps the written ones. A buffer visiting a written file,
+  unmodified, takes the new text through the line diff (point and marks kept, one undo step, the stamp the
+  write's, so its next save does not ask about a change on disk).
+- **A new grep while editing.** `M-s g` or `g r` with unwritten edits asks `*grep* has edits not written to their
+  files; discard them?`. n keeps them, y runs the grep and drops them. `Ed.compile.grep` from code drops them
+  without asking.
+- **Choices made where the package left one open:**
+  - A minor mode, not a major one: `*grep*` stays in `grep-mode`, whose test `recompile` and `kill-compilation`
+    use to tell a grep from a compilation.
+  - The files are written, not their buffers: an unmodified visiting buffer follows, and a modified one refuses
+    its file instead of being edited behind the user's back.
+  - A file is stamped when its first row comes (during the run, once per file), so "changed since the search"
+    starts as close to rg's read as the output lets; with 3000 files the frame stalls at most a few ms.
+  - Both the stamp and every row's line text are checked: the stamp catches a change anywhere in the file, the text
+    catches drift where there is no stamp and between rg's read and the stamp.
+  - A partial write is no failure: the files that pass are written, the others named, and the editing goes on.
+  - Keys: wgrep's (`C-c C-p`, `C-c C-c`, `C-x C-s`, `C-c C-k`) and evil-collection's `ZZ` and `ZQ`; the command
+    names are Edwin's own (`grep-change-to-grep-edit-mode` as Emacs 31 names it).
+- **Differences from wgrep and Emacs:** wgrep puts the edits into the files' buffers and leaves them unsaved
+  (unless `wgrep-auto-save-buffer`). Edwin writes the files and refreshes unmodified visiting buffers, which is
+  why it refuses a file whose buffer has unsaved changes. wgrep marks prefixes read-only; Edwin checks them on
+  `C-c C-c`. Neither `C-c C-d` (delete the line), `C-c C-r` (undo one region's edit) nor wgrep's faces for changed
+  rows are here. There is no `i` key from evil-collection to start the editing: `C-c C-p` (or `M-x
+  grep-change-to-grep-edit-mode`) does.
+- **Not in it:** editing `*compilation*` or other searches (consult's, project-find-regexp's); context lines
+  (`-C`); files edwind owns; deleting lines. Known limits: a row whose file name holds `:DIGITS:` is misread, and
+  is then refused by the text check unless the misread file and line happen to hold the same text. A stamp
+  unchanged by a write within the same nanosecond with the same size and inode is not seen, but the text check
+  still applies. rg prints file names raw (no `--null`), so a file whose name holds a newline can make an output
+  line that reads as a row of another file. A name cannot hold `/`, so the forged FILE is the rest of one path
+  component: it can only name a file directly in the grep's directory (`..` is a directory, refused as
+  unreadable), never one deeper or outside. The text check refuses it unless that file's line holds exactly the
+  row's text; a name with a second newline ends the forged row there, so its text can be exactly the victim
+  line, and a wide replace over `*grep*` would then write it. Look at the rows before `C-c C-c` in a tree you do
+  not trust.
+- **Many files.** Each file is its own native atomic write with an fsync (about 1.5 ms each on ex44, so 3000 files
+  take seconds), and `C-c C-c` writes them in slices of 5 ms (the background slice, architecture section 6), one
+  per turn of the event loop, so the frame is never held past a slice. The first slice runs in the command; while
+  the rest run, `*grep*` is read-only in Motion state, the echo area counts the files written, and a second
+  `C-c C-c`, `C-c C-k` or a new grep (`g r`, `M-s g`) is refused with `The rows of *grep* are being written`. A
+  slice that finds the editing gone (`*grep*` killed, or `Ed.compile.grep` from code) writes no more: the files
+  already written stay written. Each buffer's true name is looked up once per `C-c C-c`, with the buffers listed
+  again at each slice, so one opened or killed between slices is seen.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edit-grep` (new, test/grep-edit.test.mts, 14 tests: rg
+  from the sandbox over a throwaway tree, the Node host with host.files over the real directory, its read and write
+  keeping the byte order mark and an all-CRLF file's line ends as host-native.ts does, writes, stamps and true
+  names counted):
+  - `C-c C-p` makes `*grep*` writable in Normal state with the mode local to it. One row edited by `c w` and two by
+    edits, then `C-c C-c` writes three files byte-exact (only the changed lines; a CRLF line keeps its `\r\n`), one
+    write per changed file and none for the others, and the buffer is read-only again. `C-c C-p` again after those
+    shorter texts finds the same four rows, none from the status line.
+  - 3000 files are each stamped once as their rows come, the frame stalled at most 5 ms (33 ms in a rerun while
+    a Rust build ran; bound 250 ms).
+  - Edits in three files with one of them changed on disk after the search (on a line no row names): that file
+    keeps the other program's bytes with no write reaching it, and the other two are written. The echo area names
+    it, a second `C-c C-c` refuses it again, and `C-c C-k` gives its rows back while the written rows stay.
+  - With the stamp made blind, a line inserted above the rows is refused by the text check (`its line 2 is not
+    what the search found`).
+  - A visiting buffer with unsaved changes refuses its file. An unmodified one takes the new text, stays
+    unmodified, and saves later without asking.
+  - An added line writes nothing. A changed prefix refuses its file alone, and a changed header line is put back,
+    while another file is written.
+  - `C-c C-p`, then `:%s/needle/pin/g` typed in, then `C-c C-c`, with a file named `needle.txt` among the rows:
+    the three other files are written, `needle.txt` is refused alone (its prefix changed), and the command line
+    and status line are as the grep left them.
+  - Outside Evil, `C-c C-p`, typing into a row and `C-c C-c` write it; in Emacs state the buffer stays in Emacs
+    state.
+  - 200 files written with 50 visiting buffers open take at most 250 true-name lookups (10200 before).
+  - A file of mixed line ends keeps the `\r` of its CRLF row's line, and a file with a byte order mark keeps it.
+  - Editing is refused while the grep runs and in `*compilation*`, and `C-c C-c` with no change writes nothing.
+  - `rg --vimgrep` rows of one line: two different texts are refused, and one changed is written with the other
+    row showing it.
+  - A latin-1 file is refused with its bytes unchanged. `g r` with edits asks: n keeps them and runs nothing, y
+    reruns and drops them.
+  - 600 files whose stand-in write holds the thread 3 ms each (2.2 s in all, past the 2 s frame deadline) are
+    written in slices: the longest stall 9 ms (bound 250 ms), the command back before the last slice with
+    `*grep*` read-only in Motion state and the echo area counting, `C-c C-c`, `C-c C-k` and `g r` refused
+    meanwhile and no grep run, then every file written once and the buffer read-only with the editing over.
+    Against the one-loop write this test fails (the command returns only after the last file, 1.8 s later).
+
+  Also passed, before the sliced write: `edwin-compile` (39, unchanged), `edwin-typecheck`, `edwin-headless` (21),
+  `edwin-scheme` (38), `edwin-autorevert` (11), and `edit-lockdown` (6) and `edit-security` (21), since
+  scm/evil.scm and scm/emacs.scm also load on edwind (where the mode is inert: no grep runs there); after it,
+  `edwin-typecheck` and `edwin-compile` (39). `nix build .#edwin` after it ran twice under a load of 8 and failed
+  both times only at `tests/gui.rs:21` (Xvfb did not start), unit 22 and the gui tests before it passing; the
+  change is TypeScript the typecheck covers. Not run: the full `nix flake check`.
 
 ## Opening a file or URL in the desktop's application (done)
 

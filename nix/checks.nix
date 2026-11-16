@@ -201,6 +201,13 @@ in
   # grep (M-s g) with a real rg over test/fixtures/grep into *grep*, its rows the error list, and rg missing from PATH.
   edwin-compile = suiteWith [ pkgs.ripgrep ] "compile" [ "compile.test.mts" ];
 
+  # Editing *grep* (src/compile.ts, grep-edit-mode) with a real rg over a throwaway tree: changed rows of three
+  # files written back, a file changed since the search refused with nothing of it written, a drifted line, a
+  # visiting buffer with unsaved changes, added lines refused, a changed prefix refusing its file, a :%s over the
+  # whole buffer (the command line put back), Emacs keys, one true-name map per write, mixed line ends and a byte
+  # order mark, --vimgrep rows of one line.
+  edit-grep = suiteWith [ pkgs.ripgrep ] "grep-edit" [ "grep-edit.test.mts" ];
+
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
   # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's
   # Node host, an Org https link. The opener's own checks and argv (native/src/open.rs) are cargo tests, which
