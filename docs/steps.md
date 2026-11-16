@@ -1366,6 +1366,32 @@ temporary directory are never polled.
   there and inert (its host has no stamp). No primitive gives Scheme a file's text or stamp:
   `auto-revert-buffers` returns a count.
 
+## The desktop daemon's PATH (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `proc-unit-path`): give the edwind user unit a declared tool
+set on its PATH (git, rg, direnv, formatters, language servers), as the Emacs unit set its own PATH.
+
+- **`programs.edwin.daemon.path`** (nix/edwin-module.nix), a list of packages, empty by default. It is the unit's
+  NixOS `path`, so the rendered unit's `Environment="PATH=..."` holds each package's bin directory (`lib.getBin`,
+  so a package whose bin is an output of its own, as curl's, counts), in the order given.
+- **Choices.** The plan said the unit inherits the user manager's PATH; it does not: NixOS gives every unit a
+  minimal PATH of its own (coreutils, findutils, grep, sed, systemd; `enableDefaultPath`). That default stays,
+  after the listed packages, so the daemon's own scripts keep their tools and a listed package wins a name both
+  have. The unit still never sees the user's login PATH or profile: what it can run by name is what the option
+  and the default list, nothing a user's shell set. `edwin-daemon` prepends coreutils and util-linux to the PATH
+  it is given, so the option reaches edwind unchanged. Empty, the unit is exactly as before.
+- **Who sees it.** edwind and the children it starts directly. A desktop edwind starts no processes of its own
+  today (they go through a hub, and no desktop has one), and frames are processes of whatever started them, not
+  of the unit: the tool list matters for what edwind is later made to run itself.
+- **Not in it:** the tool list itself and any host setting it (fleet-edwin-unit-path); a hub unit's PATH
+  (proc-desktop-hub, declined); the PATH of frames started by `edwinclient` or `systemd-run --user`
+  (fleet-edwin-unit-path's helper).
+- **Checked by** `nix build .#checks.x86_64-linux.edwin-daemon-models`, extended: a desktop with `daemon.path =
+  [ hello curl ]` has a rendered unit whose PATH starts with hello's and curl's bin directories (curl's `bin`
+  output, not its `out`), in that order, keeps every directory of the default PATH, with coreutils after them;
+  the desktop without it has neither. The daemon-models suite passed again (5 of 5). With the `path` line taken
+  out of the module, the check fails at evaluation. `nix build .#checks.x86_64-linux.edwin-module` passed too.
+
 ## Notes into brain: the projector (done)
 
 Asked 2026-11-10: the roam part of Edwin (nodes, links, backlinks) moves to brain, which already holds tasks,

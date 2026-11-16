@@ -357,6 +357,23 @@ in
             credentials.k = "/run/k";
           };
         }).config.systemd.user.services.edwind;
+      # daemon.path: a package with one output and one whose bin is an output of its own (curl's).
+      listed = [
+        pkgs.hello
+        pkgs.curl
+      ];
+      listedBins = map (p: "${lib.getBin p}/bin") listed;
+      # The PATH of the rendered unit file, which is what systemd reads, as its directories.
+      unitPath =
+        sys':
+        let
+          line = lib.findFirst (lib.hasPrefix "Environment=\"PATH=") null (
+            lib.splitString "\n" sys'.config.systemd.user.units."edwind.service".text
+          );
+        in
+        lib.splitString ":" (lib.removeSuffix "\"" (lib.removePrefix "Environment=\"PATH=" line));
+      pathed = unitPath (desktop { programs.edwin.daemon.path = listed; });
+      plainPath = unitPath (desktop { });
       # The fragment: the settings, their refusals followed by the credentials' files.
       merged = settings // {
         refusePaths = settings.refusePaths ++ [
@@ -393,6 +410,14 @@ in
         };
         credsOnly = credsOnly.environment ? EDWIND_CONFIG_EXTRA;
         hubOnly = hubOnly.environment ? EDWIND_CONFIG_EXTRA;
+        path = {
+          # Each listed package's bin, first and in order, then NixOS's default directories, all of them kept.
+          first = lib.take (lib.length listed) pathed;
+          defaultsKept = lib.all (d: lib.elem d pathed) plainPath;
+          coreutilsAfter = lib.elem "${pkgs.coreutils}/bin" (lib.drop (lib.length listed) pathed);
+          # A desktop without daemon.path has none of them.
+          plain = lib.any (b: lib.elem b plainPath) listedBins;
+        };
         refused = {
           store = refused { programs.edwin.daemon.credentials.k = "${builtins.storeDir}/0000-k"; };
           colon = refused { programs.edwin.daemon.credentials.k = "/run/a:b"; };
@@ -423,6 +448,12 @@ in
         };
         credsOnly = true;
         hubOnly = true;
+        path = {
+          first = listedBins;
+          defaultsKept = true;
+          coreutilsAfter = true;
+          plain = false;
+        };
         refused = {
           store = [ fileMsg ];
           colon = [ fileMsg ];

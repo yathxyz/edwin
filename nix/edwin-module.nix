@@ -4,7 +4,7 @@
 # (ExecStartPost=edwin-daemon --wait), so a unit ordered After= it can connect at once. daemon.settings is merged
 # into the edwind.json the daemon writes at each start (models, brain), daemon.hub adds hubSocket to them, and
 # daemon.credentials are the unit's LoadCredential entries those settings name: the secrets stay in their files,
-# never in the store.
+# never in the store. daemon.path puts packages on the unit's PATH, ahead of NixOS's minimal default one.
 self:
 {
   config,
@@ -85,6 +85,16 @@ in
           runs what edwind asks of it: name only a socket no other user can open.
         '';
       };
+      path = mkOption {
+        type = types.listOf types.package;
+        default = [ ];
+        example = lib.literalExpression "[ pkgs.git pkgs.ripgrep ]";
+        description = ''
+          Packages whose bin directories go on the PATH of the user unit, ahead of the minimal one NixOS gives every
+          unit (coreutils, findutils, grep, sed, systemd): the tools edwind and what it starts look up by name. The
+          unit never sees the user's login PATH.
+        '';
+      };
       credentials = mkOption {
         type = types.attrsOf types.str;
         default = { };
@@ -139,6 +149,7 @@ in
     systemd.user.services.edwind = mkIf cfg.daemon.enable {
       description = "edwind, Edwin's text daemon";
       wantedBy = [ "default.target" ];
+      inherit (cfg.daemon) path;
       environment = {
         EDWIN_NOTES_DIR = cfg.daemon.notesDir;
         EDWIND_MEMORY_MIB = toString cfg.daemon.memoryMiB;
