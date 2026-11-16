@@ -1064,10 +1064,17 @@ function converter(names: Set<string> | null, meta: PoolCodecMeta): PoolConverte
     }
     /* A global procedure passed by value ((thread-run fib 10), (parallel-map fib xs)) goes by its name, as
        (thread-run 'fib 10) does: global reserves the name first, so a recursive one does not convert itself again.
-       Not while global is converting that very definition (its key is reserved then). */
+       Not while global is converting that very definition (its key is reserved then). A definition that copies
+       data goes with every job, so a closure that captures it by this name is marked to go again too, else the
+       thread keeps it bound to the copy an earlier job sent. */
     if (p.procName && !converting.has(p) && !defs.has('g:' + p.procName)) {
       const g = S.globals.get(p.procName);
-      if (g && !isMagic(g) && g.value === p) { global(p.procName); procData = false; return sy(p.procName); }
+      if (g && !isMagic(g) && g.value === p) {
+        global(p.procName);
+        const d = defs.get('g:' + p.procName);
+        procData = !!(d && d.data);
+        return sy(p.procName);
+      }
     }
     if (converting.has(p)) throw err('cannot ship a procedure that refers to itself through its environment');
     converting.add(p);
