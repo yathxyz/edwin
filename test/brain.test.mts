@@ -936,7 +936,7 @@ test('q closes a window made for the agenda, and gives a window the agenda took 
 });
 
 /* The buffer a task is written in, shown by KEY. */
-const TASK_BUFFER = '*Task*', BLANK = '---\ntitle: \nstate: todo\npriority: \nscheduled: \ndue: \ntags: \n---\n\n';
+const TASK_BUFFER = '*Task*', BLANK = '---\ntitle: \nstate: todo\n---\n\n';
 const evilState = (b: EdwinCore): string => (globalThis as unknown as { EvilCore: EdwinCore }).EvilCore.stateOf(b);
 async function capture(key = 'SPC o') { await keys(key); await until(() => cur().name === TASK_BUFFER, 'the buffer of the task'); return cur(); }
 const fieldLine = (key: string) => Ed.getBuffer(TASK_BUFFER).text.split('\n').find((l: string) => l.startsWith(key + ':'));
@@ -976,24 +976,28 @@ test('a task starts with the tags of brain-task-tags, the selection and the id o
   L.set('brain-task-tags', 'prv  Home');
   let b: EdwinCore;
   try { b = await capture(); } finally { L.set('brain-task-tags', ''); }
-  assert.equal(b.text, BLANK.replace('tags: ', 'tags: prv Home') + 'Under the section.\n\n[[id:a-section]]\n');
+  assert.equal(b.text, BLANK.replace('---\n\n', 'tags: prv Home\n---\n\n') + 'Under the section.\n\n[[id:a-section]]\n', 'a field has a line when it has a value');
   assert.notEqual(evilState(note), 'visual', 'the selection is over');
   await type('Follow this up');
   await saying('state: next', () => pick('C-c C-t', 'n'));
-  await saying('priority: A', () => pick('C-c ,', 'a'));
-  await saying('scheduled: 2026-11-18', () => answer('C-c C-s', '2026-11-18'));
+  // A key writes the line of a field that has none, where the fields are in their order.
   await saying('due: 2026-11-13T17:00', () => answer('C-c C-d', 'fri 17:00'));
+  assert.equal(b.text.split('\n').slice(0, 6).join('|'), '---|title: Follow this up|state: next|due: 2026-11-13T17:00|tags: prv Home|---');
+  await saying('scheduled: 2026-11-18', () => answer('C-c C-s', '2026-11-18'));
+  await saying('priority: A', () => pick('C-c ,', 'a'));
   await keys('C-c C-q'); await until(() => E.mini, 'the minibuffer');
   assert.equal(E.mini.prompt, 'Tags: '); assert.equal(E.minibuf.text, 'prv Home');
   await saying('tags: prv Home work', () => type(' work\n'));
   assert.equal(b.text, '---\ntitle: Follow this up\nstate: next\npriority: A\nscheduled: 2026-11-18\ndue: 2026-11-13T17:00\ntags: prv Home work\n---\n\nUnder the section.\n\n[[id:a-section]]\n');
-  // #f clears a date, space a priority; a field whose line was deleted is written on a new one.
+  // #f clears a date, space a priority: the line goes. Clearing a field that has no line changes nothing.
   await saying('No scheduled', () => L.call('brain-capture-schedule', [false]));
   await saying('No priority', () => pick('C-c ,', 'SPC'));
-  assert.equal(fieldLine('scheduled'), 'scheduled: '); assert.equal(fieldLine('priority'), 'priority: ');
-  b.text = b.text.replace('scheduled: \n', '');
+  assert.equal(fieldLine('scheduled'), undefined); assert.equal(fieldLine('priority'), undefined);
+  const cleared = b.text;
+  await saying('No priority', () => pick('C-c ,', 'SPC'));
+  assert.equal(b.text, cleared);
   await saying('scheduled: 2026-11-12T08:30', () => L.call('brain-capture-schedule', ['+2d 8:30']));
-  assert.ok(b.text.includes('tags: prv Home work\nscheduled: 2026-11-12T08:30\n---\n'));
+  assert.ok(b.text.includes('state: next\nscheduled: 2026-11-12T08:30\ndue: 2026-11-13T17:00\ntags: prv Home work\n---\n'));
   await saying('task:8 added :home:prv:work:, scheduled 2026-11-12 08:30, due 2026-11-13 17:00', () => keys('C-c C-c'));
   assert.deepEqual(lastWrite().body, { title: 'Follow this up', state: 'next', scheduled: '2026-11-12T08:30', due: '2026-11-13T17:00', tags: ['prv', 'Home', 'work'], body: 'Under the section.\n\n[[id:a-section]]' });
   assert.equal(cur(), note);
@@ -1037,10 +1041,10 @@ test('RET in the agenda changes the task at point in such a buffer: it starts as
   await showTasks('a');
   change(taskN(2), { body: 'Ask about the boiler.\n\nAnd the tap.\n', waiting_on: 'the landlord' });
   const last = agenda().agenda; await keys('r'); await until(() => agenda().agenda !== last, 'the agenda again');
-  const AS_IT_IS = '---\ntitle: Call the plumber\nstate: todo\npriority: \nscheduled: 2026-11-10T14:30\ndue: \ntags: home phone prv\nwaiting_on: the landlord\n---\n\nAsk about the boiler.\n\nAnd the tap.\n';
+  const AS_IT_IS = '---\ntitle: Call the plumber\nstate: todo\nscheduled: 2026-11-10T14:30\ntags: home phone prv\nwaiting_on: the landlord\n---\n\nAsk about the boiler.\n\nAnd the tap.\n';
   let b = await edit(2);
   assert.equal(b.mode, 'markdown-mode'); assert.equal(L.call('minor-mode-active-p', [L.intern('brain-capture-mode')]), true);
-  assert.equal(b.text, AS_IT_IS, 'a field with no line of its own in a new task has one when the task has it');
+  assert.equal(b.text, AS_IT_IS, 'the fields the task has, and no line for one it has not');
   assert.equal(evilState(b), 'normal'); assert.equal(b.pt, '---\ntitle: '.length);
   assert.ok(messages().endsWith('C-c C-c saves task:2, C-c C-k leaves it as it was\n'));
   // Nothing changed: brain is not asked. C-c C-k leaves the task too.
@@ -1054,7 +1058,10 @@ test('RET in the agenda changes the task at point in such a buffer: it starts as
   // Only what was changed is sent: a field by its key, the rest typed. Tags go as those added and removed.
   b = await edit(2);
   await pick('C-c C-t', 'n'); await until(() => fieldLine('state') === 'state: next', 'the state');
-  b.text = b.text.replace('priority: ', 'priority: b').replace('scheduled: 2026-11-10T14:30', 'scheduled: ').replace('home phone prv', 'home urgent prv').replace('\n\nAnd the tap.\n', '\n');
+  await saying('priority: B', () => pick('C-c ,', 'b'));
+  await saying('No scheduled', () => L.call('brain-capture-schedule', [false]));
+  assert.equal(b.text.split('\n').slice(0, 7).join('|'), '---|title: Call the plumber|state: next|priority: B|tags: home phone prv|waiting_on: the landlord|---');
+  b.text = b.text.replace('home phone prv', 'home urgent prv').replace('\n\nAnd the tap.\n', '\n');
   await saying('task:2: saved', () => keys('C-c C-c'));
   assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/tasks/${taskN(2).id}`, auth: `Bearer ${TASK_TOKEN}`, session: 'edwind',
     body: { state: 'next', priority: 'B', scheduled: null, add_tags: ['urgent'], remove_tags: ['phone'], body: 'Ask about the boiler.', base_revision: 2 } });
@@ -1085,7 +1092,7 @@ test('RET in the agenda changes the task at point in such a buffer: it starts as
   // Elsewhere the task got another title and another priority since the agenda showed it: the title is kept,
   // and the priority changed here replaces the other, which is said.
   b = await edit(1);
-  assert.equal(b.text, '---\ntitle: Pay the invoice\nstate: todo\npriority: A\nscheduled: \ndue: 2026-11-07\ntags: prv\n---\n\n');
+  assert.equal(b.text, '---\ntitle: Pay the invoice\nstate: todo\npriority: A\ndue: 2026-11-07\ntags: prv\n---\n\n');
   change(taskN(1), { title: 'Pay the big invoice', priority: 'C' });
   b.text = b.text.replace('priority: A', 'priority: B');
   await saying('task:1: saved; replaced what had changed since: priority was C', () => keys('C-c C-c'));

@@ -643,14 +643,14 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
       ---
       title: 
       state: todo
-      priority: 
-      scheduled: 
-      due: 
-      tags: 
       ---
 
   The front matter has a field a line, named as brain names them, and the text under it is the task's body.
-  `tags` starts with those of `brain-task-tags`, a string of tags with spaces between (`""` by default: no
+  It starts with the two a task always has; `priority`, `scheduled`, `due` and `tags` have a line when they
+  have a value, as an Org entry has a `SCHEDULED:` line when it is scheduled (asked 2026-11-16: the empty
+  lines of fields that are not needed were in the way). A key that sets one writes its line, in the order
+  above, and clearing one takes the line away.
+  `tags` starts with those of `brain-task-tags`, when there are any, a string of tags with spaces between (`""` by default: no
   tags, a task every client of brain can read). A Visual selection is the body, and when the note at point has
   an Org id the body ends with `[[id:ORG-ID]]`: the id alone, since a tag may hide the note's title from those
   who can read the task. The minor mode `brain-capture-mode` is on there (`brain-capture-mode-map`, ahead of
@@ -658,7 +658,7 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   (`brain-capture-kill`); either kills the buffer and puts the windows back as they were. `C-c C-t` sets the
   state, `C-c ,` the priority, `C-c C-s` and `C-c C-d` when it is scheduled and due, `C-c C-q` the tags, with
   the agenda's prompts, and each writes its line (`brain-capture-state`, `-priority`, `-schedule`, `-due`,
-  `-tags`, which take the value as an argument; `#f` empties a date or a priority).
+  `-tags`, which take the value as an argument; `#f` is no date or no priority, and its line goes).
 - **What is typed there is read as the keys write it.** A state in any case, a priority `a` to `c`, tags with
   spaces or commas between or as a list (`[a, b]`), and a date as brain takes one (`2026-11-20`,
   `2026-11-20T17:00`) or as `org-read-date` reads one (`fri 17:00`, `+2d`), sent as the day it names. `recur`
@@ -668,14 +668,14 @@ and the agenda and a new task are brain's (`brain/docs/API.md` §5), through edw
   what brain refuses, in brain's words; the buffer stays as it is. The echo area says `task:N added`, the
   task's tags and its dates, and an agenda that a window shows is asked for again. One task is written at a
   time: `SPC o` while one is goes back to its buffer. `C-u` is Evil's in this buffer, so a date is cleared by
-  emptying its line.
+  deleting or emptying its line.
 - **`brain-task-edit` (`RET` in the agenda)** changes the task at point in the same buffer (asked 2026-11-16:
   a task's text could not be changed from Edwin at all). `*Task*` starts as the task is, in Normal state on
-  the title: every field of the new task's front matter, `recur` and `waiting_on` when the task has them, and
+  the title: its title, its state and the other fields it has, a line each, and
   its text below, from the row the agenda shows (brain sends a task's whole text with it). The keys and the
   reading of what is typed are those above. `C-c C-c` sends what differs from what the buffer started with
   and nothing else, against the revision the agenda showed (`base_revision`), so what changed in the task
-  meanwhile is kept, and what this change replaced is said, as for the agenda's keys. A field emptied is
+  meanwhile is kept, and what this change replaced is said, as for the agenda's keys. A field whose line is emptied or deleted is
   cleared, and so is the text; a task keeps a title and a state (`No title`, `No state`). Tags go as those
   added and those removed, so a tag the task was given meanwhile stays. Nothing changed asks brain nothing
   (`task:N: nothing changed`), and `C-c C-k` leaves the task as it was. It is the one buffer: `RET` or `SPC o`
