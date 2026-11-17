@@ -1552,7 +1552,10 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; act on the commit or the stash at point, or ask.  f (fetch), F (pull) and
 ;; p (push: magit's P) with u for the upstream, f a for every remote and p f
 ;; for a force push (magit's -f switch: --force-with-lease) act on the
-;; current branch.
+;; current branch.  m (merge), A (cherry-pick), _ (revert: evil-collection's
+;; key for magit's) and r (rebase) start one, m m, A A, _ _ and r r go on
+;; with the one in progress, s skips its commit and a aborts it; r e rebases
+;; onto a revision, r u onto the upstream.
 (for-each
  (lambda (mode)
    (evil-define-key 'motion mode
@@ -1575,7 +1578,22 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
      "f a" 'git-fetch-all
      "F u" 'git-pull
      "p u" 'git-push
-     "p f" 'git-push-force))
+     "p f" 'git-push-force
+     "m m" 'git-merge
+     "m a" 'git-merge-abort
+     "A s" 'git-cherry-pick-skip
+     "A a" 'git-cherry-pick-abort
+     "_ s" 'git-revert-skip
+     "_ a" 'git-revert-abort
+     "r e" 'git-rebase
+     "r u" 'git-rebase-upstream
+     "r r" 'git-rebase-continue
+     "r s" 'git-rebase-skip
+     "r a" 'git-rebase-abort)
+   ;; A A and _ _ act on the commits selected too
+   (evil-define-key '(motion visual) mode
+     "A A" 'git-cherry-pick
+     "_ _" 'git-revert))
  '(git-status-mode git-log-mode))
 ;; The log buffer: RET shows the commit at point, + reads the next page
 ;; (evil-collection's key for magit's longer log), g r reads it again from

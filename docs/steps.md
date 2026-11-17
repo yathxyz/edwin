@@ -3101,9 +3101,10 @@ force push that asks and uses `--force-with-lease`.
   `Pulled origin/main into main: now at HASH SUBJECT (fast-forward)` (or a merge's subject), `main is up to date
   with origin/main`; diverged branches with nothing configured: `Not pulled: main and origin/main have diverged,
   and your git configuration does not say how to reconcile them (pull.rebase, pull.ff)`; a conflict: `Pulled
-  origin/main with conflicts in a.txt: resolve them and stage them (s), then commit (c c)` (or `continue the
-  rebase (git rebase --continue)`), the status showing them. Refused while a conflict is left, and on a detached
-  HEAD. No editor runs: git's merge takes its own message when it has no terminal.
+  origin/main with conflicts in a.txt: resolve them and stage them (s), then m m commits the merge, m a aborts it`
+  (or `…, then r r goes on, r s skips the commit, r a aborts` for a rebase), the status showing them. Refused
+  while a conflict is left, and on a detached HEAD. No editor runs: git's merge takes its own message when it has
+  no terminal.
 - **`p u`** pushes the current branch to its upstream: `push --progress --porcelain --end-of-options REMOTE
   refs/heads/B:refs/heads/UPSTREAM`, an explicit refspec, so a repository's `remote.R.push` or push.default is
   not what decides. With no upstream it asks the remote (`Set upstream of main and push to remote (origin): `) and
@@ -3365,6 +3366,135 @@ operations and bookmark handling from jj's log and change view, tested against a
   - `p p` to a bare remote whose pre-receive hook waits for a file: while jj runs, `f f` refused (`Pushing main to
     origin still runs in ROOT: see *vc-process*`), no child started; the file made, `Pushed to origin: bookmark:
     main [add to HEX]`. Under `Ed.proc.replay`, the twelve commands: `while the image replays`, no child started.
+
+## Merge, cherry-pick, revert and rebase (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-sequencer`, on git-remote): start, continue, skip and
+abort for sequenced operations, with their state shown in the status buffer.
+
+- **Keys**, in `git-status-mode` and `git-log-mode`, as evil-collection binds magit's transients (m merge, A
+  cherry-pick, _ revert, r rebase): `m m` `git-merge`, `m a` `git-merge-abort`; `A A` `git-cherry-pick`, `A s`
+  `git-cherry-pick-skip`, `A a` `git-cherry-pick-abort`; `_ _` `git-revert`, `_ s` `git-revert-skip`, `_ a`
+  `git-revert-abort`; `r e` `git-rebase`, `r u` `git-rebase-upstream`, `r r` `git-rebase-continue`, `r s`
+  `git-rebase-skip`, `r a` `git-rebase-abort`. `A A` and `_ _` are bound in Visual state too. Each is also M-x
+  from any buffer of a git repository; a jj workspace is refused with git-history-ops' message.
+- **Start.** `m m` asks `Merge into main: ` among the branches and tags (the current branch left out; the one at
+  point by default) and runs `merge --no-edit --end-of-options NAME` (a ref's name as it is, so git's message
+  names it; anything else as its commit's hash). `A A` and `_ _` take the commits selected in Visual state
+  (cherry-picked oldest first, reverted newest first; in the status buffer only the lines of its commit lists,
+  not the Head, Merge, operation or todo lines), else ask `Cherry-pick commit or range A..B (HASH): ` (the
+  commit at point by default): a range `A..B` has both ends resolved and its commits counted (`main..main holds
+  no commit` when none), and goes to git as `OID..OID`; then `cherry-pick|revert --no-edit --end-of-options …`.
+  `r e` asks `Rebase topic onto: ` and runs `rebase --end-of-options ONTO`; `r u` rebases onto the current
+  branch's upstream as last fetched (refused on a detached HEAD, with no upstream, or one not yet fetched).
+  Said: `Merged other into main: now at HASH SUBJECT` (with ` (fast-forward)` when git says so), `main already
+  has HASH SUBJECT: nothing merged`, `Cherry-picked 2 commits (main..other): main at HASH SUBJECT`, `Reverted
+  HASH SUBJECT: …`, `Rebased topic onto main: now at …`, `topic is up to date with main: nothing rebased`.
+  Refused while a conflict is left (`No merge started: …`, as git-history-ops' commands are).
+- **Stopped.** When git stops, what it stopped on is said: `The merge of HASH SUBJECT stopped with conflicts in
+  a.txt: resolve them and stage them (s), then m m commits the merge, m a aborts it`; `Cherry-picking stopped at
+  HASH SUBJECT with conflicts in a.txt: …, then A A goes on, A s skips the commit, A a aborts`; `Rebasing stopped
+  at HASH SUBJECT (1 of 2) with conflicts in a.txt: …, then r r goes on, r s skips the commit, r a aborts`; a pick
+  whose changes HEAD already has: `…: its changes are in HEAD already, so it would commit nothing: KEYS`; any
+  other stop with git's reason. F u's conflict message now names m m and m a (or r r, r s and r a).
+- **Going on** (`m m`, `A A`, `_ _` while their own operation is in progress, and `r r`): refused while a file is
+  still in conflict (`a.txt is still in conflict: resolve it and stage it (s) first`); offers to save the
+  repository's changed buffers; asks when a staged file still holds a conflict marker (`diff --cached --check`:
+  `a.txt still holds a conflict marker: go on with the rebase, committing it as staged?`, n changes nothing:
+  `Nothing done: the rebase is where it was`); then `KIND --continue`. Said: `Merge done: main at HASH SUBJECT`,
+  or where git stopped next.
+- **Skip and abort ask first**, naming what they discard: `Skip HASH SUBJECT, leaving it out of the rebase (its
+  changes here and your resolution of them discarded)?`; `Abort the merge of HASH SUBJECT, putting the index and
+  the work tree back as HEAD has them (your resolutions discarded)?`; `Abort the rebase, putting topic back at
+  HASH SUBJECT (the commits rebased so far and your resolutions discarded)?`; `Abort the cherry-pick|revert,
+  putting HEAD back where it was before it (the commits it made and your resolutions discarded)?`. n: `Nothing
+  done: …`. Said after: `Rebase aborted: topic at HASH SUBJECT`. A step for an operation not in progress is
+  refused: `No rebase in progress`, `No cherry-pick in progress: a rebase is (r r goes on, r s skips the commit, r
+  a aborts)`.
+- **The state in the status buffer.** Under the head lines, a line for the operation in progress: `Merging HASH
+  SUBJECT`, `Cherry-picking HASH SUBJECT`, `Reverting HASH SUBJECT` (or `…, stopped between two commits`),
+  `Rebasing topic onto HASH SUBJECT, stopped at HASH SUBJECT (1 of 2)` (`a detached HEAD`; `…, stopped after N of
+  M` with no commit stopped at), `Applying patches with git am (N of M)`; RET on it shows the commit. Then the
+  steps left, a section `To cherry-pick (1)`, `To revert (N)` or `To rebase (N)` with lines `pick HASH SUBJECT`
+  (RET shows the commit). Read on every refresh (`readSeq`) from where git keeps it, whichever backend and
+  worktree: `rev-parse --git-path` for rebase-merge, rebase-apply, sequencer and MERGE_HEAD (a linked worktree's
+  own), the files there read through the host. CHERRY_PICK_HEAD, REVERT_HEAD and REBASE_HEAD are read by
+  their exact names, as git status reads them, never by git's rules for a name typed (refs/NAME, refs/tags/NAME,
+  refs/heads/NAME, ...), under which a branch or a tag named CHERRY_PICK_HEAD would be taken for a pick in
+  progress: in a files repository each is the file `rev-parse --git-path` names; in a reftable one
+  (`rev-parse --show-ref-format` says `reftable`) each is a root ref, listed by `for-each-ref
+  --include-root-refs` with the three names. A merge's MERGE_HEAD is read as the file it is. The sequencer's todo has the current commit as its first line, left out.
+- **In the background**, as the remote commands: each asks what it needs in the command, says `Rebasing topic
+  onto main… (see *vc-process*)` and ends; git runs meanwhile, with no bound on its output and up to 10 minutes
+  (as commit: a bound would kill git partway through a rebase), then the status and log buffers are read again
+  and what git did is said. One at a time in a repository, sharing the remote commands' lock: a second is refused
+  (`A merge, cherry-pick, revert or rebase still runs in ROOT: see *vc-process*`, or the running one's own
+  message); a question quit with C-g frees the repository again.
+- **Choices**, each reversible:
+  - Going on commits with the message git prepared: Vc's new `keepMessage` option sets GIT_EDITOR to `:` (git's
+    no-op editor, for which it starts no program) for merge, cherry-pick, revert and rebase alone, and git cleans
+    the message as an edited one, so no `# Conflicts:` lines are left in it. With GIT_EDITOR=false (decision 12's
+    default) `rebase --continue` after a conflict fails (`problem with the editor 'false'`), checked with git
+    2.56; GIT_SEQUENCE_EDITOR stays false. No message is edited in Edwin: c c commits a merge with one written.
+  - The start key of an operation in progress goes on with it (`m m`, `A A`, `_ _`), as magit's transients
+    offer; `r e` and `r u` are refused during a rebase (`r r` goes on).
+  - Skip and abort ask first; going on asks only over a staged conflict marker.
+  - Hooks run (merge, cherry-pick, revert and rebase are the sequencer of decision 12).
+  - The pseudorefs are read as files in a files repository, which any git does, so a status refresh adds no
+    version floor there. Only a reftable repository runs `for-each-ref --include-root-refs` (git 2.46 or later;
+    with an older git the status buffer says git for-each-ref failed, never a wrong state). A git older than
+    2.45 (which has no reftable) does not know `--show-ref-format`; rev-parse prints a switch it does not know
+    back (checked with an unknown one on git 2.56), and that is read as a files repository.
+  - git am in progress is shown, and every command here refuses with `finish it in a terminal: git am
+    --continue, --skip or --abort`.
+- **Not in it:** the interactive rebase and its todo (git-rebase-todo); magit's switches (`--ff-only`,
+  `--no-ff`, `-x`, `--signoff`, `--autostash`, the strategies); `m e` (merge, editing its message), `m s`
+  (squash), `m p` (preview), `A d`/`A n` (cherry-pick without committing), `r i`, `r f`, `r w`, `r m`; git am
+  (`w`); a merge's or pick's message edited before going on; `V` (magit's revert key) is not bound.
+- **Image replay and edwind.** Each command checks `Ed.proc.refusal()` before anything (no child starts under the
+  image's replay), and every child goes through `Vc.run`/`Vc.start`, which refuse under the replay, in a web frame
+  and in edwind.
+- **Also changed:** the status buffer of vc-git.test.mts's fixture, which holds a merge conflict, now shows
+  `Merging HASH side`, and its read-only check counts `rev-parse` among the reads (as does
+  vc-stage.test.mts's `n` check).
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-vc` (147 passed, 0 failed,
+  test/vc-sequencer.test.mts's 11 among them) and `nix build .#checks.x86_64-linux.edwin-typecheck` (passed);
+  edwin-headless (21 passed) and edit-frame (24 passed), which load scm/evil.scm. With real git 2.55 and
+  jujutsu in throwaway repositories under a throwaway HOME. At every step below the status
+  header is compared whole (the lines above its first blank one: `Head:` with the branch, or the hash when a
+  rebase has detached HEAD, an upstream's `Merge:` line, and the operation's line), against git's own reading:
+  - `m m` of a branch with a conflict: the argv whole, hooks on, the header `Merging HASH d on other`, `Unmerged
+    paths (1)`; `m m` refused with no write run; staged with `s` (still merging); `m m` commits: `merge
+    --continue` with GIT_EDITOR `:`, the message `Merge branch 'other'` with no Conflicts lines, two parents, the
+    header with no operation line; a status read meanwhile with GIT_EDITOR false.
+  - `m a`: n leaves MERGE_HEAD; y: `merge --abort`, HEAD, the work tree and a clean status back; `m m` of an
+    ancestor: `nothing merged`, the revision given as its hash.
+  - `A A` of a range `main..other` stopping at its first commit: the header and `To cherry-pick (1)` / `pick HASH
+    d on other` before and after staging; `A A` goes on (`cherry-pick --continue`, GIT_EDITOR `:`), both commits
+    made, no Conflicts lines. `A s` after asking (`cherry-pick --skip`), the rest picked. A single pick: no todo
+    section; `A a` after asking, HEAD back.
+  - `_ _` through a conflict and `_ _` again (`Revert "second"`, its message whole); `_ a`; in the log, two
+    commits selected with `V j` and reverted newest first.
+  - `r e` of two commits, each conflicting: `(1 of 2)` with `To rebase (1)`, then `(2 of 2)` with no todo; while
+    stopped, `A A`, `A s`, `m m`, `r u` and `r r` (a conflict left) refused with no write; a resolution staged with
+    its markers: asked, n runs nothing; then `r r`: `Rebase done`, the branch on main, its two commits, no
+    Conflicts lines.
+  - `r u` onto a local upstream (`refs/heads/main`), `r s` after asking, `r a` after asking: the branch back at its
+    commit, a clean status.
+  - A linked worktree: its merge shown in its own status buffer (its own MERGE_HEAD), none in the main work
+    tree's, `m a` there.
+  - Refused before any write: `--upload-pack=touch x` as `m m`'s revision, `--x..main` as `A A`'s range; `r r`,
+    `r s`, `A s`, `_ a`, `m a` with nothing in progress; `git-fetch` while `git-rebase-upstream` readies; `r e`
+    asking again after its question was quit with C-g; `git-merge` in a jj workspace with no child started; the
+    thirteen commands under `Ed.proc.replay` with no child started.
+  - Nothing in progress, with a branch CHERRY_PICK_HEAD, a tag REVERT_HEAD and a branch REBASE_HEAD: the header
+    has no operation line; `m m`, `A A`, `_ _` and `r e` ask for their revision (none refused, no `--continue`);
+    `A s`, `_ a` and `r s` say nothing is in progress; no write run. A real pick beside the branch of its name
+    is still shown. A rebase stopped by a `break` (no REBASE_HEAD) shows the same header with a branch
+    REBASE_HEAD added, and `r s` asks to skip `the commit it stopped at`, naming none. In a reftable repository:
+    the branch and tag are no pick; a real pick is shown, read with `for-each-ref --include-root-refs`.
+  - In the status buffer, a Visual selection from the Head line over the Merge line to an unpulled commit: `A A`
+    picks that commit alone.
 
 ## Backends declared in init.scm reach edwind's models (done)
 

@@ -296,6 +296,15 @@ in
   # symlink), its sshCommand and ext:: remote running
   # nothing, the user's sshCommand instead, fetch's reference-transaction hook off, each with plain jj as the
   # control; a second remote command while a push runs, and the replay, refused.
+  # Merge, cherry-pick, revert and rebase (test/vc-sequencer.test.mts), in throwaway repositories: m m, A A (a
+  # range and a single commit), _ _ (one asked, two selected in the log), r e and r u each through a conflict to
+  # its end and to its abort, the status header and its todo compared at every step; going on refused while a
+  # conflict is left and asking over a staged conflict marker; A s and r s skipping after asking, the aborts
+  # asking (n changes nothing); the message git prepared kept (GIT_EDITOR=:), with no Conflicts lines; a merge in
+  # a linked worktree; a branch or a tag named CHERRY_PICK_HEAD, REVERT_HEAD or REBASE_HEAD taken for no
+  # operation (in a files and a reftable repository), a real one beside it still read; a Visual selection in the
+  # status buffer picking its commit lists' commits alone; a revision that would be a switch, a step with nothing
+  # in progress, a second operation, a jj workspace and the replay refused.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -310,7 +319,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts
         touch $out
       '';
 

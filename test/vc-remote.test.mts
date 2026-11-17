@@ -279,7 +279,7 @@ test('F u on diverged branches: git\'s refusal said when nothing says how to rec
   m = marked();
   await keys('F u');
   await done(m);
-  assert.equal(lastMessage(), 'Pulled origin/main with conflicts in a.txt: resolve them and stage them (s), then commit (c c)');
+  assert.equal(lastMessage(), 'Pulled origin/main with conflicts in a.txt: resolve them and stage them (s), then m m commits the merge, m a aborts it');
   assert.ok(lines().includes('Unmerged paths (1)'), `the status read again:\n${E.current.text}`);
   const n = proc.calls.length;
   await keys('F u');

@@ -224,7 +224,8 @@ test('x asks first: n keeps everything; y discards an unstaged hunk, lines, a fi
   await keys('n');
   assert.equal(lastMessage(), 'Nothing discarded');
   assert.equal(read(path.join(work, 'a.txt')), A, 'n: the work tree as it was');
-  assert.equal(proc.calls.filter((c, i) => i >= n && !c.argv.includes('status') && !c.argv.includes('diff') && !c.argv.includes('log') && !c.argv.includes('config')).length, 0, 'n: no write ran');
+  const reads = ['status', 'diff', 'log', 'config', 'rev-parse'];
+  assert.equal(proc.calls.filter((c, i) => i >= n && !reads.some(s => c.argv.includes(s))).length, 0, 'n: no write ran');
   goTo('+L2');
   await keys('x');
   await keys('y');

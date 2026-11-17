@@ -2258,8 +2258,10 @@ interface VcRepo {
   root: string;
 }
 /* progress: the child's error output goes to *vc-process* as it comes, a run of progress updates (each ended by a
-   carriage return) shown as its latest, rather than its head once it has ended (fetch, pull and push) */
-type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'> & { progress?: boolean };
+   carriage return) shown as its latest, rather than its head once it has ended (fetch, pull and push);
+   keepMessage: for merge, cherry-pick, revert and rebase alone, git's editor is `:`, so a commit git makes going
+   on after a conflict takes the message git prepared as it is */
+type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'> & { progress?: boolean; keepMessage?: boolean };
 interface VcApi {
   message(opts: VcMessageOptions): Promise<string | null>;
   cleanMessage(text: string, comment: string): string;

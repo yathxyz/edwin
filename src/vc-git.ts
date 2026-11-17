@@ -34,7 +34,11 @@
    f, F and p fetch, pull and push (docs/steps.md, "Fetch, pull and push"): the current branch with its upstream,
    in the background once the command has ended, the progress in *vc-process*; the runner takes the transport's
    programs from the user's configuration alone, and asks for no credentials (they come from the user's helper
-   or agent). A force push asks first and leases the remote branch at the commit the question named. */
+   or agent). A force push asks first and leases the remote branch at the commit the question named.
+
+   m, A, _ and r merge, cherry-pick, revert and rebase (docs/steps.md, "Merge, cherry-pick, revert and rebase"):
+   started, gone on with, skipped and aborted, in the background as the remote commands are; the state git keeps
+   in the repository (readSeq) is the status header's line and its todo section, and what git stopped on is said. */
 
 (function () {
 'use strict';
@@ -63,7 +67,16 @@ interface GitModel {
   diffs: { unstaged: VcDiffFile[]; staged: VcDiffFile[] };
   notes: { unstaged: string | null; staged: string | null };
   stashes: GitStash[]; unpulled: GitCommit[]; unpushed: GitCommit[]; recent: GitCommit[];
+  /* the merge, cherry-pick, revert or rebase in progress (null: none) */
+  seq: GitSeq | null;
 }
+/* A merge, cherry-pick, revert or rebase in progress, or a `git am` (shown, never gone on with here), as git's files
+   say it: the commit it stopped at (a merge's: the commit merged; null between two steps); for a rebase, the branch
+   rebased (null: a detached HEAD), the commit it goes onto, the commit the branch was at, and the step it is at of
+   how many (git am's too); the steps still to do, as the todo lists them. */
+type GitSeqOp = 'merge' | 'cherry-pick' | 'revert' | 'rebase' | 'am';
+interface GitTodo { text: string; oid: string | null }
+interface GitSeq { op: GitSeqOp; current: GitCommit | null; branch: string | null; onto: GitCommit | null; orig: string | null; step: number; of: number; todo: GitTodo[] }
 /* A section: its id (the ids of its parents and its own key, joined by NUL), the line of its heading and the
    line past its end, whether it has a body to fold, its parent and children. */
 interface GitSection { id: string; start: number; end: number; body: boolean; parent: GitSection | null; children: GitSection[] }
@@ -184,12 +197,75 @@ async function readStashes(r: VcRepo): Promise<GitStash[]> {
   return x.out.split('\n').filter(l => l).map(l => { const [name, oid, ...subject] = l.split('\0'); return { name, oid, subject: subject.join(' ') }; });
 }
 
+/* The lines of a todo (a rebase's git-rebase-todo, the sequencer's todo) still to do, comments and blank lines left
+   out: each as `VERB HASH SUBJECT` (the hash shortened, the `# ` git puts before a subject dropped), with the commit
+   it names (null: a line that names none, an exec's or a label's). */
+function todoOf(text: string | null): GitTodo[] {
+  return (text || '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => {
+    const [verb, id = ''] = l.split(/\s+/, 2);
+    if (verb === 'exec' || verb === 'x' || !/^[0-9a-f]{4,64}$/.test(id)) return { text: shown(l), oid: null };
+    const rest = l.slice(l.indexOf(id) + id.length).trim().replace(/^# /, '');
+    return { text: shown(`${verb} ${id.slice(0, 7)}${rest ? ' ' + rest : ''}`), oid: id };
+  });
+}
+const OID = /^[0-9a-f]{40,64}$/;
+const PSEUDO = ['CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD'];
+/* What R is in the middle of, read from git's own files: the directories a rebase (rebase-merge, rebase-apply; git
+   am's rebase-apply holds `applying`) and a sequence of picks or reverts (sequencer) keep, MERGE_HEAD (a file
+   always), and the pseudorefs CHERRY_PICK_HEAD, REVERT_HEAD and REBASE_HEAD by their exact names, as git status
+   reads them: never by git's rules for a name typed (refs/NAME, refs/tags/NAME, refs/heads/NAME, ...), under which
+   a branch or a tag of that name would be taken for an operation in progress. In a files repository each is the
+   file there; in a reftable one (`rev-parse --show-ref-format`; a git older than 2.45, which has no reftable,
+   prints a switch it does not know back) each is a root ref, listed by `for-each-ref --include-root-refs` (git 2.46; only a
+   reftable repository needs it). The paths come from `rev-parse --git-path`, so a linked worktree's own are read.
+   Precedence as git status has it: a rebase (or am), a merge, a pick, a revert, then a sequence stopped between
+   two of its steps (its todo's first word says which). Reads only. */
+async function readSeq(r: VcRepo): Promise<GitSeq | null> {
+  const px = await Vc.run(r, ['rev-parse', '--show-ref-format', ...['rebase-merge', 'rebase-apply', 'sequencer', 'MERGE_HEAD', ...PSEUDO].flatMap(p => ['--git-path', p])], { ...READ, lossy: true });
+  if (px.code !== 0 || px.error || px.timedOut || px.truncated) failed(px, 'git rev-parse');
+  const [format, ...paths] = px.out.split('\n');
+  const [rm, ra, sq, mh, ...pseudo] = paths.map(p => (p.startsWith('/') ? p : join(r.root, p)));
+  const files = Ed.host.files;
+  if (!files || !files.tree || !mh) return null;
+  const read = (p: string) => { try { return files.read(p); } catch (e) { return null; } };
+  const isDir = (p: string) => { try { const e = files.tree!.entry(p); return !!e && e.kind === 'dir'; } catch (e) { return false; } };
+  const first = (p: string) => (read(p) || '').split('\n')[0].trim();
+  const num = (p: string) => { const n = parseInt(first(p), 10); return Number.isFinite(n) ? n : 0; };
+  const heads = new Map<string, string>();
+  if (format === 'reftable') {
+    const hx = await Vc.run(r, ['for-each-ref', '--include-root-refs', '--format=%(refname)%00%(objectname)', ...PSEUDO], { ...READ, lossy: true });
+    if (hx.code !== 0 || hx.error || hx.timedOut || hx.truncated) failed(hx, 'git for-each-ref');
+    for (const l of hx.out.split('\n')) { const [name, oid] = l.split('\0'); if (PSEUDO.includes(name) && OID.test(oid)) heads.set(name, oid); }
+  } else PSEUDO.forEach((name, i) => { const oid = first(pseudo[i]); if (OID.test(oid)) heads.set(name, oid); });
+  const commit = async (oid: string | undefined): Promise<GitCommit | null> => (oid && OID.test(oid) ? (await readLog(r, ['--max-count=1', oid]))[0] || { hash: oid.slice(0, 7), subject: '' } : null);
+  const none: GitSeq = { op: 'merge', current: null, branch: null, onto: null, orig: null, step: 0, of: 0, todo: [] };
+  const dir = isDir(rm) ? rm : isDir(ra) ? ra : null;
+  if (dir) {
+    const apply = dir === ra, at = (f: string) => dir + '/' + f;
+    const [step, of] = [num(at(apply ? 'next' : 'msgnum')), num(at(apply ? 'last' : 'end'))];
+    if (apply && read(at('applying')) !== null) return { ...none, op: 'am', step, of };
+    const head = first(at('head-name')), [current, onto] = await Promise.all([commit(heads.get('REBASE_HEAD')), commit(first(at('onto')))]);
+    return {
+      op: 'rebase', current, branch: head.startsWith('refs/heads/') ? head.slice(11) : null, onto, orig: OID.test(first(at('orig-head'))) ? first(at('orig-head')) : null,
+      step, of, todo: apply ? [] : todoOf(read(at('git-rebase-todo'))),
+    };
+  }
+  const merging = first(mh);
+  if (OID.test(merging)) return { ...none, current: await commit(merging) };
+  /* the todo's first line is the step it stopped at, done or not: git goes on from the line after it */
+  const todo = todoOf(read(sq + '/todo'));
+  for (const [ref, op] of [['CHERRY_PICK_HEAD', 'cherry-pick'], ['REVERT_HEAD', 'revert']] as const)
+    if (heads.has(ref)) return { ...none, op, current: await commit(heads.get(ref)), todo: todo.slice(1) };
+  if (todo.length) return { ...none, op: todo[0].text.startsWith('revert ') ? 'revert' : 'cherry-pick', todo: todo.slice(1) };
+  return null;
+}
+
 /* Everything the buffer shows, read from REPO. */
 async function collect(r: VcRepo): Promise<GitModel> {
   const m: GitModel = {
     branch: null, oid: null, head: null, upstream: null, gone: false, merge: null, ahead: 0, behind: 0,
     untracked: [], unmerged: [], unstaged: [], staged: [], diffs: { unstaged: [], staged: [] }, notes: { unstaged: null, staged: null },
-    stashes: [], unpulled: [], unpushed: [], recent: [],
+    stashes: [], unpulled: [], unpushed: [], recent: [], seq: null,
   };
   const [st, un, ix] = await Promise.all([
     Vc.run(r, ['status', '--porcelain=v2', '--branch', '--show-stash', '-z', '--untracked-files=normal', '--find-renames'], { ...READ, lossy: true }),
@@ -207,15 +283,16 @@ async function collect(r: VcRepo): Promise<GitModel> {
   };
   attach(m.unstaged, un.files); attach(m.staged, ix.files);
   const upstream = m.upstream !== null && !m.gone;
-  const [head, merge, unpulled, unpushed, stash] = await Promise.all([
+  const [head, merge, unpulled, unpushed, stash, seq] = await Promise.all([
     m.oid === null ? [] : readLog(r, ['--max-count=' + (upstream ? 1 : RECENT), 'HEAD']),
     upstream ? readLog(r, ['--max-count=1', '@{upstream}']) : [],
     upstream && m.behind ? readLog(r, ['--max-count=' + AHEAD_MAX, 'HEAD..@{upstream}']) : [],
     upstream && m.oid !== null && m.ahead ? readLog(r, ['--max-count=' + AHEAD_MAX, '@{upstream}..HEAD']) : [],
     stashes ? readStashes(r) : [],
+    readSeq(r),
   ]);
   m.head = head[0] || null; m.merge = merge[0] || null;
-  m.unpulled = unpulled; m.unpushed = unpushed; m.stashes = stash;
+  m.unpulled = unpulled; m.unpushed = unpushed; m.stashes = stash; m.seq = seq;
   if (!upstream) m.recent = head;
   return m;
 }
@@ -332,6 +409,21 @@ function fileHeading(label: string, path: string, orig: string | null): { text: 
 }
 const label = (l: string) => l.padEnd(10);
 
+/* A commit as a line or a message names it: its short hash and subject. */
+const commitText = (c: GitCommit) => (c.subject ? `${c.hash} ${shown(c.subject)}` : c.hash);
+/* The status buffer's line for what S is in the middle of. */
+function seqText(s: GitSeq): string {
+  const at = s.current ? ' ' + commitText(s.current) : '';
+  switch (s.op) {
+    case 'merge': return `Merging${at}`;
+    case 'cherry-pick': return at ? `Cherry-picking${at}` : 'Cherry-picking, stopped between two commits';
+    case 'revert': return at ? `Reverting${at}` : 'Reverting, stopped between two commits';
+    case 'am': return `Applying patches with git am (${s.step} of ${s.of})`;
+    case 'rebase': return `Rebasing ${s.branch !== null ? shown(s.branch) : 'a detached HEAD'} onto ${s.onto ? commitText(s.onto) : '?'}, `
+      + (at ? `stopped at${at} (${s.step} of ${s.of})` : `stopped after ${s.step} of ${s.of}`);
+  }
+}
+
 /* The status buffer's lines. */
 function drawStatus(v: GitStatus, d: Drawer) {
   const m = v.model, { line, section } = d;
@@ -354,7 +446,19 @@ function drawStatus(v: GitStatus, d: Drawer) {
       const u = shown(m.upstream);
       line('merge', `${label('Merge:')}${u} ${m.gone ? '(gone)' : m.merge ? shown(m.merge.subject) : ''}`, [dim(6), [10, 10 + u.length, F.REMOTE], ...(m.gone ? [[11 + u.length, 17 + u.length, F.DIM] as [number, number, number]] : [])], { show: m.merge ? m.merge.hash : undefined });
     }
+    if (m.seq) {
+      const t = seqText(m.seq);
+      line('seq', t, [[0, t.search(/[ ,]|$/), F.SECTION]], { show: m.seq.current ? m.seq.current.hash : undefined });
+    }
     line('end:head', '');
+  }
+  /* the steps a rebase or a sequence of picks or reverts has still to do */
+  if (m.seq && m.seq.todo.length) {
+    const s = m.seq;
+    top_('todo', `To ${s.op}`, s.todo.length, () => s.todo.forEach((t, k) => {
+      const v = t.text.indexOf(' ');
+      line('t' + k, t.text, t.oid ? [[v + 1, v + 1 + Math.min(7, t.oid.length), F.HASH]] : [], { show: t.oid ?? undefined });
+    }));
   }
 
   /* FILES of a section, each with its hunks under it */
@@ -845,11 +949,13 @@ function lastError(x: EdProcResult): string {
   return ls.length ? ': ' + shown(ls[ls.length - 1]).slice(0, 200) : '';
 }
 
-/* git commit ARGS in R: its result said ("[main 1234567] subject"), the status buffers of R read again. */
-async function commitWith(r: VcRepo, args: string[], input?: string): Promise<EdProcResult> {
+/* git ARGS in R, a write whose hooks may print much (a commit, a rebase): no bound on its output, only a time, and
+   kept of it the head of its output and the tail of its error output. INPUT goes to its standard input;
+   KEEPMESSAGE as Vc.run has it. */
+async function runLong(r: VcRepo, args: string[], input?: string, keepMessage = false): Promise<EdProcResult> {
   let out = '', err = '';
-  const p = await Vc.start(r, ['commit', ...args], {
-    timeout: COMMIT_TIMEOUT, lossy: true,
+  const p = await Vc.start(r, args, {
+    timeout: COMMIT_TIMEOUT, lossy: true, keepMessage,
     onOut: s => { if (out.length < OUT_KEPT) out += s; },
     onErr: s => { err += s; if (err.length > 2 * ERR_KEPT) err = err.slice(-ERR_KEPT); },
   });
@@ -857,7 +963,11 @@ async function commitWith(r: VcRepo, args: string[], input?: string): Promise<Ed
     if (input) p.write(input);
     p.closeStdin();
   } catch (e) { p.kill('KILL'); throw e; }
-  const x: EdProcResult = { ...await p.exit, out, err };
+  return { ...await p.exit, out, err };
+}
+/* git commit ARGS in R: its result said ("[main 1234567] subject"), the status buffers of R read again. */
+async function commitWith(r: VcRepo, args: string[], input?: string): Promise<EdProcResult> {
+  const x = await runLong(r, ['commit', ...args], input);
   /* (a status that cannot be read again is said, the commit done all the same) */
   for (const b of buffersOf(r, 'status')) await refresh(b).catch(Ed.reportError);
   return x;
@@ -1304,8 +1414,8 @@ CMD('git-tag-delete', '', '', 'Delete a tag (t x), after asking.', () => history
    in a repository. */
 const REMOTE = { timeout: 1800000, maxBytes: MAX_BYTES, lossy: true, progress: true };
 const JJ_REMOTE = 'jj fetches and pushes with its own commands: f f, f a, p p, p c and p d in jj\'s log (SPC g J); SPC g G\'s status buffer works on its git repository';
-/* what runs, by repository root */
-const remoteBusy = new Map<string, string>();
+/* the remote, merge, cherry-pick, revert or rebase command that runs, by repository root */
+const busy = new Map<string, string>();
 
 /* R's remotes, by name: those its configuration (a read) gives a URL. A name that holds a control character, is
    not UTF-8 or starts with `-` is left out. */
@@ -1358,26 +1468,27 @@ function unreached(x: EdProcResult, what: string): never {
   return signal('process-error', `${what}: ${reason(x)}${creds} (see *vc-process*)`) as never;
 }
 
-/* Run the remote operation PREP readies (asking what it needs) on the current buffer's git repository, a jj
-   workspace refused: PREP gives what is starting (`Fetching origin`) and the operation, or null for nothing. The
-   command ends once it has started; when it ends, the repository's status and log buffers are read again and
-   what it did is said. */
-async function remoteOp(prep: (r: VcRepo) => Promise<[string, () => Promise<string>] | null>): Promise<false> {
-  const r = gitRepo(JJ_REMOTE);
-  const running = remoteBusy.get(r.root);
+/* Run the operation PREP readies (asking what it needs) on the current buffer B's git repository, a jj workspace
+   refused (JJ says why): PREP gives what is starting (`Fetching origin`) and the operation, or null for nothing.
+   The command ends once it has started; when it ends, the repository's status and log buffers are read again and
+   what it did is said. One at a time in a repository, whether it reaches a remote or is a merge, cherry-pick,
+   revert or rebase: STARTING names the command in the refusal while PREP readies it. */
+async function backgroundOp(jj: string, starting: string, prep: (r: VcRepo, b: EdBuffer) => Promise<[string, () => Promise<string>] | null>): Promise<false> {
+  const b = cur(), r = gitRepo(jj);
+  const running = busy.get(r.root);
   if (running) signal('user-error', `${running} still runs in ${shown(r.root)}: see *vc-process*`);
   /* the slot taken before PREP's git reads and questions, so that a second command started meanwhile is refused */
-  remoteBusy.set(r.root, 'A remote command');
+  busy.set(r.root, starting);
   let op: [string, () => Promise<string>] | null = null;
-  try { op = await prep(r); } finally { if (!op) remoteBusy.delete(r.root); }
+  try { op = await prep(r, b); } finally { if (!op) busy.delete(r.root); }
   if (!op) return false;
   const [what, run] = op;
-  remoteBusy.set(r.root, what);
+  busy.set(r.root, what);
   Ed.message(`${what}… (see *vc-process*)`);
   void (async () => {
     let said = '', err: unknown = null;
     try { said = await run(); } catch (e) { err = e; }
-    remoteBusy.delete(r.root);
+    busy.delete(r.root);
     for (const s of buffersOf(r, 'status')) await refresh(s).catch(Ed.reportError);
     for (const l of buffersOf(r, 'log')) void loadLog(l, true).catch(Ed.reportError);
     if (err) Ed.reportError(err); else Ed.message(said);
@@ -1385,6 +1496,7 @@ async function remoteOp(prep: (r: VcRepo) => Promise<[string, () => Promise<stri
   })();
   return false;
 }
+const remoteOp = (prep: (r: VcRepo) => Promise<[string, () => Promise<string>] | null>) => backgroundOp(JJ_REMOTE, 'A remote command', prep);
 
 /* f u and f a: fetch from the current branch's upstream's remote (one asked for when it has none), or from every
    remote. */
@@ -1431,7 +1543,7 @@ async function pullRun(r: VcRepo, branch: string, from: string): Promise<string>
   if (x.code !== 0) {
     if (/^CONFLICT /m.test(x.out + '\n' + x.err)) {
       const files = await conflicted(r), rebase = /^Could not apply /m.test(x.out + '\n' + x.err);
-      return `Pulled ${from} with conflicts${files.length ? ' in ' + listed(files) : ''}: resolve them and stage them (s), then ${rebase ? 'continue the rebase (git rebase --continue)' : 'commit (c c)'}`;
+      return `Pulled ${from} with conflicts${files.length ? ' in ' + listed(files) : ''}: resolve them and stage them (s), then ${rebase ? SEQ.rebase.keys : SEQ.merge.keys}`;
     }
     if (/divergent branches/.test(x.err)) signal('user-error', `Not pulled: ${shown(branch)} and ${from} have diverged, and your git configuration does not say how to reconcile them (pull.rebase, pull.ff)`);
     unreached(x, 'Not pulled');
@@ -1489,12 +1601,208 @@ CMD('git-pull', '', '', 'Pull the current branch\'s upstream into it (F u), merg
 CMD('git-push', '', '', 'Push the current branch to its upstream (p u), or to a remote asked for, which becomes its upstream. In the background: its progress in *vc-process*.', () => remoteOp(r => pushPrep(r, false)));
 CMD('git-push-force', '', '', 'Force push the current branch to its upstream (p f), after asking, with the commits it would discard named: --force-with-lease, so a push someone made since is not overwritten.', () => remoteOp(r => pushPrep(r, true)));
 
+/* ---------- merge, cherry-pick, revert and rebase ---------- */
+/* Each runs as a commit does (runLong: no bound on its output, which would kill git partway through a rebase),
+   after the command has ended, one at a time in a repository with the remote commands. A commit git makes going
+   on takes the message git prepared (keepMessage: GIT_EDITOR=:). Their hooks run (owner decision 12). */
+type GitSeqKind = Exclude<GitSeqOp, 'am'>;
+const SEQ: Record<GitSeqKind, { name: string; Name: string; doing: string; done: string; skip: string | null; keys: string }> = {
+  merge: { name: 'merge', Name: 'Merge', doing: 'Merging', done: 'Merged', skip: null, keys: 'm m commits the merge, m a aborts it' },
+  'cherry-pick': { name: 'cherry-pick', Name: 'Cherry-pick', doing: 'Cherry-picking', done: 'Cherry-picked', skip: 'A s', keys: 'A A goes on, A s skips the commit, A a aborts' },
+  revert: { name: 'revert', Name: 'Revert', doing: 'Reverting', done: 'Reverted', skip: '_ s', keys: '_ _ goes on, _ s skips the commit, _ a aborts' },
+  rebase: { name: 'rebase', Name: 'Rebase', doing: 'Rebasing', done: 'Rebased', skip: 'r s', keys: 'r r goes on, r s skips the commit, r a aborts' },
+};
+const AM = 'finish it in a terminal: git am --continue, --skip or --abort';
+const seqOp = (prep: (r: VcRepo, b: EdBuffer) => Promise<[string, () => Promise<string>] | null>) => backgroundOp(JJ_HISTORY, 'A merge, cherry-pick, revert or rebase', prep);
+
+/* HEAD for a message: its branch (HEAD when detached) and the commit it is at. */
+async function headNow(r: VcRepo): Promise<string> {
+  const [branch, oid] = await Promise.all([currentBranch(r), resolve(r, 'HEAD')]);
+  return `${branch !== null ? shown(branch) : 'HEAD'} ${oid ? 'at ' + await described(r, oid) : 'has no commit'}`;
+}
+/* The staged files that still hold a conflict marker, as `diff --cached --check` (a read) finds them. */
+async function markers(r: VcRepo): Promise<string[]> {
+  const x = await Vc.run(r, ['diff', '--cached', '--check'], { ...READ, lossy: true });
+  if (x.error || x.timedOut || x.truncated || x.code !== 0 && x.code !== 2) failed(x, 'git diff --check');   // 2: it found something
+  const files = new Set<string>();
+  for (const l of x.out.split('\n')) { const m = /^(.+):\d+: leftover conflict marker$/.exec(l); if (m) files.add(m[1]); }
+  return [...files];
+}
+
+/* What git did, run for KIND: stopped (a conflict, a commit that would be empty, a rebase's edit), said with what
+   to do then; else, when it failed, WHAT (`Not merged`) with git's reason, or DONE's message. */
+async function seqSaid(r: VcRepo, kind: GitSeqKind, x: EdProcResult, what: string, done: () => Promise<string>): Promise<string> {
+  if (x.error || x.timedOut) failed(x, `git ${kind}`);
+  const S = SEQ[kind], s = await readSeq(r);
+  if (s && s.op === kind) {
+    const cur = s.current ? commitText(s.current) : null, where = kind === 'merge' ? `The merge${cur ? ' of ' + cur : ''} stopped` : `${S.doing} stopped${cur ? ` at ${cur}${kind === 'rebase' ? ` (${s.step} of ${s.of})` : ''}` : ''}`;
+    const files = await conflicted(r);
+    if (files.length) return `${where} with conflicts in ${listed(files)}: resolve them and stage them (s), then ${S.keys}`;
+    if (S.skip && /\bis now empty\b/.test(x.err + '\n' + x.out)) return `${where}: its changes are in HEAD already, so it would commit nothing: ${S.keys}`;
+    if (x.code !== 0) signal('process-error', `${where}: ${reason(x)} (see *vc-process*); ${S.keys}`);
+    return `${where}: ${S.keys}`;
+  }
+  if (x.code !== 0) refused(x, what);
+  return done();
+}
+
+/* What a start command of KIND finds in progress: nothing (it starts; refused while a conflict is left), its own
+   (m m, A A and _ _ go on with it), or anything else, a rebase's for r e and r u too (refused). */
+async function seqStart(r: VcRepo, kind: GitSeqKind): Promise<boolean> {
+  const s = await readSeq(r);
+  if (s && (s.op !== kind || kind === 'rebase')) signal('user-error', s.op === 'am' ? `git am is in progress: ${AM}` : `A ${SEQ[s.op].name} is in progress: ${SEQ[s.op].keys}`);
+  if (!s) await unmerged(r, `No ${SEQ[kind].name} started`);
+  return !!s;
+}
+
+/* m m: a branch or a revision (point's, else asked) merged into HEAD, with git's own message (--no-edit); while a
+   merge is in progress, that merge committed. A ref's name is given to git as it is (the message names it),
+   anything else as its commit's hash. */
+async function mergePrep(r: VcRepo, b: EdBuffer): Promise<[string, () => Promise<string>] | null> {
+  if (await seqStart(r, 'merge')) return stepPrep(r, 'merge', 'continue');
+  const [refs, current] = await Promise.all([readRefs(r), currentBranch(r)]);
+  const head = current !== null ? shown(current) : 'HEAD', at = await revAt(r, b, refs, current);
+  const rev = await ask(`Merge into ${head}`, refNames(refs).filter(n => n !== current), at === current ? undefined : at);
+  const oid = await commitOf(r, rev), named = refNames(refs).includes(rev), it = named ? shown(rev) : await described(r, oid);
+  return [`Merging ${it} into ${head}`, async () => {
+    const before = await resolve(r, 'HEAD');
+    const x = await runLong(r, ['merge', '--no-edit', '--end-of-options', named ? rev : oid], undefined, true);
+    return seqSaid(r, 'merge', x, 'Not merged', async () => {
+      const after = await resolve(r, 'HEAD');
+      if (after === before) return `${head} already has ${it}: nothing merged`;
+      return `Merged ${it} into ${head}: now at ${await described(r, after!)}${/^Fast-forward$/m.test(x.out) ? ' (fast-forward)' : ''}`;
+    });
+  }];
+}
+
+/* A A and _ _: the commits SELECTED (in Visual state), else one or a range `A..B` asked for (the
+   commit at point by default), cherry-picked (oldest first) or reverted (newest first); while one is in progress,
+   it goes on. */
+async function pickPrep(r: VcRepo, b: EdBuffer, kind: 'cherry-pick' | 'revert', selected: string[]): Promise<[string, () => Promise<string>] | null> {
+  if (await seqStart(r, kind)) return stepPrep(r, kind, 'continue');
+  const S = SEQ[kind];
+  let revs: string[], it: string;
+  if (selected.length) {
+    const oids = [...new Set(await Promise.all(selected.map(x => commitOf(r, x))))];
+    revs = kind === 'cherry-pick' ? oids.reverse() : oids;   // shown newest first
+    it = revs.length === 1 ? await described(r, revs[0]) : `${revs.length} commits`;
+  } else {
+    const rev = await ask(`${S.Name} commit or range A..B`, refNames(await readRefs(r)), commitAt(b));
+    const dots = rev.indexOf('..');
+    if (dots > 0 && dots + 2 < rev.length && rev[dots + 2] !== '.' && !rev.includes('..', dots + 2)) {
+      const [from, to] = [rev.slice(0, dots), rev.slice(dots + 2)], range = `${await commitOf(r, from)}..${await commitOf(r, to)}`;
+      const x = await Vc.run(r, ['rev-list', '--count', range, '--'], { ...READ, lossy: true });
+      if (x.code !== 0 || x.error || x.timedOut || x.truncated) failed(x, 'git rev-list');
+      const n = +x.out.trim();
+      if (!n) signal('user-error', `${shown(rev)} holds no commit`);
+      revs = [range]; it = `${n} commit${n === 1 ? '' : 's'} (${shown(rev)})`;
+    } else { revs = [await commitOf(r, rev)]; it = await described(r, revs[0]); }
+  }
+  return [`${S.doing} ${it}`, async () => {
+    const x = await runLong(r, [kind, '--no-edit', '--end-of-options', ...revs], undefined, true);
+    return seqSaid(r, kind, x, `Not ${S.done.toLowerCase()}`, async () => `${S.done} ${it}: ${await headNow(r)}`);
+  }];
+}
+
+/* r e and r u: HEAD rebased onto a revision (point's, else asked) or onto its branch's upstream, without a todo
+   (the interactive rebase is git-rebase-todo's). */
+async function rebasePrep(r: VcRepo, b: EdBuffer, upstream: boolean): Promise<[string, () => Promise<string>]> {
+  await seqStart(r, 'rebase');
+  const branch = await currentBranch(r), head = branch !== null ? shown(branch) : 'HEAD';
+  let onto: string, it: string;
+  if (upstream) {
+    if (branch === null) signal('user-error', 'HEAD is detached: r e rebases it onto a revision asked for');
+    const up = await upstreamOf(r, branch!);
+    if (!up) signal('user-error', `${head} has no upstream: r e rebases it onto a revision asked for`);
+    it = upstreamName(up!);
+    if (!await resolve(r, up!.tracking)) signal('user-error', `${it} has not been fetched: f u fetches it`);
+    onto = up!.tracking;
+  } else {
+    const refs = await readRefs(r), at = await revAt(r, b, refs, branch);
+    const rev = await ask(`Rebase ${head} onto`, refNames(refs).filter(n => n !== branch), at === branch ? undefined : at);
+    const oid = await commitOf(r, rev), named = refNames(refs).includes(rev);
+    onto = named ? rev : oid; it = named ? shown(rev) : await described(r, oid);
+  }
+  return [`Rebasing ${head} onto ${it}`, async () => {
+    const before = await resolve(r, 'HEAD');
+    const x = await runLong(r, ['rebase', '--end-of-options', onto], undefined, true);
+    return seqSaid(r, 'rebase', x, 'Not rebased', async () => {
+      const after = await resolve(r, 'HEAD');
+      return after === before ? `${head} is up to date with ${it}: nothing rebased` : `Rebased ${head} onto ${it}: now at ${await described(r, after!)}`;
+    });
+  }];
+}
+
+/* Go on with (STEP continue), skip the commit stopped at in, or abort the KIND in progress; refused when none is,
+   or another operation is. Going on is refused while a conflict is left, offers to save the repository's changed
+   buffers and asks when a staged file still holds a conflict marker; a skip and an abort ask first, naming what
+   they discard. */
+async function stepPrep(r: VcRepo, kind: GitSeqKind, step: 'continue' | 'skip' | 'abort'): Promise<[string, () => Promise<string>] | null> {
+  const S = SEQ[kind], s = await readSeq(r);
+  if (!s || s.op !== kind) signal('user-error', `No ${S.name} in progress${!s ? '' : s.op === 'am' ? `: git am is (${AM})` : `: a ${SEQ[s.op].name} is (${SEQ[s.op].keys})`}`);
+  const at = s!.current ? commitText(s!.current) : null;
+  if (step === 'continue') {
+    const files = await conflicted(r), them = files.length === 1 ? 'it' : 'them';
+    if (files.length) signal('user-error', `${listed(files)} ${files.length === 1 ? 'is' : 'are'} still in conflict: resolve ${them} and stage ${them} (s) first`);
+    await Vc.offerSave(r, `going on with the ${S.name}`);
+    const marked = await markers(r);
+    if (marked.length && !await Ed.yesOrNo(`${listed(marked)} still hold${marked.length === 1 ? 's' : ''} a conflict marker: go on with the ${S.name}, committing ${marked.length === 1 ? 'it' : 'them'} as staged?`)) {
+      Ed.message(`Nothing done: the ${S.name} is where it was`);
+      return null;
+    }
+  } else {
+    let q: string;
+    if (step === 'skip') q = `Skip ${at ?? 'the commit it stopped at'}, leaving it out of the ${S.name} (its changes here and your resolution of them discarded)?`;
+    else if (kind === 'merge') q = `Abort the merge${at ? ' of ' + at : ''}, putting the index and the work tree back as HEAD has them (your resolutions discarded)?`;
+    else if (kind === 'rebase') q = `Abort the rebase, putting ${s!.branch !== null ? shown(s!.branch) : 'HEAD'} back at ${s!.orig ? await described(r, s!.orig) : 'where it was'} (the commits rebased so far and your resolutions discarded)?`;
+    else q = `Abort the ${S.name}, putting HEAD back where it was before it (the commits it made and your resolutions discarded)?`;
+    if (!await Ed.yesOrNo(q)) { Ed.message(`Nothing done: the ${S.name} is where it was`); return null; }
+  }
+  const doing = step === 'continue' ? `Going on with the ${S.name}` : step === 'skip' ? `Skipping ${at ?? 'a commit'} in the ${S.name}` : `Aborting the ${S.name}`;
+  return [doing, async () => {
+    const x = await runLong(r, [kind, '--' + step], undefined, true);
+    if (step !== 'abort') return seqSaid(r, kind, x, `The ${S.name} did not go on`, async () => `${S.Name} done: ${await headNow(r)}`);
+    if (x.error || x.timedOut) failed(x, `git ${kind} --abort`);
+    if (x.code !== 0) refused(x, `The ${S.name} is not aborted`);
+    return `${S.Name} aborted: ${await headNow(r)}`;
+  }];
+}
+
+/* The commits selected in Visual state in a git buffer, newest first as they are shown (Visual state then left);
+   none outside it. In the status buffer only its lists of commits count: the Head, Merge, operation and todo
+   lines name a commit too (RET shows it), but one is no commit to pick (HEAD's own, the one being picked). */
+const COMMIT_LISTS = new Set(['\0unpulled', '\0unpushed', '\0recent']);
+function selectedCommits(b: EdBuffer): string[] {
+  const v = b.gitView as GitView | undefined;
+  if (!v || v.kind === 'ext' || EvilCore.stateOf(b) !== 'visual') return [];
+  const [s, e] = EvilCore.visualRange(b, true);
+  EvilCore.setState(b, 'motion');
+  return v.rows.slice(lineNoB(b, s) - 1, lineNoB(b, Math.max(s, e - 1)))
+    .filter(x => x.show && !x.stash && (v.kind !== 'status' || COMMIT_LISTS.has(x.sec.id))).map(x => x.show!);
+}
+
+CMD('git-merge', '', '', 'Merge a branch or a revision into HEAD (m m), the one at point by default, with git\'s message; while a merge is in progress, commit it. In the background; a conflict is said with its files.', () => seqOp(mergePrep));
+CMD('git-merge-abort', '', '', 'Abort the merge in progress (m a), after asking: the index and the work tree back as HEAD has them.', () => seqOp(r => stepPrep(r, 'merge', 'abort')));
+CMD('git-cherry-pick', '', '', 'Cherry-pick the commits selected, or a commit or a range A..B asked for (A A), the commit at point by default; while a cherry-pick is in progress, go on with it. In the background; a conflict is said with its files.', () => { const sel = selectedCommits(cur()); return seqOp((r, b) => pickPrep(r, b, 'cherry-pick', sel)); });
+CMD('git-cherry-pick-skip', '', '', 'Skip the commit the cherry-pick in progress stopped at (A s), after asking, and go on with the rest.', () => seqOp(r => stepPrep(r, 'cherry-pick', 'skip')));
+CMD('git-cherry-pick-abort', '', '', 'Abort the cherry-pick in progress (A a), after asking: HEAD back where it was before it.', () => seqOp(r => stepPrep(r, 'cherry-pick', 'abort')));
+CMD('git-revert', '', '', 'Revert the commits selected, or a commit or a range A..B asked for (_ _), the commit at point by default, each by a commit of its own with git\'s message; while a revert is in progress, go on with it.', () => { const sel = selectedCommits(cur()); return seqOp((r, b) => pickPrep(r, b, 'revert', sel)); });
+CMD('git-revert-skip', '', '', 'Skip the commit the revert in progress stopped at (_ s), after asking, and go on with the rest.', () => seqOp(r => stepPrep(r, 'revert', 'skip')));
+CMD('git-revert-abort', '', '', 'Abort the revert in progress (_ a), after asking: HEAD back where it was before it.', () => seqOp(r => stepPrep(r, 'revert', 'abort')));
+CMD('git-rebase', '', '', 'Rebase HEAD onto a branch or a revision (r e), the one at point by default. In the background; a conflict is said with its files.', () => seqOp((r, b) => rebasePrep(r, b, false)));
+CMD('git-rebase-upstream', '', '', 'Rebase the current branch onto its upstream (r u), as last fetched.', () => seqOp((r, b) => rebasePrep(r, b, true)));
+CMD('git-rebase-continue', '', '', 'Go on with the rebase in progress (r r): refused while a conflict is left; asks when a staged file still holds a conflict marker.', () => seqOp(r => stepPrep(r, 'rebase', 'continue')));
+CMD('git-rebase-skip', '', '', 'Skip the commit the rebase in progress stopped at (r s), after asking, and go on with the rest.', () => seqOp(r => stepPrep(r, 'rebase', 'skip')));
+CMD('git-rebase-abort', '', '', 'Abort the rebase in progress (r a), after asking: the branch back where it was before it.', () => seqOp(r => stepPrep(r, 'rebase', 'abort')));
+
 for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-toggle', 'git-status-next-section', 'git-status-previous-section',
   'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard',
   'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup', 'git-log', 'git-log-more',
   'git-checkout', 'git-branch-create', 'git-branch-new', 'git-branch-delete', 'git-branch-rename', 'git-reset-soft', 'git-reset-mixed',
   'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete',
-  'git-fetch', 'git-fetch-all', 'git-pull', 'git-push', 'git-push-force']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-fetch', 'git-fetch-all', 'git-pull', 'git-push', 'git-push-force', 'git-merge', 'git-merge-abort', 'git-cherry-pick', 'git-cherry-pick-skip',
+  'git-cherry-pick-abort', 'git-revert', 'git-revert-skip', 'git-revert-abort', 'git-rebase', 'git-rebase-upstream', 'git-rebase-continue', 'git-rebase-skip',
+  'git-rebase-abort']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 Ed.MODE_NAMES['git-log-mode'] = 'Git Log';
 Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';

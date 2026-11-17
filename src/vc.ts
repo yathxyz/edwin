@@ -142,6 +142,8 @@ Ed.host.page.addStyle('vc-css', CSS);
 /* git subcommands that keep the repository's hooks: commit, push and the sequencer (owner decision 12). Every
    other one, a subcommand not named anywhere here included, runs with core.hooksPath=/dev/null. */
 const GIT_HOOKED = new Set(['commit', 'push', 'merge', 'rebase', 'cherry-pick', 'revert', 'am']);
+/* the sequenced operations, whose commits may take the message git prepared (keepMessage) */
+const GIT_SEQUENCER = new Set(['merge', 'rebase', 'cherry-pick', 'revert']);
 /* git subcommands that write: they change the work tree, the index, the history or a remote, so they keep the
    repository's filter and merge drivers and its signature programs, as the owner expects; those that reach a
    remote (GIT_TRANSPORT) take its credential helpers, ssh and askpass programs from the user's configuration
@@ -507,7 +509,8 @@ function checkStart(r: VcRepo, args: string[]) {
 /* ARGS (a subcommand first) for REPO's program, in its root, with the hardening above; a running child, as
    Ed.proc.spawn gives it, its argv and environment fixed here. A jj repository that brings settings of its own
    is refused. */
-async function start(r: VcRepo, args: string[], opts: VcRunOptions = {}): Promise<EdProc> {
+async function start(r: VcRepo, args: string[], allOpts: VcRunOptions = {}): Promise<EdProc> {
+  const { keepMessage, ...opts } = allOpts;
   checkStart(r, args);
   args = args.slice();
   let argv: string[], env = ENV[r.vcs];
@@ -527,6 +530,10 @@ async function start(r: VcRepo, args: string[], opts: VcRunOptions = {}): Promis
       pre.splice(1, 0, '--no-lazy-fetch');
       pre.push('-c', 'protocol.allow=never', '-c', 'log.showSignature=false', ...await repoOverrides(r));
     }
+    /* Going on after a conflict, the sequencer commits with the message it prepared: GIT_EDITOR=: is git's
+       editor that changes nothing (git starts no program for it), and git cleans the message as an edited one.
+       GIT_SEQUENCE_EDITOR stays false. */
+    if (keepMessage && GIT_SEQUENCER.has(sub)) env = { ...env, GIT_EDITOR: ':' };
     if (GIT_TRANSPORT.has(sub)) {
       pre.push('-c', 'protocol.ext.allow=never');
       env = { ...env, ...configEnv(await transportOverrides(r)) };

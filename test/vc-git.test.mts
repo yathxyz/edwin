@@ -121,6 +121,7 @@ test('SPC g g shows the sections of a repository with every kind of change', asy
   assert.equal(b.text, [
     'Head:     main local change',
     'Merge:    origin/main upstream change',
+    `Merging ${short(work, 'side')} side`,
     '',
     'Untracked files (2)',
     'dir/',
@@ -149,9 +150,9 @@ test('SPC g g shows the sections of a repository with every kind of change', asy
     '',
   ].join('\n'));
   assert.equal(b.pt, 0, 'point at the start');
-  /* only reads ran: status, diff and log, each hardened by the runner */
+  /* only reads ran: status, diff, log, rev-parse and config, each hardened by the runner */
   const subs = proc.calls.map(c => c.argv[c.argv.findIndex((a: string, i: number) => i > 0 && !a.startsWith('-') && c.argv[i - 1] !== '-c')]);
-  assert.deepEqual([...new Set(subs)].sort(), ['config', 'diff', 'log', 'status']);
+  assert.deepEqual([...new Set(subs)].sort(), ['config', 'diff', 'log', 'rev-parse', 'status']);
   for (const c of proc.calls) assert.ok(c.argv.includes('core.hooksPath=/dev/null') && (c.argv.includes('config') || c.argv.includes('--no-lazy-fetch')), c.argv.join(' '));
   /* faces: a section heading, the head's branch and upstream, a label, a hash */
   assert.deepEqual(new Set(classes(b, lineOf('Untracked files (2)'))), new Set(['git-section']));
@@ -182,9 +183,9 @@ test('TAB folds and unfolds: a file\'s hunks, a hunk, a section; the stashes', a
   /* a whole section */
   goTo('Untracked files (2)');
   await keys('TAB');
-  assert.deepEqual(lines().slice(3, 5), ['Untracked files (2)…', '']);
+  assert.deepEqual(lines().slice(4, 6), ['Untracked files (2)…', '']);
   await keys('TAB');
-  assert.deepEqual(lines().slice(3, 6), ['Untracked files (2)', 'dir/', 'untracked.txt']);
+  assert.deepEqual(lines().slice(4, 7), ['Untracked files (2)', 'dir/', 'untracked.txt']);
   /* a section folded and unfolded again shows its files as they were: a.txt still unfolded */
   goTo('Unstaged changes (2)');
   await keys('TAB');
@@ -213,7 +214,7 @@ test('g r reads the repository again, keeping the folds and point; a second SPC 
   write(path.join(work, 'a.txt'), 'one\nTWO\nthree\nfour\n');
   await keys('g r');
   assert.equal(E.current, b);
-  assert.deepEqual(lines().slice(3, 7), ['Untracked files (3)', 'dir/', 'later.txt', 'untracked.txt']);
+  assert.deepEqual(lines().slice(4, 8), ['Untracked files (3)', 'dir/', 'later.txt', 'untracked.txt']);
   const at = lineOf('modified   a.txt');
   assert.deepEqual(lines().slice(at, at + 6), ['@@ -1,3 +1,4 @@', ' one', '-two', '+TWO', ' three', '+four'], 'a.txt stays unfolded, with its new hunk');
   assert.equal(lineAtPoint(), '-two'); assert.equal(b.pt - Ed.lineStartB(b, lineOf('-two')), 2, 'point on its line and column');
@@ -227,7 +228,7 @@ test('g r reads the repository again, keeping the folds and point; a second SPC 
   await keys('SPC g g');
   assert.ok(proc.calls.length > n, 'read again');
   assert.equal(E.current, b);
-  assert.equal(lines()[3], 'Untracked files (2)');
+  assert.equal(lines()[4], 'Untracked files (2)');
   from(path.join(work, 'dir', 'x.txt'));
   await keys('SPC g g');
   assert.equal(E.current, b, 'one buffer per repository');
