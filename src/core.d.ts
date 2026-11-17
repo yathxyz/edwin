@@ -856,6 +856,8 @@ interface EdBuffer extends SchemeForeign {
   disk?: { stamp: string | null; ok?: string; seen?: string };
   /* a directory listing (dired.ts) */
   dired?: unknown;
+  /* the visited file's EditorConfig properties, as last read (editorconfig.ts) */
+  editorconfig?: Map<string, string>;
   /* *compilation* and *grep*: the command it shows and its directory (compile.ts) */
   compile?: { command: string; dir: string | null };
   /* *grep* once its grep has ended: the lines its output fills (from 0, TO excluded), whether its rows carry
@@ -1475,7 +1477,7 @@ interface EdApi {
   LEX_SOURCE: string;
   /* the file store: the host's files, or its storage */
   Store: {
-    get(n: string): string | null;
+    get(n: string, max?: number): string | null;
     set(n: string, v: string): boolean;
     del(n: string): void;
     list(): string[];
@@ -1854,7 +1856,7 @@ interface EdSyntaxApi {
   tree(b: EdBuffer, grammar: string): number | null;
 }
 interface EdHostFiles {
-  read(name: string): string | null;
+  read(name: string, max?: number): string | null;
   write(name: string, text: string): void;
   remove(name: string): void;
   list(): string[];
@@ -2395,6 +2397,26 @@ interface LspRpcApi {
   readonly DEFAULT_TIMEOUT: number;
 }
 
+/* ---------- modules: EditorConfig (editorconfig.ts) ---------- */
+
+/* One .editorconfig: whether it says root = true, and its sections' names and pairs in order. */
+interface EditorConfigFile {
+  root: boolean;
+  sections: [glob: string, pairs: [name: string, value: string][]][];
+}
+interface EditorConfigApi {
+  parse(text: string): EditorConfigFile;
+  /* whether a section's GLOB matches REL, a path from its file's directory */
+  matches(glob: string, rel: string): boolean;
+  /* FILE's properties (FILE absolute), READ giving each directory's NAME file (.editorconfig) or null */
+  properties(file: string, read: (path: string) => string | null, name?: string): Map<string, string>;
+  /* the longest .editorconfig read; what the sections of one search may come to, each its name's length and
+     SECTION_COST */
+  readonly MAX_FILE: number;
+  readonly MAX_GLOBS: number;
+  readonly SECTION_COST: number;
+}
+
 /* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is
    [from, to, face] from its line's start, the face one of VcView.faces. A line's extra says what RET does there:
    visit a file of the work tree at a line, show a revision (by the kind's show), or read more (by its more). */
@@ -2458,7 +2480,7 @@ interface EdNatives {
   env(name: string): string | undefined;
   cwd(): string;
   now(): number;
-  readFile(path: string): string | null;
+  readFile(path: string, max?: number): string | null;
   writeFile(path: string, text: string): void;
   appendFile(path: string, text: string): void;
   /* mtime in milliseconds; nsec, its nanoseconds within the second, and ino tell versions apart (auto-revert) */
@@ -2677,6 +2699,8 @@ declare var VcView: VcViewApi;
 declare var VcJj: VcJjApi;
 /* lsp-rpc.ts */
 declare var LspRpc: LspRpcApi;
+/* editorconfig.ts */
+declare var EditorConfig: EditorConfigApi;
 /* ot.ts */
 declare var EdOT: EdOTApi;
 /* ai.ts reads it (also as window.claude) */

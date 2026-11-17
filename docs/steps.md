@@ -4525,6 +4525,111 @@ reparse, highlighting, imenu, expand-region, indentation). Nothing in the core c
   54.7 ms before and 57.9 after, fastest 23.2 and 21.8. Nothing of tree-sitter runs before the first draw. The
   program grows by 2.4 MB (66.2 to 68.6). Also passed: `nix flake check` (exit 0).
 
+## EditorConfig: a visited file's .editorconfig sets its indent, fill column, final newline and trimming (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-editorconfig`): src/editorconfig.ts reads `.editorconfig`
+up the tree and sets indent, width, final newline and trimming. Before, Edwin read no `.editorconfig`: a file's
+indent was its mode's (`define-language :indent`) and the user's.
+
+- **The search** (`EditorConfig.properties`, src/editorconfig.ts, a new core file through the seven-place touch
+  list): from the visited file's directory upward, each directory's `.editorconfig` read through the store
+  (`Ed.Store.get(path, MAX_FILE)`), stopping after the one whose preamble says `root = true` (any case). Their sections apply from
+  the outermost file to the nearest, each file's in order, a later pair replacing an earlier one; a section applies
+  when its glob matches the file's path from that `.editorconfig`'s directory. Then the core library's defaults:
+  `indent_style = tab` with no `indent_size` gives `indent_size = tab`, a numeric `indent_size` with no
+  `tab_width` gives `tab_width`, and `indent_size = tab` takes `tab_width` when there is one.
+- **The parser**: blank lines and lines starting with `#` or `;` are skipped; `[NAME]` opens a section (NAME as
+  written between the first `[` and the last `]`, spaces kept); `KEY = VALUE` splits at the first `=`, both trimmed,
+  the key lowercased, and the value too for the standard properties (`indent_style`, `indent_size`, `tab_width`,
+  `end_of_line`, `charset`, `insert_final_newline`, `trim_trailing_whitespace`, `max_line_length`). A `#` or `;`
+  inside a value is part of it (the current spec); a byte-order mark and CR LF line ends are read.
+- **The globs**: `*` (not `/`), `**`, `?`, `[abc]`, `[a-z]`, `[!abc]`, `{a,b}` (nested, empty parts), `{N1..N2}`
+  (signed integers, no leading zero), `\` escapes; a `[` with no `]`, or a `/` before it, and a `{` with one part
+  or no closing `}` are themselves; `/**/` matches one `/` or any directories between two. As in the core
+  library, a glob is matched against the path with the `.editorconfig` directory's own `/` before it: a glob with
+  a `/` from that `/` (with or without a leading `/`), one with none after `/**/`, in any directory below. So a
+  leading `**/` or `/**/` (`[**/*.js]`, `[/**/*.md]`) also matches a file in the `.editorconfig`'s own directory.
+- **What it sets**, buffer-local, from `find-file-hook` (after the file's mode set its own indent, which it
+  overrides), and again from `after-change-major-mode-hook` in a buffer it has already set (a mode switch drops the
+  buffer-local values; the files are read again, as `write-file` may have changed the name):
+  - `indent_style`: `indent-tabs-mode` (`tab` `#t`, `space` `#f`);
+  - `indent_size` (or `tab_width` where it is `tab`): `tab-width`, TAB's stops, and `evil-shift-width`, `>` and `<`;
+  - `max_line_length`: `fill-column` (`off` sets nothing);
+  - `insert_final_newline`: `require-final-newline`, `#t` or `#f`;
+  - `trim_trailing_whitespace = true`: a save of the modified, writable buffer deletes the trailing spaces and tabs
+    of every line (`editorconfig--before-save` on `before-save-hook`, through `delete-trailing-blanks`), in any
+    mode; `false`: `ws-butler-mode` `#f` in that buffer, so ws-butler leaves even its changed lines.
+  - A width is a whole number from 1 to 9999; anything else, `unset` and a property no section gave set nothing,
+    so the mode's or the user's value stays.
+- **`(editorconfig-properties FILENAME)`**: the properties of an absolute path as a list of `(NAME . VALUE)`
+  strings, in the order each was first set; the buffer keeps its own in `b.editorconfig`.
+- **Choices**, each reversible:
+  - Globs are matched by a table of (pattern node, path position), filled from the path's end, not by a regular
+    expression: a `.editorconfig` comes from whatever repository is cloned, and a regexp of nested `*` and braces
+    backtracks without bound. The cost is the pattern's length times the path's. On top of it the search stops
+    before a file that would bring the sections read in one search past 8,192 (`MAX_GLOBS`), each counted as its
+    name's length and 16 more (`SECTION_COST`, the nodes every match adds whatever the name, so a file of empty or
+    one-character sections is bounded too; a real file's come to a few hundred). Timed on ex44 in the headless
+    runtime (load average 7), against a 4,000-character file name: one 4,001-character pattern of `*a` 0.10 s;
+    sections up to the bound of `{a,*a}` patterns 0.15 to 0.20 s, of `[a]` 0.07 s, of `[]` 0.06 s, of `[*]` 0.07 s
+    (while a cargo build ran the first two took 0.27 and up to 0.41 s). A file name of a usual length (200
+    characters) takes about a twentieth of that. (Timed before the leading-`**/` fix, which adds one `/` to the
+    path and at most four nodes to a pattern.)
+  - What is read is bounded too, since the search runs on every visit in every directory up to `/` and a cloned
+    repository can ship `.editorconfig` as a link to `/dev/stdin` or `/dev/zero`, or as a FIFO: `Ed.Store.get`
+    takes a bound, which the desktop program passes to `readFile(path, max)` in native/src/natives.rs. With a
+    bound it reads only a regular file (links followed) of at most `MAX_FILE` (1 MiB) bytes: the name is stat'ed
+    before the open, so a device, a FIFO or a larger file is never opened; the open does not block and is checked
+    again on its descriptor; the read stops at the bound and one byte. A refusal throws, and the search takes the
+    file as absent and goes on upward. Without a bound `readFile` is as before. The headless and browser stores
+    hold their files in memory, where a text past `MAX_FILE` characters is skipped the same way.
+  - Files are read through the store, not the file system: the desktop program reads its disk, edwind its own
+    within its path rules, the headless suites their memory store. A buffer with no file, one whose file is
+    edwind's (`b.shared`: a served page's, the desktop program's notes), and one whose file is not an absolute path
+    (the browser page's stored files) get nothing.
+  - `tab_width` sets no display width: Edwin draws a tab 8 columns wide in every buffer (src/display.ts), and its
+    `tab-width` is TAB's stop, which is what the indent is. So `tab_width` counts only where `indent_size` is `tab`
+    (or absent with `indent_style = tab`), as the indent.
+  - `trim_trailing_whitespace = true` trims every line, as Emacs's editorconfig does (`delete-trailing-whitespace`
+    on save) and as the property says, not only the changed ones.
+- **Differences from Emacs** (editorconfig.el): no per-mode indent variables (`python-indent-offset` and the
+  like): Edwin's modes indent by `tab-width` and `evil-shift-width`; `insert_final_newline = false` does not
+  delete a final newline that is there, as in Emacs; no `end_of_line` or `charset` (the buffer's text is saved as
+  UTF-8 with its own line ends); no `editorconfig-mode` switch and no `editorconfig-exclude-modes`.
+- **Not in it:** `end_of_line`, `charset`, `spelling_language` and other properties than those above (they are
+  read and kept in `b.editorconfig`, and set nothing); a buffer visited before its `.editorconfig` changed keeps
+  the values it got (visit it again, or switch its mode); `write-file` to a new name reads the files only when it
+  changes the mode; served buffers (above).
+- **Checked by**, on ex44, on this branch rebased onto lang-syntax-incremental (0c405f9):
+  `nix build .#checks.x86_64-linux.edwin-prog` (41: `test/prog.test.mts` 25 as before,
+  `test/editorconfig.test.mts` 16 new). Four of the 16 run the core library's own test cases from
+  editorconfig-core-c's source (`pkgs.editorconfig-core-c.src`, `tests/`, read by the check as
+  `EDITORCONFIG_CORE_TESTS`): every `new_ec_test`, `new_ec_test_multiline` and `new_ec_test_full_ec_file_path` of
+  its glob (130), parser (33), properties (9) and filetree (24) directories, their `-f` file names and expected
+  output regexps taken from its CMakeLists.txt (the cli and meta directories and the version-0.8 case left out).
+  The others: globs the core cases leave out (a negated class and `/`, signed and reversed ranges, anchoring;
+  a leading `**/` and `/**/` matching in the `.editorconfig`'s own directory and below, `x/**/y` matching `x/y`);
+  a hostile pattern, 20 nested files of hostile sections, of empty sections and of one-character sections, and
+  one-character sections up to the bound, each under 2 s, the search stopping at the bound, a file past
+  `MAX_FILE` skipped; in the editor the nearest file beating the outer one and both beating the mode's indent,
+  `indent_style = tab` making TAB insert a tab, `root = true` stopping the search, `unset`, a mode switch keeping
+  the values, no values in a buffer with no file or a relative name, `insert_final_newline` both ways (and the
+  global value where no section matches), `trim_trailing_whitespace = true` in Markdown and Nix buffers and an
+  unmodified buffer untouched, `= false` keeping ws-butler off in that buffer only, and widths out of range
+  ignored. `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36), exit 0: its
+  new `a_hostile_editorconfig_is_not_read` visits a file under a `.editorconfig` that links to `/dev/stdin`, one
+  that is a FIFO and one past 1 MiB, each beside a regular one in the directory above whose `indent_style = tab`
+  must still apply (TAB inserts a tab). The build before the bound (store path `iqhl8h7r…-edwin-0.1.0`) never
+  draws a file under the FIFO (8 s, under `script`, a throwaway HOME and XDG_RUNTIME_DIR) and draws the same file
+  without it. A link to `/dev/zero` is not in the test: before the bound it filled memory. Also passed:
+  `edwin-typecheck`, `edwin-headless` (21), `edwin-scheme` (38), `edit-security` (21), `edit-lockdown` (6), each exit 0, and
+  `nix flake check --keep-going` (all checks passed but `edwin-bench`, 10.2% against its 10% limit, and
+  `edit-anchors`, one assertion of R8.12, at a load average near 19; both passed when built again, 7.6% and 10 of
+  10). The globs were also compared with editorconfig-core-c 0.12.11's `editorconfig` program over 72,000
+  glob and path pairs drawn from a small set of pieces (`**/`, `/**/`, `/`, `*`, `**`, `?`, `{a,b}`, `[ab]`,
+  names and directories; no escapes, ranges or malformed brackets): no difference. Nothing here runs in edwind's editing of a served buffer: edwind loads the file, and its hooks run only on a
+  frame's visit and `save-buffer`.
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

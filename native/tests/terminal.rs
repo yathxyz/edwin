@@ -429,6 +429,39 @@ fn a_file_that_is_not_text_is_refused() {
     );
 }
 
+/// A cloned repository decides what the .editorconfig search reads on every visit: a link to the terminal
+/// (/dev/stdin, whose read never ends), a FIFO (whose open blocks) and a file past the 1 MiB bound are each
+/// refused unread, as if absent, and the search goes on to the directory above, whose tab style applies.
+/// (A link to /dev/zero is the terminal's case; it is not tested here, since before the bound it filled memory.)
+#[test]
+fn a_hostile_editorconfig_is_not_read() {
+    let d = workdir("editorconfig");
+    std::fs::write(
+        d.join(".editorconfig"),
+        "root = true\n[*]\nindent_style = tab\ntab_width = 4\n",
+    )
+    .unwrap();
+    for sub in ["stdin", "fifo", "big"] {
+        std::fs::create_dir(d.join(sub)).unwrap();
+        std::fs::write(d.join(sub).join("a.txt"), "x\n").unwrap();
+    }
+    std::os::unix::fs::symlink("/dev/stdin", d.join("stdin/.editorconfig")).unwrap();
+    let fifo = cstr(&d.join("fifo/.editorconfig").display().to_string());
+    // SAFETY: a valid C string.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let big = format!(
+        "[*]\nindent_style = space\n{}",
+        "# padding\n".repeat((1 << 20) / 10 + 1)
+    );
+    std::fs::write(d.join("big/.editorconfig"), big).unwrap();
+    for sub in ["stdin", "fifo", "big"] {
+        let mut t = Pty::spawn(&d.join(sub), &["a.txt"], &[]);
+        t.ready().keys("i\t").esc().keys(":wq\r");
+        assert_eq!(t.exit(), 0, "{sub}");
+        assert_eq!(read(d.join(sub).join("a.txt")), "\tx\n", "{sub}");
+    }
+}
+
 #[test]
 fn plus_line_starts_on_that_line() {
     let d = workdir("args");

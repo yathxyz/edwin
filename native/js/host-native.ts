@@ -49,9 +49,9 @@ readDirs();
 
 /* ---------- files: line ends and the byte order mark are kept per file ---------- */
 const shapes = new Map<string, { crlf: boolean; bom: boolean }>();   // absolute path -> { crlf, bom }
-function read(name: string) {
+function read(name: string, max?: number) {
   const p = resolve(name);
-  let t = N.readFile(p);
+  let t = N.readFile(p, max);
   if (t === null) return null;
   const bom = t.charCodeAt(0) === 0xfeff;
   if (bom) t = t.slice(1);

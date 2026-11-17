@@ -43,7 +43,7 @@ const hooks: EdHooks = {};
    completion offers. */
 const PFX = 'lmacs:file:';
 const Store = {
-  get(n: string) { return host.files ? host.files.read(n) : host.storage.get(PFX + n); },
+  get(n: string, max?: number) { return host.files ? host.files.read(n, max) : host.storage.get(PFX + n); },
   set(n: string, v: string) { if (host.files) { host.files.write(n, v); return true; } return host.storage.set(PFX + n, v) !== false; },
   del(n: string) { if (host.files) host.files.remove(n); else host.storage.remove(PFX + n); },
   list() { return host.files ? host.files.list() : host.storage.keys().filter(k => k.startsWith(PFX)).map(k => k.slice(PFX.length)).sort(); },

@@ -169,8 +169,14 @@ in
   # Programming modes in the headless runtime: define-language (scm/prog.scm), each declared file name selecting its
   # mode, with its indent and hooks on a visit; each mode's comment syntax (set-comment-syntax!, found through the
   # modes it derives from, nearest first) and gc, gcc and M-; using it; ws-butler: a save trims the trailing blanks of
-  # the lines that differ from the file only, so untouched dirty lines survive it.
-  edwin-prog = suite "prog" [ "prog.test.mts" ];
+  # the lines that differ from the file only, so untouched dirty lines survive it. EditorConfig (src/editorconfig.ts):
+  # the glob, parser, properties and filetree cases of the core library's own test suite, from editorconfig-core-c's
+  # source, and a visited file's .editorconfig setting its buffer's indent, fill column, final newline and trimming.
+  edwin-prog = pkgs.runCommand "edwin-prog" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+    export HOME=$TMPDIR EDITORCONFIG_CORE_TESTS=${pkgs.editorconfig-core-c.src}/tests
+    node --test ${edwin}/edwin/test/prog.test.mts ${edwin}/edwin/test/editorconfig.test.mts
+    touch $out
+  '';
 
   # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm
   # declares; each library loads with py-tree-sitter, exports its symbol and has an ABI version tree-sitter

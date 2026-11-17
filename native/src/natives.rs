@@ -151,6 +151,17 @@ fn read_file(
     mut rv: v8::ReturnValue,
 ) {
     let p = arg_str(scope, &args, 0);
+    if args.length() > 1 && !args.get(1).is_undefined() {
+        let max = args.get(1).number_value(scope).unwrap_or(0.0).max(0.0) as u64;
+        return match read_regular(&p, max) {
+            Ok(None) => rv.set(v8::null(scope).into()),
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(s) => ret_str(scope, &mut rv, &s),
+                Err(_) => throw(scope, "not UTF-8 text"),
+            },
+            Err(msg) => throw(scope, &msg),
+        };
+    }
     match std::fs::metadata(&p) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             rv.set(v8::null(scope).into());
@@ -167,6 +178,46 @@ fn read_file(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => rv.set(v8::null(scope).into()),
         Err(e) => throw(scope, &sys_msg(&e)),
     }
+}
+
+/// readFile(PATH, MAX): the bytes of PATH (its links followed) when it is a regular file of at most MAX bytes;
+/// None when nothing is there. Anything else (a directory, a device, a FIFO, a socket, a larger file) is
+/// refused before a byte is read: the name is checked before the open (so no device is even opened), the file
+/// opened without blocking and checked again on its descriptor (should the name have changed in between), and
+/// read no further than MAX and one byte, should it have grown.
+fn read_regular(p: &str, max: u64) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(sys_msg(&e)),
+        Ok(m) if !m.is_file() => return Err("not a regular file".into()),
+        Ok(_) => {}
+    }
+    let mut f = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(p)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(sys_msg(&e)),
+    };
+    let m = f.metadata().map_err(|e| sys_msg(&e))?;
+    if !m.is_file() {
+        return Err("not a regular file".into());
+    }
+    let too_large = || format!("larger than {max} bytes");
+    if m.len() > max {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(m.len() as usize);
+    (&mut f)
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| sys_msg(&e))?;
+    if bytes.len() as u64 > max {
+        return Err(too_large());
+    }
+    Ok(Some(bytes))
 }
 
 /// Write TEXT to PATH. An ordinary file is replaced atomically: a temporary file beside it with the old
