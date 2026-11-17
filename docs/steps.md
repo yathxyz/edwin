@@ -4695,6 +4695,77 @@ lexer's classes was off: `%`, `C-M-f/b/u/k`, `=` and newline indentation, highli
   (median of 50; about 0.15 ms in the check). On the old lexer (561495a) 18 or 19 of the 36 fail: the 2 ms keystroke test is timing-dependent there, passing at a median of 1.6 ms in a full-suite run and failing at about 4.4 ms in two runs of it alone. Also passed: `edwin-typecheck`,
   `edwin-headless` (21), `edwin-display` (20), `edwin-scheme` (38), `edwin-pool` (21), `edwin-prog` (41), `edwin-proc` (13), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36). `edwin-markdown` (20), `edit-frame` (24), `edwin-syntax` (6), and `nix flake check` (exit 0; two earlier runs each failed one timing test only, `edwin-proc`'s direnv timeout and `edwin-markdown`'s 2 ms font-lock budget at 2.5 ms; `edwin-proc` passed in the second run and `edwin-markdown` alone after it). The whole audit corpus (219 cases) run headless on the old lexer and on this lexer as it was before the `#(` fix (b388475): exactly the 12 cases above go from failing to passing, and no other case changes its result or its output; not rerun since.
 
+## Delimiter text objects through the lexer (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-pair-objects`): B2, B9 and B10 of the structural-editing
+audit (`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). Before, `i(` `a(` and the other
+pair objects counted raw characters, so a `)` in a string, a comment or a character literal closed the list
+(`da(` on `(x (foo "a)b" bar) y)` left ` y)`); `ds` and `cs`, and expreg, which call the same scan, went wrong the
+same way; `i"` took a quote after an escaped backslash (`"a\\"`) for an escaped quote; and `a(` again in Visual
+state selected the same list.
+
+- **Pair objects in Lisp buffers** (`pairObject`, `src/evil-core.ts`): a `( ) [ ]` is a delimiter only when the
+  lexer classes it PAR, as `%` already reads it, so brackets in strings, comments, `#;` data, `#\(` and Emacs
+  Lisp's `?\(` are passed over; a `{ } < >`, which the Lisp lexer leaves as plain characters, counts outside
+  strings, comments and character literals (`#\{`). With point in a string or a comment, the pairs inside that
+  string or comment count first, so `di(` still works in a commented-out form (`;; (foo bar)`) and in
+  `"a (b) c"`; a count beyond them, or none there, goes on among the lists around the string or comment, so
+  `2di(` on the `h` of `(display "(hi)" x)` empties the list. Other buffers keep the raw scan. `ds` and `cs`
+  (`evil--surround-bounds`) and expreg call `evil--pair-object` and get the same pairs; `ds` and `cs` needed no
+  change in `scm/evil.scm`.
+- **Quote objects** (`quoteObject`): a quote is escaped only after an odd run of backslashes, in every buffer, so
+  `di"` on `(f "a\\" "b")` empties `"b"` (B9). In a Lisp buffer `i"` and `a"` take the lexer's strings: the one
+  point is in, over several lines if it runs over them (a docstring), or else the first that starts after point
+  on its line, so `#\"` is never a quote. With point in a comment the comment's line is scanned as in other
+  buffers. `'` and `` ` `` stay line-local raw scans: in Lisp they are prefixes, not strings.
+- **Visual growth** (`evil--pair-text-object`, B10): the eight pair text objects (`i( a( i[ a[ i{ a{ i< a<`) go
+  through it. In Visual state with more than one character selected it takes the COUNTth pair that strictly
+  contains the selection, so `va(a(` selects the list around the list, `vi(i(` the inside of the next list out,
+  and `vl` then `a(` the list around the selection; from a pair in a string or a comment it grows out to the
+  lists around it. With no such pair the text object fails and the selection stays. A linewise selection counts
+  as its whole lines, and a pair object (any text object that is not linewise) turns linewise Visual charwise
+  (`evil--apply-text-object`), as Vim does, so `V` then `a(`, or `vi(i(` from an inner object that came out
+  linewise, selects the pair's text and `d` deletes nothing outside it; before, Visual stayed linewise and `d`
+  took the pair's whole lines. `evil--pair-object` itself does not grow: expreg calls it in Visual state for each level.
+- **expreg** (`expreg--candidates`, `scm/evil.scm`): in a Lisp buffer the string point is in gives two steps, its
+  text and the string with its quotes, between the symbol and the list; a string elsewhere on the line is no step.
+- **Choices:**
+  - A one-character selection does not grow: it cannot be told from a fresh `v`, and `v` on a one-character
+    list's element then `i(` must select that element. So `vi(i(` on `(b)` selects `b` again, where Evil may
+    go out to the next list (not checked against Evil).
+  - Inside a string or a comment the pairs inside it come first, and a count or Visual growth goes on to the
+    lists around it; the audit has no case for it, and Evil's behaviour there was not checked.
+  - `ds"` on a string holding a bracket makes that bracket code, as evil-surround does; the balance property test
+    leaves `ds"` out for that reason, and every other operator in it keeps the buffer balanced.
+- **Not in it:** non-Lisp buffers still scan raw characters for `i(` and the like (`di{` in Nix counts a `}` in a
+  string; tree-sitter for brackets is se-match-nonlisp's, B11); expreg in non-Lisp buffers (`expreg-nix-list`,
+  audit gap 11); `ds)-keeps-space` and `cs)]-multiline` (B7, se-surround); `dio-symbol` (the symbol object,
+  a gap); `i'` and `` i` `` in Lisp.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`, `test/structural.test.mts` now 99
+  tests (63 new): the audit's 15 cases that failed at 58df99f (`di(-string-close-paren`, `di(-string-open-paren`,
+  `da(-string-paren`, `di(-comment-paren`, `di(-charlit`, `di(-charlit-close`, `di(-elisp-charlit`,
+  `di"-escaped-backslash`, `di"-multiline`, `va(a(-expands`, `ds(-string-paren`, `ds(-charlit`, `expreg-string`,
+  `expreg-string-paren`, `msg-di(-string`) and 40 that passed there and still must (the other `i( a( i[ i{ i"`,
+  `ds`, `cs`, `ys` and expreg cases, with counts, `.`, undo and an unbalanced buffer), driven by keys; every Lisp
+  case of the suite that starts balanced ends balanced; 200 seeded random operations (`di( da( di[ da[ ds( ds[
+  cs([ cs[( di" da" ci(`) at random points of random balanced Lisp text with strings, literals, `#;` and comments
+  leave it balanced; Visual growth (`vi(i(`, `va(a(a(`, `2a(`, `a[` after `a(`, `vl a(`); counts and growth from a
+  pair in a string or a comment out to the lists around it (`2di(`, `3di(`, `4di(`, `va(a(`, `va(2a(`); `V a(`,
+  `Vj i(`, and `vi(i(` and `vi(a(` from a linewise inner object, which keep to the outer pair; pairs inside a string or
+  comment, `{ }` with `#\{`, adjacent strings, `#\"`, `i"` in a comment, and B9 in a Python buffer; expreg's string
+  steps; and the Visual-block case operators (`C-v j ~`, `C-v jl U`, `u`, `g?`), which call
+  `evil--block-ranges`, a definition in `src/evil-core.ts` this package had dropped by mistake and restored. On
+  58df99f 22 of the 99 fail (the 15 cases and the 7 new property and behaviour tests; the block case operators
+  pass there, and fail on this package without the restored definition). Also passed in
+  the same build: `edwin-typecheck`, `edwin-headless` (21), `edwin-prog` (41), `edwin-scheme` (38),
+  `edwin-display` (20), `edwin-pool` (21), `edit-conformance` (29), `edit-lockdown` (6), `edit-security` (21);
+  `nix build .#edwin` passed on its second run (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored,
+  `tests/terminal.rs` 36); its first run failed one unit test only, `open.rs`'s
+  `the_opener_gets_exactly_its_name_and_the_target` at its `remove_dir_all` cleanup (directory not empty, at a load
+  average of 20), in native code this package does not change. At landing, `nix flake check` passed (exit 0) on
+  its second run (`--keep-going`); the first stopped at `edit-crash`'s R16.5 (random SIGKILL under a three-client load, "the history
+  lost acked batches"), server code this package does not change, which then passed alone.
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

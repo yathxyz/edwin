@@ -392,7 +392,9 @@ D('evil--apply-text-object', 'RANGE', 'In Visual state, extend the selection to 
   if (e <= s) return r;
   const single = b.mark === b.pt;
   if (!single) { s = Math.min(s, b.mark!, b.pt); e = Math.max(e, Math.max(b.mark!, b.pt) + 1); }
+  /* The selection takes the object's type, so a( from linewise Visual selects the list, not its lines. */
   if (type === 'line') b.visual = 'line';
+  else if (b.visual === 'line') b.visual = 'char';
   b.mark = s; b.pt = Math.max(s, e - 1); E.keepMark = true;
   return r;
 });
@@ -810,14 +812,17 @@ D('evil--word-object', 'COUNT BIG OUTER', 'Range (BEG END) of COUNT words at poi
   const r = wordObject(cur(), optNum(n, 1), truthy(big), truthy(outer));
   return r ? L.list(r[0] + 1, r[1] + 1, intern('exclusive')) : false;
 });
-function pairObject(b: EdBuffer, open: string | null, close: string | null, count: number, outer: boolean): EdRange | null {
-  const t = b.rope; let p = b.pt, o: number | null = null;
+/* The COUNTth pair of OPEN and CLOSE around P, as the positions of its two delimiters, or null. Only the positions
+   REAL accepts are delimiters; the scan stays within LO and HI. */
+function scanPair(t: EdText, open: string, close: string, count: number, p: number, lo: number, hi: number, real: (k: number) => boolean): [number, number] | null {
+  let o: number | null = null;
   for (let c = 0; c < count; c++) {
     o = null;
-    if (c === 0 && t.at(p) === open) o = p;
+    if (c === 0 && t.at(p) === open && real(p)) o = p;
     else {
       let d = 0;
-      for (let k = (c === 0 && t.at(p) === close) ? p - 1 : p - 1; k >= 0; k--) {
+      for (let k = p - 1; k >= lo; k--) {
+        if (!real(k)) continue;
         if (t.at(k) === close && open !== close) d++;
         else if (t.at(k) === open) { if (d === 0) { o = k; break; } d--; }
       }
@@ -825,28 +830,105 @@ function pairObject(b: EdBuffer, open: string | null, close: string | null, coun
     if (o === null) return null;
     p = o;
   }
-  let d = 0, cl: number | null = null;
-  for (let k = o!; k < t.length; k++) { if (t.at(k) === open) d++; else if (t.at(k) === close && --d === 0) { cl = k; break; } }
-  if (cl === null) return null;
-  if (outer) return [o!, cl + 1, 'exclusive'];
-  let beg = o! + 1, end = cl;
+  let d = 0;
+  for (let k = o!; k < hi; k++) {
+    if (!real(k)) continue;
+    if (t.at(k) === open) d++; else if (t.at(k) === close && --d === 0) return [o!, k];
+  }
+  return null;
+}
+/* In a Lisp buffer the delimiters are those the lexer sees: ( ) [ ] of class PAR, and a { } < > outside strings,
+   comments and character literals. With point in a string or a comment, the pairs inside that string or comment
+   count first, so di( still works in a commented-out form; a count beyond them goes on among the pairs around it. */
+function pairObject(b: EdBuffer, open: string | null, close: string | null, count: number, outer: boolean): EdRange | null {
+  if (open === null || close === null) return null;
+  const t = b.rope, p = b.pt;
+  let pair: [number, number] | null;
+  if (Ed.isLisp(b)) {
+    const cls = Ed.lexOf(b)!, C = Ed.C;
+    const kind = (k: number) => (cls[k] === C.DOC ? C.STR : cls[k]), pk = kind(p);
+    let owed = count, from = p;
+    pair = null;
+    if (pk === C.STR || pk === C.CMT) {
+      let lo = p, hi = p + 1;
+      while (lo > 0 && kind(lo - 1) === pk) lo--;
+      while (hi < t.length && kind(hi) === pk) hi++;
+      /* One pair out at a time: the 2nd pair from an open delimiter is the one around its own. */
+      for (; owed > 0; owed--) {
+        const q = scanPair(t, open, close, pair ? 2 : 1, pair ? pair[0] : p, lo, hi, () => true);
+        if (!q) break;
+        pair = q;
+      }
+      if (pair) from = lo;
+    }
+    const brackets = '()[]'.includes(open) && '()[]'.includes(close);
+    if (owed > 0) pair = scanPair(t, open, close, owed, from, 0, t.length,
+      brackets ? k => cls[k] === C.PAR : k => { const c = kind(k); return c !== C.STR && c !== C.CMT && c !== C.NUM; });
+  } else pair = scanPair(t, open, close, count, p, 0, t.length, () => true);
+  if (pair === null) return null;
+  const [o, cl] = pair;
+  if (outer) return [o, cl + 1, 'exclusive'];
+  const beg = o + 1;
   if (t.at(beg) === '\n' && /^[ \t]*$/.test(t.slice(bol(t, cl), cl)) && bol(t, cl) > beg) return [beg + 1, bol(t, cl), 'line'];
-  return [beg, end, 'exclusive'];
+  return [beg, cl, 'exclusive'];
 }
 D('evil--pair-object', 'OPEN CLOSE COUNT OUTER', 'Range of the COUNTth pair of OPEN and CLOSE around point.', ([o, c, n, outer]: SchemeValue[]) => {
   const r = pairObject(cur(), chr(o), chr(c), optNum(n, 1), truthy(outer));
   return r ? L.list(r[0] + 1, r[1] + 1, intern(r[2])) : false;
 });
-D('evil--quote-object', 'QUOTE OUTER', 'Range of the QUOTE-delimited string on this line around or after point.', ([q, outer]: SchemeValue[]) => {
-  const b = cur(), t = b.rope, ch = chr(q), p = b.pt, ls = bol(t, p), le = eol(t, p);
-  const qs: number[] = [];
-  for (let k = ls; k < le; k++) if (t.at(k) === ch && t.at(k - 1) !== '\\') qs.push(k);
-  let pair: [number, number] | null = null;
-  for (let i = 0; i + 1 < qs.length; i += 2) if (qs[i] <= p && p <= qs[i + 1]) { pair = [qs[i], qs[i + 1]]; break; }
-  if (!pair) for (let i = 0; i + 1 < qs.length; i += 2) if (qs[i] > p) { pair = [qs[i], qs[i + 1]]; break; }
+D('evil--pair-text-object', 'OPEN CLOSE COUNT OUTER', 'Range of the pair of OPEN and CLOSE for i( a( and the like: in Visual state with more than one character selected, the COUNTth pair that strictly contains the selection, so a( again grows it.', ([o, c, n, outer]: SchemeValue[]) => {
+  const b = cur(), open = chr(o), close = chr(c), count = optNum(n, 1), out = truthy(outer);
+  let r = pairObject(b, open, close, count, out);
+  if (r && stateOf(b) === 'visual' && b.mark !== b.pt) {
+    /* Linewise Visual selects whole lines. */
+    const t = b.rope, line = b.visual === 'line';
+    const s = line ? bol(t, Math.min(b.mark!, b.pt)) : Math.min(b.mark!, b.pt);
+    const e = line ? Math.min(t.length, eol(t, Math.max(b.mark!, b.pt)) + 1) : Math.max(b.mark!, b.pt) + 1;
+    for (let k = 1; ; k++) {
+      const q = pairObject(b, open, close, k, out);
+      if (!q) { r = null; break; }
+      if (q[0] <= s && q[1] >= e && (q[0] < s || q[1] > e)) { r = count === 1 ? q : pairObject(b, open, close, k + count - 1, out); break; }
+    }
+  }
+  return r ? L.list(r[0] + 1, r[1] + 1, intern(r[2])) : false;
+});
+/* Whether the character at K is escaped: an odd run of backslashes before it. */
+function escaped(t: EdText, k: number) { let n = 0; while (k - n > 0 && t.at(k - n - 1) === '\\') n++; return n % 2 === 1; }
+/* The positions of the two quotes of the string QUOTE delimits around or after point. In a Lisp buffer, for ",
+   the strings are the lexer's: the one point is in, which may run over lines, or else the first that starts
+   after point on its line, so #\" is no quote; with point in a comment, the comment's text is scanned as in
+   other buffers. Elsewhere, the unescaped QUOTEs of point's line, paired from its start. */
+function quoteObject(b: EdBuffer, ch: string, p: number): [number, number] | null {
+  const t = b.rope;
+  if (ch === '"' && Ed.isLisp(b)) {
+    const cls = Ed.lexOf(b)!, C = Ed.C, str = (k: number) => cls[k] === C.STR || cls[k] === C.DOC;
+    if (cls[p] !== C.CMT) {
+      let k = p;
+      if (!str(k)) { const le = eol(t, p); k = p + 1; while (k < le && !str(k)) k++; if (k >= le) return null; }
+      /* A run of string characters may hold several strings ("a""b"): walk it from its start as the lexer does. */
+      let s = k; while (s > 0 && str(s - 1)) s--;
+      for (;;) {
+        let e = s + 1;
+        while (e < t.length && t.at(e) !== '"') e += t.at(e) === '\\' ? 2 : 1;
+        if (e >= t.length) return null;
+        if (k <= e) return [s, e];
+        s = e + 1;
+        if (!str(s)) return null;
+      }
+    }
+  }
+  const ls = bol(t, p), le = eol(t, p), qs: number[] = [];
+  for (let k = ls; k < le; k++) if (t.at(k) === ch && !escaped(t, k)) qs.push(k);
+  for (let i = 0; i + 1 < qs.length; i += 2) if (qs[i] <= p && p <= qs[i + 1]) return [qs[i], qs[i + 1]];
+  for (let i = 0; i + 1 < qs.length; i += 2) if (qs[i] > p) return [qs[i], qs[i + 1]];
+  return null;
+}
+D('evil--quote-object', 'QUOTE OUTER', 'Range of the QUOTE-delimited string around or after point: in Lisp the string the lexer sees, else on this line.', ([q, outer]: SchemeValue[]) => {
+  const b = cur(), t = b.rope, pair = quoteObject(b, chr(q)!, b.pt);
   if (!pair) return false;
   let [a, z] = pair;
   if (!truthy(outer)) return L.list(a + 2, z + 1, intern('exclusive'));
+  const ls = bol(t, a), le = eol(t, z);
   let e = z + 1;
   if (e < le && /[ \t]/.test(t.at(e)!)) { while (e < le && /[ \t]/.test(t.at(e)!)) e++; }
   else { while (a > ls && /[ \t]/.test(t.at(a - 1)!)) a--; }

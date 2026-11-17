@@ -180,8 +180,10 @@ in
 
   # Structural editing in Lisp buffers, the fix track of the Emacs-to-Edwin plan, each case of the audit by its id:
   # the lexer's character literals (#\( #\" #\;), [ ] as brackets and #; over the next datum, through %, C-M-f/b/u,
-  # = and show-paren; the incremental lex against a whole one after random edits, the worker pool's lexer against
-  # the main thread's, gg=G on scm/evil.scm moving no line for its character literals, and the 2 ms keystroke budget.
+  # = and show-paren; the pair and quote text objects (i( a( i" ...), ds, cs and expreg reading the lexer, Visual a(
+  # growing, no operator leaving a balanced buffer unbalanced; the Visual-block case operators; the incremental lex
+  # against a whole one after random edits, the worker pool's lexer against the main thread's, gg=G on scm/evil.scm
+  # moving no line for its character literals, and the 2 ms keystroke budget.
   edwin-structural = suite "structural" [ "structural.test.mts" ];
 
   # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm
