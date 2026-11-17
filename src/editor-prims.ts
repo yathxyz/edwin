@@ -861,6 +861,37 @@ CMD('write-file', 'FWrite file: ', 'FILENAME', 'Save the current buffer to FILEN
 D('file-exists-p', 'FILENAME', 'Non-nil if FILENAME is saved in this browser.', ([n]) => bool(Ed.Store.get(str(n)) !== null));
 D('delete-file', 'FILENAME', 'Remove FILENAME from this browser’s storage.', ([n]) => { Ed.Store.del(str(n)); return false; });
 D('directory-files', '&rest IGNORED', 'Names of all saved files.', () => listOf(Ed.Store.list()));
+/* The lines a save would change in the visited file (Rope.changedLines of the file's text and the buffer's),
+   which ws-butler trims (scm/prog.scm). Read from the store, so the file as it is now, not as it was visited. */
+D('buffer-changed-lines', '', 'The lines of the current buffer that differ from its visited file, as a list of (FIRST . LAST) line numbers, ascending; every line when the file does not exist yet; #f for a buffer with no file, one edwind saves, or a file that cannot be read.', () => {
+  const b = cur();
+  if (!b.file || b.shared) return false;
+  let old: string | null;
+  try { old = Ed.Store.get(b.file); } catch (e) { return false; }
+  /* The desktop program reads null for a file it cannot read (not UTF-8, no permission) as for one that is absent. */
+  if (old === null && host.files && host.files.exists(b.file)) return false;
+  return listOf(globalThis.Rope.changedLines(old ?? '', b.text).map(([f, e]) => L.cons(f + 1, e)));
+});
+/* One batch of deletions (applyOps, in sequential coordinates), not one command each: a save that trims every line
+   of a large file stays well inside a frame's budget. */
+D('delete-trailing-blanks', 'RANGES', 'Delete the spaces and tabs at the end of the lines in RANGES, a list of (FIRST . LAST) line numbers in ascending order, in one change. Point and the markers move as for any deletion.', ([rs]) => {
+  const b = cur(), t = b.text, ops: EdEditOp[] = [];
+  Ed.checkRO(b);
+  let done = 0, p = 0, line = 1;
+  for (const r of arr(rs)) {
+    const first = num((r as SchemePair).car), last = num((r as SchemePair).cdr);
+    for (; line < first && p < t.length; line++) { const k = t.indexOf('\n', p); p = k < 0 ? t.length : k + 1; }
+    for (; line <= last && p <= t.length; line++) {
+      const k = t.indexOf('\n', p), e = k < 0 ? t.length : k;
+      let s = e; while (s > p && (t.charCodeAt(s - 1) === 32 || t.charCodeAt(s - 1) === 9)) s--;
+      if (s < e) { ops.push([s - done, e - s, '']); done += e - s; }
+      if (k < 0) { p = t.length + 1; break; }
+      p = k + 1;
+    }
+  }
+  if (ops.length) { Ed.applyOps(b, ops); b.modified = true; }
+  return false;
+});
 
 /* ---------- leaving Edwin (DT1) ----------
    A host that runs Edwin as a program sets hooks.killEmacs(code), which ends it with exit status CODE, and

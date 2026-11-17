@@ -672,6 +672,8 @@ interface RopeConstructor {
   /* the ops that turn A into B changing only the differing lines, in sequential coordinates; one span past
      LIMIT units of work */
   diffLines(a: string, b: string, limit?: number): [pos: number, del: number, ins: string][];
+  /* the lines of B that differ from A, as [first, end) ranges of B's lines from 0; a deletion changes none */
+  changedLines(a: string, b: string, limit?: number): [first: number, end: number][];
 }
 
 /* ---------- editor: buffers and markers (editor-core.ts) ---------- */

@@ -309,3 +309,131 @@ test('define-language refuses a declaration it cannot use, and records nothing o
   assert.equal(ev('(assoc "cs-str-mode" languages)'), false);
   assert.equal(ed.Ed.modeFor('a.csz'), 'fundamental-mode');
 });
+
+/* ---------- ws-butler: trailing blanks trimmed on save from the changed lines only (scm/prog.scm) ---------- */
+
+/* Visit NAME, whose file holds TEXT (none when TEXT is null), in Normal state with point at its start. */
+async function visit(name: string, text: string | null) {
+  if ((globalThis as typeof globalThis & { EvilCore: { stateOf(b: unknown): string } }).EvilCore.stateOf(ed.E.current) !== 'normal') await ed.keys('ESC');
+  if (text !== null) ed.Ed.Store.set(name, text);
+  await ed.type(`:e ${name}\n`);
+  assert.equal(ed.text(), text ?? '');
+  ev('(goto-char 1)');
+  return ed.E.current;
+}
+const saved = (name: string) => ed.Ed.Store.get(name);
+const DIRTY = 'a = 1;  \nb = 2;\t\nc = 3; \t \n';
+
+test('ws-butler: untouched dirty lines survive a save; the changed line loses its trailing blanks', async () => {
+  const b = await visit('ws1.nix', DIRTY);
+  ev('(forward-line 1) (forward-char 5) (insert "2")');
+  assert.equal(ed.text(), 'a = 1;  \nb = 22;\t\nc = 3; \t \n');
+  await ed.type(':w\n');
+  assert.equal(saved('ws1.nix'), 'a = 1;  \nb = 22;\nc = 3; \t \n');
+  assert.equal(ed.text(), saved('ws1.nix'));
+  assert.equal(b.modified, false);
+});
+
+test('ws-butler: an edit at a line\'s start, a line added and a line joined are changed lines; a deleted line changes none', async () => {
+  await visit('ws2.nix', 'a  \nb  \nc  \nd  \ne  \nf  \n');
+  // An edit at the start: the line diff's ops cover only the start, yet the whole line counts.
+  ev('(forward-line 1) (insert "x")');
+  // A deleted line (d) leaves its neighbours (c, e) untouched.
+  ev('(goto-char 1) (forward-line 3) (let ((s (point))) (forward-line 1) (delete-region s (point)))');
+  // e and f joined.
+  ev('(goto-char 1) (forward-line 3) (end-of-line) (delete-char 1)');
+  // A new line with trailing blanks after the first.
+  ev('(goto-char 1) (end-of-line) (insert "\\nnew \\t")');
+  assert.equal(ed.text(), 'a  \nnew \t\nxb  \nc  \ne  f  \n');
+  await ed.type(':w\n');
+  assert.equal(saved('ws2.nix'), 'a  \nnew\nxb\nc  \ne  f\n');
+});
+
+test('ws-butler: a new file is trimmed throughout, a Scheme buffer as well as a programming one', async () => {
+  await visit('ws3.scm', null);
+  ev('(insert "(define x 1)   \\n(define y 2)\\t")');
+  await ed.type(':w\n');
+  assert.equal(saved('ws3.scm'), '(define x 1)\n(define y 2)');
+  await visit('ws3.py', null);
+  ev('(insert "x = 1  \\n\\ny = 2 \\n")');
+  await ed.type(':w\n');
+  assert.equal(saved('ws3.py'), 'x = 1\n\ny = 2\n');
+});
+
+test('ws-butler: saving an unmodified buffer changes nothing and leaves it unmodified', async () => {
+  const b = await visit('ws4.nix', DIRTY);
+  await ed.type(':w\n');
+  assert.equal(saved('ws4.nix'), DIRTY);
+  assert.equal(ed.text(), DIRTY);
+  assert.equal(b.modified, false);
+  // Changed and changed back: the text is the file's again, so no line differs from it.
+  ev('(forward-line 1) (end-of-line) (insert "x") (delete-char -1)');
+  await ed.type(':w\n');
+  assert.equal(saved('ws4.nix'), DIRTY);
+});
+
+test('ws-butler: off with ws-butler-mode #f, and never in a mode that is not a programming or Scheme one', async () => {
+  try {
+    ev('(set! ws-butler-mode #f)');
+    await visit('ws5.nix', DIRTY);
+    ev('(insert "# top  \\n")');
+    await ed.type(':w\n');
+    assert.equal(saved('ws5.nix'), '# top  \n' + DIRTY);
+  } finally { ev('(set! ws-butler-mode #t)'); }
+  for (const name of ['ws5.txt', 'ws5.org', 'ws5.md']) {
+    await visit(name, 'one  \n');
+    ev('(insert "two  \\n")');
+    await ed.type(':w\n');
+    assert.equal(saved(name), 'two  \none  \n', name);
+  }
+});
+
+test('ws-butler: point and the mark stay on their lines and columns; point among the trimmed blanks goes to the line\'s end', async () => {
+  const b = await visit('ws6.nix', 'one  \ntwo  \nthree  \n');
+  ev('(insert "1") (forward-line 2) (forward-char 2) (set-mark (point))');
+  ev('(goto-char 1) (forward-line 1) (forward-char 1) (insert "w")');
+  assert.equal(ed.text(), '1one  \ntwwo  \nthree  \n');
+  await ed.type(':w\n');
+  assert.equal(saved('ws6.nix'), '1one\ntwwo\nthree  \n');
+  assert.deepEqual([ev('(line-number-at-pos)'), ev('(current-column)')], [2, 2]);
+  assert.equal(ev('(buffer-substring (mark) (+ (mark) 3))'), 'ree', 'the mark on an untouched line keeps its column');
+  assert.equal(b.modified, false);
+  // Saved by a call, not :w: after a command Normal state would put point back on the line's last character.
+  ev('(end-of-line) (insert "x  ") (backward-char 1)');
+  ev('(save-buffer)');
+  assert.equal(saved('ws6.nix'), '1one\ntwwox\nthree  \n');
+  assert.deepEqual([ev('(line-number-at-pos)'), ev('(current-column)')], [2, 5]);
+});
+
+test('buffer-changed-lines: the lines that differ from the file; every line of a new file; none in a buffer with no file', async () => {
+  await visit('ws7.nix', 'a\nb\nc\nd\n');
+  assert.deepEqual(ed.L.arr(ev('(buffer-changed-lines)')), []);
+  ev('(insert "0\\n") (forward-line 2) (insert "B")');
+  const pairs = (v: unknown) => ed.L.arr(v).map((p: { car: number; cdr: number }) => [p.car, p.cdr]);
+  assert.deepEqual(pairs(ev("(buffer-changed-lines)")), [[1, 1], [4, 4]]);
+  await visit('ws7.ts', null);
+  ev('(insert "x\\ny\\n")');
+  assert.deepEqual(pairs(ev('(buffer-changed-lines)')), [[1, 2]]);
+  ev('(switch-to-buffer "*ws7 no file*")');
+  assert.equal(ev('(buffer-changed-lines)'), false);
+  // Past the line diff's limits: the lines between the common prefix and suffix of characters.
+  const R = (globalThis as typeof globalThis & { Rope: { changedLines(a: string, b: string, limit?: number): [number, number][] } }).Rope;
+  assert.deepEqual(R.changedLines('a\nb\nc\nd\n', 'a\nB\nc\nD\n'), [[1, 2], [3, 4]]);
+  assert.deepEqual(R.changedLines('a\nb\nc\nd\n', 'a\nB\nc\nD\n', 0), [[1, 4]]);
+  assert.deepEqual(R.changedLines('a\nb\n', 'a\n'), []);
+  assert.deepEqual(R.changedLines('a\nb', 'a'), [[0, 1]]);
+  assert.deepEqual(R.changedLines('', ''), []);
+});
+
+test('delete-trailing-blanks: the given lines only, the last line with no newline, ranges past the end; refused in a read-only buffer', async () => {
+  await visit('ws8.nix', null);
+  ev('(insert "a \\nb\\t\\n  \\nd  \\ne \\t")');
+  ev('(delete-trailing-blanks (list (cons 1 1) (cons 3 3) (cons 5 9)))');
+  assert.equal(ed.text(), 'a\nb\t\n\nd  \ne');
+  ev('(delete-trailing-blanks (list (cons 2 2)))');
+  assert.equal(ed.text(), 'a\nb\n\nd  \ne');
+  ev('(read-only-mode)');
+  try { assert.throws(() => ev('(delete-trailing-blanks (list (cons 4 4)))'), /read-only/); }
+  finally { ev('(read-only-mode)'); }
+  assert.equal(ed.text(), 'a\nb\n\nd  \ne');
+});

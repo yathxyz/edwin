@@ -112,3 +112,21 @@ prog-mode's. The option values are evaluated. Declaring MODE again replaces all 
 (define-language nasm-mode "NASM" :files '("\\.nasm$") :comment '(";") :indent 4)
 (define-language nginx-mode "Nginx" :files '("(^|/)nginx\\.conf$" "/nginx/.+\\.conf$") :comment '("#") :indent 4)
 (define-language typst-mode "Typst" :files '("\\.typ$") :comment '("//" "/*" "*/") :indent 2)
+
+;;;; ws-butler: trailing blanks removed on save from the lines that changed, and from no others
+
+(define ws-butler-mode #t
+  "Non-#f: saving a programming buffer (a mode derived from prog-mode) or a Scheme buffer removes the trailing
+spaces and tabs of the lines that differ from its file (buffer-changed-lines) and leaves the other lines as they are.")
+
+(define (ws-butler--before-save)
+  "On before-save-hook: with ws-butler-mode on, trim the changed lines of a modified, writable programming or
+Scheme buffer."
+  (when (and ws-butler-mode
+             (buffer-modified-p)
+             (not (buffer-read-only?))
+             (or (derived-mode-p 'prog-mode) (lisp-buffer?)))
+    (let ((ranges (buffer-changed-lines)))
+      (when (pair? ranges) (delete-trailing-blanks ranges)))))
+
+(add-hook! 'before-save-hook ws-butler--before-save)

@@ -168,7 +168,8 @@ in
 
   # Programming modes in the headless runtime: define-language (scm/prog.scm), each declared file name selecting its
   # mode, with its indent and hooks on a visit; each mode's comment syntax (set-comment-syntax!, found through the
-  # modes it derives from, nearest first) and gc, gcc and M-; using it.
+  # modes it derives from, nearest first) and gc, gcc and M-; using it; ws-butler: a save trims the trailing blanks of
+  # the lines that differ from the file only, so untouched dirty lines survive it.
   edwin-prog = suite "prog" [ "prog.test.mts" ];
 
   # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm

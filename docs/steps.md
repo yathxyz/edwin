@@ -4394,6 +4394,75 @@ Edwin reads the directory yet.
   check finds `share/edwin/grammars/grammars.json`; unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35)
   and `nix flake check` (exit 0, all checks passed).
 
+## ws-butler: trailing blanks trimmed on save from the changed lines only (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-ws-butler`): on save, trailing whitespace is removed only
+from the lines the session changed. Before, `ws-butler-mode` (src/extras.ts) stripped the trailing blanks of every
+line of a Scheme buffer on each save, by replacing the whole text, and did nothing in other programming buffers.
+
+- **`ws-butler-mode`** (now in `scm/prog.scm`, still `#t` by default): with it on, saving a modified, writable buffer
+  whose mode derives from prog-mode, or a Scheme buffer (scheme-mode, scheme-interaction-mode), deletes the trailing
+  spaces and tabs of the lines that differ from its file, from `before-save-hook`, and leaves every other line as
+  it is. This is the scope the owner's Emacs had (`ws-butler-mode` on `prog-mode-hook`, init-ui.el), where Emacs
+  Lisp is a prog-mode. `(set! ws-butler-mode #f)` turns it off.
+- **Which lines changed: a line diff against the file at save time.** `(buffer-changed-lines)` (src/editor-prims.ts)
+  reads the visited file from the store and returns the lines of the buffer that differ from it, as `(FIRST . LAST)`
+  line numbers; every line when the file does not exist yet; `#f` for a buffer with no file, a buffer edwind saves
+  (`b.shared`: its file is on edwind's side), or a file the store cannot read (the desktop program reads `null` for
+  a file that exists but is not UTF-8 or not readable, as for an absent one; `host.files.exists` tells them apart).
+  The lines come from `Rope.changedLines` (src/text.ts), the hunks of the same line diff `Rope.diffLines` takes,
+  before those are shrunk to characters: an edit at a line's start, a line added and two lines joined are changed
+  lines; a hunk that only deletes lines changes none, so the lines around a deleted line are left alone.
+- **The trim** (`(delete-trailing-blanks RANGES)`, src/editor-prims.ts): each line's trailing spaces and tabs
+  deleted, all of them as one `applyOps` batch, so point, the other windows' points and the markers move as for
+  any deletion: point and the mark keep their line and column, and point among the deleted blanks ends up at the
+  line's end. The deletions are part of the change that is saved; an unmodified buffer is not touched (before, a
+  Scheme buffer was modified by the trim before `save-buffer` said there was nothing to save).
+- **Cost**, timed on ex44 in the headless runtime, `(save-buffer)` of a `.ts` file whose every line ends in two
+  blanks: one line edited in 100,000 lines 25 ms, in 200,000 lines 72 ms (the line diff); a new file of 100,000
+  lines, all trimmed, 0.6 s, of 200,000 lines 1.6 s; 1,500 lines edited across 200,000 (past the diff's limit, so
+  every line between the first and last edit is trimmed) 2.0 s. The large cases are the rope's cost per deletion
+  (each splice brings its chunk offsets up to date), not the diff.
+- **Choices**, each reversible:
+  - The baseline is the file as it is now, read at save time, not a record of the session's edits: no state per
+    buffer and no hook on every edit, and every way a buffer comes to match its file (a visit, a save, a revert,
+    `:e!`) is covered. A line changed and changed back counts as untouched. When another program changed the file
+    since the visit, its changed lines count as changed too: the trim runs first, then the save asks about the
+    supersession as before.
+  - Past the line diff's limits (1,000 differing lines, 5,000,000 units of work) `changedLines` gives the lines from
+    the common prefix of characters to the common suffix as one range, so those are trimmed.
+  - The decision (the variable, the modes, the hook) is in `scm/prog.scm`, where the plan puts the package; the
+    diff and the deletions are two TypeScript primitives, for speed (a first version deleting line by line in
+    Scheme took 1.0 s for 100,000 lines). prog.scm runs in edwind too (CONFIG), so a `save-buffer` evaluated in
+    edwind's image trims there, reading only the file being saved.
+- **Differences from Emacs** (ws-butler.el): Emacs marks the changed lines with text properties as they are edited
+  and trims those; here the diff against the file decides. Emacs keeps the blanks before point in the buffer after
+  the save (written without them, restored after); here they are deleted from the buffer too, point going to the
+  line's end. No `ws-butler-keep-whitespace-before-point`, no trimming of trailing blank lines at the end of the
+  file, no `ws-butler-global-exempt-modes`.
+- **Not in it:** Org, Markdown and text buffers (not prog-mode, as in the owner's Emacs). Buffers edwind serves
+  (a served page's, and the desktop program's under the notes directory): their save is a message to edwind,
+  which writes the text without running `save-buffer`, so nothing trims them; before, the frame trimmed a served
+  Scheme buffer's every line before sending the save. The first save of a buffer with no file (the name asked
+  for by `save-buffer`) trims nothing, as the file is not yet known when `before-save-hook` runs; a buffer opened
+  by `:e NEW-FILE` has its file and is trimmed throughout. No per-buffer switch (`ws-butler-mode` is one global
+  variable). `write-file` runs no `before-save-hook`, as before. `.editorconfig`'s `trim_trailing_whitespace` is
+  lang-editorconfig's.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-prog`, `test/prog.test.mts` (25, 8 new): a
+  visited `.nix` file with dirty lines, one line edited and saved, keeps the other lines byte for byte and loses the
+  edited line's blanks; an edit at a line's start, an added line and a joined line are trimmed, the lines around a
+  deleted line are not; a new `.scm` and a new `.py` file are trimmed throughout (as the headless case still checks); saving an
+  unmodified buffer, and one changed and changed back, leaves the file as it was; `ws-butler-mode` `#f`, and `.txt`,
+  `.org` and `.md` buffers, trim nothing; point and the mark keep their line and column, point among the trimmed
+  blanks goes to the line's end; `buffer-changed-lines` on a visited, a new and a fileless buffer, and
+  `Rope.changedLines` with the limit forced to 0 (the one-range fallback); `delete-trailing-blanks` on given lines, a
+  last line with no newline, a range past the end, and refused in a read-only buffer. With every line trimmed instead (what a
+  Scheme buffer had before) 4 of the 8 fail. Also passed: `edwin-headless` (21, its ws-butler case unchanged),
+  `edwin-linediff` (6), `edwin-scheme` (38), `edwin-typecheck`, `edit-security` (21), `edit-lockdown` (6) and
+  `nix build .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35), each exit 0; `nix flake check` exit 0 (its first run stopped at `edwin-bench`, whose
+  shadow-stack timing was 26.8% against a 10% limit while ex44's load average was 22; built alone it passed at
+  7.5%, and the whole check then passed with `--keep-going`).
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

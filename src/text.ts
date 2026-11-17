@@ -47,6 +47,7 @@ class Rope {
   declare ci: number;
   declare static flattens: number;
   declare static diffLines: (a: string, b: string, limit?: number) => [number, number, string][];
+  declare static changedLines: (a: string, b: string, limit?: number) => [number, number][];
   constructor(s?: string) {
     this.ch = []; this.nl = [];
     this.off = new Int32Array(16); this.nlo = new Int32Array(16);
@@ -336,6 +337,19 @@ function diffLines(a: string, b: string, limit = LIMIT) {
   return ops;
 }
 Rope.diffLines = diffLines;
+/* The lines of B that differ from A: [first, end) ranges of B's lines (from 0), ascending, from the hunks
+   diffLines takes; a hunk that only deletes changes no line of B. Past the limits, the lines from the one at
+   the common prefix of characters to the one at the common suffix. */
+function changedLines(a: string, b: string, limit = LIMIT) {
+  if (a === b) return [];
+  const B = lines(b), hs = hunks(lines(a), B, limit);
+  if (hs) return hs.filter(h => h[3] > h[2]).map(h => [h[2], h[3]] as [number, number]);
+  const [[p, , ins]] = diffLines(a, b, 0);
+  const nls = (e: number) => { let n = 0; for (let k = b.indexOf('\n'); k >= 0 && k < e; k = b.indexOf('\n', k + 1)) n++; return n; };
+  const first = nls(p), end = Math.min(B.length, nls(p + ins.length) + 1);
+  return first < end ? [[first, end] as [number, number]] : [];
+}
+Rope.changedLines = changedLines;
 g.Rope = Rope;
 }
 ropeModule(globalThis);

@@ -21,7 +21,6 @@ const str = (x: SchemeValue): string => { if (typeof x !== 'string') signal('wro
 L.defvar('fill-column', 70, 'Column at which fill-paragraph wraps.');
 L.defvar('avy-keys', 'asdfghjklqwertyuiopzxcvbnm', 'Letters used for avy labels, in order of preference.');
 L.defvar('before-save-hook', NIL, 'Procedures called before a buffer is saved.');
-L.defvar('ws-butler-mode', true, 'Non-#f removes trailing blanks from Scheme buffers when they are saved.');
 
 /* ---------- avy: jump to a visible place by typing its label ---------- */
 function visibleRange(w: EdWindow) {
@@ -208,12 +207,10 @@ CMD('bookmark-jump', async () => [await Ed.readMini('Jump to bookmark: ', '', ()
 });
 CMD('bookmark-delete', async () => [await Ed.readMini('Delete bookmark: ', '', () => Object.keys(bookmarks()), { kind: 'bookmark', require: true })], 'name', 'Forget the bookmark NAME.', ([name]) => { const m = bookmarks(); delete m[name as string]; saveBookmarks(m); return false; });
 
-/* ---------- saving: before-save-hook and trailing whitespace ---------- */
+/* ---------- saving: before-save-hook (ws-butler, scm/prog.scm, is on it) ---------- */
 {
   const save = L.toFn(intern('save-buffer'));
   CMD('save-buffer', save.interactive as ExtrasSpec, save.params!, save.doc!, args => {
-    const b = cur();
-    if (truthy(L.get('ws-butler-mode')) && Ed.isLisp(b) && /[ \t]+$/m.test(b.text)) { const pt = b.pt, before = b.rope.length; const t = b.text.replace(/[ \t]+$/gm, ''); Ed.replaceText(b, 0, b.rope.length, t); b.pt = Math.min(pt, b.rope.length); void before; }
     L.runHook('before-save-hook');
     return save(args);
   });
