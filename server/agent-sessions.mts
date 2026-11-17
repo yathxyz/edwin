@@ -7,6 +7,7 @@ import { randomId } from './journal.mts';
 import { Transcript } from './agent-transcript.mts';
 import type { TranscriptReply } from './agent-transcript.mts';
 import type { SchemeGen } from './threads.mts';
+import { installPrompts } from './agent-prompts.mts';
 import type { Server, SchemeValue } from './main.mts';
 import type { SBuf } from './buffers.mts';
 import type { CallResult } from './proto.mts';
@@ -57,6 +58,7 @@ export class AgentSessions implements AgentBackend {
   replaying = new Map<string, Promise<void>>();
   openedObserved = new Set<string>();
   announced = new Set<string>();
+  stopPrompts?: () => Promise<void>;
   #secrets = new Set<string>();
   constructor(server: Server) {
     this.server = server; this.config = server.cfg.agentHub; this.sessions = new Map(); this.observed = new Map();
@@ -201,6 +203,7 @@ export class AgentSessions implements AgentBackend {
     sidOf(sid); if (this.observed.has(sid) && !this.sessions.has(sid)) throw new Error('Reported session is read-only and cannot be steered');
     const s = await this.request('GET', 'sessions/' + sid);
     if (s.kind !== 'acp') throw new Error('This session is not a hub-run ACP agent and cannot be steered');
+    s.promptCapabilities ??= this.transcripts.get(sid)?.render().promptCapabilities;
     return s;
   }
   async open(sid: string): Promise<string> {
@@ -273,6 +276,7 @@ export async function install(server: Server) {
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });
   primitive.where = 'server';
   primitive.gen = function* ([sid]: SchemeValue[]): SchemeGen { return yield new server.L.S.Block(hub.open(sid), 'agent journal'); };
+  hub.stopPrompts = (await installPrompts(server, hub)).stop;
   hub.start();
 }
-export async function shutdown(server: Server) { modules.get(server)?.stop(); }
+export async function shutdown(server: Server) { const hub = modules.get(server); hub?.stop(); await hub?.stopPrompts?.(); }

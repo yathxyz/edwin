@@ -1035,11 +1035,11 @@ Issue #7: Edwin is the complete text interface to the hub's agents and to the se
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
 Edwin never starts or speaks ACP to an agent itself.
 
-**State of the work.** The HTTP/SSE client, shared sessions list and structured journal transcripts are
-implemented (`server/agent-sessions.mts`, `server/agent-transcript.mts`, corresponding `src` modules).
-The 54 affected checks pass, including a rendered 1,201-event transcript, folds, off-point streaming,
-no streaming undo, malicious Markdown prompts and token redaction. Next: durable prompt buffers and steering,
-then resource attachment/named reuse/multiple destinations.
+**State of the work.** HTTP/SSE, the shared live list and structured folded transcripts are committed.
+Durable ordinary Markdown prompt buffers now preview/send/abandon with the editor's keys, survive kills
+and daemon restart, and recall immutable prompt blocks. Global permission/elicitation answers announce
+pending work and preserve req/epoch; mode/config/revive go through the hub. Five new steering checks pass.
+Next: resource attachment, named reuse and several destinations, then the full verification gate.
 
 ### Requirements
 
@@ -1099,6 +1099,7 @@ prompt, `RET` visit tool location, `d` diff, `p` compose, `P` quick prompt, `R` 
 `!` answer, `m` mode, `o` config option, `v` revive, `g r` refresh, `q` quit. Prompt minor mode takes
 precedence over Markdown: `C-c C-c` send, `C-c C-k` abandon, `C-c C-p` preview. Other prompt-engineering
 commands are available through M-x, with ordinary editing and completion throughout.
+Global `C-c a !` answers pending work and `C-c a p` composes from any buffer (with session completion).
 
 ### Checks
 
