@@ -1,8 +1,11 @@
 // Agent steering: ordinary shared Markdown drafts; HTTP mutations go only through AgentBackend.
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomId } from './journal.mts';
 import { writeAtomic, sha256, diskState } from './files.mts';
+import { lexicalPath } from './buffers.mts';
+import { realPath } from './paths.mts';
 import type { SBuf } from './buffers.mts';
 import type { Server } from './main.mts';
 import type { AgentBackend } from './agent-sessions.mts';
@@ -103,9 +106,16 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     try { durable(sb, d); }
     catch (e) { sb.setReadOnly('Agent prompt persistence failed; draft journal retained'); server.log.error('agent-prompt', { error: backend.clean(String(e.message || e)) }); }
   });
+  const previousBeforeKill = buffers.hooks.beforeKill;
+  const beforeKill = (sb: SBuf) => {
+    if (previousBeforeKill) previousBeforeKill(sb);
+    const d = owned.get(sb);
+    if (d) { durable(sb, d); persist(d); }
+  };
+  buffers.hooks.beforeKill = beforeKill;
   const offKill = buffers.on('killed', sb => {
     const d = owned.get(sb);
-    if (d) { durable(sb, d); owned.delete(sb); }
+    if (d) owned.delete(sb);
   });
   // Only these owned files bypass the general write authority; stateDir is never a writable root.
   const save = buffers.save;
@@ -130,7 +140,12 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   command('agent-prompt-open', ([id]) => { const d = draft(id); open(d); return idOf(d); });
   command('agent-prompt-preview', async (args, buf) => snapshot(selected(args, buf)));
   command('agent-prompt-abandon', async (args, buf) => { const d = selected(args, buf); await snapshot(d); persist(d); return idOf(d); });
-  command('agent-prompt-targets', ([id]) => [...draft(id).targets]);
+  command('agent-prompt-targets', async ([id, targets]) => {
+    const d = draft(id); if (targets === undefined) return [...d.targets]; writable(d);
+    const next = targetsOf(targets); for (const sid of next) await backend.requireSession(sid);
+    writable(d);
+    const changed = { ...d, targets: next }; persist(changed); d.targets = next; buffers.sendMeta(open(d)); return next;
+  });
   command('agent-prompt-send', async (args, buf) => {
     const d = selected(args, buf); writable(d); sending.add(d.key);
     try {
@@ -154,10 +169,50 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     } finally { sending.delete(d.key); }
   });
 
-  command('agent-session-recall', ([sid, blocks]) => create({ sid, blocks: blocksOf(blocks) }));
+  // Prompt engineering: resources never become pasted prompt text; named prompts snapshot exact ACP blocks.
+  function attach(d: Draft, block: Block) {
+    writable(d); const blocks = [...d.blocks, block]; persist({ ...d, blocks }); d.blocks = blocks; buffers.sendMeta(open(d)); return block;
+  }
+  command('agent-prompt-attach-file', ([id, file, options]) => {
+    const d = draft(id), name = text(file, 'File'), o = object(options) ? options : {};
+    const mimeType = typeof o.mimeType === 'string' ? o.mimeType : 'text/plain';
+    if (!o.embed) {
+      // This URI is interpreted on the agent's host. Never stat/read an agent-side path here.
+      const uri = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(name) ? new URL(name).href : name.startsWith('/') ? pathToFileURL(name).href : fail('An agent file link needs an absolute path or URI');
+      return attach(d, { type: 'resource_link', uri, name: path.basename(name), mimeType });
+    }
+    const absolute = lexicalPath(server.auth, name); server.auth.checkRead(absolute);
+    const real = realPath(absolute); if (!real.exists) fail('No such embedded file'); server.auth.checkRead(real.real);
+    const data = fs.readFileSync(real.real), uri = pathToFileURL(real.real).href;
+    return attach(d, { type: 'resource', resource: { uri, mimeType, ...(mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType) ? { text: data.toString('utf8') } : { blob: data.toString('base64') }) } });
+  });
+  for (const kind of ['buffer', 'region']) command(`agent-prompt-attach-${kind}`, ([id, resource]) => {
+    if (!object(resource) || typeof resource.text !== 'string') fail(`Attach ${kind} needs an immutable text snapshot`);
+    const r = resource as Record<string, unknown>, uri = text(r.uri, 'Resource URI'); new URL(uri);
+    return attach(draft(id), { type: 'resource', resource: { uri, text: r.text, mimeType: typeof r.mimeType === 'string' ? r.mimeType : 'text/plain' } });
+  });
+  const namedFile = path.join(dir, 'named.json');
+  let named: Record<string, { blocks: Block[] }> = Object.create(null);
+  if (fs.existsSync(namedFile)) {
+    const value = JSON.parse(fs.readFileSync(namedFile, 'utf8'));
+    if (!object(value)) fail('Invalid saved agent prompts');
+    for (const [name, v] of Object.entries(value)) { if (!object(v)) fail('Invalid saved agent prompt'); named[name] = { blocks: blocksOf((v as Record<string, unknown>).blocks) }; }
+  }
+  command('agent-prompt-list', () => Object.keys(named).sort());
+  command('agent-prompt-save', async ([id, name]) => {
+    const d = draft(id), label = text(name, 'Prompt name'), p = await snapshot(d);
+    const next = Object.assign(Object.create(null), named, { [label]: { blocks: p.blocks } }); writeAtomic(namedFile, JSON.stringify(next) + '\n'); named = next;
+    persist({ ...d, name: label }); d.name = label; buffers.sendMeta(open(d)); return label;
+  });
+  command('agent-prompt-load', ([name, targets]) => {
+    const label = text(name, 'Prompt name'); if (!Object.hasOwn(named, label)) fail('No saved prompt by that name');
+    return create({ blocks: named[label].blocks, targets: targets ?? [] });
+  });
+  command('agent-session-recall', async ([sid, seq]) => create({ sid, blocks: blocksOf(await backend.promptBlocks(sidOf(sid), Number(seq))) }));
   return { async stop() {
     for (const d of drafts.values()) { const sb = buffers.live(idOf(d)); if (sb) { if (buffers.seq.flushHold) buffers.seq.flushHold(sb); if (sb.journal) await sb.journal.drain(); durable(sb, d); } persist(d); }
     offBatch(); offKill(); if (buffers.save === saveOwned) buffers.save = save;
+    if (buffers.hooks.beforeKill === beforeKill) buffers.hooks.beforeKill = previousBeforeKill;
     for (const name of commands) server.commands.delete(name);
   } };
 }

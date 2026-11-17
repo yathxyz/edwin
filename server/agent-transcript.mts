@@ -66,7 +66,7 @@ export class Transcript {
   private blocks: Block[] = [];
   private tools = new Map<string, Block>();
   private requests = new Map<number, RequestState>();
-  private planBlock: Block | null = null;
+  private plans = new Map<string, Block>();
   private messageBlock: Block | null = null;
   private modes: unknown = null;
   private modeId: unknown = null;
@@ -87,7 +87,7 @@ export class Transcript {
     this.events = []; this.seen.clear(); this.clearFold(); this.cached = null;
   }
   private clearFold() {
-    this.blocks = []; this.tools.clear(); this.requests.clear(); this.planBlock = this.messageBlock = null;
+    this.blocks = []; this.tools.clear(); this.requests.clear(); this.plans.clear(); this.messageBlock = null;
     this.modes = this.modeId = this.configOptions = this.promptCapabilities = this.availableCommands = this.usage = null;
   }
   apply(reply: TranscriptReply): void {
@@ -116,7 +116,7 @@ export class Transcript {
     this.cached = null;
   }
   private block(e: Wire, kind: string): Block {
-    const b: Block = { id: `${this.epoch}:${kind}:${e.seq}`, seq: e.seq, lastSeq: e.seq, kind, events: [e] };
+    const b: Block = { id: `${this.epoch}:${kind}:${e.seq}`, seq: e.seq, lastSeq: e.seq, kind, events: [e], sessionId: e.sessionId };
     this.blocks.push(b); return b;
   }
   private setup(v: Wire) {
@@ -177,12 +177,15 @@ export class Transcript {
         return;
       }
       if (variant === 'plan') {
-        let b = this.planBlock;
-        if (!b) this.planBlock = b = this.block(e, 'plan'); else b.events.push(e);
+        const key = e.sessionId || '';
+        let b = this.plans.get(key);
+        if (!b) { b = this.block(e, 'plan'); this.plans.set(key, b); } else b.events.push(e);
         b.lastSeq = e.seq; b.current = u; return;
       }
-      this.setup(u);
-      if (variant === 'current_mode_update' && own(u, 'currentModeId')) this.setup({ modeId: u.currentModeId });
+      if (!e.sessionId) {
+        this.setup(u);
+        if (variant === 'current_mode_update' && own(u, 'currentModeId')) this.setup({ modeId: u.currentModeId });
+      }
       this.block(e, typeof variant === 'string' ? variant : 'update'); return;
     }
     this.block(e, typeof e.e === 'string' ? e.e : 'unknown');
@@ -199,7 +202,7 @@ export class Transcript {
     for (const b of this.blocks) {
       const span: Wire = { id: b.id, seq: b.seq, lastSeq: b.lastSeq, kind: b.kind, start: pos, end: pos, eventCount: b.events.length };
       let title: string, body: string, folded = false, prefix = '';
-      if (b.kind === 'prompt') { title = `Prompt #${b.seq}`; body = contentText(b.blocks!); span.blocks = b.blocks; }
+      if (b.kind === 'prompt') { title = `Prompt #${b.seq}`; body = contentText(b.blocks!); span.hasBlocks = true; }
       else if (b.content) {
         title = `${b.kind === 'thought' ? 'Thought' : b.role === 'user' ? 'User' : 'Assistant'} #${b.seq}`;
         body = contentText(b.content); folded = b.kind === 'thought' || long(body);

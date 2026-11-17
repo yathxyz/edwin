@@ -135,7 +135,12 @@ async function fieldValue(name: string, schema: Json, required: boolean): Promis
     const v = await Ed.readMini(label, '', () => choices, { require: true }); return v === 'skip' ? undefined : v === 'true';
   }
   const choices = Array.isArray(schema.enum) ? schema.enum.map(String) : null;
-  const v = await Ed.readMini(label, schema.default === undefined ? '' : typeof schema.default === 'string' ? schema.default : JSON.stringify(schema.default), choices ? () => choices : null, { require: !!choices });
+  let v: string;
+  if (choices && !required) {
+    const selected = await Ed.readMini(label, 'Skip field', () => ['Skip field', ...choices.map((v: string) => 'Use: ' + v)], { require: true });
+    if (selected === 'Skip field') return undefined;
+    v = selected.slice(5);
+  } else v = await Ed.readMini(label, schema.default === undefined ? '' : typeof schema.default === 'string' ? schema.default : JSON.stringify(schema.default), choices ? () => choices : null, { require: !!choices });
   if (!required && !v) return undefined;
   if (schema.type === 'array') {
     let a: unknown; try { a = JSON.parse(v); } catch (e) { signal('user-error', `${name} needs a JSON string array`); }
@@ -178,4 +183,47 @@ CMD('agent-session-answer', '', '', 'Answer a pending permission or elicitation 
   Ed.message('Agent request answered'); return false;
 });
 
+// Prompt-engineering stage: immutable resource snapshots, multiple targets, and named reuse.
+CMD('agent-prompt-targets', '', '&optional TARGETS ID', 'Choose several ACP destinations, separated by commas, with session completion.', async ([targets, value]: SchemeValue[]) => {
+  const id = await chooseDraft(value), current = await rpc('agent-prompt-targets', [id]) as string[], ids = await sessions();
+  const input = typeof targets === 'string' ? targets : await Ed.readMini('Targets (comma separated): ', current.join(', '), t => { const prefix = t.slice(0, t.lastIndexOf(',') + 1); return ids.map(s => prefix + (prefix ? ' ' : '') + s); });
+  const values = typeof targets !== 'string' && targets !== undefined ? L.arr(targets).map(String) : input.split(/[\s,]+/).filter(Boolean);
+  await rpc('agent-prompt-targets', [id, values]); return false;
+});
+CMD('agent-prompt-attach-file', '', '&optional FILE EMBED ID', 'Attach an agent-side file URI as resource_link, or explicitly embed an Edwin-side file after authority checks; never paste into prompt text.', async ([file, embed, value]: SchemeValue[]) => {
+  const source = cur(), id = await chooseDraft(value);
+  const method = embed === undefined ? await Ed.readMini('Attach file (link/embed): ', 'link', () => ['link', 'embed'], { require: true }) : embed === false ? 'link' : 'embed';
+  const filename = typeof file === 'string' ? file : method === 'embed' ? await ((H.readFileName && H.readFileName('Embed Edwin file: ')) || Ed.readMini('Embed Edwin file: ', source.file || '')) : await Ed.readMini('Agent-side absolute path or URI: ', '');
+  const mimeType = await Ed.readMini('MIME type: ', 'text/plain');
+  await rpc('agent-prompt-attach-file', [id, filename, { embed: method === 'embed', mimeType }]); Ed.message('File attached as a resource'); return false;
+});
+function resource(b: EdBuffer, start = 0, end = b.rope.length) {
+  return { uri: `edwin-buffer:${encodeURIComponent(b.shared ? b.id : b.name)}?start=${start}&end=${end}`, name: b.name, text: b.rope.slice(start, end), mimeType: b.mode === 'markdown-mode' ? 'text/markdown' : 'text/plain' };
+}
+CMD('agent-prompt-attach-buffer', '', '&optional BUFFER ID', 'Attach the source buffer as an immutable embedded resource, even when the draft is in another window.', async ([name, value]: SchemeValue[]) => {
+  const source = name === undefined ? cur() : Ed.toBuffer(name), snapshot = resource(source), id = await chooseDraft(value);
+  if (source.shared) await synced(String(source.id));
+  await rpc('agent-prompt-attach-buffer', [id, snapshot]); Ed.message('Buffer attached as a resource'); return false;
+});
+CMD('agent-prompt-attach-region', '', '&optional ID', 'Attach the current source region as an immutable resource; it is never inserted into prompt text.', async ([value]: SchemeValue[]) => {
+  const source = cur();
+  let start = Math.min(source.pt, source.mark ?? source.pt), end = Math.max(source.pt, source.mark ?? source.pt);
+  if (E.evil && globalThis.EvilCore.stateOf(source) === 'visual') [start, end] = globalThis.EvilCore.visualRange(source);
+  if (start === end) signal('user-error', 'No source region is selected');
+  const snapshot = resource(source, start, end), id = await chooseDraft(value);
+  await rpc('agent-prompt-attach-region', [id, snapshot]); Ed.message('Region attached as a resource'); return false;
+});
+CMD('agent-prompt-save', '', '&optional NAME ID', 'Save exact text and resource blocks as a named reusable prompt.', async ([name, value]: SchemeValue[]) => {
+  const id = await chooseDraft(value); await synced(id); const names = await rpc('agent-prompt-list') as string[];
+  const label = typeof name === 'string' ? name : await Ed.readMini('Save prompt as: ', '', () => names);
+  await rpc('agent-prompt-save', [id, label]); Ed.message(`Saved prompt ${label}`); return false;
+});
+CMD('agent-prompt-load', '', '&optional NAME SID', 'Reuse a named prompt and its resources in a new editable draft.', async ([name, sid]: SchemeValue[]) => {
+  const names = await rpc('agent-prompt-list') as string[];
+  if (!names.length) signal('user-error', 'No named prompts have been saved');
+  const label = typeof name === 'string' ? name : await Ed.readMini('Reuse prompt: ', '', () => names, { require: true });
+  const target = await targetOrRead(sid);
+  await showDraft(await rpc('agent-prompt-load', [label, [target]]) as string); return false;
+});
+CMD('agent-prompt-list', '', '', 'List saved prompt names; agent-prompt-load reuses one with completion.', async () => { jsonView('*Agent Named Prompts*', await rpc('agent-prompt-list')); return false; });
 })();

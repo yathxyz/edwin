@@ -53,7 +53,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 
 | Path | What |
 | --- | --- |
-| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `ot` `sync` `display` |
+| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `agent-sessions` `agent-transcript` `agent-prompts` `ot` `sync` `display` |
 | `scm/*.scm` | the shipped Scheme configuration (`emacs`, `evil`, `org`, `ai`, `init`, and `notes-syntax`, `address`, `markdown`, `babel` through `require`), fetched by `index.html` and the console from `scm/` |
 | `index.html` | the page: styles and the script tags. It loads `src/*.js` and fetches `scm/*.scm` relative to itself, so serving this directory runs it, and a published copy keeps the `src/` and `scm/` paths |
 | `src/host-browser.ts`, `src/host-node.cts` | the host layer (R4.1): storage, the shipped Scheme, page attributes, suspend, clipboard, scheduling. The core reaches the page only through it and through frame objects |
@@ -80,8 +80,8 @@ the source.
 Since 2026-10-19 Edwin is its own repository, and Workbench depends on it, never the reverse. Edwin is the Emacs
 replacement: it grows the features an Emacs user expects and loads no extensions. Workbench uses it as an
 edit.sock client.
-- **No default hub.** edwind connects to a hub only when edit.json names `hubSocket`. With none, as under
-  `edwin --daemon`, it dials nothing, and process primitives raise `hub-error` (code `unconfigured`) at once.
+- **No default hub.** Process primitives use `hubSocket`; agent sessions independently use `agentHub`.
+  Without either configuration, edwind dials neither service and the corresponding commands explain why.
 - **The §5 session API is gone**: `wb.mts`, `scm/wb.scm` (sessions, cards, `acp-prompt`, `shell-run`, the `wb-*`
   hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
   `boardsDir` was ignored with a warning for one release; since Workbench's module stopped writing it, edwind
@@ -89,6 +89,15 @@ edit.sock client.
 - **The hub protocol is Edwin's**: `docs/hub-protocol.md` specifies what edwind speaks to a hub (version 1, the
   messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
   server, without the ACP messages it served for the session API.
+- **Agent sessions** (Step AS1): `agentHub: {"url":"http://mesh-host:PORT","tokenFile":"/private/api-token"}`
+  in edit.json, or `(on-server (agent-hub-configure "http://mesh-host:PORT" "/private/api-token"))` in
+  init.scm, configures the mesh HTTP API. Never put token contents in init. `M-x agent-sessions` opens the
+  live shared list; RET opens a read-only, structurally folded journal. `p` composes an ordinary durable
+  Markdown draft (`C-c C-p` preview, `C-c C-c` send, `C-c C-k` leave retaining it). `C-c a !` answers
+  permissions/elicitations from any buffer. Resource attachments, named reuse and several destinations
+  are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts, outside the notes tree.
+  `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
+  `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
 - **Task rows carry `fields`**: every `key::` field (and Org property) of a task, by its lowercased key, in
   `notes-tasks`, `notes-task` and the reply of `notes-task-set`. The rows no longer single out `session`,
   `dispatched` and `target`, which only Workbench's dispatch gives a meaning.

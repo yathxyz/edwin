@@ -9,7 +9,7 @@ type Wire = Record<string, unknown>;
 interface Span extends Wire {
   id: string; seq: number; kind: string; start: number; end: number;
   foldStart?: number; foldEnd?: number; folded?: boolean;
-  blocks?: unknown[]; locations?: Wire[]; diffs?: Wire[];
+  hasBlocks?: boolean; locations?: Wire[]; diffs?: Wire[];
 }
 interface Meta extends Wire { sid: string; epoch: number; head: number; spans: Span[] }
 interface Presentation { meta: Meta; ver: number; choices: Map<string, boolean> }
@@ -109,8 +109,8 @@ CMD('agent-session-diff', '', '', 'Show every supplied structural diff for the t
 });
 CMD('agent-session-recall', '', '', 'Recall the immutable journal prompt at or before point into a new durable draft (R), preserving its content blocks.', async () => {
   const b = E.current, m = needMeta(b), s = m.spans.findLast(s => s.kind === 'prompt' && s.start <= b.pt);
-  if (!s || !Array.isArray(s.blocks)) return signal('user-error', 'No earlier prompt to recall');
-  const id = await Ed.agentSessions.rpc('agent-prompt-create', [{ sid: m.sid, blocks: s.blocks }]);
+  if (!s || !s.hasBlocks) return signal('user-error', 'No earlier prompt to recall');
+  const id = await Ed.agentSessions.rpc('agent-session-recall', [m.sid, s.seq]);
   if (typeof id !== 'string') return signal('user-error', 'edwind returned no recalled prompt draft');
   await Ed.agentSessions.show(id); return false;
 });

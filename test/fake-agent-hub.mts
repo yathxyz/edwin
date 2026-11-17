@@ -11,7 +11,7 @@ export class FakeAgentHub {
   streams = new Set<http.ServerResponse>();
   server = http.createServer((req, res) => void this.handle(req, res));
   configSupported = true;
-  refusal: { status: number; body: Json } | null = null;
+  refusal: { status: number; body: unknown } | null = null;
   truncated = false;
   async start(): Promise<this> {
     await new Promise<void>(r => this.server.listen(0, '127.0.0.1', r));

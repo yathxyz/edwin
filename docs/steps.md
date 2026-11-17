@@ -1035,11 +1035,12 @@ Issue #7: Edwin is the complete text interface to the hub's agents and to the se
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
 Edwin never starts or speaks ACP to an agent itself.
 
-**State of the work.** HTTP/SSE, the shared live list and structured folded transcripts are committed.
-Durable ordinary Markdown prompt buffers now preview/send/abandon with the editor's keys, survive kills
-and daemon restart, and recall immutable prompt blocks. Global permission/elicitation answers announce
-pending work and preserve req/epoch; mode/config/revive go through the hub. Five new steering checks pass.
-Next: resource attachment, named reuse and several destinations, then the full verification gate.
+**State of the work.** All four implementation stages are complete: HTTP/SSE and the live shared list;
+structured replay/folds; durable drafts and global permission/elicitation/steering; resource attachments,
+named reuse and multi-session sends. Draft text/resources survive kill and restart, and successful
+destinations are durably removed before partial-failure retry. The affected eight suites passed 108 checks;
+all three TypeScript projects passed. Served-frame smoke exercised folds, file/line, diff, recall, off-point
+and tail streaming, reconnect metadata and a 3 MiB live output without reconnect. Final full-suite gate next.
 
 ### Requirements
 
@@ -1067,11 +1068,16 @@ open transcripts. The stream contains summaries, not journal events: pretending 
 
 The hub's journal remains the only session record. Derived transcripts are special buffers, not files and
 not another authoritative journal. Spans carry seq, kind, start/end, fold bounds, tool identity, locations,
-diffs and prompt blocks; frames receive the structure beside the text with its buffer version. Fold state
-is a per-frame presentation choice keyed by structural identity. Markdown is fontification only, never the
+diff ranges and prompt identities; frames receive the structure beside the text with its buffer version.
+Original prompt blocks stay in the daemon's replay object and recall fetches them by seq, avoiding unbounded
+metadata copies. Fold choices are buffer-local within each frame runtime, as Edwin's existing folding is;
+separate attached clients choose independently. Markdown is fontification only, never the
 source of command targets. An event containing fences or headings cannot manufacture a prompt/tool span.
 Whole transcript buffers are read-only, so partial read-only spans are unnecessary. Existing sequenced edits,
 markers, metadata, folds and Markdown fontification are reused; missing seams are added, not a second renderer.
+History-only reconnects now include current structural metadata. Large live changes publish bounded
+sequenced chunks, yielding between them rather than overflowing a frame's outbound queue. A pre-kill
+buffer hook can veto teardown when draft persistence fails, preserving the acknowledged journal.
 
 Measured on this shared machine: 8,192 events / 25,141,248 content bytes replayed and rendered in 83.46 ms
 in the pure journal fold (5 visible folded lines); a real daemon + frame opened a 1,201-event,
@@ -1129,4 +1135,12 @@ Global `C-c a !` answers pending work and `C-c a p` composes from any buffer (wi
 - **Transport:** explicit HTTP URL means the operator chose the private encrypted mesh the API specifies;
   unlike brain's localhost-only API this cannot be restricted to local addresses. Redirects are refused so
   a token cannot move to another origin. No automatic authentication/terminal attach beyond the named API.
+- **Configuration authority:** `agent-hub-configure` runs only during trusted init. An attached Scheme client
+  must not rebind an existing credential file to an arbitrary HTTP origin. Changing configuration thereafter
+  requires the owner's normal daemon restart; the client never restarts it.
+- **Model availability:** summaries do not contain the model. A lightweight journal facts cursor follows
+  advertised model config options for list rows; observed model data wins when supplied. `unknown` means
+  no model was advertised in the available record, not a guessed agent default.
+- **Folds:** existing buffer-local folds are reused, including sharing between cards/windows inside one
+  runtime. Separate terminal/browser runtimes have independent choices. No second daemon transcript.
 

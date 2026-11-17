@@ -125,7 +125,7 @@ export interface BufferEvents {
   renamed: [fromReal: string, toReal: string];
 }
 type Listener = (...args: any[]) => void; // any: one map holds the listeners of every event
-export interface BufferHooks { killed: ((sb: SBuf) => void) | null; afterBatch: ((sb: SBuf, entry: HistEntry) => void) | null }
+export interface BufferHooks { beforeKill?: (sb: SBuf) => void; killed: ((sb: SBuf) => void) | null; afterBatch: ((sb: SBuf, entry: HistEntry) => void) | null }
 export interface BuffersInit { Ed: Edwin; auth: Authority; stateDir: string; log: Log }
 export interface CreateInit { id: string; jid: string; name: string; file: string | null; text: string; eol?: Eol; special?: boolean }
 /* buffer-list (§13.1). */
@@ -164,6 +164,7 @@ export class Buffers {
     const wrapped = function killBuffer(args: SchemeValue[]): SchemeValue {
       const b = args.length && args[0] !== false && args[0] !== undefined ? Ed.toBuffer(args[0]) : Ed.E.current;
       const sb = self.ofEd(b);
+      if (sb && self.hooks.beforeKill) self.hooks.beforeKill(sb);
       const r = orig(args);
       if (sb && !Ed.E.buffers.includes(b)) self.forget(sb);
       return r;
@@ -347,6 +348,7 @@ export class Buffers {
     sb.lastOpen = Date.now();
     if (since !== undefined && since <= sb.ver && this.seq.inHistory(sb, since)) {
       this.seq.replay(client, sb, since);
+      client.send({ t: 'meta', buf: sb.id, ...sb.meta() });
     } else {
       this.snapshot(client, sb, rid);
     }
@@ -586,7 +588,8 @@ export class Buffers {
   /* ---------- kill (R6.3) ---------- */
   kill(sb: SBuf): void {
     const L = (globalThis as unknown as { L: Lisp }).L;
-    if (this.Ed.E.buffers.includes(sb.ed)) L.call('kill-buffer', [sb.ed]); else this.forget(sb);
+    if (this.Ed.E.buffers.includes(sb.ed)) L.call('kill-buffer', [sb.ed]);
+    else { if (this.hooks.beforeKill) this.hooks.beforeKill(sb); this.forget(sb); }
   }
   /* The Edwin buffer is gone: tell the clients, drop the journal. */
   forget(sb: SBuf): void {

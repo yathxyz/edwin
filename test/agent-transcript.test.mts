@@ -17,7 +17,6 @@ test('Markdown inside an immutable prompt cannot create structural headings or t
   tr.apply(reply(events));
   const r = tr.render(), prompts = r.spans.filter(s => s.kind === 'prompt');
   assert.equal(prompts.length, 2);
-  assert.strictEqual(prompts[0].blocks, blocks);
   assert.ok(r.text.includes(malicious));
   assert.ok(r.text.includes('file:///agent/notes.md'));
   assert.equal(r.text.slice(prompts[0].start, prompts[0].start + 12), '## Prompt #1');
@@ -203,4 +202,28 @@ test('a long replay retains at least 20 MiB verbatim and reports replay time, ev
   const visibleLines = lineCount(r.text) + 1 - lineCount(r.text.slice(s.foldStart + 1, s.foldEnd + 1));
   assert.ok(visibleLines <= 8, `folded transcript has ${visibleLines} visible lines`);
   t.diagnostic(JSON.stringify({ ms: Number(ms.toFixed(2)), events: count, bytes, renderedBytes: Buffer.byteLength(r.text), foldedVisibleLines: visibleLines }));
+});
+
+test('many maximum-size prompt bodies remain inspectable without overflowing metadata wire frames', () => {
+  const tr = new Transcript('prompt-budget'), payload = 'context\n'.repeat(120000);
+  tr.apply(reply(Array.from({ length: 19 }, (_, i) => ({ seq: i + 1, e: 'prompt', prompt: [{ type: 'text', text: `${i}:` + payload }] }))));
+  const rendered = tr.render();
+  assert.ok(Buffer.byteLength(rendered.text) > 16 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify({ ...rendered, text: undefined })) < 16 * 1024 * 1024, 'the /edit frame limit applies to structure too');
+  assert.ok(rendered.text.includes('18:' + payload));
+});
+
+test('foreign-session mode/config and plan updates cannot replace the main session state', () => {
+  const tr = new Transcript('scopes');
+  tr.apply(reply([
+    { seq: 1, e: 'session', modes: { currentModeId: 'ask' }, configOptions: [{ id: 'model', currentValue: 'main-model' }] },
+    { seq: 2, e: 'update', update: { sessionUpdate: 'plan', entries: [{ content: 'main plan', status: 'in_progress' }] } },
+    { seq: 3, e: 'update', sessionId: 'child', update: { sessionUpdate: 'config_option_update', configOptions: [{ id: 'model', currentValue: 'child-model' }] } },
+    { seq: 4, e: 'update', sessionId: 'child', update: { sessionUpdate: 'current_mode_update', currentModeId: 'auto' } },
+    { seq: 5, e: 'update', sessionId: 'child', update: { sessionUpdate: 'plan', entries: [{ content: 'child plan', status: 'pending' }] } },
+  ]));
+  const rendered = tr.render();
+  assert.deepEqual(rendered.configOptions, [{ id: 'model', currentValue: 'main-model' }]); assert.equal(rendered.modeId, 'ask');
+  assert.ok(rendered.text.includes('main plan')); assert.ok(rendered.text.includes('child plan'));
+  assert.equal(rendered.spans.filter(s => s.kind === 'plan').length, 2);
 });

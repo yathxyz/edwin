@@ -34,7 +34,7 @@ async function pending(sid: string, req: number) {
   }
 }
 async function frame() {
-  if (Ed) return;
+  if (Ed) { await until(() => Ed.sync.state === 'online', 'frame reconnect'); return; }
   Ed = loadEdwin(createHost({ storage: memoryStorage(), workers: false })); E = Ed.E; L = (globalThis as Core).L;
   await Ed.bootServed({ transport: transport(dir.cfg.socket), device: 'agent-prompt-test' }); await Ed.whenIdle();
 }
@@ -138,4 +138,126 @@ test('offered mode/config values reach the API and an old hub reports config uns
   try { await assert.rejects(L.call('agent-session-config', ['model', 'small', 'alpha']), /unsupported|does not support/i); }
   finally { hub.configSupported = true; }
 });
+test('exact blocks, private per-edit persistence, attachments, named reuse, kill/reopen and daemon restart', async () => {
+  const retained = await value('agent-prompt-create', [{ targets: ['alpha', 'beta'] }]);
+  const opened = await client.open(retained); assert.equal(opened.error, null); assert.equal(opened.meta!.readOnly, false); assert.equal(opened.meta!.mode, 'markdown-mode');
+  const body = '# A real prompt\n\n```md\n## not a transcript boundary\n```\n';
+  assert.equal((await client.edit(retained, opened.ver!, [[0, '', body]])).t, 'ack');
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(retained)![1], root = path.join(dir.dirs.state, 'agent-prompts');
+  await value('agent-prompt-preview', [retained]);
+  assert.equal(fs.readFileSync(path.join(root, key + '.md'), 'utf8'), body, 'edits are durable without notes autosave');
+  assert.equal(fs.statSync(path.join(root, key + '.md')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(root, key + '.json')).mode & 0o777, 0o600);
+  await value('agent-prompt-attach-file', [retained, '/only-on-the-agent-host/source.ts', { mimeType: 'text/typescript' }]);
+  const file = path.join(dir.dirs.notes, 'attach.md'); fs.writeFileSync(file, 'embedded file bytes\n');
+  await value('agent-prompt-attach-file', [retained, file, { embed: true, mimeType: 'text/markdown' }]);
+  await value('agent-prompt-attach-buffer', [retained, { uri: 'edwin-buffer:source', text: 'whole buffer', mimeType: 'text/plain' }]);
+  await value('agent-prompt-attach-region', [retained, { uri: 'edwin-buffer:source?start=2&end=5', text: 'ole', mimeType: 'text/plain' }]);
+  const exact = await value('agent-prompt-preview', [retained]);
+  assert.deepEqual(exact.targets, ['alpha', 'beta']);
+  assert.deepEqual(exact.blocks, [
+    { type: 'text', text: body },
+    { type: 'resource_link', uri: 'file:///only-on-the-agent-host/source.ts', name: 'source.ts', mimeType: 'text/typescript' },
+    { type: 'resource', resource: { uri: new URL('file://' + file).href, text: 'embedded file bytes\n', mimeType: 'text/markdown' } },
+    { type: 'resource', resource: { uri: 'edwin-buffer:source', text: 'whole buffer', mimeType: 'text/plain' } },
+    { type: 'resource', resource: { uri: 'edwin-buffer:source?start=2&end=5', text: 'ole', mimeType: 'text/plain' } },
+  ]);
+  assert.equal(await value('agent-prompt-save', [retained, 'review carefully']), 'review carefully');
+  assert.ok((await value('agent-prompt-list')).includes('review carefully'));
+  const reused = await value('agent-prompt-load', ['review carefully', ['alpha']]);
+  assert.deepEqual((await value('agent-prompt-preview', [reused])).blocks, exact.blocks);
+  assert.equal((await client.request({ t: 'save', buf: retained })).error, undefined, 'scoped draft save bypasses no general writable root');
+  await value('agent-prompt-abandon', [retained]); await value('kill-buffer', [retained]);
+  await value('agent-prompt-open', [retained]); assert.deepEqual(await value('agent-prompt-preview', [retained]), exact);
+  client.close(); await stopEdwind(child); child = await startEdwind(dir); client = await connect();
+  assert.deepEqual(await value('agent-prompt-preview', [retained]), exact, 'restart retains resources and text');
+  assert.deepEqual((await value('agent-prompt-preview', [await value('agent-prompt-load', ['review carefully'])])).blocks, exact.blocks);
+  const link = path.join(dir.dirs.notes, 'secret-link'); fs.symlinkSync(tokenFile, link);
+  const refused = await client.call('agent-prompt-attach-file', [retained, link, { embed: true }]); assert.ok(refused.error); assert.ok(!JSON.stringify(refused).includes(hub.token));
+});
 
+test('multi-send snapshots exact blocks, removes successful targets before partial failure, and never retries an ambiguous mutation', async () => {
+  const retained = await value('agent-prompt-create', [{ targets: ['alpha', 'beta'], blocks: [{ type: 'text', text: 'review a resource' }, { type: 'resource_link', uri: 'file:///remote/source', name: 'source' }] }]);
+  const exact = await value('agent-prompt-preview', [retained]);
+  const original = hub.handle.bind(hub); let refuseBeta = true, lostReply = false;
+  hub.handle = async (req, res) => {
+    if (req.method === 'POST' && req.url === '/v1/sessions/beta/prompt' && (refuseBeta || lostReply)) {
+      let text = ''; for await (const chunk of req) text += chunk;
+      hub.calls.push({ method: req.method, path: req.url, body: JSON.parse(text) });
+      if (lostReply) { res.destroy(); return; }
+      res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'busy', code: 'busy' })); return;
+    }
+    await original(req, res);
+  };
+  try {
+    const before = hub.calls.length, failed = await client.call('agent-prompt-send', [retained]);
+    assert.match(failed.error.report, /busy/);
+    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, ['beta']);
+    const sends = hub.calls.slice(before).filter(c => c.path.endsWith('/prompt'));
+    assert.equal(sends.length, 2); for (const send of sends) assert.deepEqual(send.body!.blocks, exact.blocks);
+    assert.equal(sends.filter(c => c.path.includes('/alpha/')).length, 1);
+    client.close(); await stopEdwind(child); child = await startEdwind(dir); client = await connect();
+    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, ['beta'], 'partial success is durable across restart');
+    refuseBeta = false;
+    const sent = await value('agent-prompt-send', [retained]); assert.deepEqual(sent.sent, ['beta']);
+    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, []);
+    assert.equal(hub.calls.slice(before).filter(c => c.path === '/v1/sessions/alpha/prompt').length, 1, 'successful alpha was not resent');
+    const ambiguous = await value('agent-prompt-create', [{ sid: 'beta', text: 'may already have acted' }]); lostReply = true;
+    const mark = hub.calls.length, result = await client.call('agent-prompt-send', [ambiguous]); assert.ok(result.error);
+    assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 1);
+    assert.deepEqual((await value('agent-prompt-preview', [ambiguous])).targets, ['beta']);
+  } finally { hub.handle = original; }
+});
+
+test('recall preserves every immutable content block and named resources without editing the journal', async () => {
+  const blocks = [{ type: 'text', text: 'first' }, { type: 'resource_link', uri: 'file:///remote/source', name: 'source' }, { type: 'text', text: 'second' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
+  const prompt = hub.append('alpha', { e: 'prompt', prompt: blocks });
+  const before = JSON.stringify(hub.journals.get('alpha'));
+  const id = await value('agent-session-recall', ['alpha', prompt.seq]);
+  assert.deepEqual((await value('agent-prompt-preview', [id])).blocks, blocks);
+  await value('agent-prompt-save', [id, 'immutable recall']);
+  const loaded = await value('agent-prompt-load', ['immutable recall', ['beta']]);
+  assert.deepEqual((await value('agent-prompt-preview', [loaded])).blocks, blocks);
+  assert.equal(JSON.stringify(hub.journals.get('alpha')), before, 'recall and reuse do not rewrite earlier prompts');
+});
+test('source buffer and Visual region attach to a draft elsewhere, without pasting text', async () => {
+  await frame();
+  const id = await value('agent-prompt-create', [{ sid: 'alpha', text: 'please review' }]);
+  const b = Ed.getBufferCreate('*Attachment source*'); b.text = 'source region text'; b.pt = 12; b.mark = 7; b.visual = 'char'; b.evilState = 'visual'; show(b);
+  await L.call('agent-prompt-attach-buffer', [b.name, id]);
+  await L.call('agent-prompt-attach-region', [id]);
+  const preview = await value('agent-prompt-preview', [id]);
+  assert.equal(preview.blocks[0].text, 'please review');
+  assert.equal(preview.blocks[1].resource.text, 'source region text'); assert.equal(preview.blocks[2].resource.text, 'region');
+  assert.equal(E.current, b, 'attachment command does not steal its source');
+});
+
+test('advertised prompt capabilities refuse unsupported resources without making a prompt mutation', async () => {
+  const summary = hub.sessions.get('alpha')!;
+  summary.acp.promptCapabilities = { embeddedContext: false, image: false, audio: false };
+  const id = await value('agent-prompt-create', [{ sid: 'alpha', blocks: [{ type: 'text', text: 'read' }, { type: 'resource', resource: { uri: 'edwin-buffer:fixture', text: 'content', mimeType: 'text/plain' } }] }]);
+  const mark = hub.calls.length, reply = await client.call('agent-prompt-send', [id]);
+  assert.match(reply.error.report, /embeddedContext/);
+  assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 0);
+  assert.deepEqual((await value('agent-prompt-preview', [id])).targets, ['alpha']);
+  delete summary.acp.promptCapabilities;
+});
+
+test('a failed draft-file write cannot let kill discard acknowledged journal edits', async () => {
+  const id = await value('agent-prompt-create', [{ sid: 'alpha', text: 'before' }]), opened = await client.open(id);
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.md');
+  fs.unlinkSync(file); fs.mkdirSync(file);
+  assert.equal((await client.edit(id, opened.ver!, [[6, '', ' acknowledged']])).t, 'ack');
+  const killed = await client.call('kill-buffer', [id]); assert.equal(killed.t, 'error');
+  assert.ok((await client.open(id)).text!.includes('acknowledged'));
+  fs.rmdirSync(file); fs.writeFileSync(file, '');
+  client.close(); await stopEdwind(child, 'SIGKILL'); child = await startEdwind(dir); client = await connect();
+  assert.equal((await value('agent-prompt-preview', [id])).blocks[0].text, 'before acknowledged');
+});
+
+test('optional enumerated elicitation fields may be skipped rather than silently supplied', async () => {
+  await frame();
+  const request = hub.append('beta', { e: 'elicitation', request: { message: 'Optional choices', requestedSchema: { type: 'object', properties: { color: { type: 'string', enum: ['red', 'blue'] } } } } });
+  await pending('beta', request.seq); await keys('C-c a !'); await mini('accept'); await mini('Skip field');
+  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/elicitation')).at(-1)!.body!.response, { action: 'accept', content: {} });
+});
