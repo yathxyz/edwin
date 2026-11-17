@@ -1945,7 +1945,7 @@ jj views) starts its children here, never through `Ed.proc` directly.
 
   The environment:
   GIT_TERMINAL_PROMPT=0, GIT_OPTIONAL_LOCKS=0, GIT_EDITOR=false and GIT_SEQUENCE_EDITOR=false (a repository's
-  sequence.editor beats GIT_EDITOR), GIT_PAGER=cat, no GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE from Edwin's own
+  sequence.editor beats GIT_EDITOR; a rebase has the frame as both since the interactive rebase's section), GIT_PAGER=cat, no GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE from Edwin's own
   environment, and LC_MESSAGES=C with LC_ALL and LANGUAGE unset, so git's messages are English.
 - **safe.directory.** Vc never sets it. A repository git refuses as owned by someone else (`detected dubious
   ownership`, exit 128) is shown as such: the exit rejects with a user-error `git refuses ROOT as unsafe: it
@@ -3436,6 +3436,8 @@ abort for sequenced operations, with their state shown in the status buffer.
     the message as an edited one, so no `# Conflicts:` lines are left in it. With GIT_EDITOR=false (decision 12's
     default) `rebase --continue` after a conflict fails (`problem with the editor 'false'`), checked with git
     2.56; GIT_SEQUENCE_EDITOR stays false. No message is edited in Edwin: c c commits a merge with one written.
+    (Since the interactive rebase, below, a rebase's GIT_EDITOR and GIT_SEQUENCE_EDITOR are the frame's, which
+    hands back a message after a pick or an edit as `:` did.)
   - The start key of an operation in progress goes on with it (`m m`, `A A`, `_ _`), as magit's transients
     offer; `r e` and `r u` are refused during a rebase (`r r` goes on).
   - Skip and abort ask first; going on asks only over a staged conflict marker.
@@ -3447,7 +3449,7 @@ abort for sequenced operations, with their state shown in the status buffer.
     back (checked with an unknown one on git 2.56), and that is read as a files repository.
   - git am in progress is shown, and every command here refuses with `finish it in a terminal: git am
     --continue, --skip or --abort`.
-- **Not in it:** the interactive rebase and its todo (git-rebase-todo); magit's switches (`--ff-only`,
+- **Not in it:** the interactive rebase and its todo (git-rebase-todo, since done: `r i`, below); magit's switches (`--ff-only`,
   `--no-ff`, `-x`, `--signoff`, `--autostash`, the strategies); `m e` (merge, editing its message), `m s`
   (squash), `m p` (preview), `A d`/`A n` (cherry-pick without committing), `r i`, `r f`, `r w`, `r m`; git am
   (`w`); a merge's or pick's message edited before going on; `V` (magit's revert key) is not bound.
@@ -3606,6 +3608,143 @@ markers and jj's; nested and malformed markers left untouched with a message.
     visit-location; a read-only buffer is not changed.
   - In a markdown file with a conflict, the mode on: `] ]` (markdown-mode's) goes to the next heading, `C-c C-t`
     cycles a task, `] b` and `[ b` go to another buffer.
+
+## The interactive rebase (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-rebase-todo`, on git-conflict): git-rebase-todo buffers
+with keys to reorder commits and change their actions, the frame serving as GIT_SEQUENCE_EDITOR; proved by an
+interactive rebase that reorders and squashes end to end, and by phase 3's exit gate, one scripted test that
+stages a hunk, commits, rebases interactively, resolves a conflict, then runs jj describe and squash.
+
+- **`r i` `git-rebase-interactive`**, in `git-status-mode` and `git-log-mode` with the other rebase keys (and
+  M-x in any buffer of a git repository; a jj workspace refused as the others are): asks `Rebase interactively
+  from commit`, the commit at point by default, and rebases it and those after it up to HEAD (`rebase -i
+  --end-of-options PARENT`, or `rebase -i --root` for a root commit) in the background, as `r e` does: `Rebasing
+  main interactively from HASH SUBJECT… (see *vc-process*)`, then `Rebased main interactively: now at HASH
+  SUBJECT`, `Nothing rebased: main at HASH SUBJECT` when HEAD did not move, or the git-sequencer's `Rebasing
+  stopped at …` with its conflict and its next keys. Refused before any write: a commit not in HEAD's history
+  (`HASH SUBJECT is not in main's history: r i rebases a commit of it and those after it`), a revision that is no
+  commit (`--exec=touch x` among them), an operation in progress, no commit yet, a second remote or sequencer
+  command (the todo open counts as the rebase running), a jj workspace, the image's replay.
+- **The todo** is git's own file in a buffer `*git-rebase-todo: NAME*` in `git-rebase-todo-mode` (scm/emacs.scm,
+  derived from text-mode, lighter `Rebase`), its text exactly as git wrote it (git 2.55 and 2.56 write `pick HASH #
+  SUBJECT`), point on the first step, and is plain text: anything can be typed in Insert state. Its keys, as
+  evil-collection binds magit's git-rebase-mode, in Normal state (scm/evil.scm): `p`, `r`, `e`, `s`, `f` and `d`
+  (`git-rebase-todo-pick`, `-reword`, `-edit`, `-squash`, `-fixup`, `-drop`) set the action of the commit line
+  at point, as one change for `u`, point then to the next line; a `fixup -C` or `-c` flag goes with its old
+  action; off a pick, reword, edit, squash, fixup or drop line, `Not a commit's line: only pick, reword, edit,
+  squash, fixup and drop lines change`. `M-k` and `M-j` (`git-rebase-todo-move-up`, `-move-down`; `M-p` and `M-n`
+  in Emacs's keys, scm/emacs.scm) swap the step at point with the step before or after it, comment and blank
+  lines between them staying where they are, the column kept, one change; `Not a step of the todo`, `The first
+  step already`, `The last step already`. `Z Z` or `C-c C-c` (`git-rebase-todo-finish`) writes the buffer's text
+  back to git's file and lets git go on; `Z Q` or `C-c C-k` (`git-rebase-todo-abort`), or killing the buffer
+  (kill-buffer-hook `git--rebase-todo-killed`), aborts: git ends with nothing changed and leaves no rebase behind,
+  said `Rebase aborted (C-c C-k): nothing changed`. An empty todo is git's `nothing to do`, said as a git failure
+  is: `process-error: Not rebased: nothing to do (see *vc-process*)`. In any other buffer the todo commands say `No rebase waits
+  for this todo`.
+- **A message git asks for** during the rebase: for a reword, a squash or a fixup step (the last line of
+  rebase-merge/done), `COMMIT_EDITMSG` in vc-message-mode (`*git-rebase-message: NAME*`), git's text and comments
+  as it wrote them, C-c C-c giving it back as written (git cleans it, with its own comment character), C-c C-k
+  aborting it: git then stops at that
+  commit with its old message, said `Rebasing stopped at HASH SUBJECT (N of M): its message was aborted (C-c
+  C-k), so it keeps the one it had: r r goes on, r s skips the commit, r a aborts`. After any other step (`r r`
+  after a conflict on a pick or an edit) git's prepared message is handed back as it is, as the git-sequencer's
+  `:` editor did, so no `# Conflicts:` lines are left. The todo and message buffers still open when git ends go
+  with it.
+- **The hand-back** (src/vc.ts, `VcRunOptions.edit`, for git rebase alone; any other use is refused): git runs
+  with GIT_SEQUENCE_EDITOR and GIT_EDITOR both a shell function that prints NUL `edwin-edit` NUL ID NUL FILE NUL
+  on its standard output, git's, ID its own shell's process id (`$$`), and reads lines on descriptor 3 until one
+  starts with its ID: `ID done` ends it with 0, so git takes the file as it is now; `ID abort`, or the end of its
+  input (Edwin gone), with 1. The descriptor is one pipe for every child of git, so the id keeps an answer meant
+  for one frame from being read by the editor that runs next: Edwin's answer names the frame's id, an editor skips
+  the lines that are not its own, and an answer nobody waits for (to a frame an exec line printed and walked away
+  from) stays in the pipe harmlessly. An exec line cannot know the id of an editor that has not started yet. A
+  frame whose id is no number is left unanswered. git is started by `sh -c 'exec 3<&0 </dev/null
+  && exec "$@"'`: the pipe Edwin writes is git's descriptor 3, which git's children (its editors, hooks and exec
+  lines) inherit, and git's standard input is /dev/null, as every other git child's input is closed at once, so
+  an exec line's command that reads its input (`exec cat`) gets its end at once and can take no answer.
+  `*vc-process*` shows git's argv without the `sh` before it. Edwin reads the frames out of git's output (the
+  rest goes to `*vc-process*` as before, a frame split across reads put together) and answers them one at a
+  time; a frame's start with no two NULs after it within 4096 characters is no frame, and goes on as output (an
+  exec line printing it is held back no longer than that). Only the todo and COMMIT_EDITMSG of the repository's
+  own git directory (`rev-parse --git-path`, so a linked worktree's own), compared by their true names, are taken;
+  a frame naming any other file is left unanswered, so no other file is opened or written. The todo is taken
+  once, and only in `r i`'s `rebase -i`, the one rebase git asks it of: a second frame naming it, or one in `r e`,
+  `r u`, `r r` or `r s`, is left unanswered too, so no second todo buffer opens and the todo git works from is
+  not written over. A frame naming COMMIT_EDITMSG that no editor printed (an exec line's) cannot be told from a
+  real one: it is answered as the step git is at asks (handed back unedited after an exec line, which writes
+  nothing), to its own id, which no editor reads. A hook's output goes to git's error output, where no frame is
+  read; an exec line's reaches git's output. The run's 10-minute bound counts only while no file is being edited (an exec line's
+  command counts toward it, as any of git's own work does), and git is never
+  killed while one is: a git killed while its todo waits leaves rebase-merge behind with the todo unedited.
+- **Choices** where the package left one open, each reversible:
+  - Every rebase Edwin runs but its abort (`r e`, `r u`, `r i`, `r r`, `r s`) has the frame as both editors,
+    since rebase-merge/interactive is written by a plain `git rebase` too and cannot tell `r r` of an
+    interactive rebase from another; a message after a step that is not a reword, squash or fixup is handed back
+    unedited, which is the `:` editor's behaviour. Merge, cherry-pick and revert keep `:`. Every other git child
+    keeps GIT_EDITOR and GIT_SEQUENCE_EDITOR false (decision 12).
+  - The message buffer's text is handed back uncleaned (`Vc.message`'s `raw`), and git cleans it with its own
+    comment character (core.commentChar or core.commentString, `auto` included) and the repository's
+    commit.cleanup, as it would after any editor: with core.commentChar `;` a `#123 …` line stays in the message
+    and a `;` line goes. C-c C-c still refuses a message with nothing but blank and `#` lines; one with only
+    another character's comment lines is git's to refuse (`Aborting commit due to empty commit message`, the
+    rebase stopping there for `r r`). Unlike `c c`, which cleans with `#` and commits `--cleanup=verbatim`.
+  - A todo or message buffer of another rebase under the same name (a repository of the same base name) is left
+    alone: the new one is named `…<2>` (generate-new-buffer-name).
+  - The frame going away (edwind or the window closed) while git waits ends git's editor with 1: the todo is
+    aborted cleanly; a message stops the rebase there, which `r a` aborts. A git killed while the todo waits
+    leaves its rebase-merge behind, which `r a` aborts too.
+  - The todo is written back as its text is, with no cleaning: git reads its comments and blank lines itself.
+  - Command names are Edwin's (`git-rebase-todo-…`, `git-rebase-interactive`), the keys evil-collection's and
+    magit's.
+- **Not in it:** keys for exec (`x`), break, label, reset, merge and update-ref lines, which are typed as text;
+  `u` stays evil's undo, not magit's `git-rebase-undo`; no commit shown from a todo line (magit's RET and SPC);
+  no faces on the todo; `git rebase --edit-todo`; magit's `r f` (autosquash), `r w`, `r m`, `r k` and the
+  rebase switches (`--autostash`, `--autosquash`, `--rebase-merges`, `--keep-base`); the todo's `# Commands:`
+  help is git's, as git wrote it. No editor for any other git command.
+- **Image replay and edwind.** `r i` checks `Ed.proc.refusal()` before anything, as the git-sequencer's commands
+  do, and git runs through `Vc.start`, which refuses under the replay, in a web frame and in edwind.
+- **Also changed:** test/vc-sequencer.test.mts's `r r` check: GIT_EDITOR is now the frame's editor, the same as
+  GIT_SEQUENCE_EDITOR, where it was `:`; the git-sequencer's section below says so.
+- **Checked by**, on ex44 (the build host), after the reviews' fixes (git's own comment character, a second
+  todo of the same name, git's input /dev/null and the answers on descriptor 3, the bounded frame; then the
+  frame's id, so that an answer to a stray frame is never read by the next editor, and the todo taken once):
+  `nix build .#checks.x86_64-linux.edwin-vc` (168 passed, 0 failed, test/vc-rebase.test.mts's 10 and
+  test/vc-flow.test.mts's 1 among them, test/vc-sequencer.test.mts's 11 still passing), `edwin-typecheck`
+  (passed), `edwin-scheme` (38 passed), `edwin-headless` (21 passed) and `edit-frame` (24 passed), which load
+  scm/evil.scm, and `nix build .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35).
+  `nix flake check path:$PWD`: all checks passed. With nixpkgs' git 2.55 and jujutsu 0.45.1 in the check (git
+  2.56 when run by hand), under a throwaway HOME, in throwaway repositories:
+  - test/vc-rebase.test.mts (10): `r i` from c1 of base, c1, c2, c3: the argv whole, the buffer git's own file, point
+    on its first step; `M-k` on c3 with the column kept, `u` and `C-r` over it, `s` on c2, `Z Z`: git's
+    combined message in its buffer, the todo buffer gone, the message written; the log, the files of each commit
+    and the branch after, both editors the frame's, no host timeout. `r`, `e` and `d`; `f`, a `fixup -C` line
+    typed and set back by `p`; a reword's message written, the stop at the edit (the status header and its `To
+    rebase` section), `r r` to the end with the drop left out. C-c C-k, Z Q and killing the todo, each with
+    HEAD unchanged and no rebase-merge left; an empty todo; a reword's message aborted, then `r a`. A
+    pre-rebase hook (which ran) and an exec line each printing a frame for a file outside the repository: the file
+    untouched, no buffer opened, the rebase done. With core.commentChar `;`, a reword's message buffer showing
+    git's `;` comments, a `#123 keep me` line kept in the commit and a `;` line left out. A second repository
+    named `work` (under another directory): its todo `*git-rebase-todo: work*<2>`, the first todo still open and
+    its rebase waiting, each aborted alone. A todo of `pick c2`, then exec lines each printing a frame with the
+    exec shell's own id, for the todo, for COMMIT_EDITMSG, and for COMMIT_EDITMSG with `x` for an id, each
+    lingering two seconds so that Edwin looks at it while git is still at that exec, then `reword c3`: no second
+    todo buffer, the reword's message buffer opens (its editor skipped the answer to the exec's COMMIT_EDITMSG
+    frame) and its message lands, the three frames with a number for an id looked at (a `rev-parse` each), the
+    `x` one not. A todo of `exec cat`, an exec printing a frame's start and 100 kB with
+    no NUL, then a reword: cat ends at once, the reword's message buffer still opens, the rebase done. (Each of
+    these four failed on the code before its fix.) `r i` on the root commit from the log buffer: `--root`. Refused
+    with no rebase run: a commit of another branch, `--exec=touch x`, a rebase in progress (`git rebase -i`
+    stopped at an edit), the todo keys in another buffer and off a step, moving past the ends, `git-fetch` while
+    the todo is open, a jj workspace, the image's replay.
+  - test/vc-flow.test.mts (1), phase 3's exit gate: in a repository of twenty lines, a hunk of two staged with
+    `s` and committed with `c c` (the other left in the work tree), then two more commits; `r i` from the first
+    with the third moved above the second (`M-k`), the first dropped (`d`) and the second squashed into the
+    third (`s`), `Z Z`: git stops at the third with a conflict; RET on its file in the status buffer visits it in
+    vc-conflict-mode, `] n` and `C-c ^ l` resolve it, `C-x C-s`, `s` stages it, `r r`: the squash's message
+    written, `Rebase done`, the log, the file and a clean status; `jj git init --colocate`, SPC g g shows jj's
+    log, `c` describes the working-copy change and `s` squashes it into its parent with the two descriptions
+    written as one, read back with jj's own template.
 
 ## Backends declared in init.scm reach edwind's models (done)
 

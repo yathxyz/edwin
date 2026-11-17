@@ -300,7 +300,8 @@ in
   # range and a single commit), _ _ (one asked, two selected in the log), r e and r u each through a conflict to
   # its end and to its abort, the status header and its todo compared at every step; going on refused while a
   # conflict is left and asking over a staged conflict marker; A s and r s skipping after asking, the aborts
-  # asking (n changes nothing); the message git prepared kept (GIT_EDITOR=:), with no Conflicts lines; a merge in
+  # asking (n changes nothing); the message git prepared kept (GIT_EDITOR=:, a rebase's the frame's editor handing
+  # it back), with no Conflicts lines; a merge in
   # a linked worktree; a branch or a tag named CHERRY_PICK_HEAD, REVERT_HEAD or REBASE_HEAD taken for no
   # operation (in a files and a reftable repository), a real one beside it still read; a Visual selection in the
   # status buffer picking its commit lists' commits alone; a revision that would be a switch, a step with nothing
@@ -313,6 +314,14 @@ in
   # malformed markers left as they are with a message, an opening marker with no closing one of its length text; the
   # mode on at a visit and still on after the last resolution, so undo brings it back with its keys, ] n and [ n,
   # Insert state and read-only; ] b, [ b and markdown-mode's ] ] and C-c C-t still theirs while the mode is on.
+  # The interactive rebase (test/vc-rebase.test.mts): r i's todo in git-rebase-todo-mode, M-k reordering and s
+  # squashing to the end with the squash's message written, r, e, d, f and p, a reword's message, a stop at an
+  # edit gone on with by r r; C-c C-k, Z Q and a kill aborting with nothing left; a reword's message aborted; a
+  # hook's and an exec line's frame for another file left unanswered; a `#` line kept under core.commentChar `;`;
+  # a second repository of the same name's todo beside the first; `exec cat` ending at once and a frame never
+  # ended by a NUL taken as output; --root; refusals before any write.
+  # Phase 3's exit gate (test/vc-flow.test.mts): a hunk staged, commits, r i through a conflict resolved by
+  # vc-conflict-mode and a squash, then jj describe and squash in the same repository colocated.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -327,7 +336,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts ${edwin}/edwin/test/vc-conflict.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts ${edwin}/edwin/test/vc-conflict.test.mts ${edwin}/edwin/test/vc-rebase.test.mts ${edwin}/edwin/test/vc-flow.test.mts
         touch $out
       '';
 

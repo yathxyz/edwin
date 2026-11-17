@@ -371,7 +371,9 @@ test('r e rebases a branch through two conflicts: the header and the todo at eve
   await done(m);
   assert.equal(lastMessage(), `Rebasing stopped at ${T2} t2 (2 of 2) with conflicts in a.txt: resolve them and stage them (s), then r r goes on, r s skips the commit, r a aborts`);
   assert.deepEqual(argvOf('rebase'), ['rebase', '--continue']);
-  assert.equal(callOf('rebase').opts.env!.GIT_EDITOR, ':');
+  /* the frame is a rebase's editors: a pick's message after a conflict is handed back unedited, as `:` would */
+  assert.match(callOf('rebase').opts.env!.GIT_EDITOR!, /edwin-edit/);
+  assert.equal(callOf('rebase').opts.env!.GIT_SEQUENCE_EDITOR, callOf('rebase').opts.env!.GIT_EDITOR);
   assert.deepEqual(header(), top(`Rebasing topic onto ${S2} second, stopped at ${T2} t2 (2 of 2)`));
   assert.equal(todoLines(), null);
   /* a resolution staged with its markers still in: asked, n changes nothing */

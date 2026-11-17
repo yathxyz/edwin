@@ -876,6 +876,8 @@ interface EdBuffer extends SchemeForeign {
   vcMessage?: VcPending;
   /* a git status, log or revision buffer, or a jj log or change buffer: its repository, what its last read gave, its folds and its lines (vc-git.ts) */
   gitView?: unknown;
+  /* vc-git.ts: a rebase todo's buffer, while git waits for it */
+  gitTodo?: unknown;
   _glx?: unknown;
   _mdf?: unknown;
   _mdfm?: unknown;
@@ -2245,9 +2247,13 @@ interface VcMessageOptions {
   text?: string;
   /* the prefix of a comment line: '#' (git's default), 'JJ:' for jj */
   comment?: string;
+  /* the message given back as the buffer holds it, uncleaned, to a program that cleans it with its own comment
+     character (a git rebase); whether it is empty is still judged without COMMENT lines */
+  raw?: boolean;
 }
 interface VcPending {
   comment: string;
+  raw: boolean;
   done(msg: string | null): void;
 }
 /* vc.ts: running git and jj. A repository is its program and its root; Vc.start and Vc.run give the child's
@@ -2260,8 +2266,11 @@ interface VcRepo {
 /* progress: the child's error output goes to *vc-process* as it comes, a run of progress updates (each ended by a
    carriage return) shown as its latest, rather than its head once it has ended (fetch, pull and push);
    keepMessage: for merge, cherry-pick, revert and rebase alone, git's editor is `:`, so a commit git makes going
-   on after a conflict takes the message git prepared as it is */
-type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'> & { progress?: boolean; keepMessage?: boolean };
+   on after a conflict takes the message git prepared as it is; edit: for git rebase alone, the frame is git's
+   sequence editor and editor: each file git gives it to edit (its absolute path) goes to edit, whose true hands
+   it back as it is then, false aborts it, and null leaves it unanswered (not a file it asked for); the timeout
+   counts only while no file is being edited, and the child's input stays open */
+type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'> & { progress?: boolean; keepMessage?: boolean; edit?: (file: string) => Promise<boolean | null> };
 interface VcApi {
   message(opts: VcMessageOptions): Promise<string | null>;
   cleanMessage(text: string, comment: string): string;

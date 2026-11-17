@@ -462,6 +462,17 @@ vc-message-summary-max-length and a second line that is not blank are shown, and
 (define-key vc-message-mode-map "C-c C-c" 'vc-message-finish)
 (define-key vc-message-mode-map "C-c C-k" 'vc-message-abort)
 
+;; A rebase's todo (src/vc-git.ts opens it for r i): a plain text buffer; C-c C-c hands it back to git, C-c C-k
+;; aborts the rebase, M-p and M-n move the step at point (magit's keys)
+(define-derived-mode git-rebase-todo-mode text-mode "Rebase"
+  "Major mode for a rebase's todo, which git waits for: each line a step, in order.  C-c C-c rebases as it says,
+C-c C-k aborts the rebase."
+  #f)
+(define-key git-rebase-todo-mode-map "C-c C-c" 'git-rebase-todo-finish)
+(define-key git-rebase-todo-mode-map "C-c C-k" 'git-rebase-todo-abort)
+(define-key git-rebase-todo-mode-map "M-p" 'git-rebase-todo-move-up)
+(define-key git-rebase-todo-mode-map "M-n" 'git-rebase-todo-move-down)
+
 ;; Conflict markers (src/vc.ts turns vc-conflict-mode on in a visited file that holds one), smerge's keys:
 ;; C-c ^ n and C-c ^ p go to the next and the previous conflict, C-c ^ u, C-c ^ l and C-c ^ a keep ours, theirs, both
 (define-key vc-conflict-mode-map "C-c ^ n" 'vc-conflict-next)

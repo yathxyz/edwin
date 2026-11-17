@@ -1555,7 +1555,8 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; current branch.  m (merge), A (cherry-pick), _ (revert: evil-collection's
 ;; key for magit's) and r (rebase) start one, m m, A A, _ _ and r r go on
 ;; with the one in progress, s skips its commit and a aborts it; r e rebases
-;; onto a revision, r u onto the upstream.
+;; onto a revision, r u onto the upstream, r i interactively from the commit
+;; at point.
 (for-each
  (lambda (mode)
    (evil-define-key 'motion mode
@@ -1586,6 +1587,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
      "_ s" 'git-revert-skip
      "_ a" 'git-revert-abort
      "r e" 'git-rebase
+     "r i" 'git-rebase-interactive
      "r u" 'git-rebase-upstream
      "r r" 'git-rebase-continue
      "r s" 'git-rebase-skip
@@ -1689,6 +1691,23 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 (evil-define-key 'normal 'grep-edit-mode
   "Z Z" 'grep-edit-finish
   "Z Q" 'grep-edit-abort)
+
+;; A rebase's todo, as evil-collection binds magit's git-rebase-mode: in Normal
+;; state p, r, e, s, f and d set the action of the commit line at point (in
+;; place of evil's paste, replace, end of word, snipe, find and delete), M-k
+;; and M-j move the step at point, Z Z hands the todo to git and Z Q aborts.
+;; Insert state edits it as text.
+(evil-define-key 'normal 'git-rebase-todo-mode
+  "p" 'git-rebase-todo-pick
+  "r" 'git-rebase-todo-reword
+  "e" 'git-rebase-todo-edit
+  "s" 'git-rebase-todo-squash
+  "f" 'git-rebase-todo-fixup
+  "d" 'git-rebase-todo-drop
+  "M-k" 'git-rebase-todo-move-up
+  "M-j" 'git-rebase-todo-move-down
+  "Z Z" 'git-rebase-todo-finish
+  "Z Q" 'git-rebase-todo-abort)
 
 ;; Conflict markers (vc-conflict-mode): ] n and [ n go to the next and the previous conflict; the
 ;; C-c ^ keys of scm/emacs.scm hold in Normal and Insert state too.

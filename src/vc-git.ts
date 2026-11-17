@@ -38,7 +38,10 @@
 
    m, A, _ and r merge, cherry-pick, revert and rebase (docs/steps.md, "Merge, cherry-pick, revert and rebase"):
    started, gone on with, skipped and aborted, in the background as the remote commands are; the state git keeps
-   in the repository (readSeq) is the status header's line and its todo section, and what git stopped on is said. */
+   in the repository (readSeq) is the status header's line and its todo section, and what git stopped on is said.
+
+   r i rebases interactively (docs/steps.md, "The interactive rebase"): the frame is git's sequence editor and
+   editor (Vc's edit), the todo a buffer in git-rebase-todo-mode handed back to git. */
 
 (function () {
 'use strict';
@@ -951,11 +954,11 @@ function lastError(x: EdProcResult): string {
 
 /* git ARGS in R, a write whose hooks may print much (a commit, a rebase): no bound on its output, only a time, and
    kept of it the head of its output and the tail of its error output. INPUT goes to its standard input;
-   KEEPMESSAGE as Vc.run has it. */
-async function runLong(r: VcRepo, args: string[], input?: string, keepMessage = false): Promise<EdProcResult> {
+   KEEPMESSAGE and EDIT as Vc.run has them. */
+async function runLong(r: VcRepo, args: string[], input?: string, keepMessage = false, edit?: VcRunOptions['edit']): Promise<EdProcResult> {
   let out = '', err = '';
   const p = await Vc.start(r, args, {
-    timeout: COMMIT_TIMEOUT, lossy: true, keepMessage,
+    timeout: COMMIT_TIMEOUT, lossy: true, keepMessage, edit,
     onOut: s => { if (out.length < OUT_KEPT) out += s; },
     onErr: s => { err += s; if (err.length > 2 * ERR_KEPT) err = err.slice(-ERR_KEPT); },
   });
@@ -1631,14 +1634,16 @@ async function markers(r: VcRepo): Promise<string[]> {
 
 /* What git did, run for KIND: stopped (a conflict, a commit that would be empty, a rebase's edit), said with what
    to do then; else, when it failed, WHAT (`Not merged`) with git's reason, or DONE's message. */
-async function seqSaid(r: VcRepo, kind: GitSeqKind, x: EdProcResult, what: string, done: () => Promise<string>): Promise<string> {
+async function seqSaid(r: VcRepo, kind: GitSeqKind, x: EdProcResult, what: string, done: () => Promise<string>, ed: RebaseEditor | null = null): Promise<string> {
   if (x.error || x.timedOut) failed(x, `git ${kind}`);
   const S = SEQ[kind], s = await readSeq(r);
+  if (ed && ed.aborted === 'todo' && !s) return 'Rebase aborted (C-c C-k): nothing changed';
   if (s && s.op === kind) {
     const cur = s.current ? commitText(s.current) : null, where = kind === 'merge' ? `The merge${cur ? ' of ' + cur : ''} stopped` : `${S.doing} stopped${cur ? ` at ${cur}${kind === 'rebase' ? ` (${s.step} of ${s.of})` : ''}` : ''}`;
     const files = await conflicted(r);
     if (files.length) return `${where} with conflicts in ${listed(files)}: resolve them and stage them (s), then ${S.keys}`;
     if (S.skip && /\bis now empty\b/.test(x.err + '\n' + x.out)) return `${where}: its changes are in HEAD already, so it would commit nothing: ${S.keys}`;
+    if (ed && ed.aborted === 'message') return `${where}: its message was aborted (C-c C-k), so it keeps the one it had: ${S.keys}`;
     if (x.code !== 0) signal('process-error', `${where}: ${reason(x)} (see *vc-process*); ${S.keys}`);
     return `${where}: ${S.keys}`;
   }
@@ -1724,12 +1729,12 @@ async function rebasePrep(r: VcRepo, b: EdBuffer, upstream: boolean): Promise<[s
     onto = named ? rev : oid; it = named ? shown(rev) : await described(r, oid);
   }
   return [`Rebasing ${head} onto ${it}`, async () => {
-    const before = await resolve(r, 'HEAD');
-    const x = await runLong(r, ['rebase', '--end-of-options', onto], undefined, true);
+    const before = await resolve(r, 'HEAD'), ed = rebaseEditor(r);
+    const x = await rebaseRun(r, ['rebase', '--end-of-options', onto], ed);
     return seqSaid(r, 'rebase', x, 'Not rebased', async () => {
       const after = await resolve(r, 'HEAD');
       return after === before ? `${head} is up to date with ${it}: nothing rebased` : `Rebased ${head} onto ${it}: now at ${await described(r, after!)}`;
-    });
+    }, ed);
   }];
 }
 
@@ -1760,13 +1765,183 @@ async function stepPrep(r: VcRepo, kind: GitSeqKind, step: 'continue' | 'skip' |
   }
   const doing = step === 'continue' ? `Going on with the ${S.name}` : step === 'skip' ? `Skipping ${at ?? 'a commit'} in the ${S.name}` : `Aborting the ${S.name}`;
   return [doing, async () => {
-    const x = await runLong(r, [kind, '--' + step], undefined, true);
-    if (step !== 'abort') return seqSaid(r, kind, x, `The ${S.name} did not go on`, async () => `${S.Name} done: ${await headNow(r)}`);
+    /* a rebase going on or skipping may come to a reword or a squash, whose message is written in the frame */
+    const ed = kind === 'rebase' && step !== 'abort' ? rebaseEditor(r) : null;
+    const x = ed ? await rebaseRun(r, [kind, '--' + step], ed) : await runLong(r, [kind, '--' + step], undefined, true);
+    if (step !== 'abort') return seqSaid(r, kind, x, `The ${S.name} did not go on`, async () => `${S.Name} done: ${await headNow(r)}`, ed);
     if (x.error || x.timedOut) failed(x, `git ${kind} --abort`);
     if (x.code !== 0) refused(x, `The ${S.name} is not aborted`);
     return `${S.Name} aborted: ${await headNow(r)}`;
   }];
 }
+
+/* ---------- the interactive rebase and its todo ----------
+
+   r i rebases the commit at point (or one asked for) and those after it up to HEAD, interactively: git writes its
+   todo and gives it to the frame, its sequence editor (Vc's edit). The todo is a plain text buffer in
+   git-rebase-todo-mode, whose keys change the action of the commit line at point or move it; C-c C-c (Z Z) hands
+   the text back to git as it is, C-c C-k (Z Q), or killing the buffer, aborts the rebase. A reword's, a squash's
+   or a `fixup -c`'s message git gives the frame too, written in vc-message-mode; a message git asks for after a
+   conflict on a pick or an edit is handed back unedited, as `:` would (the git-sequencer's way). Every rebase
+   Edwin runs but its abort has the frame as its editors, so a reword left in the todo is reached by r r too. */
+interface RebaseEditor { edit: (file: string) => Promise<boolean | null>; aborted: 'todo' | 'message' | null; open: Set<EdBuffer>; todoDue: boolean }
+interface GitTodoPending { done(ok: boolean): void }
+/* the steps whose message git asks the frame for, by their todo verb */
+const EDITED_STEPS = new Set(['reword', 'r', 'squash', 's', 'fixup', 'f']);
+const truename = (p: string) => { try { return Ed.host.files!.truename(p); } catch (e) { return p; } };
+
+/* The frame as git's editors for a rebase in R: only the todo and COMMIT_EDITMSG of R's own git directory (a
+   linked worktree's own), by their true names, are taken; any other file is left unanswered. Only `rebase -i`
+   (INTERACTIVE) asks for the todo, once, when it starts: any other frame naming it (an exec line's, one in a
+   rebase gone on with) is nobody's and is left unanswered too, so no second todo buffer opens and the todo git
+   is working from is not written over. */
+function rebaseEditor(r: VcRepo, interactive = false): RebaseEditor {
+  const ed: RebaseEditor = { aborted: null, open: new Set(), todoDue: interactive, edit: async file => {
+    const px = await Vc.run(r, ['rev-parse', '--git-path', 'rebase-merge/git-rebase-todo', '--git-path', 'COMMIT_EDITMSG', '--git-path', 'rebase-merge/done'], { ...READ, lossy: true });
+    if (px.code !== 0 || px.error || px.timedOut || px.truncated) failed(px, 'git rev-parse');
+    const [todo, msg, done] = px.out.split('\n').slice(0, 3).map(p => truename(p.startsWith('/') ? p : join(r.root, p)));
+    const f = truename(file), files = Ed.host.files!;
+    if (f === todo) {
+      if (!ed.todoDue) return null;
+      ed.todoDue = false;
+      return editTodo(r, ed, f);
+    }
+    if (f !== msg) return null;
+    const last = (files.read(done) || '').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')).pop() || '';
+    if (!EDITED_STEPS.has(last.split(/\s+/)[0])) return true;
+    /* git cleans the message itself, with its own comment character (core.commentChar, `auto` included): it is
+       handed back as written. Another rebase's message under the same name gets a name of its own. */
+    const base = `*git-rebase-message: ${repoName(r)}*`, b = Ed.getBuffer(base) ? L.call('generate-new-buffer-name', [base]) as string : base;
+    const pending = Vc.message({ name: b, text: files.read(f) || '', comment: '#', raw: true });
+    const mb = Ed.getBuffer(b);
+    if (mb) ed.open.add(mb);
+    const m = await pending;
+    if (mb) ed.open.delete(mb);
+    if (m === null) { ed.aborted = 'message'; return false; }
+    files.write(f, m);
+    return true;
+  } };
+  return ed;
+}
+/* A rebase run with ED as its editors; a todo or message buffer still open when git ends goes with it. */
+async function rebaseRun(r: VcRepo, args: string[], ed: RebaseEditor): Promise<EdProcResult> {
+  try { return await runLong(r, args, undefined, false, ed.edit); }
+  finally { for (const b of ed.open) if (E.buffers.includes(b)) L.call('kill-buffer', [b]); }
+}
+
+/* The todo FILE of R's rebase in its buffer: true when it is handed back (C-c C-c), false when the rebase is
+   aborted. */
+function editTodo(r: VcRepo, ed: RebaseEditor, file: string): Promise<boolean> {
+  const text = Ed.host.files!.read(file);
+  if (text === null) signal('file-error', `Could not read ${shown(file)}`);
+  /* another rebase's todo under the same name (a repository of the same name) gets a name of its own */
+  const name = `*git-rebase-todo: ${repoName(r)}*`;
+  const b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
+  b.text = text!; b.pt = 0; b.modified = false; b.undo = []; b.redo = [];
+  try { Ed.switchMajorMode(b, 'git-rebase-todo-mode'); }
+  catch (e) { L.call('kill-buffer', [b]); throw e; }
+  b.pt = Math.max(0, lineStartB(b, todoLines(b)[0] ?? 1));
+  ed.open.add(b);
+  return new Promise<boolean>(done => {
+    b.gitTodo = { done: (ok: boolean) => {
+      delete b.gitTodo; ed.open.delete(b);
+      if (ok) try { Ed.host.files!.write(file, b.text); } catch (e) { Ed.reportError(e); ok = false; }
+      if (!ok) ed.aborted = 'todo';
+      done(ok);
+    } } as GitTodoPending;
+    Ed.setWindowBuffer(b); Ed.scheduleRender();
+    Ed.message('C-c C-c (Z Z) rebases as the todo says, C-c C-k (Z Q) aborts');
+  });
+}
+const todoOfBuffer = (b: EdBuffer) => (b.gitTodo as GitTodoPending | undefined) || signal('user-error', 'No rebase waits for this todo') as never;
+/* A todo line that names a commit: its indent, its verb (with fixup's -C or -c), and the rest from the commit. */
+const TODO_LINE = /^(\s*)(pick|p|reword|r|edit|e|squash|s|fixup|f|drop|d)(?:\s+-[cC])?\s+([0-9a-f]{4,64}\b.*)$/;
+const TODO_STEP = /^\s*[a-z]/;
+/* The line numbers of B's todo steps: neither blank nor a comment (git's comment character, whatever it is, is
+   no letter). */
+function todoLines(b: EdBuffer): number[] {
+  return b.text.split('\n').flatMap((l, i) => (TODO_STEP.test(l) ? [i + 1] : []));
+}
+function lineText(b: EdBuffer, n: number): [number, number, string] {
+  const s = lineStartB(b, n), nl = b.rope.indexOf('\n', s), e = nl < 0 ? b.rope.length : nl;
+  return [s, e, b.text.slice(s, e)];
+}
+/* The commit line at point given VERB (its fixup flag dropped), as one change; point to the next line. */
+function todoSet(verb: string): false {
+  const b = cur();
+  todoOfBuffer(b);
+  const n = lineNoB(b, b.pt), [s, e, text] = lineText(b, n), m = TODO_LINE.exec(text);
+  if (!m) signal('user-error', 'Not a commit\'s line: only pick, reword, edit, squash, fixup and drop lines change');
+  Ed.replaceText(b, s, e, `${m![1]}${verb} ${m![3]}`);
+  b.pt = lineStartB(b, Math.min(n + 1, lineNoB(b, b.rope.length)));
+  return false;
+}
+/* The step at point moved past the step before it (UP) or after it, as one change; point stays on it. */
+function todoMove(up: boolean): false {
+  const b = cur();
+  todoOfBuffer(b);
+  const n = lineNoB(b, b.pt), steps = todoLines(b), k = steps.indexOf(n);
+  if (k < 0) signal('user-error', 'Not a step of the todo');
+  const o = steps[up ? k - 1 : k + 1];
+  if (o === undefined) signal('user-error', up ? 'The first step already' : 'The last step already');
+  const col = b.pt - lineStartB(b, n), [a, z] = up ? [o, n] : [n, o];
+  const [as, , at] = lineText(b, a), [zs, ze, zt] = lineText(b, z), between = b.text.slice(as + at.length, zs);
+  Ed.replaceText(b, as, ze, zt + between + at);
+  b.pt = Math.min(lineStartB(b, o!) + col, lineText(b, o!)[1]);
+  return false;
+}
+/* r i: the commit asked for (point's by default) and its descendants up to HEAD rebased interactively, onto its
+   parent (--root for a root commit). */
+async function interactivePrep(r: VcRepo, b: EdBuffer): Promise<[string, () => Promise<string>]> {
+  await seqStart(r, 'rebase');
+  const [branch, headOid] = await Promise.all([currentBranch(r), resolve(r, 'HEAD')]), head = branch !== null ? shown(branch) : 'HEAD';
+  if (!headOid) signal('user-error', 'No commit yet: nothing to rebase');
+  const rev = await ask('Rebase interactively from commit', refNames(await readRefs(r)), commitAt(b));
+  const oid = await commitOf(r, rev), it = await described(r, oid);
+  const x = await Vc.run(r, ['merge-base', '--is-ancestor', oid, headOid!], { ...READ, lossy: true });
+  if (x.code === 1 && !x.error && !x.timedOut) signal('user-error', `${it} is not in ${head}'s history: r i rebases a commit of it and those after it`);
+  if (x.code !== 0 || x.error || x.timedOut) failed(x, 'git merge-base');
+  await Vc.offerSave(r, 'rebasing');
+  const parent = await resolve(r, oid + '^');
+  const args = parent ? ['rebase', '-i', '--end-of-options', parent] : ['rebase', '-i', '--root'];
+  return [`Rebasing ${head} interactively from ${it}`, async () => {
+    const ed = rebaseEditor(r, true);
+    const x = await rebaseRun(r, args, ed);
+    return seqSaid(r, 'rebase', x, 'Not rebased', async () => {
+      const after = await resolve(r, 'HEAD');
+      return after === headOid ? `Nothing rebased: ${head} at ${await described(r, after!)}` : `Rebased ${head} interactively: now at ${await described(r, after!)}`;
+    }, ed);
+  }];
+}
+
+CMD('git-rebase-interactive', '', '', 'Rebase the commit at point, or one asked for, and those after it up to HEAD interactively (r i): their todo is written in a buffer, C-c C-c rebases as it says, C-c C-k aborts. In the background.', () => seqOp(interactivePrep));
+CMD('git-rebase-todo-pick', '', '', 'Pick the commit on this todo line (p): use it as it is.', () => todoSet('pick'));
+CMD('git-rebase-todo-reword', '', '', 'Reword the commit on this todo line (r): use it, its message written in a buffer.', () => todoSet('reword'));
+CMD('git-rebase-todo-edit', '', '', 'Edit the commit on this todo line (e): use it, and stop there for amending.', () => todoSet('edit'));
+CMD('git-rebase-todo-squash', '', '', 'Squash the commit on this todo line into the one before it (s), the two messages written as one in a buffer.', () => todoSet('squash'));
+CMD('git-rebase-todo-fixup', '', '', 'Fix up the one before with the commit on this todo line (f): melded into it, its message left out.', () => todoSet('fixup'));
+CMD('git-rebase-todo-drop', '', '', 'Drop the commit on this todo line (d): leave it out.', () => todoSet('drop'));
+CMD('git-rebase-todo-move-up', '', '', 'Move the step at point above the one before it (M-k, M-p).', () => todoMove(true));
+CMD('git-rebase-todo-move-down', '', '', 'Move the step at point below the one after it (M-j, M-n).', () => todoMove(false));
+CMD('git-rebase-todo-finish', '', '', 'Hand the todo back to git as it is (C-c C-c, Z Z): the rebase goes on with it.', () => {
+  const b = cur();
+  todoOfBuffer(b).done(true);
+  L.call('kill-buffer', [b]);
+  return false;
+});
+CMD('git-rebase-todo-abort', '', '', 'Abort the rebase this todo is for (C-c C-k, Z Q): nothing is changed.', () => {
+  const b = cur();
+  todoOfBuffer(b).done(false);
+  L.call('kill-buffer', [b]);
+  return false;
+});
+/* A todo buffer killed another way aborts its rebase. */
+L.D('git--rebase-todo-killed', '', 'kill-buffer-hook: a rebase todo killed before C-c C-c aborts its rebase.', () => {
+  const t = cur().gitTodo as GitTodoPending | undefined;
+  if (t) t.done(false);
+  return false;
+});
+L.addHook('kill-buffer-hook', intern('git--rebase-todo-killed'));
 
 /* The commits selected in Visual state in a git buffer, newest first as they are shown (Visual state then left);
    none outside it. In the status buffer only its lists of commits count: the Head, Merge, operation and todo
@@ -1802,7 +1977,8 @@ for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-to
   'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete',
   'git-fetch', 'git-fetch-all', 'git-pull', 'git-push', 'git-push-force', 'git-merge', 'git-merge-abort', 'git-cherry-pick', 'git-cherry-pick-skip',
   'git-cherry-pick-abort', 'git-revert', 'git-revert-skip', 'git-revert-abort', 'git-rebase', 'git-rebase-upstream', 'git-rebase-continue', 'git-rebase-skip',
-  'git-rebase-abort']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-rebase-abort', 'git-rebase-interactive', 'git-rebase-todo-finish', 'git-rebase-todo-abort']) L.put(intern(n), 'evil-repeat', intern('abort'));
+Ed.MODE_NAMES['git-rebase-todo-mode'] = 'Git Rebase Todo';
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 Ed.MODE_NAMES['git-log-mode'] = 'Git Log';
 Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';

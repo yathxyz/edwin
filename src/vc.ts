@@ -59,11 +59,11 @@ function settle(b: EdBuffer, msg: string | null) {
 }
 
 /* Open a buffer named NAME holding TEXT (point at its start) in the selected window, in vc-message-mode, its
-   comment lines those that start with COMMENT. The promise gives the cleaned message, or null when the user
-   aborts or kills the buffer. NAME must not name a live buffer: a message is never written over another
-   buffer, nor over a message still being written. */
+   comment lines those that start with COMMENT. The promise gives the cleaned message (RAW: the text as it
+   is), or null when the user aborts or kills the buffer. NAME must not name a live buffer: a message is never
+   written over another buffer, nor over a message still being written. */
 function message(opts: VcMessageOptions): Promise<string | null> {
-  const { name, text = '', comment = '#' } = opts;
+  const { name, text = '', comment = '#', raw = false } = opts;
   if (typeof name !== 'string' || !name) signal('error', 'Vc.message needs a buffer name');
   if (typeof text !== 'string' || typeof comment !== 'string' || !comment) signal('error', 'Vc.message: TEXT is a string and COMMENT a non-empty one');
   if (Ed.getBuffer(name)) signal('user-error', `${name} is already open: finish (C-c C-c) or abort (C-c C-k) the message there first`);
@@ -74,7 +74,7 @@ function message(opts: VcMessageOptions): Promise<string | null> {
   try { Ed.switchMajorMode(b, 'vc-message-mode'); }
   catch (e) { L.call('kill-buffer', [b]); throw e; }
   return new Promise<string | null>(done => {
-    b.vcMessage = { comment, done };
+    b.vcMessage = { comment, raw, done };
     Ed.setWindowBuffer(b); Ed.scheduleRender();
   });
 }
@@ -82,7 +82,7 @@ function message(opts: VcMessageOptions): Promise<string | null> {
 CMD('vc-message-finish', '', '', 'Give the commit message in this buffer to what waits for it, without its comment lines, and kill the buffer (C-c C-c). An empty message is refused.', () => {
   const b = cur(), p = pendingOf(b), msg = cleanMessage(b.text, p.comment);
   if (!msg) signal('user-error', 'The message is empty: write one, or abort with C-c C-k');
-  settle(b, msg);
+  settle(b, p.raw ? b.text : msg);
   L.call('kill-buffer', [b]);
   return false;
 });
@@ -196,9 +196,10 @@ const UNDOES: Record<VcTool, string[]> = {
   jj: ['--config', '--config-file', '--config-toml', '--color', '--tool', '--repository', '-R'],
 };
 /* The child's environment changes. No prompt for credentials (the child has no terminal either), no optional
-   index write from a read, no editor (GIT_EDITOR is false until a package wires it back to the frame; a
-   repository's sequence.editor beats GIT_EDITOR, GIT_SEQUENCE_EDITOR beats it), no stray repository from
-   Edwin's own environment, and git's messages in English, so an unsafe repository is told apart in any locale. */
+   index write from a read, no editor (GIT_EDITOR and GIT_SEQUENCE_EDITOR are false but for a rebase given an
+   editor, below; a repository's sequence.editor beats GIT_EDITOR, GIT_SEQUENCE_EDITOR beats it), no stray
+   repository from Edwin's own environment, and git's messages in English, so an unsafe repository is told apart
+   in any locale. */
 const ENV: Record<VcTool, Record<string, string | null>> = {
   git: {
     GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', GIT_PAGER: 'cat',
@@ -292,11 +293,12 @@ function progressLog() {
 /* ARGV started in REPO's root with ENV, logged to *vc-process*: the whole argv when it starts, then its error
    output (the first ERR_KEPT characters; with PROGRESS, all of it as it comes) and how it ended. The exit rejects with user-error when git refuses
    the repository as unsafe (safe.directory): that is shown as it is, never retried. */
-function spawnLogged(r: VcRepo, argv: string[], env: Record<string, string | null>, opts: VcRunOptions): EdProc {
+/* (WRAP: what starts ARGV, left out of the log) */
+function spawnLogged(r: VcRepo, argv: string[], env: Record<string, string | null>, opts: VcRunOptions, wrap: string[] = []): EdProc {
   const { onErr, progress, ...rest } = opts;
   let err = '';
   const live = progress ? progressLog() : null;
-  const p = Ed.proc.spawn(argv, {
+  const p = Ed.proc.spawn([...wrap, ...argv], {
     ...rest, cwd: r.root, env,
     onErr: s => { if (err.length < ERR_KEPT) err += s; if (live) live.feed(s); if (onErr) onErr(s); },
   });
@@ -506,12 +508,79 @@ function checkStart(r: VcRepo, args: string[]) {
   }
 }
 
+/* ---------- the frame as git's editor ----------
+
+   A rebase given an editor (VcRunOptions.edit) runs with GIT_SEQUENCE_EDITOR and GIT_EDITOR set to EDITOR_SH, git
+   started through EDIT_WRAP: git's standard input is /dev/null, so an exec line's command that reads its input
+   gets its end at once, as before; the pipe Edwin writes is git's descriptor 3, which git's children inherit.
+   git starts EDITOR_SH (through its shell, the file's absolute path after it) with git's standard output, the
+   pipe Edwin reads. It writes NUL, `edwin-edit`, NUL, its own shell's process id, NUL, the file, NUL to its
+   output, then reads lines on descriptor 3 until one starts with its id: `ID done` ends it with 0 (git takes the
+   file as it is now), `ID abort` or any other line with its id, or the end of its input (the frame gone), with 1 (git aborts the
+   rebase, or stops at a reword it could not edit). Edwin reads the frames out of git's output and asks EDIT for
+   each, one at a time, and answers with the frame's id; a file EDIT does not take (a frame printed by anything
+   else: a hook's output goes to git's error output, an exec line's to its output) is left unanswered. The
+   descriptor is one pipe for all of git's children, so the id keeps an answer to one of them (a frame an exec
+   line printed, say, which no editor waits for) from being read by the editor that runs next: that one skips
+   it, and only its own answer ends it. An exec line cannot know the id of an editor that has not started yet.
+   A frame's start with no two NULs after it within FRAME_MAX is no frame: it goes on as output, none of it held
+   back; a frame whose id is not a number is left unanswered. git is never killed while the user edits: a git
+   killed then leaves its rebase-merge behind, the todo unedited. So the run's timeout counts only while no file
+   is being edited. */
+const EDIT_WRAP = ['sh', '-c', 'exec 3<&0 </dev/null && exec "$@"', 'sh'];
+const EDITOR_SH = 'edwin_edit() { printf \'\\000edwin-edit\\000%s\\000%s\\000\' "$$" "$1" && while read -r id answer <&3; do [ "$id" = "$$" ] && break; done && [ "$answer" = done ]; }; edwin_edit';
+const FRAME = '\0edwin-edit\0', FRAME_MAX = 4096, FRAME_ID = /^[0-9]+$/;
+function editing(start: (opts: VcRunOptions) => EdProc, opts: VcRunOptions): EdProc {
+  const { edit, timeout, onOut, ...rest } = opts;
+  let tail = '', queue: Promise<unknown> = Promise.resolve(), asking = 0, timer: number | null = null, timedOut = false, ended = false;
+  const arm = () => { if (timer !== null) clearTimeout(timer); timer = timeout && !asking && !ended ? setTimeout(() => { timedOut = true; p.kill('TERM'); }, timeout) : null; };
+  const ask = (id: string, file: string) => {
+    if (!FRAME_ID.test(id)) return;
+    asking++; arm();
+    queue = queue.then(() => edit!(file)).then(ok => ok, e => { Ed.reportError(e); return false; }).then(ok => {
+      if (ok !== null) p.write(`${id} ${ok ? 'done' : 'abort'}\n`);
+    }).finally(() => { asking--; arm(); });
+  };
+  const p = start({
+    ...rest,
+    onOut: s => {
+      tail += s;
+      let out = '';
+      for (;;) {
+        const at = tail.indexOf(FRAME);
+        if (at < 0) {
+          /* what may yet be the start of a frame is kept back */
+          let keep = 0;
+          for (let n = Math.min(FRAME.length - 1, tail.length); n > 0; n--) if (FRAME.startsWith(tail.slice(-n))) { keep = n; break; }
+          out += tail.slice(0, tail.length - keep); tail = tail.slice(tail.length - keep);
+          break;
+        }
+        const idEnd = tail.indexOf('\0', at + FRAME.length), end = idEnd < 0 ? -1 : tail.indexOf('\0', idEnd + 1);
+        if (end < 0 ? tail.length - at > FRAME.length + FRAME_MAX : end - at > FRAME.length + FRAME_MAX) {
+          out += tail.slice(0, at + 1); tail = tail.slice(at + 1);
+          continue;
+        }
+        if (end < 0) { out += tail.slice(0, at); tail = tail.slice(at); break; }
+        out += tail.slice(0, at);
+        ask(tail.slice(at + FRAME.length, idEnd), tail.slice(idEnd + 1, end));
+        tail = tail.slice(end + 1);
+      }
+      if (out && onOut) onOut(out);
+    },
+  });
+  arm();
+  const exit = p.exit.then(x => { ended = true; if (timer !== null) clearTimeout(timer); if (tail && onOut) onOut(tail); return timedOut ? { ...x, timedOut: true } : x; });
+  /* the input (git's descriptor 3) stays open for the editor's answers while git runs */
+  return { ...p, exit, closeStdin: () => {} };
+}
+
 /* ARGS (a subcommand first) for REPO's program, in its root, with the hardening above; a running child, as
    Ed.proc.spawn gives it, its argv and environment fixed here. A jj repository that brings settings of its own
    is refused. */
 async function start(r: VcRepo, args: string[], allOpts: VcRunOptions = {}): Promise<EdProc> {
   const { keepMessage, ...opts } = allOpts;
   checkStart(r, args);
+  if (opts.edit && (r.vcs !== 'git' || args[0] !== 'rebase')) signal('process-error', 'Vc gives an editor to git rebase alone');
   args = args.slice();
   let argv: string[], env = ENV[r.vcs];
   if (r.vcs === 'jj') {
@@ -532,15 +601,16 @@ async function start(r: VcRepo, args: string[], allOpts: VcRunOptions = {}): Pro
     }
     /* Going on after a conflict, the sequencer commits with the message it prepared: GIT_EDITOR=: is git's
        editor that changes nothing (git starts no program for it), and git cleans the message as an edited one.
-       GIT_SEQUENCE_EDITOR stays false. */
+       GIT_SEQUENCE_EDITOR stays false; a rebase given an editor has the frame as both (below). */
     if (keepMessage && GIT_SEQUENCER.has(sub)) env = { ...env, GIT_EDITOR: ':' };
+    if (opts.edit) env = { ...env, GIT_EDITOR: EDITOR_SH, GIT_SEQUENCE_EDITOR: EDITOR_SH };
     if (GIT_TRANSPORT.has(sub)) {
       pre.push('-c', 'protocol.ext.allow=never');
       env = { ...env, ...configEnv(await transportOverrides(r)) };
     }
     argv = ['git', ...pre, sub, ...(GIT_AFTER[sub] || []), ...args.slice(1)];
   }
-  return spawnLogged(r, argv, env, opts);
+  return opts.edit ? editing(o => spawnLogged(r, argv, env, o, EDIT_WRAP), opts) : spawnLogged(r, argv, env, opts);
 }
 
 /* As start, then the child's whole output, error and exit once it has ended. INPUT goes to its standard input,
