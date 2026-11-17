@@ -8,6 +8,9 @@
 // The Visual-block case operators (~ U u g?) guard evil--block-ranges, which this package once dropped.
 // se-indent: the Lisp indenter as Emacs 31's scheme-mode and emacs-lisp-mode (B3). se-comment: gc, gcc and M-; share
 // comment-toggle-lines, in the mode's comment syntax, with any run of a repeated opener a comment (B6).
+// se-surround: ys repeats with ., takes a count and wraps lines from their first to their last non-blank, more than
+// one on lines of their own; ds( and cs( take the blanks inside, ds) and cs) keep them, and cs keeps the lines; f
+// wraps in a call of a function read from the minibuffer (B7).
 // One Edwin per process, so the cases run in order on fresh buffers.
 // Run: node --test test/structural.test.mts
 import { test } from 'node:test';
@@ -23,18 +26,20 @@ type Globals = typeof globalThis & { EdPool: Edwin; EvilCore: { stateOf(b: unkno
 const P = (globalThis as Globals).EdPool;
 ed.eval('(set! corfu-auto #f)');
 let n = 0;
-/* A fresh buffer visiting a new file with extension EXT, holding TEXT, point at its start, Normal state. */
+/* A fresh buffer visiting a new file with extension EXT, holding TEXT, point at its start, Normal state, with
+   nothing to repeat: a case's . repeats only its own change. */
 async function buffer(ext: string, text: string) {
   if ((globalThis as Globals).EvilCore.stateOf(ed.E.current) !== 'normal') await ed.keys('ESC');
   await ed.type(`:e st${++n}.${ext}\n`);
   assert.equal(ed.text(), '');
+  ed.E.dotLast = null;
   if (text) Ed.insertText(ed.E.current, text);
   ed.E.current.pt = 0;
   return ed.E.current;
 }
 /* KEYS as the audit wrote them: "K:NAME" is one key by its name (C-M-f, Escape, Tab), "H:1b 3b" the bytes a
    terminal sends, read by the terminal decoder, anything else is typed. */
-const KEY_NAMES: Record<string, string> = { Escape: 'ESC', Tab: 'TAB' };
+const KEY_NAMES: Record<string, string> = { Escape: 'ESC', Tab: 'TAB', Enter: 'RET' };
 const Term = createRequire(import.meta.url)('../native/js/term.ts') as { decoder(): { feed(s: string): { type: string; key?: string }[] } };
 const decode = (s: string) => Term.decoder().feed(s).filter(e => e.type === 'key').map(e => e.key as string);
 async function press(keys: string[]) {
@@ -806,4 +811,157 @@ test('B6: M-; reaches comment-line from a terminal, as ESC ; and as a kitty key'
   await ed.keys('ESC');
   assert.equal(ed.text(), 'a = 1;M-\n');
   assert.equal(ed.L.call('lookup-key', [ed.L.get('global-map'), 'M-;']).name, 'comment-line');
+});
+
+/* se-surround (B7): ys is repeated by ., takes a count before its motion and wraps a line from its first to its
+   last non-blank; more than one line, or Visual S on lines, puts the pair on lines of their own; ds) and cs)
+   keep the blanks inside and ds( and cs( take them; cs keeps the lines inside; f wraps in a function call.
+   SURROUND_FAILED failed at Edwin 73d9f03 and still at se-comment (a69f078); SURROUND_GUARDS passed at both. */
+const SURROUND_FAILED: Case[] = [
+  ["ys2e)","scm","foo bar baz\n",["ys2e)"],"(foo bar) baz\n"],
+  ["yss)-indented","scm","  foo bar\n",["yss)"],"  (foo bar)\n"],
+  ["ysiwf-function","scm","foo\n",["ysiwf","g","K:Enter"],"g(foo)\n"],
+  ["ds)-keeps-space","scm","( foo )\n",["fo","ds)"]," foo \n"],
+  ["cs)]-multiline","scm","(\n  foo\n)\n",["j","cs)]"],"[\n  foo\n]\n"],
+  ["VS)-linewise","scm","foo\n",["V","S)"],"(\nfoo\n)\n"],
+  ["ysiw)-dot","scm","foo bar\n",["ysiw)","fb","."],"(foo) (bar)\n"],
+  ["yss)-dot","scm","a\nb\n",["yss)","j","."],"(a)\n(b)\n"],
+];
+const SURROUND_GUARDS: Case[] = [
+  ["ysiw)","scm","foo bar\n",["ysiw)"],"(foo) bar\n"],
+  ["ysiw(","scm","foo bar\n",["ysiw("],"( foo ) bar\n"],
+  ["ysiw\"","scm","foo bar\n",["ysiw\""],"\"foo\" bar\n"],
+  ["ysiwb","scm","foo bar\n",["ysiwb"],"(foo) bar\n"],
+  ["ysiw*-unknown","scm","foo\n",["ysiw*"],"*foo*\n"],
+  ["vS)-charwise","scm","foo bar\n",["ve","S)"],"(foo) bar\n"],
+  ["ysiw)-undo","scm","foo bar\n",["ysiw)","u"],"foo bar\n"],
+  ["ysiw)-in-el","el","foo\n",["ysiw)"],"(foo)\n"],
+];
+for (const [label, cases] of [['failed at a69f078', SURROUND_FAILED], ['a guard', SURROUND_GUARDS]] as const)
+  for (const [id, ext, input, keys, expected] of cases)
+    test(`audit case ${id} (${label})`, async () => {
+      await buffer(ext, input);
+      await press(keys);
+      assert.equal(ed.text(), expected);
+    });
+
+test('B7: ys wraps lines from the first to the last non-blank, more than one on lines of their own', async () => {
+  for (const [ext, input, keys, expected] of [
+    ['scm', '  foo bar  \n', 'yss(', '  ( foo bar )  \n'],
+    ['scm', '\tfoo\n', 'yss]', '\t[foo]\n'],
+    ['scm', '  foo', 'yss)', '  (foo)'],
+    // Two lines, by a count, a linewise motion or a paragraph: the pair goes on lines of its own at the first
+    // line's indentation, without the pad blanks, and the lines inside stay as they were.
+    ['scm', '  a\n  b\nc\n', '2yss)', '  (\n  a\n  b\n  )\nc\n'],
+    ['scm', '  a\n  b\nc\n', 'ys2s)', '  (\n  a\n  b\n  )\nc\n'],
+    ['nix', 'a = 1;\nb = 2;\n', 'ysj{', '{\na = 1;\nb = 2;\n}\n'],
+    ['scm', 'a\nb\n\nc\n', 'ysip)', '(\na\nb\n)\n\nc\n'],
+    ['scm', 'a\nb', 'ysj)', '(\na\nb\n)'],
+    // A count before the operator and one before the motion multiply, as for any operator.
+    ['scm', 'aa bb cc dd ee\n', '2ys2w)', '(aa bb cc dd) ee\n'],
+    ['scm', 'foo bar\n', 'ysw)', '(foo) bar\n'],
+    // On a word's last character, w ends there, as cw in Vim: that word is the first of the count.
+    ['scm', 'ab cd\n', 'lysw)', 'a(b) cd\n'],
+    ['scm', 'a b\n', 'ysw)', '(a) b\n'],
+    ['scm', 'a b c\n', 'ys2w)', '(a b) c\n'],
+    ['scm', 'ab cd ef\n', 'lys2W)', 'a(b cd) ef\n'],
+    ['scm', 'ab cd\n', 'lcwX', 'aX cd\n'],
+    ['scm', 'ab cd ef\n', 'lc2wX', 'aX ef\n'],
+    // A count past the last word stops at its end, before the final newline, as Vim and evil-surround do.
+    ['scm', 'ab\n', 'lys2w)', 'a(b)\n'],
+    ['scm', 'x ab\n', '$c2wX', 'x aX\n'],
+    ['scm', 'aa bb cc dd ee\n', 'ys3e)', '(aa bb cc) dd ee\n'],
+  ] as const) {
+    await buffer(ext, input);
+    await ed.type(keys);
+    assert.equal(ed.text(), expected, `${keys} on ${JSON.stringify(input)}`);
+  }
+});
+
+test('B7: Visual S on lines puts the pair on lines of its own; charwise it wraps the selection', async () => {
+  for (const [input, keys, expected] of [
+    ['  a\n  b\n', 'VjS)', '  (\n  a\n  b\n  )\n'],
+    ['a\n', 'VS(', '(\na\n)\n'],
+    ['foo bar\n', 'veS(', '( foo ) bar\n'],
+  ] as const) {
+    await buffer('scm', input);
+    await ed.type(keys);
+    assert.equal(ed.text(), expected, `${keys} on ${JSON.stringify(input)}`);
+    assert.equal((globalThis as Globals).EvilCore.stateOf(ed.E.current), 'normal');
+  }
+});
+
+test('B7: ds( and cs( take the blanks inside, ds) cs) and ds" keep them, and the lines inside stay', async () => {
+  for (const [input, keys, expected] of [
+    ['( foo )\n', 'llds(', 'foo\n'],
+    ['( foo )\n', 'llcs)]', '[ foo ]\n'],
+    ['( foo )\n', 'llcs(]', '[foo]\n'],
+    ['(a " b " c)\n', 'fbds"', '(a  b  c)\n'],
+    ['(\n  foo\n)\n', 'jds)', '\n  foo\n\n'],
+    ['(\n  foo\n)\n', 'jds(', '\n  foo\n\n'],
+    // An opening bracket's pad blank is left out next to a newline, so no blank ends a line.
+    ['(\n  foo\n)\n', 'jcs([', '[\n  foo\n]\n'],
+    ['(\n  foo\n)\n', 'jcs)[', '[\n  foo\n]\n'],
+    ['(a\n b)\n', 'jcs)]', '[a\n b]\n'],
+    ['(a\n b)\n', 'jcs)[', '[ a\n b ]\n'],
+  ] as const) {
+    await buffer('scm', input);
+    await ed.type(keys);
+    assert.equal(ed.text(), expected, `${keys} on ${JSON.stringify(input)}`);
+  }
+});
+
+test('B7: f wraps in a call of the function named in the minibuffer, for ys, cs and Visual S, and . reuses the name', async () => {
+  await buffer('scm', 'foo bar\n');
+  await ed.type('ysiwf');
+  assert.ok(ed.E.mini, 'f prompts for the function');
+  await ed.type('list\n');
+  assert.equal(ed.text(), 'list(foo) bar\n');
+  await ed.type('fb.');
+  assert.equal(ed.text(), 'list(foo) list(bar)\n');
+  await ed.type('u');
+  assert.equal(ed.text(), 'list(foo) bar\n', 'one undo step takes one surround');
+  await buffer('js', 'x = (a, b);\n');
+  await ed.type('facs)fg\n');
+  assert.equal(ed.text(), 'x = g(a, b);\n');
+  await buffer('py', 'n + 1\n');
+  await ed.type('v$hSfint\n');
+  assert.equal(ed.text(), 'int(n + 1)\n');
+  // C-g in the prompt leaves the buffer as it was.
+  await buffer('scm', 'foo\n');
+  await ed.type('ysiwf');
+  await ed.keys('C-g');
+  assert.equal(ed.text(), 'foo\n');
+  // cs finds the old pair before f asks for a name: with no ( around, cs(f fails at once.
+  await buffer('scm', 'foo\n');
+  await ed.type('cs(f');
+  assert.ok(!ed.E.mini, 'cs(f with no ( around point asks for no function name');
+  assert.equal(ed.text(), 'foo\n');
+});
+
+test('B7: . after ys survives a yank in between, and a yank alone is still not repeated', async () => {
+  await buffer('scm', 'a b c\n');
+  await ed.type('ysiw]fbyiwfc.');
+  assert.equal(ed.text(), '[a] b [c]\n');
+  await ed.type('0xyiw.');
+  assert.equal(ed.text(), '] b [c]\n', 'the . repeats the x, not the yank');
+  await buffer('scm', 'aa bb cc dd\n');
+  await ed.type('ys2e)fc.');
+  assert.equal(ed.text(), '(aa bb) (cc dd)\n', 'a count inside the keys of ys is part of what . repeats');
+  await buffer('scm', 'a\nb\nc\nd\n');
+  await ed.type('yss)j3.');
+  assert.equal(ed.text(), '(a)\n(\nb\nc\nd\n)\n', 'a count given to . replaces the count of ys');
+});
+
+test('no surround case starting from a balanced Lisp buffer leaves it unbalanced', async () => {
+  let n = 0;
+  for (const [id, ext, input, keys] of [...SURROUND_FAILED, ...SURROUND_GUARDS]) {
+    if (ext !== 'scm' && ext !== 'el') continue;
+    if (!balanced(input)) continue;
+    await buffer(ext, input);
+    await press(keys);
+    assert.ok(balanced(ed.text()), `${id}: ${JSON.stringify(ed.text())}`);
+    n++;
+  }
+  assert.ok(n >= 15, `${n} cases`);
 });

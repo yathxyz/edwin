@@ -257,11 +257,16 @@ Brackets mark the part that may be left out, as in \"w[rite]\"."
       (forward-char 1))))
 
 (define (evil--forward-word-end-1 big)
-  (unless (eobp) (forward-char 1))
-  (while (and (not (eobp)) (memv (evil--cls #f big) '(0 3))) (forward-char 1))
-  (let ((c (evil--cls #f big)))
-    (while (and (< (+ (point) 1) (point-max)) (= (evil--cls (+ (point) 1) big) c))
-      (forward-char 1))))
+  "Move to the end of the next word. With no word before the end of the buffer, stay, so e (and cw, ysw)
+never runs past the last word's end onto the final newline."
+  (let ((start (point)))
+    (unless (eobp) (forward-char 1))
+    (while (and (not (eobp)) (memv (evil--cls #f big) '(0 3))) (forward-char 1))
+    (if (eobp)
+        (goto-char start)
+        (let ((c (evil--cls #f big)))
+          (while (and (< (+ (point) 1) (point-max)) (= (evil--cls (+ (point) 1) big) c))
+            (forward-char 1))))))
 
 (define (evil--backward-word-begin-1 big)
   (unless (bobp) (backward-char 1))
@@ -831,24 +836,59 @@ The replaced text goes to the unnamed register."
   "Characters that name a pair, with the strings that open and close it.
 An opening bracket adds spaces inside; a closing one does not.")
 
-(define (evil--surround-strings char)
-  "The opening and closing strings for CHAR, as a pair.  Unknown characters surround with themselves."
+(define (evil--surround-opener? char)
+  "Whether CHAR is an opening bracket: it pads a pair it adds, and trims the blanks inside one it takes away."
+  (memv char '(#\( #\[ #\{ #\<)))
+
+(define (evil--surround-strings char fname)
+  "The opening and closing strings for CHAR, as a pair.  f is a call of the function FNAME around the text;
+unknown characters surround with themselves."
   (let ((p (assv char evil-surround-pairs)))
-    (cond ((not p) (let ((s (char->string char))) (cons s s)))
-          ((memv char '(#\( #\[ #\{ #\<)) (cons (string-append (cadr p) " ") (string-append " " (caddr p))))
+    (cond ((eqv? char #\f) (cons (string-append (or fname "") "(") ")"))
+          ((not p) (let ((s (char->string char))) (cons s s)))
+          ((evil--surround-opener? char) (cons (string-append (cadr p) " ") (string-append " " (caddr p))))
           (else (cons (cadr p) (caddr p))))))
 
-(evil-define-operator (evil-surround-region beg end type char)
-  "Put the pair named by CHAR around the text from BEG to END (ys and S)."
-  (interactive "<R><C>")
-  (let ((pair (evil--surround-strings char)))
+(define (evil--surround-wrap beg end pair)
+  "Put PAIR around the text from BEG to END.  A pad blank is left out where the text starts or ends a line."
+  (let ((open (car pair)) (close (cdr pair)))
     (save-excursion
       (goto-char end)
-      (when (and (eq? type 'line) (eqv? (char-before end) #\newline)) (backward-char 1))
-      (insert (cdr pair))
+      (insert (if (and (eqv? (char-before end) #\newline) (string-prefix? " " close))
+                  (string-trim-left close)
+                  close))
       (goto-char beg)
-      (insert (car pair)))
-    (goto-char beg)))
+      (insert (if (and (eqv? (char-after beg) #\newline) (string-suffix? " " open))
+                  (string-trim-right open)
+                  open)))))
+
+(define (evil--surround-insert beg end type char fname own-lines)
+  "Put the pair named by CHAR (f: a call of FNAME) around the text from BEG to END of TYPE.  Lines (type line)
+are wrapped from the first line's first non-blank to the last line's last non-blank; more than one line, or
+OWN-LINES, puts the pair on lines of their own at the first line's indentation instead."
+  (let ((pair (evil--surround-strings char fname)))
+    (if (not (eq? type 'line))
+        (begin (evil--surround-wrap beg end pair) (goto-char beg))
+        (let* ((last (if (and (> end beg) (eqv? (char-before end) #\newline)) (- end 1) end))
+               (text-beg (save-excursion (goto-char beg) (skip-chars-forward " \t" last) (point)))
+               (indent (buffer-substring beg text-beg)))
+          (if (or own-lines (save-excursion (goto-char beg) (search-forward "\n" last #t)))
+              (begin
+                (save-excursion
+                  (goto-char last)
+                  (insert "\n" indent (string-trim-left (cdr pair)))
+                  (goto-char beg)
+                  (insert indent (string-trim-right (car pair)) "\n"))
+                (goto-char text-beg))
+              (let ((text-end (save-excursion (goto-char last) (skip-chars-backward " \t" text-beg) (point))))
+                (evil--surround-wrap text-beg text-end pair)
+                (goto-char text-beg)))))))
+
+(evil-define-operator (evil-surround-region beg end type char fname)
+  "Put the pair named by CHAR around the text from BEG to END (S in Visual state; ys calls it as an operator).
+f prompts for a function name and wraps the text in a call of it.  Linewise, the pair goes on lines of its own."
+  (interactive "<R><surround>")
+  (evil--surround-insert beg end type char fname (eq? type 'line)))
 
 (define (evil--surround-bounds char)
   "The pair around point that CHAR names, as (OPEN-START OPEN-END CLOSE-START CLOSE-END), or #f."
@@ -864,33 +904,31 @@ An opening bracket adds spaces inside; a closing one does not.")
              ;; the quote object is the inside; the quotes sit just outside it
              (list (- (car r) 1) (car r) (cadr r) (+ (cadr r) 1))))))
 
-(evil-define-command (evil-surround-delete char)
-  "Delete the pair named by CHAR around point, and any blanks just inside it (ds)."
-  (interactive "<C>")
+(define (evil--surround-take char)
+  "Delete the pair named by CHAR around point; return where what it held now starts and ends, as a pair.  An
+opening bracket also takes the blanks just inside the pair, a closing one leaves them; newlines stay."
   (let ((b (evil--surround-bounds char)))
     (unless b (user-error "No surrounding ~a" char))
-    (let ((o1 (car b)) (o2 (cadr b)) (c1 (caddr b)) (c2 (cadddr b)))
-      (save-excursion
-        (goto-char c1)
-        (skip-chars-backward " \t" o2)
-        (delete-region (point) c2)
-        (goto-char o2)
-        (skip-chars-forward " \t" c1)
-        (delete-region o1 (point)))
-      (goto-char o1))))
+    (let* ((o1 (car b)) (o2 (cadr b)) (c1 (caddr b)) (c2 (cadddr b))
+           (trim (evil--surround-opener? char))
+           (ib (if trim (save-excursion (goto-char o2) (skip-chars-forward " \t" c1) (point)) o2))
+           (ie (if trim (save-excursion (goto-char c1) (skip-chars-backward " \t" ib) (point)) c1)))
+      (delete-region ie c2)
+      (delete-region o1 ib)
+      (cons o1 (- ie (- ib o1))))))
 
-(evil-define-command (evil-surround-change old new)
-  "Replace the pair OLD around point with the pair NEW (cs)."
-  (interactive "<C><C>")
-  (let ((b (evil--surround-bounds old)))
-    (unless b (user-error "No surrounding ~a" old))
-    (let ((inner (buffer-substring (cadr b) (caddr b)))
-          (pair (evil--surround-strings new))
-          (start (car b)))
-      (delete-region (car b) (cadddr b))
-      (goto-char start)
-      (insert (car pair) (string-trim inner) (cdr pair))
-      (goto-char start))))
+(evil-define-command (evil-surround-delete char)
+  "Delete the pair named by CHAR around point (ds).  ds( takes the blanks just inside it too, ds) does not."
+  (interactive "<C>")
+  (goto-char (car (evil--surround-take char))))
+
+(evil-define-command (evil-surround-change old new fname)
+  "Replace the pair OLD around point with the pair NEW (cs); NEW f prompts for a function name.  The blanks inside
+go as ds OLD takes them, and the lines inside stay."
+  (interactive "<C><surround>")
+  (let ((inner (evil--surround-take old)))
+    (evil--surround-wrap (car inner) (cdr inner) (evil--surround-strings new fname))
+    (goto-char (car inner))))
 
 (define-command (evil-surround-edit)
   "After an operator, s means surround: ys{motion}{char} adds a pair, ds{char} removes one, cs{old}{new} replaces one."

@@ -4927,6 +4927,78 @@ became `; Header` and `; foo` became `;; ; foo`, while `M-;` stripped any run of
   `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36), each exit 0, and `nix flake check --keep-going
   --max-jobs 2` on that commit's code and tests before these notes were finished (exit 0, "all checks passed!").
 
+## Surround fixes (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-surround`): B7 of the structural-editing audit
+(`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). Before, `ys` could not be repeated
+with `.` (it ran under `evil-yank`, which is not repeated); `yss)` on an indented line put the indentation inside
+the pair; `cs)]` over several lines joined them (`string-trim`); `ds)` took the blanks inside `( foo )`; `ys2e)`
+read the `2` as a key and failed; `ysiwf` wrapped in `f`; and `V S)` put the pair on the line itself.
+Expected behaviour was checked against evil-surround's own source (evil-surround 20240325.852 from nixpkgs).
+
+- **`.` repeats `ys`** (`surroundEdit`, `src/evil-core.ts`): once a surround has been made, the change being
+  recorded for `.` is marked as `evil-surround-region`'s, which is repeated, instead of `evil-yank`'s, which is not.
+  `.` replays the keys, so `ysiw)` then `fb.` wraps `bar` too, and a yank alone is still not repeated.
+- **A count before the motion** (`ys2e)`, `ys2s)`): read as the operator reader does and multiplied by a count
+  before `ys` (`2ys2w)` is `ys4w)`). `.` with a count replaces the count before `ys`.
+- **`ysw` wraps as `cw` changes**: the word without the blanks after it, as evil-surround puts itself on
+  `evil-change-commands`. `cw` (`motionRange`) is `ce`, except that, as in Vim, point on a word's last character
+  counts that word as the first of the count: `cw` there changes that one character and `c2w` goes on to the next
+  word's end. So `ysw)` on `ab cd` with point on `b` gives `a(b) cd`, on `a b` gives `(a) b`, and `ys2w)` on
+  `a b c` gives `(a b) c`. Before, `e` from a word's end went on to the end of the next word and took it too.
+  A count that runs past the buffer's last word stops at that word's end (`evil--forward-word-end-1`,
+  `scm/evil.scm`): `e` with no word after point stays, so `ys2w)` on `ab` with point on `b` gives `a(b)` and
+  `c2wX` on `x ab` from `$` gives `x aX`, both keeping the final newline. Before, `e` went on to the end of the
+  buffer, past the final newline, so the pair or the change took it (`cw` did so on a69f078 too).
+- **Lines** (`evil--surround-insert`, `scm/evil.scm`): `yss` and any linewise range of one line are wrapped from
+  the first non-blank to the last non-blank, so `yss)` on `  foo bar` gives `  (foo bar)`. More than one line
+  (`ysj`, `2yss`, `ysip`), and Visual `S` on lines even on one (`V S)`), put the opening and closing strings on lines
+  of their own, at the first line's indentation and without their pad blank: `foo` with `V S)` gives `(`, `foo`, `)`.
+- **`ds` and `cs`** (`evil--surround-take`): an opening bracket (`ds(`, `cs([`) also takes the blanks just inside
+  the pair; any other character (`ds)`, `cs)]`, `ds"`) leaves them, as evil-surround does, so `ds)` on `( foo )`
+  gives ` foo `. Only spaces and tabs are taken, never newlines, and `cs` no longer trims the text it keeps, so
+  `cs)]` on `(`, `  foo`, `)` keeps the three lines. A new pair's pad blank (`[ ` ` ]`) is left out next to a
+  newline, so `cs([` there gives `[`, `  foo`, `]` and no line ends in a blank.
+- **`f`** (the `<surround>` interactive code, `surroundChar`): after `ys{motion}`, `cs{old}` and Visual `S`, `f`
+  reads a function name in the minibuffer and wraps the text in a call of it, `name(` and `)`, as evil-surround's
+  `evil-surround-function`: `ysiwf g RET` on `foo` gives `g(foo)`, in every mode. `.` replays the name typed;
+  `C-g` at the prompt changes nothing. `cs` reads both characters, so the new one never runs as a command, but
+  finds the old pair before `f` asks for a name: `cs(f` with no `(` around point fails with `No surrounding (`.
+- **Choices** (where Edwin differs from evil-surround):
+  - The lines inside a pair put on lines of its own are left as they were; evil-surround runs `indent-region` over
+    them (in a Lisp buffer, `foo` would move under the `(`). `=` reindents them. The audit's `VS)-linewise`
+    expects them unindented, and the test asserts that.
+  - `ds(` and `cs(` take spaces and tabs inside the pair, not newlines; evil-surround takes any whitespace, so its
+    `cs([` over several lines joins them, which is what the package asked to stop.
+  - The function name is prompted for with `Function: `; evil-surround's prompt is empty.
+  - `ds` of a character that is no opening bracket used to take the blanks inside too (`ds"` on `" b "` gave
+    `b`); it now keeps them, as evil-surround.
+- **Not in it**: `C-f` (`(name ` and `)`, evil-surround's prefix call), `t` and `<` as tags (Edwin's `<` stays
+  the pair `< >`), `#` as `#{ }`, and surround over a Visual block, which wraps the block's first to last character
+  as before.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`; `test/structural.test.mts` now has
+  172 tests (22 new):
+  - The audit's 8 surround cases that failed at a69f078, driven by keys: `ys2e)`, `yss)-indented`,
+    `ysiwf-function`, `ds)-keeps-space`, `cs)]-multiline`, `VS)-linewise`, `ysiw)-dot` and `yss)-dot`.
+  - 8 audit cases that passed there and still must: `ysiw)`, `ysiw(`, `ysiw"`, `ysiwb`, `ysiw*-unknown`,
+    `vS)-charwise`, `ysiw)-undo`, `ysiw)-in-el`. The other `ds`, `cs` and `ys` cases of the audit were already
+    in the suite from se-pair-objects.
+  - Lines (`yss(` with trailing blanks, a tab, no final newline; `2yss)`, `ys2s)`, `ysj{` in Nix, `ysip)`, `ysj)`
+    with no final newline), counts (`2ys2w)`, `ys3e)`, `ysw)`), `ysw)` `ys2w)` `ys2W)` `cw` and `c2w` from a
+    word's last character, and `ys2w)` and `c2w` there with no word after it, keeping the final newline; Visual `S` on two lines, on one line and charwise;
+    `ds(` `ds)` `ds"` `cs)]` `cs(]` `cs([` `cs)[` on one line and over several; `f` with `ys`, `cs` and Visual `S`
+    in Scheme, `.js` and Python, `.` and undo after it, `C-g` at its prompt, `cs(f` with no pair asking for no
+    name; `.` after `ys` across a yank, a yank alone not repeated, a count inside `ys`'s keys and one given to `.`; every surround case of the audit that
+    starts from a balanced Lisp buffer ends balanced.
+  - Each case starts with nothing to repeat (`buffer` clears `dotLast`): on a69f078 `yss)-dot` passed by chance, with
+    a `.` left over from an earlier case.
+
+  On a69f078 (se-comment), 13 of the 172 fail: the 8 audit cases and 5 of the new behaviour tests. The `cw` and
+  `cs(f` cases were added later, inside two of those 5 tests, and fail on 134af95 too. Also passed on the final
+  code, each exit 0: `edwin-typecheck`, `edwin-headless` (21), `edwin-scheme` (38), `edwin-prog` (41),
+  `edit-conformance` (29), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36). `nix flake check` was
+  not run.
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

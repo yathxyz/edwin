@@ -195,6 +195,12 @@ sc.x = async () => {
   return [E.register ? L.mkchar(E.register) : false];
 };
 sc.C = async () => { const r = await Ed.readChar(''); return [r]; };
+/* The pair character of a surround, and for f the name of the function to call, read from the minibuffer. */
+async function surroundChar(): Promise<SchemeValue[]> {
+  const c = await Ed.readChar('');
+  return [c, chr(c) === 'f' ? await Ed.readMini('Function: ', '') : false];
+}
+sc.surround = surroundChar;
 sc.R = async () => { const [b, e, t] = await readRange(); return [b + 1, e + 1, intern(t)]; };
 sc.r = async () => { const [b, e] = await readRange(); return [b + 1, e + 1]; };
 sc.a = async () => [E.ex && E.ex.arg ? E.ex.arg : false];
@@ -273,39 +279,61 @@ async function readRange(): Promise<EdRange> {
     E.opShow = ''; E.prefixArg = null;
   }
 }
-/* ys{motion}{char}, ds{char} and cs{old}{new}: the s after an operator means surround. */
+/* ys{motion}{char}, ds{char} and cs{old}{new}: the s after an operator means surround. ys takes a count before
+   its motion (ys2e), as the operator does (2ysiw), and . repeats it although y alone is not repeated. */
 async function surroundEdit(b: EdBuffer, opSym: SchemeValue, count: number | null) {
   const name = opSym instanceof Sym ? opSym.name : '';
   if (name === 'evil-delete') { const c = await Ed.readChar(''); L.call('evil-surround-delete', [c]); return; }
-  if (name === 'evil-change') { const o = await Ed.readChar(''); const n = await Ed.readChar(''); L.call('evil-surround-change', [o, n]); return; }
-  // yank (or any other operator): read a motion or text object, then the pair character
-  let seq = '', forced: string | null = null;
+  if (name === 'evil-change') {
+    // both characters are read, so the new one never runs as a command, but the pair is found before f asks
+    // for a function name
+    const o = await Ed.readChar(''), c = await Ed.readChar('');
+    if (!truthy(L.call('evil--surround-bounds', [o]))) signal('user-error', `No surrounding ${chr(o)}`);
+    L.call('evil-surround-change', [o, c, chr(c) === 'f' ? await Ed.readMini('Function: ', '') : false]);
+    return;
+  }
+  // yank (or any other operator): read a count, a motion or text object, then the pair character
+  let seq = '', forced: string | null = null, count2 = '';
   for (;;) {
     const k = await Ed.nextKey();
-    if (!seq && (k === 'v' || k === 'V')) { forced = k === 'v' ? 'char' : 'line'; continue; }
     if (k === 'ESC' || k === 'C-g') Ed.quietQuit();
+    if (!seq && (/^[1-9]$/.test(k) || (k === '0' && count2))) { count2 += k; E.opShow += k; continue; }
+    if (!seq && (k === 'v' || k === 'V')) { forced = k === 'v' ? 'char' : 'line'; continue; }
     seq = seq ? seq + ' ' + k : k;
     E.opShow += k;
-    if (k === 's' && seq === 's') { const [bg, en, ty] = lineRange(b, count); const c = await Ed.readChar(''); L.call('evil-surround-region', [bg + 1, en + 1, intern(ty), c]); return; }
-    const def = Ed.lookupWith(opMaps(b), seq);
-    if (def === Ed.PREFIX) continue;
-    if (def === undefined) { Ed.ding(); Ed.quietQuit(); }
-    const [bg, en, ty] = await motionRange(b, def as SchemeValue, count, forced, opSym);
-    const c = await Ed.readChar('');
-    L.call('evil-surround-region', [bg + 1, en + 1, intern(ty), c]);
+    const n = count === null && !count2 ? null : (count || 1) * (+count2 || 1);
+    let range: EdRange;
+    if (seq === 's') range = lineRange(b, n);
+    else {
+      const def = Ed.lookupWith(opMaps(b), seq);
+      if (def === Ed.PREFIX) continue;
+      if (def === undefined) { Ed.ding(); Ed.quietQuit(); }
+      // ysw wraps as cw changes: the word without the blanks after it, as evil-surround does
+      range = await motionRange(b, def as SchemeValue, n, forced, intern('evil-change'));
+    }
+    const [bg, en, ty] = range;
+    const [c, fname] = await surroundChar();
+    L.call('evil--surround-insert', [bg + 1, en + 1, intern(ty), c, fname, false]);
+    if (E.dotCand && E.dotCand.buf === b) E.dotCand.cmd = intern('evil-surround-region');
     return;
   }
 }
 async function motionRange(b: EdBuffer, def: SchemeValue, count: number | null, forced: string | null, opSym: SchemeValue): Promise<EdRange> {
   let cmd = def;
+  const start = b.pt;
   if (opSym === intern('evil-change') && cmd instanceof Sym) {
     const ch = b.rope.at(b.pt);
-    if (ch !== undefined && !/\s/.test(ch)) {
-      if (cmd === intern('evil-forward-word-begin')) cmd = intern('evil-forward-word-end');
-      else if (cmd === intern('evil-forward-WORD-begin')) cmd = intern('evil-forward-WORD-end');
+    const big = cmd === intern('evil-forward-WORD-begin');
+    if (ch !== undefined && !/\s/.test(ch) && (big || cmd === intern('evil-forward-word-begin'))) {
+      // cw is ce, except that, as in Vim, point on a word's last character counts that word as the first of
+      // the count: cw there changes the one character, c2w goes on to the next word's end
+      cmd = intern(big ? 'evil-forward-WORD-end' : 'evil-forward-word-end');
+      if (L.call('evil--cls', [start + 2, big]) !== L.call('evil--cls', [start + 1, big])) {
+        if ((count ?? 1) <= 1) return [start, start + 1, 'exclusive'];
+        count = (count as number) - 1;
+      }
     }
   }
-  const start = b.pt;
   E.prefixArg = count;
   if (isTextObject(cmd)) {
     const r = arr(await Ed.callInteractively(cmd));
