@@ -989,40 +989,12 @@ line-local finds.  With ARG, on when it is positive."
 
 ;;;; Comments: gc is an operator, gcc comments the line
 
-(define (evil--line-commented? open close)
-  "Whether the current line, from its indentation, starts with OPEN and ends with CLOSE; a blank line counts."
-  (back-to-indentation)
-  (or (eolp)
-      (and (looking-at (regexp-quote open))
-           (string-suffix? close (buffer-substring (point) (line-end-position))))))
-
 (evil-define-operator (evil-comment-operator beg end type)
-  "Comment the lines from BEG to END out, in the mode's comment syntax, or back in when they all are (gc)."
-  (let* ((delims (comment-delimiters))
-         (open (car delims))
-         (close (cdr delims))
-         (lines (count-lines beg end))
-         (all-commented
-          (save-excursion
-            (goto-char beg)
-            (let loop ((i 0))
-              (cond ((= i lines) #t)
-                    ((evil--line-commented? open close) (forward-line 1) (loop (+ i 1)))
-                    (else #f))))))
-    (save-excursion
-      (goto-char beg)
-      (dotimes (_ lines)
-        (back-to-indentation)
-        (cond (all-commented
-               (when (looking-at (string-append (regexp-quote open) " ?"))
-                 (replace-match "")
-                 (comment--strip-close close)))
-              ((not (eolp))
-               (insert open " ")
-               (unless (string=? close "") (end-of-line) (insert " " close))))
-        (forward-line 1)))
-    (goto-char beg)
-    (evil--first-non-blank)))
+  "Comment the lines from BEG to END out, in the mode's comment syntax, or back in when they all are (gc).
+The rule is comment-toggle-lines's, which M-; uses too."
+  (comment-toggle-lines beg (count-lines beg end))
+  (goto-char beg)
+  (evil--first-non-blank))
 
 
 ;;;; Expand region: SPC v grows the selection, SPC V shrinks it again
@@ -1751,5 +1723,8 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 (define-key evil-visual-state-map "S" 'evil-surround-region)
 (define-key evil-normal-state-map "g c" 'evil-comment-operator)
 (define-key evil-visual-state-map "g c" 'evil-comment-operator)
+;; M-; on a selection comments its lines, as comment-line does on the region Evil makes of it in Emacs: Edwin's
+;; region is the raw point and mark, which in linewise Visual stop short of the last line.
+(define-key evil-visual-state-map "M-;" 'evil-comment-operator)
 
 ;;; evil.scm ends here

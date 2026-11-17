@@ -258,11 +258,50 @@ or a block comment's two delimiters in a mode with no line comment."
       (delete-region (- eol n (if (string-suffix? (string-append " " close) text) 1 0)) eol))))
 
 (define (comment--opener-re open)
-  "A regexp for OPEN: any run of its character when OPEN is one character repeated, else OPEN itself."
-  (let ((c (char->string (string-ref open 0))))
-    (if (string=? open (make-string (string-length open) (string-ref open 0)))
-        (string-append (regexp-quote c) "+")
+  "A regexp for OPEN: when OPEN is one character repeated, OPEN and any more of it (// ///, # ##), and for ;; any
+run of ; (a Lisp comment needs one, the second is the convention Emacs's comment-add writes); else OPEN itself."
+  (let* ((c (string-ref open 0))
+         (least (if (char=? c #\;) ";" open)))
+    (if (string=? open (make-string (string-length open) c))
+        (string-append (regexp-quote least) (regexp-quote (char->string c)) "*")
         (regexp-quote open))))
+
+(define (comment--line-commented? open-re close)
+  "Whether the current line, from its indentation, starts with OPEN-RE and ends with CLOSE; a blank line counts.
+Leaves point at the indentation."
+  (back-to-indentation)
+  (or (eolp)
+      (and (looking-at open-re)
+           (string-suffix? close (buffer-substring (point) (line-end-position))))))
+
+(define (comment-toggle-lines beg lines)
+  "Comment out the LINES lines from the one BEG is on, in the mode's comment syntax, or back in when every
+non-blank one is commented. An opener of one character repeated counts and strips with any more of it, and ;;
+as any run of ;, so ;;; Header, ; x and /// x are comments and / x is not; a block opener (<!--) counts only as
+itself. gc and M-; both use this."
+  (let* ((delims (comment-delimiters))
+         (open (car delims))
+         (close (cdr delims))
+         (open-re (comment--opener-re open))
+         (all-commented
+          (save-excursion
+            (goto-char beg)
+            (let loop ((i 0))
+              (cond ((>= i lines) #t)
+                    ((comment--line-commented? open-re close) (forward-line 1) (loop (+ i 1)))
+                    (else #f))))))
+    (save-excursion
+      (goto-char beg)
+      (dotimes (_ lines)
+        (back-to-indentation)
+        (cond (all-commented
+               (when (looking-at (string-append open-re " ?"))
+                 (replace-match "")
+                 (comment--strip-close close)))
+              ((not (eolp))
+               (insert open " ")
+               (unless (string=? close "") (end-of-line) (insert " " close))))
+        (forward-line 1)))))
 
 (set-comment-syntax! 'fundamental-mode "#")
 (set-comment-syntax! 'scheme-mode ";;")
@@ -270,27 +309,18 @@ or a block comment's two delimiters in a mode with no line comment."
 (set-comment-syntax! 'org-mode "#")
 
 (define-command (comment-line n)
-  "Toggle a comment, in the mode's comment syntax, on the current line or on each line of the region."
+  "Toggle a comment, in the mode's comment syntax, on the current line and the N-1 after it, or on the lines of
+the region: as gc, they are uncommented when every non-blank one is commented, else commented. A negative N
+takes the -N lines above the current one, as Emacs's; 0 takes none."
   (interactive "*p")
-  (let* ((count (if (region-active?) (count-lines (region-beginning) (region-end)) n))
-         (start (if (region-active?) (region-beginning) (point)))
-         (delims (comment-delimiters))
-         (open (car delims))
-         (close (cdr delims))
-         ;; An opener of one repeated character (;; # //) matches any run of it: ;;; Header and ; x uncomment.
-         (open-re (string-append "\\([ \t]*\\)" (comment--opener-re open) " ?")))
-    (save-excursion
-      (goto-char start)
-      (dotimes (_ count)
-        (beginning-of-line)
-        ;; As gc: a line that opens a block comment but does not close it is not commented.
-        (if (and (string-suffix? close (buffer-substring (point) (line-end-position)))
-                 (looking-at open-re))
-            (begin (replace-match "\\1") (comment--strip-close close))
-            (begin (back-to-indentation)
-                   (insert open " ")
-                   (unless (string=? close "") (end-of-line) (insert " " close))))
-        (forward-line 1)))))
+  (cond ((region-active?)
+         (comment-toggle-lines (region-beginning) (count-lines (region-beginning) (region-end))))
+        ((< n 0)
+         ;; No further than the first line.
+         (let ((above (min (- n) (count-lines (point-min) (line-beginning-position)))))
+           (comment-toggle-lines (save-excursion (forward-line (- above)) (point)) above)))
+        ;; No further than the last line: a count past it would come back to that line again.
+        (else (comment-toggle-lines (point) (min n (max 1 (count-lines (line-beginning-position) (point-max))))))))
 
 (define-command (delete-trailing-whitespace)
   "Delete spaces and tabs at the end of every line."

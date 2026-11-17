@@ -4864,6 +4864,69 @@ and gg=G on `scm/evil.scm` changed 303 lines once its literals were made neutral
   (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36), each exit 0;
   and `nix flake check --keep-going --max-jobs 2` on this commit's code, tests and fixtures before these notes were finished (exit 0, "all checks passed!").
 
+## One comment rule for gc and M-; (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-comment`): B6 of the structural-editing audit
+(`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). lang-comment-syntax and lang-prog-mode
+had already given each mode its comment syntax, so `gcc` wrote `//` in `.js` and `<!-- -->` in Markdown, and
+`comment-line` no longer hard-coded `;; `. What was left: `gc` took only its own opener as a comment, so `;;; Header`
+became `; Header` and `; foo` became `;; ; foo`, while `M-;` stripped any run of `;`.
+
+- **`comment-toggle-lines`** (`scm/emacs.scm`) is the one rule, and `gc`/`gcc` (`evil-comment-operator`,
+  `scm/evil.scm`) and `M-;` (`comment-line`) both call it. Over a range of lines: when every non-blank line is a
+  comment it strips each, else it comments each non-blank line at its indentation; blank lines are left alone.
+- **What counts as a comment** (`comment--opener-re`): an opener of one character repeated counts with any more of
+  that character, and is stripped whole with one space after it: `//` and `///`, `#` and `##`. Scheme's `;;`
+  counts as any run of `;`, one included, since one `;` starts a Lisp comment and the second is a convention (Emacs's
+  `comment-add`). So `;;; Header` gives `Header` and `; foo` gives `foo` under both commands, while `/ x` in `.js`
+  is not a comment and is commented to `// / x`. A block opener (`<!--`) counts only as itself and with its closer
+  at the end of the line.
+- **`M-;` follows `gc` on a region**: `comment-line` takes the region's lines (the last one left out when the region
+  ends at its start, as Emacs's) and decides for all of them at once, as Emacs's `comment-or-uncomment-region`
+  does; before, it toggled each line on its own. On a blank line it does nothing, as Emacs's `comment-line` with
+  `comment-empty-lines` nil. With no region it takes the line and the N-1 after it, no further than the last line;
+  a negative N takes the -N lines above, no further than the first (Emacs's meaning), and 0 takes none.
+- **`M-;` in Visual state** is `gc` (`evil-visual-state-map`): Evil in Emacs gives `comment-line` a region over the
+  selected lines, whereas Edwin's region is the raw point and mark, which in linewise Visual stops at the start
+  of the last line and would leave it out.
+- **The audit's four `M-;` failures**: `M-;-nix-hex` (`ESC ;` sent as bytes) gave `;; ` in .nix, which
+  lang-comment-syntax had already fixed. The other three (`M-;-scm`, `M-;-nix`, `M-;-insert-nix`) came from the
+  audit's key delivery, not Edwin: `M` and `-` arrived instead of `M-;`, which fits tmux taking the `;` as its
+  command separator. In Normal state they gave "Beginning of buffer" and in Insert state typed `M-`, as the audit
+  recorded. The terminal decoder reads `ESC ;` and the kitty key `CSI 59;3u` as `M-;`, `M-;` is `comment-line` in
+  `global-map`, and Insert state reaches it; the tests drive them by key, the hex cases through the decoder, and
+  check that `M` then `-` on line 1 gives that echo and Insert state types `M-`.
+- **Choices** (where Edwin differs from Emacs): `M-;` with a count leaves point where it was; Emacs's
+  `comment-line` moves it past the lines. `gca(` on lines of a list comments those whole lines (gc is linewise);
+  the audit gave `gca(-multiline` no expected text, and it is not in the suite.
+- **Not in it**: in Org, `gc` and `M-;` on `#+TITLE` still strip the `#` (Emacs's `comment-start-skip` needs a
+  blank after it), as before. Nothing reads strings or the lexer, so a `#` inside a string at the start of a line
+  counts; no `comment-dwim`, `comment-region` or end-of-line comments.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`; `test/structural.test.mts` now has
+  150 tests (26 new):
+  - The audit's 8 comment cases that failed at 73d9f03, driven by keys: `gcc-js`, `gcc-md`, `gcc-uncomment-;;;`,
+    `gcc-uncomment-;`, `M-;-nix`, `M-;-scm`, `M-;-insert-nix`, and `M-;-nix-hex` (its bytes `1b 3b` through the
+    terminal decoder).
+  - 14 audit cases that passed there and still must: `gcc`, `gcc-toggle`, `gcc-indented`, `3gcc`, `gcj`, `Vjgc`,
+    `gcc-dot`, `gcc-undo`, `gcc-nix`, `gcc-py`, `gcc-el`, `gcip`, `M-;-scm-hex`, `M-;-toggle-hex`.
+  - `gc` and `M-;` giving the same text on 8 inputs in Scheme, `.js`, `.nix` and Markdown (runs, a mixed range,
+    a one-character `/` or `;` that is no comment, closed and unclosed block comments); `M-;` on a Visual
+    selection, on an Emacs region of mixed lines, with a count past the last line and on a blank line; the
+    decoder's `M-;`, its binding, and what the audit's `M` `-` did; `C-u - M-;` in Emacs state on a commented
+    last line, `(comment-line -1)` and `comment-toggle-lines` with -1 lines returning at once and changing nothing
+    (a review found the first two running into the 8 s limit), and `-2` and `-5` from the third line.
+
+  On 842e243 (se-indent), 5 of the 150 fail: `gcc-uncomment-;;;`, `gcc-uncomment-;`, the test of `gc` and `M-;`
+  giving the same text, the one of `M-;` on a region and the one of a negative count. The other 6 audit cases pass
+  there: `gcc-js`, `gcc-md` and `M-;-nix-hex` through lang-comment-syntax and lang-prog-mode, the other `M-;` ones
+  once the key is delivered. With the review's fix (the negative count) these 150 pass, and so do `edwin-prog` (41)
+  and `edwin-typecheck`. The rest were run on the commit before the fix, whose code differs only in
+  `comment-line`'s negative count and the `>=` in `comment-toggle-lines`'s loop (scm/emacs.scm) and whose
+  structural suite lacks the 4 tests above; there passed `edwin-headless` (21), `edwin-scheme` (38),
+  `edwin-markdown` (20), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin` (unit 30 and 1 ignored,
+  `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36), each exit 0, and `nix flake check --keep-going
+  --max-jobs 2` on that commit's code and tests before these notes were finished (exit 0, "all checks passed!").
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a
@@ -4967,7 +5030,8 @@ and `M-;` (`comment-line`) always wrote `;; `, so a Markdown line became a headi
   comment syntax. .nix, .js and the other languages open in fundamental-mode until lang-prog-mode declares
   their own through this table.
 - **Not in it (left for se-comment, B6 of docs/emacs-to-edwin/structural-editing-audit.md):** `gc` and `M-;`
-  still differ on runs (`gc` on `;;; Header` gives `; Header`); in Org, `gc` and `M-;` on `#+TITLE` strip the `#`, as `gc` did before
+  differed on runs (`gc` on `;;; Header` gave `; Header`) until se-comment ("One comment rule for gc and M-;")
+  gave them one rule; in Org, `gc` and `M-;` on `#+TITLE` strip the `#`, as `gc` did before
   (Emacs's `comment-start-skip` would not); nothing looks at strings or the lexer, and no `comment-dwim`,
   `comment-region` or end-of-line comments. No buffer-local override of a mode's syntax.
 - **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-prog`, the new `test/prog.test.mts` (10): the

@@ -6,11 +6,14 @@
 // them too, so a bracket in a string, a comment or a character literal is no delimiter (B2); i" passes an escaped
 // backslash (B9) and takes a Lisp string over lines; i( and a( again in Visual state grow the selection (B10).
 // The Visual-block case operators (~ U u g?) guard evil--block-ranges, which this package once dropped.
+// se-indent: the Lisp indenter as Emacs 31's scheme-mode and emacs-lisp-mode (B3). se-comment: gc, gcc and M-; share
+// comment-toggle-lines, in the mode's comment syntax, with any run of a repeated opener a comment (B6).
 // One Edwin per process, so the cases run in order on fresh buffers.
 // Run: node --test test/structural.test.mts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { startEdwin } from './headless.mts';
 import type { Edwin } from './headless.mts';
 
@@ -29,10 +32,16 @@ async function buffer(ext: string, text: string) {
   ed.E.current.pt = 0;
   return ed.E.current;
 }
-/* KEYS as the audit wrote them: "K:NAME" is one key by its name (C-M-f, Escape, Tab), anything else is typed. */
+/* KEYS as the audit wrote them: "K:NAME" is one key by its name (C-M-f, Escape, Tab), "H:1b 3b" the bytes a
+   terminal sends, read by the terminal decoder, anything else is typed. */
 const KEY_NAMES: Record<string, string> = { Escape: 'ESC', Tab: 'TAB' };
+const Term = createRequire(import.meta.url)('../native/js/term.ts') as { decoder(): { feed(s: string): { type: string; key?: string }[] } };
+const decode = (s: string) => Term.decoder().feed(s).filter(e => e.type === 'key').map(e => e.key as string);
 async function press(keys: string[]) {
-  for (const k of keys) if (k.startsWith('K:')) await ed.keys(KEY_NAMES[k.slice(2)] ?? k.slice(2)); else await ed.type(k);
+  for (const k of keys)
+    if (k.startsWith('K:')) await ed.keys(KEY_NAMES[k.slice(2)] ?? k.slice(2));
+    else if (k.startsWith('H:')) for (const key of decode(String.fromCharCode(...k.slice(2).split(' ').map(h => parseInt(h, 16))))) await ed.keys(key);
+    else await ed.type(k);
 }
 const C = Ed.C;
 const classes = (t: string) => Array.from(Ed.lex(t) as Uint8Array);
@@ -673,4 +682,128 @@ test('gg=G on every scm/*.scm file changes only the forms written down', async (
     a.forEach((l, i) => { if (l !== z[i]) { let j = i; while (j > 0 && a[j][0] !== '(') j--; const k = a[j].slice(0, 40); forms[k] = (forms[k] || 0) + 1; } });
     assert.deepEqual(forms, SCM_CHANGES[f] || {}, f);
   }
+});
+
+/* se-comment: gc, gcc, M-; and comment-line share one rule (comment-toggle-lines, scm/emacs.scm) over the mode's
+   comment syntax (B6). COMMENT_FAILED failed at 73d9f03: gcc-js and gcc-md for want of the mode's syntax, which
+   lang-comment-syntax and lang-prog-mode gave; the ;;; and ; cases because gc took only its own opener as a comment;
+   M-;-nix-hex for want of the mode's syntax too; the other three M-; cases because the audit's keys arrived as M and -
+   (Normal state: "Beginning of buffer") or typed "M-" (Insert state), which fits tmux taking the ; of M-; as its
+   command separator. COMMENT_GUARDS passed there. gca( on lines of a list (gca(-multiline, no expected text in the audit) is left out: gc is linewise. */
+const COMMENT_FAILED: Case[] = [
+  ["gcc-js", "js", "x = 1;\n", ["gcc"], "// x = 1;\n"],
+  ["gcc-md", "md", "text\n", ["gcc"], "<!-- text -->\n"],
+  ["gcc-uncomment-;;;", "scm", ";;; Header\n", ["gcc"], "Header\n"],
+  ["gcc-uncomment-;", "scm", "; foo\n", ["gcc"], "foo\n"],
+  ["M-;-nix", "nix", "a = 1;\n", ["K:M-;"], "# a = 1;\n"],
+  ["M-;-scm", "scm", "(foo)\n", ["K:M-;"], ";; (foo)\n"],
+  ["M-;-insert-nix", "nix", "a = 1;\n", ["A","K:M-;","K:Escape"], "# a = 1;\n"],
+  ["M-;-nix-hex", "nix", "a = 1;\n", ["H:1b 3b"], "# a = 1;\n"],
+];
+const COMMENT_GUARDS: Case[] = [
+  ["gcc", "scm", "(foo)\n", ["gcc"], ";; (foo)\n"],
+  ["gcc-toggle", "scm", "(foo)\n", ["gcc","gcc"], "(foo)\n"],
+  ["gcc-indented", "scm", "  (foo)\n", ["gcc"], "  ;; (foo)\n"],
+  ["3gcc", "scm", "a\nb\nc\nd\n", ["3gcc"], ";; a\n;; b\n;; c\nd\n"],
+  ["gcj", "scm", "a\nb\nc\n", ["gcj"], ";; a\n;; b\nc\n"],
+  ["Vjgc", "scm", "a\nb\nc\n", ["Vj","gc"], ";; a\n;; b\nc\n"],
+  ["gcc-dot", "scm", "a\nb\n", ["gcc","j","."], ";; a\n;; b\n"],
+  ["gcc-undo", "scm", "a\nb\n", ["gcc","u"], "a\nb\n"],
+  ["gcc-nix", "nix", "a = 1;\n", ["gcc"], "# a = 1;\n"],
+  ["gcc-py", "py", "x = 1\n", ["gcc"], "# x = 1\n"],
+  ["gcc-el", "el", "(foo)\n", ["gcc"], ";; (foo)\n"],
+  ["gcip", "scm", "a\nb\n\nc\n", ["gcip"], ";; a\n;; b\n\nc\n"],
+  ["M-;-scm-hex", "scm", "(foo)\n", ["H:1b 3b"], ";; (foo)\n"],
+  ["M-;-toggle-hex", "scm", ";; (foo)\n", ["H:1b 3b"], "(foo)\n"],
+];
+for (const [label, cases] of [['failed at 73d9f03', COMMENT_FAILED], ['a guard', COMMENT_GUARDS]] as const)
+  for (const [id, ext, input, keys, expected] of cases)
+    test(`audit case ${id} (${label})`, async () => {
+      await buffer(ext, input);
+      await press(keys);
+      assert.equal(ed.text(), expected);
+    });
+
+test('B6: gc and M-; give the same text: a run of the opener is a comment, a block opener only as itself', async () => {
+  for (const [ext, input, toggled] of [
+    // Any run of a one-character opener counts and is stripped whole, with one space after it.
+    ['scm', ';;; Header\n;; a\n; b\n;c\n', 'Header\na\nb\nc\n'],
+    ['js', '/// doc\n// x\n', 'doc\nx\n'],
+    ['nix', '## a\n  # b\n', 'a\n  b\n'],
+    // A line that is not a comment comments the whole range, the commented lines again; blank lines are left.
+    ['scm', ';;; Header\n\n(foo)\n', ';; ;;; Header\n\n;; (foo)\n'],
+    // A one-character run of another character is no comment: / in .js, ; in .nix.
+    ['js', '/ x\n', '// / x\n'],
+    ['nix', '; x\n', '# ; x\n'],
+    // Markdown's block opener counts only whole and closed.
+    ['md', '<!-- a -->\n  <!-- b -->\n', 'a\n  b\n'],
+    ['md', '<!- a\n', '<!-- <!- a -->\n'],
+  ] as const) {
+    const lines = input.split('\n').length - 1;
+    await buffer(ext, input);
+    await ed.type(`${lines}gcc`);
+    assert.equal(ed.text(), toggled, `gc ${ext}: ${JSON.stringify(input)}`);
+    await buffer(ext, input);
+    if (lines > 1) await ed.type(`V${lines - 1}j`);
+    await ed.keys('M-;');
+    if ((globalThis as Globals).EvilCore.stateOf(ed.E.current) !== 'normal') await ed.keys('ESC');
+    assert.equal(ed.text(), toggled, `M-; ${ext}: ${JSON.stringify(input)}`);
+  }
+});
+
+test('B6: M-; on a region of mixed lines comments them all, as gc; on a blank line it does nothing', async () => {
+  await buffer('scm', ';; a\nb\n');
+  await ed.type('Vj');
+  await ed.keys('M-;');
+  assert.equal((globalThis as Globals).EvilCore.stateOf(ed.E.current), 'normal');
+  assert.equal(ed.text(), ';; ;; a\n;; b\n');
+  // comment-line on an Emacs region: its lines, the last one left out when the region ends at its start.
+  await buffer('scm', ';; a\nb\nc\n');
+  ed.eval('(begin (goto-char (point-min)) (push-mark (point) #t #t) (forward-line 2) (comment-line 1))');
+  assert.equal(ed.text(), ';; ;; a\n;; b\nc\n');
+  // A count past the last line, with no final newline, comments each line once.
+  await buffer('scm', 'a\nb');
+  ed.eval('(comment-line 3)');
+  assert.equal(ed.text(), ';; a\n;; b');
+  await buffer('scm', '\n');
+  await ed.keys('M-;');
+  assert.equal(ed.text(), '\n');
+});
+
+test('B6: M-; with a negative count takes the lines above, none on the first line, and returns at once', async () => {
+  // C-u - M-; on a commented last line: comment-toggle-lines once counted up to -1 and ran into the 8 s limit.
+  await buffer('scm', ';; a\n');
+  ed.eval('(evil-emacs-state)');
+  const t0 = Date.now();
+  try {
+    await ed.keys('C-u');
+    await ed.keys('-');
+    await ed.keys('M-;');
+    assert.equal(ed.text(), ';; a\n');
+    assert.ok(!String(Ed.E.echo).includes('Interrupted'), String(Ed.E.echo));
+    ed.eval('(comment-line -1)');
+    ed.eval('(comment-toggle-lines (point) -1)');
+    assert.equal(ed.text(), ';; a\n');
+  } finally { ed.eval('(evil-normal-state)'); }
+  assert.ok(Date.now() - t0 < 4000, `${Date.now() - t0} ms`);
+  // From the third line, -2 comments the two above and -5 stops at the first line.
+  await buffer('scm', 'a\nb\nc\n');
+  ed.eval('(begin (forward-line 2) (comment-line -2))');
+  assert.equal(ed.text(), ';; a\n;; b\nc\n');
+  ed.eval('(begin (goto-char (point-max)) (forward-line -1) (comment-line -5))');
+  assert.equal(ed.text(), 'a\nb\nc\n');
+});
+
+test('B6: M-; reaches comment-line from a terminal, as ESC ; and as a kitty key', async () => {
+  assert.deepEqual(decode('\x1b;\x1b[59;3u'), ['M-;', 'M-;']);
+  // What the audit's keys did for M-;: M then -, which on line 1 reports the start of the buffer and changes
+  // nothing, and in Insert state types M-.
+  await buffer('nix', 'a = 1;\n');
+  await ed.type('M-');
+  assert.equal(Ed.E.echo, 'Beginning of buffer');
+  assert.equal(ed.text(), 'a = 1;\n');
+  await ed.type('AM-');
+  await ed.keys('ESC');
+  assert.equal(ed.text(), 'a = 1;M-\n');
+  assert.equal(ed.L.call('lookup-key', [ed.L.get('global-map'), 'M-;']).name, 'comment-line');
 });
