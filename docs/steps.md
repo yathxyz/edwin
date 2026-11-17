@@ -2920,6 +2920,155 @@ operation log's undo from jj's log and change view, proved by `edwin-vc`.
     edwin-typecheck were built alone and passed; the whole run is the reviewer's to report. docs/ is outside the
     checks' sources.
 
+## Branches, checkout, reset, stash and tags (done)
+
+Asked 2026-11-16 (the Emacs-to-Edwin plan, package `git-history-ops`, on git-log-show): history operations from
+the status and log buffers, each state git leaves (local changes in the way, a detached HEAD, a stash conflict)
+reported exactly, a hard reset asking first.
+
+- **Keys**, in `git-status-mode` and `git-log-mode`, as evil-collection binds magit's transients and their
+  suffixes: `b b` `git-checkout`, `b c` `git-branch-create`, `b n` `git-branch-new`, `b x` `git-branch-delete`,
+  `b m` `git-branch-rename`; `O s`, `O m`, `O h` `git-reset-soft`, `-mixed`, `-hard` (evil-collection's keys,
+  checked against nixpkgs' evil-collection-magit.el: `O` for magit's reset `X`, `x` for its delete `k`, `z` the
+  stash prefix with `evil-collection-magit-use-z-for-folds` off, its default); `z z` `git-stash`, `z i` `git-stash-index`, `z a` `git-stash-apply`, `z p`
+  `git-stash-pop`, `z k` `git-stash-drop`; `t t` `git-tag-create`, `t x` `git-tag-delete`. Each is also M-x from
+  any buffer of a git repository, found as SPC g g finds it; a jj workspace is refused (`ROOT is a jj workspace: jj
+  has its own commands for its changes and bookmarks; SPC g G's status buffer works on its git repository`).
+- **What they act on.** The commit on point's line (a log line, the status buffer's Head, Merge and commit lines,
+  a revision buffer's Parent), never a stash's line; the stash on a stash line. Elsewhere they ask, the default
+  in the prompt: for `b b` and `b c`/`b n` a local branch at point's commit (one other than the current branch
+  when there are several), else the commit (its hash shown by 7 digits), else for `b c`/`b n` the current
+  branch; for `O` and `t t` the commit at point, else `HEAD`; for the stash commands `stash@{0}`. The prompts
+  complete local branches, remote branches and tags (`for-each-ref`, a read), but RET takes what is typed (no
+  candidate selected at first: a typed `stash@{1}` or `HEAD~1` is never swapped for a candidate it happens to
+  match); an empty input takes the default.
+- **`b b`**: a local branch becomes HEAD (`git switch --end-of-options NAME`); anything else, a remote branch, a
+  tag or a commit, is checked out detached (`git switch --detach HASH`), as magit-checkout does. Said: git's
+  `Switched to branch 'NAME'` or `Already on 'NAME'`, or `HEAD detached at HASH SUBJECT`; then `; local changes
+  kept in N files` when the switch carried them, and `; N commit(s) left on no branch, the last HASH SUBJECT (b n
+  there names it)` when it left a detached HEAD's commits behind. Local changes git would overwrite stop it:
+  `Not checked out: your local changes to a.txt would be overwritten; commit or stash them (z z) first`, HEAD and
+  the work tree as they were (the untracked files in the way are said the same way).
+- **`b c` and `b n`** ask the start, then the name, and create the branch checked out (`git switch -c NAME
+  --end-of-options START`) or not (`git branch --end-of-options NAME START`). A start that is a ref's name is
+  given as it is, so a remote branch becomes the new branch's upstream (git's `branch.autoSetupMerge`); any other
+  revision as its commit's full hash. `Switched to a new branch NAME at HASH SUBJECT`, `Branch NAME created at HASH
+  SUBJECT`. **`b x`** deletes a local branch (`branch -d`); one git calls not fully merged only after `Branch NAME
+  is not fully merged: delete it anyway?` (`branch -D`), as magit asks. **`b m`** renames one, the current by
+  default (`branch -m`).
+- **`O s`, `O m`, `O h`**: `git reset -q --soft|--mixed|--hard HASH --`, the branch HEAD is on moved (`main reset
+  to HASH SUBJECT (hard)`). The hard reset first asks `Hard reset main to HASH SUBJECT, discarding every
+  uncommitted change to tracked files?`, and names the untracked or ignored files it would overwrite, which git
+  overwrites without a word: those at a path the commit tracks, those where it has a directory (a file `d` where
+  it tracks `d/f`) and those in a directory standing where it has a file (`x/p` where it tracks `x`, whether or not
+  the index tracks `x`; a wholly untracked `x/` is named as `the untracked directory x/`, an empty one not at all).
+  All read with `ls-tree`, `ls-files --others --directory --no-empty-directory` and `diff --diff-filter=D`, then
+  `ls-files --others` in the directories a target path is in: `…, and overwriting 2 untracked files d/y.txt,
+  x.txt?` (three named at most); n says `Nothing reset` and starts no write. Two kinds of directory are named
+  whole rather than by their files, so the question may name more than the reset overwrites: a nested repository
+  (a worktree or clone under the tree, as `.claude/worktrees/*`), which `ls-files` lists as a directory and never
+  looks into, and a directory whose name is not UTF-8 (read lossily as U+FFFD, it cannot be given back to git as a
+  pathspec, so it is not read).
+- **`z z` and `z i`** ask a message (empty: git's) and run `git stash push [--staged] [--message=MSG] --`; git's
+  line is said (`Saved working directory and index state On main: MSG`, `No local changes to save`). **`z a` and
+  `z p`** apply (and, `pop`, drop) with `--index`, so the staged changes come back staged; when git says the
+  index part does not apply (`conflicts in index. Try without --index.`, exit 128, nothing changed) it is run
+  once more without, and said: `; its staged changes are unstaged: they did not apply to the index`. A conflict
+  is said with its files, from `diff --name-only --diff-filter=U`: `stash@{1} applied with conflicts in a.txt:
+  resolve them and stage them (s); the stash is kept (z k drops it)`, the status buffer then showing them under
+  Unmerged paths. Local changes in the way: `stash@{0} not popped: your local changes to a.txt would be
+  overwritten; …`. While a conflict is left nothing is stashed, applied or popped, the files named
+  (`stash@{0} not popped: a.txt is in conflict; resolve and stage it (s) first`), where git says only `could not
+  write index`. Nor, when the stash carries staged changes (its index commit's tree differs from its base's:
+  `rev-parse --verify STASH^1^{tree}` against `^2^{tree}`), while anything is staged: git 2.56's `--index` then
+  fails for any staged file, one the stash does not touch too, and unstages them all (`Index was not unstashed.`,
+  its file list indented by two spaces), so Edwin refuses first with the files named (`stash@{0} not popped:
+  a.txt is staged, and git would unstage it; commit, unstage (u) or stash (z z) it first`); should git still say
+  so (a file staged in between), the message names its files and says that git unstaged the staged changes. A
+  stash without staged changes applies with `--index` over a staged file, which stays staged (the common case:
+  unstaged work stashed, something staged, the work popped back), so it is not refused. Applying without
+  `--index` instead would keep the staged files staged but leave the stash's own staged changes unstaged. **`z
+  k`** asks `Drop stash@{0} SUBJECT?` first; git drops by name alone, so after y the name is resolved again and a
+  stash pushed or dropped while the question was open refuses the drop with the message below.
+  A stash line carries the stash's commit as well
+  as its name: when `stash@{N}` names another commit by the time the key comes (a stash pushed or dropped since
+  the buffer was drawn), `The stashes changed since stash@{N} was shown: g r reads them again`.
+- **`t t`** asks a name, then the commit: `git tag --no-sign --end-of-options NAME HASH`, a lightweight tag even
+  where `tag.gpgSign` asks for signed ones (a signed tag is annotated, its message needing an editor, and would
+  run the signature program). **`t x`** asks `Delete tag NAME?` (a tag has no reflog to bring it back), then `tag
+  -d`.
+- **Nothing typed becomes a switch.** A revision is resolved to its commit's full hash by `rev-parse --verify
+  --quiet --end-of-options REV^{commit}` before any write (`Not a commit: --merge`); a new branch's or tag's
+  name must be one `check-ref-format` (`--branch` for a branch) takes, not start with `-`, and expand to itself
+  (`@{-1}` is refused); a stash is one of `log --walk-reflogs refs/stash`'s `stash@{N}`; a ref name read from the
+  repository that is not UTF-8, holds a control character or starts with `-` is not offered. Names go after
+  `--end-of-options`. The runner refuses the switches that would undo its hardening, as for every command.
+- **The repository's configuration.** for-each-ref, symbolic-ref, check-ref-format, rev-parse, log and diff are
+  the runner's reads (nothing the repository names runs). switch, branch, reset, stash and tag are writes: they
+  keep the repository's filter drivers and the like, as the owner expects of a write, and run with the hooks off
+  (`core.hooksPath=/dev/null`: no post-checkout hook), which owner decision 12 keeps for commit, push and the
+  sequencer only. After each operation, whether it worked or not, the repository's status buffers are read again
+  and its log buffers read again from HEAD, in the background.
+- **Choices**, each reversible:
+  - `b b` on a remote branch detaches HEAD (magit-checkout's way) instead of git switch's guess of a local
+    tracking branch; `b c` from the remote branch makes one.
+  - No post-checkout hook on checkout (decision 12's list), where magit runs git's hooks.
+  - `b x` asks only for a branch that is not fully merged (magit's way); the hard reset, `z k` and `t x` always.
+  - Lightweight tags only.
+  - Stash apply and pop try `--index` first (magit's way) and fall back once, saying so.
+- **Not in it:** magit's transients and their switches; `b s` (spin-off), `b X` (reset a branch), `b l`; `O k`,
+  `O i`, `O w`, `O f` (keep, index, worktree, file); stashing untracked files, `z w`, `z x`, `z b`, `z l`, `z v`;
+  annotated or signed tags (they need the message buffer), `t r`, `t p`; acting on several branches or tags at
+  once; jj's bookmarks (git-jj-ops, git-jj-remote).
+- **Image replay and edwind.** Each command checks `Ed.proc.refusal()` before anything (no child starts under the
+  image's replay), and every child goes through `Vc.run`, which refuses under the replay, in a web frame and in
+  edwind.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (115 passed, test/vc-history.test.mts's 13 among them;
+  the other suites unchanged, the stash line now carrying its stash) and `edwin-typecheck`, with real git and
+  jujutsu, over one fixture repository (main, other, then feature, topic, tags and stashes):
+  - `b b` to `other` with a.txt changed: the refusal above whole, HEAD `main`, a.txt as it was, one write
+    (`switch --end-of-options other`), the status read again; with c.txt changed (the same on both): `Switched
+    to branch 'other'; local changes kept in 1 file`, the Head line `other`, the hooks off on switch; back.
+  - `b b` on the log line of a commit no branch is at: the prompt offers its hash, `HEAD detached at HASH first`,
+    `switch --detach FULLHASH`, the log read again from the new HEAD; a commit made there, the Head line its hash,
+    `b b main` names it as left behind.
+  - `b c` from a log line: `feature` at that commit, checked out, the log showing `HEAD -> feature`; `b n` from
+    `main` as typed: `branch --end-of-options topic main`, HEAD still `feature`; refused before any write: names
+    `--force`, `@{-1}` and `a..b`, the start `--output=/tmp/x`; an existing name: git's `a branch named 'topic'
+    already exists`.
+  - `b x`: `topic` (merged) deleted at once, `other` (unmerged) asked: n keeps it, y deletes it with `-D`;
+    `b m` renames `main` to `trunk` (the Head line too) and back.
+  - `O s` to a typed `HEAD~1` (the index keeps the change), `O m` to HEAD (the index reset, the work tree kept),
+    `O h` from a Recent commits line: the question names the branch, hash and subject, n writes nothing; y to a
+    typed full hash leaves a clean tree there; `O h --merge`: `Not a commit`, no write.
+  - `O h` to a commit that tracks x.txt and d/y.txt, both untracked in the work tree: the question ends `and
+    overwriting 2 untracked files d/y.txt, x.txt?`, n writes nothing and keeps them, y overwrites them as asked.
+  - `O h` where a file and a directory change places: an untracked file `d` where the target tracks `d/f` (named,
+    whether the index tracks `d/f` or not), an untracked `x/p` where the target tracks `x` (`the untracked
+    directory x/`; emptied, not named), and a directory `x/` with `x/p` and `x/q` where the index and the target
+    track `x` (named `x/p, x/q`); n keeps each, y on the tracked ones loses what was named.
+  - `O h` where the target tracks `sub/file` and `sub/` is now a repository of its own holding an untracked
+    `sub/file`: `the untracked directory sub/`; where it tracks a file in a directory named by the byte 0xFF, that
+    directory wholly untracked: `the untracked directory �/`; n keeps both.
+  - `z z` with a staged and an unstaged change (`push --message=both --`), `No local changes to save`, `z a` on
+    the unfolded stash line (both back, a.txt staged again), `z i` (the staged change alone), a stash line whose
+    commit no longer matches refused, `z p stash@{1}` after a conflicting commit: `--index` refused by git, run
+    again without, the conflict message, the stash kept, `UU a.txt` and `Unmerged paths (1)` shown; then `z p`
+    and `z z` refused while the conflict is left, no write run.
+  - `z p` with a.txt in the way: refused with the file named, the stash and a.txt as they were; then a.txt staged:
+    refused before any write, still `M  a.txt` (the stash, `index`, carries a staged change); a stash of an
+    unstaged c.txt alone popped over a staged a.txt: `stash@{0} popped` by one `pop --index`, `M  a.txt` and
+    ` M c.txt` after; a stash of a staged c.txt popped with a.txt staged just before git runs: git's refusal said
+    with a.txt named and its unstaging, the stash kept; `z k` n, a stash pushed from a shell while the question
+    is open (y refused, all three kept), and y;
+    a clean push and pop: `stash@{0} popped`.
+  - `t t` on a Recent commits line under `tag.gpgSign=true` and a `gpg.program` marker script: a lightweight tag,
+    no marker; `-d` refused as a name; `t x` n and y.
+  - A jj workspace refused with no child started; the fifteen commands under `Ed.proc.replay` refused, no child
+    started.
+  - `nix flake check` on the final code (2026-11-17, after the review fixes): all checks passed, exit 0;
+    `edwin-vc` 115 of 115.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

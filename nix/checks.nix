@@ -274,6 +274,12 @@ in
   # Visual selection off a change (names with a quote, a backslash, a space and a leading -, as root-file:
   # filesets after --), a rename with both its names, every file, a stale file and an immutable change refused;
   # nothing under the replay.
+  # Branches, checkout, reset, stash and tags (test/vc-history.test.mts): b b refused with the files named when local
+  # changes are in the way and carrying them when not, detaching HEAD from a log line and naming the commit left
+  # behind; b c, b n, b x (an unmerged branch after asking) and b m; O s, O m and O h (asking: n writes nothing);
+  # z z, z i, z a with the index, z p with a conflict (the stash kept) and with local changes in the way, z k
+  # asking, a stale stash line refused; t t lightweight under tag.gpgSign, t x asking; names and revisions that
+  # would be switches refused before any write; a jj workspace and the image's replay refused.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -288,7 +294,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts
         touch $out
       '';
 

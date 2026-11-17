@@ -1545,6 +1545,30 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; and its suffix.
 (evil-define-key 'motion 'git-status-mode
   "l l" 'git-log)
+;; Branches, checkout, reset, stash and tags, in the status and the log
+;; buffers, as evil-collection binds magit's transients and their suffixes:
+;; b (branch), O (reset: magit's X), z (stash; z is no fold prefix in these
+;; buffers) and t (tag), with x for delete in b and t as for magit's k.  They
+;; act on the commit or the stash at point, or ask.
+(for-each
+ (lambda (mode)
+   (evil-define-key 'motion mode
+     "b b" 'git-checkout
+     "b c" 'git-branch-create
+     "b n" 'git-branch-new
+     "b x" 'git-branch-delete
+     "b m" 'git-branch-rename
+     "O s" 'git-reset-soft
+     "O m" 'git-reset-mixed
+     "O h" 'git-reset-hard
+     "z z" 'git-stash
+     "z i" 'git-stash-index
+     "z a" 'git-stash-apply
+     "z p" 'git-stash-pop
+     "z k" 'git-stash-drop
+     "t t" 'git-tag-create
+     "t x" 'git-tag-delete))
+ '(git-status-mode git-log-mode))
 ;; The log buffer: RET shows the commit at point, + reads the next page
 ;; (evil-collection's key for magit's longer log), g r reads it again from
 ;; HEAD.

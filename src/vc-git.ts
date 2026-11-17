@@ -23,7 +23,13 @@
    motions, each with its own model.
 
    VcView gives that drawing to other version control: jj's log and change buffers (src/vc-jj.ts) are views of
-   kind 'ext', drawn, read again and shown by their VcViewKind, folded, stepped and visited by the same commands. */
+   kind 'ext', drawn, read again and shown by their VcViewKind, folded, stepped and visited by the same commands.
+
+   b, O, z and t in the status and log buffers branch, check out, reset, stash and tag (docs/steps.md, "Branches,
+   checkout, reset, stash and tags"): each a write through the runner on what point is on (a commit, a stash) or
+   what is typed (refused as a switch: a revision is resolved to its hash first, a name checked as git checks
+   one), the state git leaves said exactly (local changes in the way, a conflict, a commit left behind), then the
+   repository's status and log buffers read again. */
 
 (function () {
 'use strict';
@@ -39,6 +45,8 @@ const READ = { timeout: 120000, maxBytes: MAX_BYTES };
 const RECENT = 10, AHEAD_MAX = 100;
 
 interface GitCommit { hash: string; subject: string }
+/* A stash: its name (stash@{N}), the commit it is, and its subject. */
+interface GitStash { name: string; oid: string; subject: string }
 /* A file of a section: its path (a directory of untracked files ends in /), its old path for a rename or copy,
    what happened to it, and its part of the section's diff (null: none read, or none). */
 interface GitFile { path: string; orig: string | null; label: string; diff: VcDiffFile | null }
@@ -49,7 +57,7 @@ interface GitModel {
   /* the diffs as parsed (what a pick of a hunk is taken from), and why one is not shown (null: it is) */
   diffs: { unstaged: VcDiffFile[]; staged: VcDiffFile[] };
   notes: { unstaged: string | null; staged: string | null };
-  stashes: GitCommit[]; unpulled: GitCommit[]; unpushed: GitCommit[]; recent: GitCommit[];
+  stashes: GitStash[]; unpulled: GitCommit[]; unpushed: GitCommit[]; recent: GitCommit[];
 }
 /* A section: its id (the ids of its parents and its own key, joined by NUL), the line of its heading and the
    line past its end, whether it has a body to fold, its parent and children. */
@@ -57,9 +65,9 @@ interface GitSection { id: string; start: number; end: number; body: boolean; pa
 /* A line as drawn: its id (what point is kept on across a redraw), the innermost section it is in, its faces as
    [from, to, face] from the line's start, the file and line (from 1) RET visits, the commit it names (what c f fixes
    up: one in HEAD's history), the revision RET shows (any commit line, a stash's too), and, MORE, that RET there
-   reads the log's next page. */
-interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt; commit?: string; show?: string; more?: boolean }
-type GitExtra = Pick<GitRow, 'visit' | 'at' | 'commit' | 'show' | 'more'>;
+   reads the log's next page; on a stash's line, the stash (what z a, z p and z k act on). */
+interface GitRow { id: string; sec: GitSection; spans: [number, number, number][]; visit?: { path: string; line: number }; at?: GitAt; commit?: string; show?: string; more?: boolean; stash?: GitStash }
+type GitExtra = Pick<GitRow, 'visit' | 'at' | 'commit' | 'show' | 'more' | 'stash'>;
 /* What s, u and x act on at a line: a part of the status (its heading: FILE null), a file of it, one of the file's
    hunks (by its index in FILE.diff.hunks), or a line of that hunk (by its index in hunk.lines). */
 type GitPart = 'untracked' | 'unmerged' | 'unstaged' | 'staged';
@@ -165,10 +173,10 @@ async function readLog(r: VcRepo, args: string[]): Promise<GitCommit[]> {
 }
 /* The stashes, from the stash's reflog (log -g is a read; `git stash list` would keep the repository's
    signature programs). */
-async function readStashes(r: VcRepo): Promise<GitCommit[]> {
-  const x = await Vc.run(r, ['log', '--walk-reflogs', '--format=%gd %gs', 'refs/stash', '--'], { ...READ, lossy: true });
+async function readStashes(r: VcRepo): Promise<GitStash[]> {
+  const x = await Vc.run(r, ['log', '--walk-reflogs', '--format=%gd%x00%H%x00%gs', 'refs/stash', '--'], { ...READ, lossy: true });
   if (x.code !== 0 || x.truncated) failed(x, 'git log of the stashes');
-  return x.out.split('\n').filter(l => l).map(l => { const sp = l.indexOf(' '); return { hash: l.slice(0, sp), subject: l.slice(sp + 1) }; });
+  return x.out.split('\n').filter(l => l).map(l => { const [name, oid, ...subject] = l.split('\0'); return { name, oid, subject: subject.join(' ') }; });
 }
 
 /* Everything the buffer shows, read from REPO. */
@@ -357,7 +365,7 @@ function drawStatus(v: GitStatus, d: Drawer) {
   top_('unmerged', 'Unmerged paths', m.unmerged.length, files('unmerged', m.unmerged, null), { part: 'unmerged', file: null });
   top_('unstaged', 'Unstaged changes', m.unstaged.length, files('unstaged', m.unstaged, m.notes.unstaged), { part: 'unstaged', file: null });
   top_('staged', 'Staged changes', m.staged.length, files('staged', m.staged, m.notes.staged), { part: 'staged', file: null });
-  top_('stashes', 'Stashes', m.stashes.length, () => m.stashes.forEach(c => commitLine(c, true)));
+  top_('stashes', 'Stashes', m.stashes.length, () => m.stashes.forEach(c => line(c.name, `${c.name} ${shown(c.subject)}`, [[0, c.name.length, F.HASH]], { show: c.name, stash: c })));
   const up = m.upstream === null ? '' : shown(m.upstream);
   const ahead = (list: GitCommit[], n: number, mine: boolean) => () => {
     list.forEach(c => commitLine(c, !mine));
@@ -922,9 +930,374 @@ CMD('git-commit-amend', '', '', 'Amend the last commit (c a): its message, in a 
 CMD('git-commit-reword', '', '', 'Change the last commit\'s message only (c w): the staged changes stay staged, and no pre-commit or commit-msg hook runs.', () => commit('reword'));
 CMD('git-commit-fixup', '', '', 'Commit the staged changes as a fixup of the commit at point, or of one asked for (c f): `fixup! SUBJECT`, for git rebase --autosquash.', () => fixup());
 
+/* ---------- branches, checkout, reset, stash and tags ---------- */
+/* Each of these writes: so long at most (a checkout of a large tree), and so much output (its list of files). */
+const WRITE = { timeout: 120000, maxBytes: MAX_BYTES, lossy: true };
+const JJ_HISTORY = 'jj has its own commands for its changes and bookmarks; SPC g G\'s status buffer works on its git repository';
+
+/* git ARGS in R, a write: its result, whatever its exit; one that could not run, ran too long or printed too much
+   raised. */
+async function gitWrite(r: VcRepo, args: string[]): Promise<EdProcResult> {
+  const x = await Vc.run(r, args, WRITE);
+  if (x.error || x.timedOut || x.truncated) failed(x, `git ${args[0]}`);
+  return x;
+}
+const firstLine = (s: string) => shown(s.split('\n').find(l => l.trim()) || '').trim();
+/* NAMES for a message: the first five, then how many more. */
+const listed = (names: string[]) => names.slice(0, 5).map(shown).join(', ') + (names.length > 5 ? ` and ${names.length - 5} more` : '');
+/* git's reason for a failure: its first `error:` or `fatal:` line, without the prefix. */
+function reason(x: EdProcResult): string {
+  const l = (x.err + '\n' + x.out).split('\n').find(s => /^(error|fatal): /.test(s));
+  return l ? shown(l.replace(/^(error|fatal): /, '')).slice(0, 300) : `exit ${x.code}`;
+}
+/* What git refused to overwrite, as it says it: the files of the local changes or the untracked files in the way.
+   Null when that is not why it failed. */
+function inTheWay(x: EdProcResult): string | null {
+  const m = /(Your local changes to the following files|The following untracked working tree files) would be (overwritten|removed) by \w+:\n((?:(?:\t| {2}).*(?:\n|$))+)/.exec(x.err);
+  if (!m) return null;
+  const files = m[3].split('\n').map(l => l.trim()).filter(l => l);
+  return m[1].startsWith('Your')
+    ? `your local changes to ${listed(files)} would be overwritten; commit or stash them (z z) first`
+    : `the untracked ${listed(files)} would be ${m[2]}; move ${files.length === 1 ? 'it' : 'them'} away first`;
+}
+/* Raise git's failure X, WHAT saying what was not done. */
+function refused(x: EdProcResult, what: string): never {
+  const way = inTheWay(x);
+  if (way) return signal('user-error', `${what}: ${way}`) as never;
+  return signal('process-error', `${what}: ${reason(x)} (see *vc-process*)`) as never;
+}
+/* What a switch said besides where HEAD is now: the local changes it carried, the commits it left on no branch. */
+function carried(x: EdProcResult): string {
+  let s = '';
+  const kept = x.out.split('\n').filter(l => /^[A-Z]\t/.test(l)).length;
+  if (kept) s += `; local changes kept in ${kept} file${kept === 1 ? '' : 's'}`;
+  const left = /you are leaving (\d+) commits? behind/.exec(x.err.replace(/\s+/g, ' '));
+  if (left) {
+    const n = +left[1], tip = /^ {2}([0-9a-f]{7,}) (.*)$/m.exec(x.err);
+    s += `; ${n} commit${n === 1 ? '' : 's'} left on no branch${tip ? `, the last ${tip[1]} ${shown(tip[2])}` : ''} (b n there names ${n === 1 ? 'it' : 'them'})`;
+  }
+  return s;
+}
+
+/* R's refs, from for-each-ref (a read): the local branches with the commit each is at, the remote branches (but
+   their HEAD) and the tags, by their short names. A name that is not UTF-8, holds a control character or starts
+   with `-` is left out: it is never given back to git. */
+interface GitRefs { heads: Map<string, string>; remotes: string[]; tags: string[] }
+async function readRefs(r: VcRepo): Promise<GitRefs> {
+  const x = await Vc.run(r, ['for-each-ref', '--format=%(objectname)%00%(refname)', 'refs/heads', 'refs/remotes', 'refs/tags'], { ...READ, lossy: true });
+  if (x.code !== 0 || x.truncated || x.error) failed(x, 'git for-each-ref');
+  const refs: GitRefs = { heads: new Map(), remotes: [], tags: [] };
+  for (const l of x.out.split('\n')) {
+    const [oid, ref] = l.split('\0');
+    if (!ref || /[\u0000-\u001f\u007f�]/.test(ref)) continue;
+    const [, kind, name] = /^refs\/(heads|remotes|tags)\/(.*)$/.exec(ref) || [];
+    if (!name || name.startsWith('-')) continue;
+    if (kind === 'heads') refs.heads.set(name, oid);
+    else if (kind === 'tags') refs.tags.push(name);
+    else if (!name.endsWith('/HEAD')) refs.remotes.push(name);
+  }
+  return refs;
+}
+const refNames = (refs: GitRefs) => [...refs.heads.keys(), ...refs.remotes, ...refs.tags];
+/* The branch HEAD is on (an unborn one too), or null when it is detached. */
+async function currentBranch(r: VcRepo): Promise<string | null> {
+  const x = await Vc.run(r, ['symbolic-ref', '--quiet', 'HEAD'], { ...READ, lossy: true });
+  if (x.code === 1 && !x.error && !x.timedOut) return null;
+  if (x.code !== 0 || x.error || x.timedOut) failed(x, 'git symbolic-ref');
+  const ref = x.out.trim();
+  return ref.startsWith('refs/heads/') ? ref.slice(11) : null;
+}
+/* The commit point's line in B shows (a commit's line, the Head and Merge lines, a parent's), never a stash's. */
+function commitAt(b: EdBuffer): string | undefined {
+  if (!b.gitView) return undefined;
+  const row = here(b).row;
+  return row && !row.stash ? row.show : undefined;
+}
+/* What point in B names as a revision: a local branch at the commit on its line (one but CURRENT when there are
+   several), else the commit. */
+async function revAt(r: VcRepo, b: EdBuffer, refs: GitRefs, current: string | null): Promise<string | undefined> {
+  const rev = commitAt(b);
+  if (!rev) return undefined;
+  const oid = await resolve(r, rev);
+  if (!oid) return undefined;
+  const names = [...refs.heads].filter(([, o]) => o === oid).map(([n]) => n);
+  return names.find(n => n !== current) ?? names[0] ?? rev;
+}
+/* A revision or a name read at PROMPT, completed from CANDS, DEF first (what RET gives on an empty input; a full
+   hash shown by its first 7 digits); with REQUIRE, one of CANDS. '' when nothing is typed and there is no
+   default. */
+async function ask(prompt: string, cands: string[], def?: string, require = false): Promise<string> {
+  const list = def === undefined ? cands : [def, ...cands.filter(c => c !== def)];
+  const p = def === undefined ? `${prompt}: ` : `${prompt} (${shown(/^[0-9a-f]{40,64}$/.test(def) ? def.slice(0, 7) : def)}): `;
+  return (await Ed.readMini(p, '', list.length ? () => list : null, { def, require, kind: 'git-rev', keepOrder: true, noIndex: true })).trim();
+}
+/* REV, typed or offered, as the full hash of its commit; refused when it names none. */
+async function commitOf(r: VcRepo, rev: string): Promise<string> {
+  if (!rev) signal('user-error', 'No revision given');
+  return (await resolve(r, rev)) || signal('user-error', `Not a commit: ${shown(rev)}`) as never;
+}
+/* OID as a message names it: its short hash and subject. */
+async function described(r: VcRepo, oid: string): Promise<string> {
+  const [c] = await readLog(r, ['--max-count=1', oid]);
+  return c ? `${c.hash} ${shown(c.subject)}` : oid.slice(0, 7);
+}
+/* NAME as a new branch's or tag's, refused unless git takes it as it is typed: check-ref-format (a read) finds
+   it valid and expands nothing in it (`@{-1}`, the branch before). */
+async function newName(r: VcRepo, kind: 'branch' | 'tag', name: string): Promise<string> {
+  if (!name) signal('user-error', `No ${kind} name given`);
+  const x = name.startsWith('-') ? null : await Vc.run(r, kind === 'branch' ? ['check-ref-format', '--branch', name] : ['check-ref-format', 'refs/tags/' + name], { ...READ, lossy: true });
+  if (!x || x.code !== 0 || kind === 'branch' && x.out.trim() !== name) signal('user-error', `Not a valid ${kind} name: ${shown(name)}`);
+  return name;
+}
+
+/* Run OP on the current buffer's git repository (a jj workspace refused), then read its status and log buffers
+   again, whether it worked or not: a conflict it left, or a moved HEAD, is shown. */
+async function historyOp(op: (r: VcRepo, b: EdBuffer) => Promise<void>): Promise<false> {
+  const b = cur(), r = gitRepo(JJ_HISTORY);
+  let err: unknown = null;
+  try { await op(r, b); } catch (e) { err = e; }
+  for (const s of buffersOf(r, 'status')) await refresh(s).catch(Ed.reportError);
+  for (const l of buffersOf(r, 'log')) void loadLog(l, true).catch(Ed.reportError);
+  if (err) throw err;
+  return false;
+}
+
+/* b b: a local branch becomes HEAD; anything else (a remote branch, a tag, a commit) is checked out detached, as
+   magit-checkout does. */
+async function checkout(r: VcRepo, b: EdBuffer) {
+  const [refs, current] = await Promise.all([readRefs(r), currentBranch(r)]);
+  const rev = await ask('Checkout', refNames(refs), await revAt(r, b, refs, current));
+  if (!rev) signal('user-error', 'No branch or commit given');
+  if (refs.heads.has(rev)) {
+    const x = await gitWrite(r, ['switch', '--end-of-options', rev]);
+    if (x.code !== 0) refused(x, 'Not checked out');
+    const said = /^(Switched to branch '.*'|Already on '.*')$/m.exec(x.err);
+    Ed.message((said ? shown(said[1]) : `On branch ${shown(rev)}`) + carried(x));
+    return;
+  }
+  const oid = (await resolve(r, rev)) || signal('user-error', `Not a branch or commit: ${shown(rev)}`) as never;
+  const x = await gitWrite(r, ['switch', '--detach', oid]);
+  if (x.code !== 0) refused(x, 'Not checked out');
+  Ed.message(`HEAD detached at ${await described(r, oid)}` + carried(x));
+}
+/* b c and b n: a new branch starting at a revision (point's, else the current branch), checked out with CHECKOUT.
+   A ref's name is given to git as it is, so a remote branch becomes the new branch's upstream (git's
+   branch.autoSetupMerge); anything else as its commit's hash. */
+async function branchCreate(r: VcRepo, b: EdBuffer, checkout: boolean) {
+  const [refs, current] = await Promise.all([readRefs(r), currentBranch(r)]);
+  const start = await ask(checkout ? 'Create and checkout branch starting at' : 'Create branch starting at', refNames(refs), (await revAt(r, b, refs, current)) ?? current ?? 'HEAD');
+  const oid = await commitOf(r, start), at = refNames(refs).includes(start) ? start : oid;
+  const name = await newName(r, 'branch', (await Ed.readMini('Name for new branch: ', '', null, { kind: 'git-branch-name' })).trim());
+  const x = await gitWrite(r, checkout ? ['switch', '-c', name, '--end-of-options', at] : ['branch', '--end-of-options', name, at]);
+  if (x.code !== 0) refused(x, 'No branch created');
+  const where = await described(r, oid);
+  Ed.message(checkout ? `Switched to a new branch ${shown(name)} at ${where}` + carried(x) : `Branch ${shown(name)} created at ${where}`);
+}
+/* b x: a local branch deleted; one not merged into HEAD or its upstream only after asking, as magit does. */
+async function branchDelete(r: VcRepo, b: EdBuffer) {
+  const [refs, current] = await Promise.all([readRefs(r), currentBranch(r)]);
+  const at = await revAt(r, b, refs, current), others = [...refs.heads.keys()].filter(n => n !== current);
+  const name = await ask('Delete branch', others, at !== undefined && at !== current && refs.heads.has(at) ? at : undefined, true);
+  if (!name || !refs.heads.has(name)) signal('user-error', `Not a branch: ${shown(name)}`);
+  let x = await gitWrite(r, ['branch', '-d', '--end-of-options', name]);
+  if (x.code !== 0 && /is not fully merged/.test(x.err)) {
+    if (!await Ed.yesOrNo(`Branch ${shown(name)} is not fully merged: delete it anyway?`)) { Ed.message('Nothing deleted'); return; }
+    x = await gitWrite(r, ['branch', '-D', '--end-of-options', name]);
+  }
+  if (x.code !== 0) refused(x, 'Not deleted');
+  Ed.message(firstLine(x.out) || `Deleted branch ${shown(name)}`);
+}
+/* b m: a local branch renamed (the current one by default). */
+async function branchRename(r: VcRepo) {
+  const [refs, current] = await Promise.all([readRefs(r), currentBranch(r)]);
+  const old = await ask('Rename branch', [...refs.heads.keys()], current !== null && refs.heads.has(current) ? current : undefined, true);
+  if (!old || !refs.heads.has(old)) signal('user-error', `Not a branch: ${shown(old)}`);
+  const name = await newName(r, 'branch', (await Ed.readMini(`Rename ${shown(old)} to: `, '', null, { kind: 'git-branch-name' })).trim());
+  const x = await gitWrite(r, ['branch', '-m', '--end-of-options', old, name]);
+  if (x.code !== 0) refused(x, 'Not renamed');
+  Ed.message(`Branch ${shown(old)} renamed to ${shown(name)}`);
+}
+/* O s, O m and O h: HEAD (its branch) reset to a revision, point's or HEAD. A hard reset asks first, naming the
+   branch and the commit. */
+async function reset(r: VcRepo, b: EdBuffer, mode: 'soft' | 'mixed' | 'hard') {
+  const [refs, current] = await Promise.all([readRefs(r), currentBranch(r)]);
+  const head = current === null ? 'HEAD' : shown(current), Mode = mode[0].toUpperCase() + mode.slice(1);
+  const oid = await commitOf(r, await ask(`${Mode} reset ${head} to`, refNames(refs), commitAt(b) ?? 'HEAD'));
+  const what = await described(r, oid);
+  if (mode === 'hard') {
+    const lost = await overwritten(r, oid);
+    const also = lost.length === 0 ? ''
+      : `, and overwriting ${lost.length === 1 ? 'the untracked ' + (lost[0].endsWith('/') ? 'directory' : 'file') : lost.length + ' untracked files'} ${lost.slice(0, 3).map(shown).join(', ')}${lost.length > 3 ? ', …' : ''}`;
+    if (!await Ed.yesOrNo(`Hard reset ${head} to ${what}, discarding every uncommitted change to tracked files${also}?`)) { Ed.message('Nothing reset'); return; }
+  }
+  const x = await gitWrite(r, ['reset', '-q', '--' + mode, oid, '--']);
+  if (x.code !== 0) refused(x, 'Not reset');
+  Ed.message(`${head} reset to ${what} (${mode})`);
+}
+
+/* The untracked or ignored files a hard reset to OID would overwrite, which git does without a word: those at a
+   path OID tracks, under one (a directory where OID has a file), or at a directory of one (a file where OID has a
+   directory). ls-files names a wholly untracked directory with a trailing / (and not at all one standing where the
+   index has a file, which diff calls deleted): the files of those a path of OID is in are read one by one. A
+   directory named is lost whole. Reads only. */
+async function overwritten(r: VcRepo, oid: string): Promise<string[]> {
+  const list = async (args: string[], what: string) => {
+    const x = await Vc.run(r, args, { ...READ, lossy: true });
+    if (x.code !== 0 || x.error || x.timedOut || x.truncated) failed(x, what);
+    return x.out.split('\0').filter(p => p);
+  };
+  const [target, others, deleted] = await Promise.all([
+    list(['ls-tree', '-r', '-z', '--name-only', '--full-tree', oid], 'git ls-tree'),
+    list(['ls-files', '-z', '--others', '--directory', '--no-empty-directory', '--full-name'], 'git ls-files'),
+    list(['diff', '--name-only', '-z', '--diff-filter=D'], 'git diff'),
+  ]);
+  const files = new Set(target), dirs = new Set<string>();   // OID's files, and its directories (each with a /)
+  for (const p of target) for (let k = p.indexOf('/'); k >= 0; k = p.indexOf('/', k + 1)) dirs.add(p.slice(0, k + 1));
+  /* whether OID has a file at path P (a directory's ends in /) or at a directory P is in */
+  const under = (p: string) => { for (let k = p.indexOf('/'); k >= 0 && k < p.length - 1; k = p.indexOf('/', k + 1)) if (files.has(p.slice(0, k))) return true; return files.has(p.replace(/\/$/, '')); };
+  const lost = new Set<string>(), read: string[] = [];
+  /* A directory a path of OID is in is read, unless its name is not UTF-8 (read lossily, it holds U+FFFD and
+     cannot be given back to git): that one is named whole. */
+  const toRead = (d: string) => { if (d.includes('�')) lost.add(d); else read.push(d); };
+  for (const p of others) {
+    if (under(p) || (!p.endsWith('/') && dirs.has(p + '/'))) lost.add(p);
+    else if (p.endsWith('/') && dirs.has(p)) toRead(p);
+  }
+  for (const p of deleted) if (under(p) || dirs.has(p + '/')) toRead(p + '/');
+  /* ls-files does not look into a nested repository and lists it as a directory (its / kept): one a path of OID
+     is in is named whole. */
+  if (read.length) for (const p of await list(['ls-files', '-z', '--others', '--full-name', '--', ...read.map(d => ':(top,literal)' + d)], 'git ls-files')) if (under(p) || dirs.has(p.endsWith('/') ? p : p + '/')) lost.add(p);
+  return [...lost].sort();
+}
+/* The files git left in conflict. */
+async function conflicted(r: VcRepo): Promise<string[]> {
+  const x = await Vc.run(r, ['diff', '--name-only', '--diff-filter=U', '-z'], { ...READ, lossy: true });
+  if (x.code !== 0 || x.error || x.timedOut || x.truncated) failed(x, 'git diff');
+  return x.out.split('\0').filter(p => p);
+}
+/* The files staged in R: the index differing from HEAD. */
+async function stagedFiles(r: VcRepo): Promise<string[]> {
+  const x = await Vc.run(r, ['diff', '--cached', '--name-only', '-z'], { ...READ, lossy: true });
+  if (x.code !== 0 || x.error || x.timedOut || x.truncated) failed(x, 'git diff');
+  return x.out.split('\0').filter(p => p);
+}
+/* Whether stash S carries staged changes: the tree of its index commit (its second parent) differs from its
+   base's (its first). */
+async function stashHasIndex(r: VcRepo, s: GitStash): Promise<boolean> {
+  const tree = async (parent: number) => {   // --verify takes one revision, and it alone keeps --end-of-options out of the output
+    const x = await Vc.run(r, ['rev-parse', '--verify', '--end-of-options', `${s.oid}^${parent}^{tree}`], { ...READ, lossy: true });
+    const hash = x.out.trim();
+    if (x.code !== 0 || x.error || x.timedOut || x.truncated || !/^[0-9a-f]{40,64}$/.test(hash)) failed(x, 'git rev-parse');
+    return hash;
+  };
+  return await tree(1) !== await tree(2);
+}
+/* Refused while a conflict is left (git would say only `could not write index`): WHAT names what is not done. */
+async function unmerged(r: VcRepo, what: string) {
+  const files = await conflicted(r);
+  if (files.length) signal('user-error', `${what}: ${listed(files)} ${files.length === 1 ? 'is' : 'are'} in conflict; resolve and stage ${files.length === 1 ? 'it' : 'them'} (s) first`);
+}
+/* z z and z i: the local changes (with STAGED, the staged ones alone) stashed, under a message typed (git's when
+   none is). Untracked files are not stashed. Nothing is stashed while a conflict is left. */
+async function stashPush(r: VcRepo, staged: boolean) {
+  await unmerged(r, 'Nothing stashed');
+  const msg = (await Ed.readMini(staged ? 'Stash the staged changes, message: ' : 'Stash message: ', '', null, { kind: 'git-stash-message' })).trim();
+  const x = await gitWrite(r, ['stash', 'push', ...(staged ? ['--staged'] : []), ...(msg ? ['--message=' + msg] : []), '--']);
+  if (x.code !== 0) refused(x, 'Nothing stashed');
+  Ed.message(firstLine(x.out) || 'Stashed');
+}
+const STASH_NAME = /^stash@\{\d+\}$/;
+/* The stash z a, z p or z k acts on: the one on point's line in B, refused when the stashes changed since it was
+   shown (a name stands for a different stash once one is pushed or dropped); else one read at a prompt
+   (stash@{0} first). */
+async function stashPick(r: VcRepo, b: EdBuffer, verb: string): Promise<GitStash> {
+  if (!await resolve(r, 'refs/stash')) signal('user-error', 'No stashes');
+  const stashes = (await readStashes(r)).filter(s => STASH_NAME.test(s.name)), row = b.gitView ? here(b).row : undefined;
+  if (row && row.stash) {
+    const s = stashes.find(x => x.name === row.stash!.name);
+    if (!s || s.oid !== row.stash.oid) signal('user-error', `The stashes changed since ${row.stash.name} was shown: g r reads them again`);
+    return s!;
+  }
+  const name = await ask(`${verb} stash`, stashes.map(s => s.name), stashes.length ? stashes[0].name : undefined, true);
+  return stashes.find(s => s.name === name) || signal('user-error', `Not a stash: ${shown(name)}`) as never;
+}
+/* z a and z p: a stash applied (POP: then dropped) with its staged changes staged again; when those do not apply
+   to the index (git says so and changes nothing), applied again without, its changes then unstaged. A conflict is
+   said with its files, the stash kept. Nothing is applied while a conflict is left, nor, when the stash carries
+   staged changes, while anything is staged: git's --index then fails for any staged file, one the stash does not
+   touch too, and unstages them all (`Index was not unstashed`). A stash without staged changes applies over a
+   staged file, which stays staged. */
+async function stashApply(r: VcRepo, b: EdBuffer, pop: boolean) {
+  const s = await stashPick(r, b, pop ? 'Pop' : 'Apply'), sub = pop ? 'pop' : 'apply', done = pop ? 'popped' : 'applied';
+  await unmerged(r, `${s.name} not ${done}`);
+  const staged = await stagedFiles(r), them = staged.length === 1 ? 'it' : 'them';
+  if (staged.length && await stashHasIndex(r, s)) signal('user-error', `${s.name} not ${done}: ${listed(staged)} ${staged.length === 1 ? 'is' : 'are'} staged, and git would unstage ${them}; commit, unstage (u) or stash (z z) ${them} first`);
+  /* git applies by name alone, and a stash pushed or dropped while the prompt was open moves the names */
+  if (await resolve(r, s.name) !== s.oid) signal('user-error', `The stashes changed since ${s.name} was shown: g r reads them again`);
+  let x = await gitWrite(r, ['stash', sub, '--index', s.name]), unindexed = false;
+  if (x.code !== 0 && /conflicts in index\. Try without --index/i.test(x.err)) { unindexed = true; x = await gitWrite(r, ['stash', sub, s.name]); }
+  if (x.code !== 0 && /^CONFLICT /m.test(x.out + '\n' + x.err)) {
+    const files = await conflicted(r);
+    Ed.message(`${s.name} applied with conflicts${files.length ? ' in ' + listed(files) : ''}: resolve them and stage them (s); the stash is kept${pop ? ' (z k drops it)' : ''}`);
+    return;
+  }
+  if (x.code !== 0 && /^Index was not unstashed\./m.test(x.err)) signal('process-error', `${s.name} not ${done}: ${inTheWay(x) || reason(x)}; git unstaged the staged changes (see *vc-process*)`);
+  if (x.code !== 0) refused(x, `${s.name} not ${done}`);
+  Ed.message(`${s.name} ${done}${unindexed ? '; its staged changes are unstaged: they did not apply to the index' : ''}`);
+}
+/* z k: a stash dropped, after asking. */
+async function stashDrop(r: VcRepo, b: EdBuffer) {
+  const s = await stashPick(r, b, 'Drop');
+  if (!await Ed.yesOrNo(`Drop ${s.name} ${shown(s.subject)}?`)) { Ed.message('Nothing dropped'); return; }
+  /* git drops by name alone, and a stash pushed or dropped while the question was open moves the names */
+  if (await resolve(r, s.name) !== s.oid) signal('user-error', `The stashes changed since ${s.name} was shown: g r reads them again`);
+  const x = await gitWrite(r, ['stash', 'drop', s.name]);
+  if (x.code !== 0) refused(x, `${s.name} not dropped`);
+  Ed.message(firstLine(x.out) || `Dropped ${s.name}`);
+}
+
+/* t t: a lightweight tag at a revision, point's or HEAD; never signed, whatever tag.gpgSign says (a signed tag
+   is annotated, and its message would need an editor). */
+async function tagCreate(r: VcRepo, b: EdBuffer) {
+  const refs = await readRefs(r);
+  const name = await newName(r, 'tag', (await Ed.readMini('Tag name: ', '', null, { kind: 'git-tag-name' })).trim());
+  const oid = await commitOf(r, await ask(`Tag ${shown(name)} at`, refNames(refs), commitAt(b) ?? 'HEAD'));
+  const x = await gitWrite(r, ['tag', '--no-sign', '--end-of-options', name, oid]);
+  if (x.code !== 0) refused(x, 'No tag created');
+  Ed.message(`Tag ${shown(name)} at ${await described(r, oid)}`);
+}
+/* t x: a tag deleted, after asking (a tag has no reflog to bring it back from). */
+async function tagDelete(r: VcRepo) {
+  const refs = await readRefs(r);
+  const name = await ask('Delete tag', refs.tags, undefined, true);
+  if (!name || !refs.tags.includes(name)) signal('user-error', `Not a tag: ${shown(name)}`);
+  if (!await Ed.yesOrNo(`Delete tag ${shown(name)}?`)) { Ed.message('Nothing deleted'); return; }
+  const x = await gitWrite(r, ['tag', '-d', '--end-of-options', name]);
+  if (x.code !== 0) refused(x, 'Not deleted');
+  Ed.message(firstLine(x.out) || `Deleted tag ${shown(name)}`);
+}
+
+CMD('git-checkout', '', '', 'Check out a branch or a revision (b b), the branch or commit at point by default: a local branch becomes HEAD, anything else is checked out detached. Local changes git would overwrite stop it.', () => historyOp(checkout));
+CMD('git-branch-create', '', '', 'Create a branch and check it out (b c), starting at the branch or commit at point, or the current branch.', () => historyOp((r, b) => branchCreate(r, b, true)));
+CMD('git-branch-new', '', '', 'Create a branch without checking it out (b n), starting at the branch or commit at point, or the current branch.', () => historyOp((r, b) => branchCreate(r, b, false)));
+CMD('git-branch-delete', '', '', 'Delete a local branch (b x), the one at point by default; one not fully merged only after asking.', () => historyOp(branchDelete));
+CMD('git-branch-rename', '', '', 'Rename a local branch (b m), the current one by default.', () => historyOp(r => branchRename(r)));
+CMD('git-reset-soft', '', '', 'Reset HEAD to the commit at point, or one asked for (O s): the index and the work tree stay.', () => historyOp((r, b) => reset(r, b, 'soft')));
+CMD('git-reset-mixed', '', '', 'Reset HEAD and the index to the commit at point, or one asked for (O m): the work tree stays.', () => historyOp((r, b) => reset(r, b, 'mixed')));
+CMD('git-reset-hard', '', '', 'Reset HEAD, the index and the work tree to the commit at point, or one asked for (O h), after asking: uncommitted changes to tracked files are lost.', () => historyOp((r, b) => reset(r, b, 'hard')));
+CMD('git-stash', '', '', 'Stash the local changes, staged and unstaged (z z), under a message asked for. Untracked files stay.', () => historyOp(r => stashPush(r, false)));
+CMD('git-stash-index', '', '', 'Stash the staged changes alone (z i), under a message asked for.', () => historyOp(r => stashPush(r, true)));
+CMD('git-stash-apply', '', '', 'Apply the stash at point, or one asked for (z a), its staged changes staged again; a conflict is said, the stash kept.', () => historyOp((r, b) => stashApply(r, b, false)));
+CMD('git-stash-pop', '', '', 'Apply the stash at point, or one asked for, and drop it (z p); on a conflict it is kept.', () => historyOp((r, b) => stashApply(r, b, true)));
+CMD('git-stash-drop', '', '', 'Drop the stash at point, or one asked for (z k), after asking.', () => historyOp(stashDrop));
+CMD('git-tag-create', '', '', 'Tag the commit at point, or one asked for (t t), with a lightweight tag.', () => historyOp(tagCreate));
+CMD('git-tag-delete', '', '', 'Delete a tag (t x), after asking.', () => historyOp(r => tagDelete(r)));
+
 for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-toggle', 'git-status-next-section', 'git-status-previous-section',
   'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard',
-  'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup', 'git-log', 'git-log-more']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup', 'git-log', 'git-log-more',
+  'git-checkout', 'git-branch-create', 'git-branch-new', 'git-branch-delete', 'git-branch-rename', 'git-reset-soft', 'git-reset-mixed',
+  'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 Ed.MODE_NAMES['git-log-mode'] = 'Git Log';
 Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';
