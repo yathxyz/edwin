@@ -232,6 +232,18 @@ in
   # replays, in a web frame or with no host.proc.
   edwin-shell-command = suite "shell-command" [ "shell-command.test.mts" ];
 
+  # The language client (src/lsp-rpc.ts so far): JSON-RPC's Content-Length framing under fast-check, any chunking
+  # of a random message stream decoding as the whole does and a broken one failing at the same place; the
+  # framing's refusals (a header past 4096 bytes, a body past 64 MiB, a bad, missing or doubled length, one ending
+  # inside a character); requests by id, error answers, cancellation and timeouts sending $/cancelRequest, the
+  # server's requests answered; and a stand-in server as a real child through Ed.proc (test/fake-proc.mts).
+  # LSPRPC_RUNS raises the run count.
+  edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+    export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts
+    touch $out
+  '';
+
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
   # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's
   # Node host, an Org https link. The opener's own checks and argv (native/src/open.rs) are cargo tests, which

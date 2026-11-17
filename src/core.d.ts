@@ -2334,6 +2334,50 @@ interface VcDiffApi {
   patch(files: VcDiffFile[], picks: VcDiffPick[], reverse?: boolean): string | null;
 }
 
+/* ---------- modules: JSON-RPC for language servers (lsp-rpc.ts) ---------- */
+
+/* Content-Length framed bodies, in order, to the decoder's function; push throws lsp-error at the first fault in
+   the framing and refuses after it. */
+interface LspRpcDecoder {
+  push(chunk: string): void;
+}
+interface LspRpcOptions {
+  /* framed text for the server's input; false or a throw closes the connection */
+  write(text: string): boolean | void;
+  /* what to answer the server's requests with, by method (a value or a promise of one); the rest are answered
+     method not found */
+  requests?: Record<string, (params: unknown) => unknown>;
+  onNotification?(method: string, params: unknown): void;
+  /* once, when the connection closes (a broken stream, closed input, or close), with why */
+  onClose?(why: string): void;
+}
+/* A request's result (null when the server gave none); cancel rejects it and tells the server. */
+interface LspRpcRequest extends Promise<unknown> {
+  readonly id: number;
+  cancel(): void;
+}
+interface LspRpcConnection {
+  /* the server's output, as it comes */
+  receive(chunk: string): void;
+  /* TIMEOUT in ms (absent: LspRpc.DEFAULT_TIMEOUT; 0 or Infinity: none) */
+  request(method: string, params?: unknown, opts?: { timeout?: number }): LspRpcRequest;
+  notify(method: string, params?: unknown): void;
+  /* rejects every request still waiting with WHY */
+  close(why?: string): void;
+  /* why it closed, or null while open */
+  closed(): string | null;
+  /* how many requests wait for an answer */
+  pending(): number;
+}
+interface LspRpcApi {
+  encode(msg: unknown): string;
+  decoder(on: (body: string) => void): LspRpcDecoder;
+  connect(opts: LspRpcOptions): LspRpcConnection;
+  readonly HEADER_MAX: number;
+  readonly BODY_MAX: number;
+  readonly DEFAULT_TIMEOUT: number;
+}
+
 /* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is
    [from, to, face] from its line's start, the face one of VcView.faces. A line's extra says what RET does there:
    visit a file of the work tree at a line, show a revision (by the kind's show), or read more (by its more). */
@@ -2599,6 +2643,8 @@ declare var Vc: VcApi;
 declare var VcDiff: VcDiffApi;
 declare var VcView: VcViewApi;
 declare var VcJj: VcJjApi;
+/* lsp-rpc.ts */
+declare var LspRpc: LspRpcApi;
 /* ot.ts */
 declare var EdOT: EdOTApi;
 /* ai.ts reads it (also as window.claude) */

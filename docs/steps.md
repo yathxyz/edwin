@@ -4046,6 +4046,116 @@ fixture; `git grep` run once per refresh, for the cost on a large repository.
     starts no git grep.
   - `vc-status` under the image's replay refused, no git grep started.
 
+## JSON-RPC for language servers (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lsp-rpc`, on proc-frame-api; owner decision 2: the LSP client
+lives in the frame over real pipes, no hub): Content-Length framing, request ids, cancellation and timeouts, as
+frame TypeScript; proved by a property test that any chunking of a message stream decodes identically, and an
+oversize header refused.
+
+- **`src/lsp-rpc.ts`** (the global `LspRpc`) is the wire alone: nothing in it starts a process or reaches the
+  network, so the image's replay stays refused where a server would start, in `Ed.proc` (R16.15). The language
+  client (lsp-sessions) will spawn a server through `Ed.proc.spawn`, hand its output to `receive` and give
+  `write` the child's `write`.
+- **`LspRpc.encode(msg)`** frames a message: `Content-Length: N\r\n\r\n` and the JSON, N its UTF-8 bytes.
+- **`LspRpc.decoder(on)`** gives `{push(chunk)}`: each whole body, in order, to `on`. The hosts hand a child's
+  output over as strings while Content-Length counts bytes, so the bytes are counted from the UTF-16 code units
+  (one below U+0080, two below U+0800, two for each half of a surrogate pair, else three): the count, and so what
+  is decoded, does not depend on where a chunk ends, inside a header, its blank line or a pair included. A body
+  that comes in many chunks is kept as the chunks and joined once.
+- **The framing's refusals.** Header names in any case; `Content-Type` and other headers are read and ignored.
+  `push` signals `lsp-error` (new, under `error`), after giving `on` every body before it, at: a header block
+  past 4096 bytes (refused as soon as that many have come with no blank line, not waiting for it), a header that
+  is not ASCII or a line that is not `NAME: VALUE`, no `Content-Length`, two, one that is not 1 to 10 digits, a
+  body past 64 MiB (refused at its header, before any of it is kept), and a length that ends inside a character.
+  A stream that broke cannot be found again: the decoder refuses every push after it.
+- **`LspRpc.connect({write, requests, onNotification, onClose})`** gives a connection: `receive(chunk)`,
+  `request(method, params?, {timeout})`, `notify(method, params?)`, `close(why?)`, `closed()` (why, or null)
+  and `pending()`.
+  - **Requests** get ids 1, 2, ... per connection; params absent or null are sent as none (JSON-RPC has
+    them an array or an object). `request` gives a promise of the result (null when the server
+    gives none) with its `id` and `cancel()`. An error answer rejects with `lsp-error` `METHOD: MESSAGE (CODE)`,
+    the code its irritant (lsp-sessions will want -32801, content modified); `"error": null` beside a result,
+    which some servers send though JSON-RPC forbids both, is no error. An answer to an id not waiting
+    (never asked, cancelled, timed out, or a string id, which Edwin never sends) is dropped.
+  - **Cancellation**: `cancel()` rejects with `lsp-error` `METHOD: cancelled` and sends `$/cancelRequest
+    {id}`; the server's late answer, a result or its -32800, is dropped. A second cancel sends nothing. The
+    promise is `EdPool.interruptible`'s shape, so a command awaiting `EdPool.interruptible(request)` is
+    cancelled by C-g.
+  - **Timeouts**: 10 s unless the caller names one (`timeout` in ms; 0, Infinity, or past 2^31 - 1 ms, about
+    24.8 days, the longest setTimeout takes, is none). Past it the request rejects with `timeout` and `$/cancelRequest` goes to the server, as on cancel. Every way a request
+    ends clears its timer.
+  - **The server's requests** are answered by `requests[method](params)` (a value or a promise of one; JSON null
+    for undefined); a method with no handler (looked up as the object's own key, so `constructor` and
+    `__proto__` are no handlers) is answered -32601 method not found, a handler that throws -32603 with its
+    error's text. **Notifications** go to `onNotification(method, params)`; one that throws is reported and the
+    connection goes on.
+  - **A message that is not JSON** (params or a handler's result holding a BigInt, which Edwin's exact integers
+    past 2^53 are, a cycle, or a toJSON that throws) fails alone and the connection goes on: its `request`
+    rejects with `lsp-error` `METHOD: params that are not JSON` before anything is sent, its `notify` throws
+    that, and the server's request it answers gets -32603 `Edwin answered with a result that is not JSON`.
+  - **Closing.** `close(why)`, a broken stream (its `lsp-error` text the why) and a write that returns false or
+    throws (the child's input closed, or 64 MiB not yet taken; a message that is not JSON is not a write that
+    failed, the bullet above) close the connection: every waiting request rejects
+    with `lsp-error` `METHOD: WHY`, `onClose(why)` is called once, nothing more is sent or received (the rest
+    of the chunk it closed in included: no notification after onClose, no handler run), a later `request`
+    rejects and `notify` throws.
+  - A body that is not JSON, or is JSON but not an object, is framed correctly and is dropped; the connection
+    goes on. A message is told by its fields (`method` with or without `id`, else a response), not by `jsonrpc`;
+    one with a `method` that is not a string is dropped, never taken for a response, though its id is waiting.
+- **Choices**, each reversible:
+  - Strict `\r\n` framing, as the specification has it: a server that ends its header lines with `\n` alone is
+    refused, not guessed at.
+  - The bounds: 4096 bytes of header (a server's is two short lines) and 64 MiB of body (semantic tokens of a
+    large file and a workspace's symbols stay well under it).
+  - 10 s for a request when the caller names none, as eglot's jsonrpc-request; initialize and the slow ones
+    will name their own in lsp-sessions.
+  - No message's body is put into an error or a log: a server's payload holds file text. An error answer's own
+    message is shown, cut at 500 characters.
+  - The Content-Type's charset is not checked: LSP has only UTF-8, and the hosts decode the child's output as
+    UTF-8 already (a child whose output is not is stopped by `Ed.proc`).
+- **Not in it:** no server process, session, restart or capability (lsp-sessions); no batches (LSP sends
+  none); the server's own `$/cancelRequest` for a request it asked is not acted on (its answer is sent anyway,
+  which JSON-RPC allows); no flow control past `Ed.proc`'s 64 MiB of unsent input.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-lsp` (new; 10 passed, 0
+  failed, test/lsp-rpc.test.mts, fast-check from the dev dependencies, 1000 runs each, the broken streams 250,
+  LSPRPC_RUNS raises them), `edwin-typecheck` (passed), `edwin-headless` (passed), `edit-lockdown`, `edit-security`,
+  `edit-console` and `edit-front` (passed), `nix build .#edwin` (passed). test/lsp-rpc.test.mts (10):
+  - Random streams of up to 8 requests, notifications and responses (strings of `é`, `€`, an astral character,
+    CRLFs, blank lines, `Content-Length: 3` and quotes inside them), each with a header in one of three shapes
+    (`content-length:N` in lower case, a Content-Type first): decoded whole they give the bodies and the
+    messages sent; cut at up to 30 random places, and at every code unit, they decode the same.
+  - The same with each of 11 broken tails after them (a header past the bound, with and without its end; no,
+    doubled, negative and 11-digit lengths; a body past 64 MiB; lengths ending inside `é` and between a pair's
+    halves; a bare LF in a header; a non-ASCII header): the same bodies before it and the same fault, however
+    cut, and nothing after.
+  - `encode`'s length equals Node's `Buffer.byteLength`; a lone surrogate is escaped by JSON.stringify.
+  - A header of 4096 bytes is read, one of 4097 refused; 4207 bytes with no blank line yet refused before it comes,
+    and every push after refused.
+  - A notify with null params sent without them. Two requests answered in reverse order, an unknown id, a string
+    id, a result with an astral character, an
+    error answer (`a: bad params (-32602)`, code -32602), a late answer, an answer with no result (null), a
+    result beside `"error": null`, a message with a waiting id and `method` 5 or null (dropped), a body
+    that is not JSON and one that is an array, the connection still open.
+  - Cancel: rejected, one `$/cancelRequest`, the late -32800 dropped; a timeout of 20 ms: `timeout`, a
+    `$/cancelRequest`, the late answer dropped; one answered in time sends none after its time; timeouts of 0
+    and 3e9 ms wait; C-g through `EdPool.interruptible` rejects with quit and cancels.
+  - The server's `workspace/configuration` answered by its handler, one answered after an await (a string id),
+    `window/showDocument`, `constructor` and `__proto__` answered -32601, a throwing handler -32603;
+    notifications delivered in order.
+  - Params of a BigInt and of a cycle: that request rejects alone, before anything is sent, and the other
+    still waiting is answered; a notify of a BigInt throws; handlers returning a cycle and a BigInt answered
+    -32603; the connection open and onClose not called.
+  - `close`: both waiting requests rejected, the timer of one cleared (no cancel sent after), onClose once, a
+    request after it rejected and a notify thrown; a bad Content-Length closing the connection; a write
+    returning false and one throwing closing it; a notification that closes the connection, and a -32601 reply
+    whose write fails, with more messages in the same chunk: nothing of the rest delivered or handled.
+  - A stand-in server as a real child through `Ed.proc.spawn` (test/fake-proc.mts), its own framing over bytes,
+    writing three bytes at a time so characters are cut across the client's chunks: three requests at once
+    (one a 50-times-repeated text of astral and two- and three-byte characters with CRLFs and
+    `Content-Length: 1` in it), the server asking `workspace/configuration` and reporting the answer in a
+    notification, `exit` ending it with 0 and no child left.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
