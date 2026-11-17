@@ -9,15 +9,25 @@
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
       edwind = pkgs.callPackage ./nix/edwind.nix { };
+      # The tree-sitter grammars and query files of the languages scm/prog.scm declares (nix/grammars.nix).
+      edwin-grammars = pkgs.callPackage ./nix/grammars.nix { };
       # Edwin on the desktop: edwin (terminal and window), edwin --daemon, edwinclient and edwind (nix/edwin.nix).
-      edwin = pkgs.callPackage ./nix/edwin.nix { inherit edwind; };
+      edwin = pkgs.callPackage ./nix/edwin.nix {
+        inherit edwind;
+        grammars = edwin-grammars;
+      };
       # The frame runtime a web page serves (nix/web.nix): Workbench serves it at /edwin/.
       edwin-web = pkgs.callPackage ./nix/web.nix { };
     in
     {
       packages.${system} = {
         default = edwin;
-        inherit edwin edwind edwin-web;
+        inherit
+          edwin
+          edwind
+          edwin-web
+          edwin-grammars
+          ;
       };
 
       # nix run .#edwin -- FILE (-g for a window, --daemon for the user's edwind); nix run .#edwind -- --config F.

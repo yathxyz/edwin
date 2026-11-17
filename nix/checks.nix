@@ -171,6 +171,19 @@ in
   # modes it derives from, nearest first) and gc, gcc and M-; using it.
   edwin-prog = suite "prog" [ "prog.test.mts" ];
 
+  # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm
+  # declares; each library loads with py-tree-sitter, exports its symbol and has an ABI version tree-sitter
+  # accepts, and each query file the manifest lists is there, has patterns and compiles against its grammar.
+  edwin-grammars =
+    pkgs.runCommand "edwin-grammars-check"
+      { nativeBuildInputs = [ (pkgs.python3.withPackages (ps: [ ps.tree-sitter ])) ]; }
+      ''
+        python3 -W error ${../test/grammars.py} ${
+          self.packages.${pkgs.stdenv.hostPlatform.system}.edwin-grammars
+        } ${../scm/prog.scm}
+        touch $out
+      '';
+
   # The error list (scm/next-error.scm) in the headless runtime: a list seeded across files stepped through with
   # M-g n, M-g p, :cn, :cp and :cc; its ends and refusals, clamping, columns in the unit the producer counts in (characters, display cells, UTF-16), and a visit that waits for edwind.
   edwin-next-error = suite "next-error" [ "next-error.test.mts" ];

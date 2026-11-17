@@ -11,6 +11,8 @@
   makeFontsConf,
   dejavu_fonts,
   edwind,
+  # The tree-sitter grammars and query files (nix/grammars.nix), linked as share/edwin/grammars.
+  grammars,
   coreutils,
   util-linux,
   # The window's tests: a virtual X display, keys and the mouse sent to it, its properties read, and Mesa's
@@ -240,6 +242,8 @@ rustPlatform.buildRustPackage {
     ln -s edwin $out/bin/edwinclient
     ln -s ${daemon} $out/bin/edwin-daemon
     ln -s ${edwind}/bin/edwind $out/bin/edwind
+    mkdir -p $out/share/edwin
+    ln -s ${grammars} $out/share/edwin/grammars
   '';
   # After the fixup's RPATH shrinking, which would drop libraries no DT_NEEDED names.
   postFixup = ''
@@ -255,6 +259,7 @@ rustPlatform.buildRustPackage {
     env -u EDWIN_SOCKET -u XDG_RUNTIME_DIR $out/bin/edwinclient a.txt 2>"$TMPDIR/err" || status=$?
     test "$status" = 1
     grep -q '^edwinclient: no edwind to attach to' "$TMPDIR/err"
+    test -f $out/share/edwin/grammars/grammars.json
     runHook postInstallCheck
   '';
 

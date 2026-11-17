@@ -4233,6 +4233,57 @@ file but Scheme, Org and Markdown opened in fundamental-mode.
   `edwin-typecheck`, `edit-lockdown` (6), `edit-security` (21), `nix build .#edwin` (unit 17, `tests/gui.rs` 5 and 1
   ignored, `tests/terminal.rs` 32) and `nix flake check` (exit 0).
 
+## Tree-sitter grammars from Nix (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-grammar-bundle`). The tree-sitter grammars and query files
+of the languages Edwin declares, built by Nix into one directory the edwin package points at, for the tree-sitter
+packages after it (lang-syntax-native loads them; highlighting, imenu and indentation use the queries). Nothing in
+Edwin reads the directory yet.
+
+- **`nix/grammars.nix`** (new; the flake's `packages.edwin-grammars`): for each of the 22 modes `scm/prog.scm`
+  declares, one directory NAME holding `parser.so` (a link to the grammar's library) and `queries/KIND.scm` for the
+  standard tree-sitter query kinds the grammar has (highlights, injections, locals, tags), and `grammars.json`,
+  mapping each NAME to its `mode`, `symbol` (`tree_sitter_NAME`, the library's entry point), `queries` (the kinds
+  there) and `source`. The names: rust, nix, go, c, cpp, java, c_sharp, python, javascript, typescript, tsx, json,
+  yaml, toml, bash (sh-mode), hcl (terraform-mode), gdscript, just, meson, nasm, nginx, typst. Every one has
+  highlights; the queries add up to 893 patterns. The bundle references the 22 grammar outputs (18 MB) and through
+  them only the C libraries they link (glibc, libgcc); the query files are copies, so no source tree stays referenced.
+- **Where the grammars and queries come from (decision 8; the plan states no default, so the simplest):**
+  nixpkgs' `tree-sitter.builtGrammars`, with each grammar's own queries, composed in the order its
+  `tree-sitter.json` lists them, each file followed by a newline: C++'s highlights are C's then its own;
+  JavaScript's are its highlights, highlights-jsx and highlights-params; TypeScript's and TSX's are their own then
+  JavaScript's (TSX with highlights-jsx between), their injections JavaScript's, as tree-sitter-typescript's
+  `tree-sitter.json` names them from its node_modules. Just's queries are `queries-src`, which its
+  `tree-sitter.json` names (`queries/just` is the copy for Neovim); Typst's are `queries/typst`. HCL and GDScript ship
+  no queries: both are Helix's (nixpkgs' `helix`), the grammar at the revision Helix pins
+  (`helix.passthru.tree-sitter-grammars`) and the queries from its `runtime/queries`, since Helix's GDScript
+  highlights do not compile against nixpkgs' GDScript grammar (6.1.0). Helix's queries use only tree-sitter's own
+  predicates (`#match?`, `#set!`), unlike Neovim's (`#lua-match?`). Terraform files use the HCL grammar.
+- **Loaded with dlopen from the store, not linked in (decision 8):** each library stays its own file, so a grammar
+  can change without rebuilding the program, and the program's build stays as it is. Handed to lang-syntax-native as a
+  requirement: load grammars only from this directory, never from a path a buffer or the user's Scheme gives.
+- **The package points at it:** `nix/edwin.nix` takes `grammars` and links it as `share/edwin/grammars`, a path the
+  program can find from its own executable; the install check tests that `grammars.json` is there. edwind and
+  `edwin-web` do not get it: the server never parses, and web frames keep the TypeScript lexers.
+- **Differences from Emacs:** the capture names are the grammars' own (and Helix's for HCL and GDScript), not the
+  treesit font-lock features of the Emacs modes; lang-syntax-highlight maps them to faces. Query kinds that are an
+  editor's own dialect (folds, indents, textobjects) are left out: the indent packages add Edwin's indent queries.
+  Left out too: Nix's `locals.scm`, which upstream keeps as comments only (no patterns), and Helix's GDScript
+  `tags.scm`, which compiles against neither GDScript revision (`Impossible pattern`).
+- **Not in it:** loading or parsing (lang-syntax-native), faces, indentation, the Lisp languages (Scheme, Emacs
+  Lisp, Clojure: lang-lisp-modes), nushell (not declared), tree-sitter in web frames.
+- **Checked by**, on ex44: `nix build .#edwin-grammars` (22 directories, each a `parser.so` and its `queries/`, and
+  `grammars.json`); `nix build .#checks.x86_64-linux.edwin-grammars` (new; `test/grammars.py` with nixpkgs'
+  py-tree-sitter 0.25.2, warnings as errors): every mode `scm/prog.scm` declares has exactly one grammar and the
+  bundle holds nothing else; each `parser.so` loads, exports its symbol and gives a language of an ABI version
+  py-tree-sitter 0.25.2 accepts (13 to 15, the same range as nixpkgs' tree-sitter 0.26.11, whose
+  `TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION` is 13; the Nix grammar is ABI 13, the rest 14 or 15); each query file `grammars.json` lists is there, alone in `queries/`, has patterns
+  and compiles against its grammar. It failed on the first bundle, on Nix's empty `locals.scm` and Helix's GDScript
+  `tags.scm`, both since left out; Helix's GDScript highlights fail against nixpkgs' GDScript grammar, which is why
+  the bundle takes Helix's. Also passed: `nix build .#edwin` (its install
+  check finds `share/edwin/grammars/grammars.json`; unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35)
+  and `nix flake check` (exit 0, all checks passed).
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block
