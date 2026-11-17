@@ -1930,11 +1930,13 @@ jj views) starts its children here, never through `Ed.proc` directly.
     -c diff.NAME.command=`: `status -v` prints a diff with the textconv driver and takes no `--no-textconv`. git
     then fails to run the empty program, so `status -v` in such a repository exits 128 and runs nothing. Drivers
     and signature programs are read first, in one `git config --show-scope --null --get-regexp
-    '^(filter|merge|diff|gpg)\.'` (a driver's key has three parts; merge's and diff's own settings,
+    '^(filter|merge|diff|gpg|mailmap)\.'` (a driver's key has three parts; merge's and diff's own settings,
     merge.conflictStyle, diff.external, two).
+  - the repository's own `mailmap.file` (added by git-blame) set back to the user's (`-c mailmap.file=`, empty
+    when the user names none): blame and log read that file, and a FIFO there hangs them.
   - after the subcommand: diff, show, log, diff-tree, diff-files and diff-index get `--no-ext-diff --no-textconv
     --submodule=short`; status, diff, diff-files and diff-index `--ignore-submodules=dirty`; blame and annotate
-    `--no-textconv`. A read with no such switch (`reflog -p`, `range-diff`) is held by the emptied diff drivers:
+    `--no-textconv --no-ignore-revs-file` (the second added by git-blame). A read with no such switch (`reflog -p`, `range-diff`) is held by the emptied diff drivers:
     git fails to run the empty textconv program (`reflog -p` exits 128) rather than run the repository's.
     The submodule switches keep a read out of a submodule's work tree: the git that would look there runs under
     the submodule's own configuration, and its filter drivers are not the superproject's to empty. On the command
@@ -3745,6 +3747,121 @@ stages a hunk, commits, rebases interactively, resolves a conflict, then runs jj
     written, `Rebase done`, the log, the file and a clean status; `jj git init --colocate`, SPC g g shows jj's
     log, `c` describes the working-copy change and `s` squashes it into its parent with the two descriptions
     written as one, read back with jj's own template.
+
+## Blame (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-blame`, on git-rebase-todo): a blame view beside the
+file with a jump to the commit, shown as a side buffer (no overlays); proved by edwin-vc on a fixture history.
+
+- **`git-blame`** (`SPC g b` in Normal and Visual state; M-x)
+  blames the file the current buffer visits. Its repository is git's around the file (`Vc.repo(dir, 'git')`,
+  so a colocated jj workspace is blamed through git and a jj workspace with no git work tree is not in one).
+  The blame goes to `*git-blame: PATH*` (`git-blame-mode`, `Git Blame`; PATH the file's from the repository's
+  root, `<2>` when another repository's file of that path has one), read-only and in Motion state, one buffer
+  a file (by its true name). It takes the window the file was in and the file moves to a new window on its right, so the blame
+  reads as the file's left margin; a blame already shown is selected where it is, with no other window.
+- **In the background.** The command ends at once with `(blaming PATH…)` as the buffer's text; the blame is
+  drawn when git has printed it, point then on the line point was on in the file. A read started later (`g r`,
+  `SPC g b` again) wins over one still running, and a read whose buffer was killed draws nothing; while `g r`
+  reads, the lines shown stay and `(blaming PATH…)` is a last line under them.
+- **The lines.** Line N is the file's line N: its commit's hash (8 characters, `git-hash`), its author (a column
+  as wide as the longest author, at most 20, a longer name cut with `…`) and its author date's day in the
+  author's own zone (`YYYY-MM-DD`), both `git-dim`, then the line's text as it is, a TAB kept and any other
+  control character shown as `?` (a CRLF line's `\r` left out). A line changed and not committed (git's zero
+  hash) shows `00000000 Not committed yet`, the hash dim and no day. An empty file says `(the file is empty)`.
+- **What is blamed** is the text of the buffer that visits the file when it has changes not saved (`git blame
+  --porcelain --contents - -- PATH`, the text on git's standard input), so those lines are the buffer's; else
+  the file on disk (`git blame --porcelain -- PATH`), its bytes as committed: a buffer's text decoded from a
+  file that is not UTF-8 holds U+FFFD where the file has another byte, and would no longer match the commit.
+  Two cases are left: a changed buffer of a file that is not UTF-8 has its lines with such a byte blamed `Not
+  committed yet`, and an unchanged buffer whose file changed on disk since it was read is blamed as the disk
+  has it. The file is taken by its true name (every symbolic link followed): its repository, PATH, the blame
+  buffer it has and the buffer whose text is blamed are the true file's, so a name through a link selects the
+  blame the file already has (a link to a file outside the repository blames it in its own repository, or is
+  refused outside one). PATH comes after `--`, as one argument. The output is read whole (lossily: it is only shown), each line's group
+  `OID ORIG FINAL [COUNT]`, a commit's author, author-time and author-tz from the first group that names it, the
+  text after its TAB; lines must come in order, one each, or the blame is refused as `git blame printed a line
+  Edwin cannot read`.
+- **Keys** in `git-blame-mode` (scm/evil.scm): RET (`git-status-visit`) on a committed line shows its commit in
+  the revision buffer (`*git-revision: NAME*`, the git-log-show one, its header, message and diff, `q` back to
+  the blame), on a line not committed visits the file at that line; `g r` (`git-status-refresh`) blames again,
+  point kept on its line number; `q` leaves; SPC is the leader, as in the other git buffers.
+- **Failures** say git's reason: `Not blamed: no such path 'u.txt' in HEAD (see *vc-process*)` for a file git
+  does not track, `Not blamed: ` and git's reason with no commit yet; the buffer then says `(the blame could not
+  be read: see *vc-process*)` after the lines it had. Refused before any child: a buffer that visits no file
+  (`NAME visits no file: git-blame blames a file's lines`; a git view buffer, the blame's own, counts as one),
+  a file not in a git repository (`Not in a git repository: DIR`), the image's replay.
+- **The repository's configuration.** blame is one of the runner's reads: the hooks off, no pager, no
+  fsmonitor, `--no-textconv`, the repository's filter drivers emptied (git runs the clean filter on the
+  `--contents` text and on a work-tree file it blames; plain `git blame --contents -` was checked to run it), its alias of
+  the name emptied. `--porcelain` fixes the shape against the user's blame.date, blame.showEmail and colouring.
+  Two settings that name a file git reads are not followed, as plain `git blame` follows them: a repository
+  could point them at any file the user can read (or a FIFO, which hangs git until the 2 minutes are up).
+  `blame.ignoreRevsFile`: git dies naming that file's first line that is no commit, which Edwin would show in
+  *Messages* and *vc-process*; every value is dropped, the user's too, with `--no-ignore-revs-file` after
+  `blame` (and `annotate`), since an empty `-c blame.ignoreRevsFile=` drops none of those before it (checked
+  with git 2.56). `mailmap.file`: a repository's is set back to the user's (none when they name none) for every
+  read, as its signature programs are; the in-tree `.mailmap`, which git reads without following a link, stays.
+- **Choices**, each reversible:
+  - `SPC g b`: Edwin's own key, free in the `SPC g` group; the Emacs config binds no blame key.
+  - A side buffer with the line's text after the annotation (as vc-annotate draws it) rather than a margin kept
+    in step with the file's window: the two windows scroll on their own. Every line names its commit, where
+    magit shows a heading for each run of lines of one commit.
+  - A buffer with unsaved changes is blamed as shown, those lines not committed yet; nothing is saved or asked.
+  - The day is the author's (author-time in author-tz), as `git blame` prints it, not the committer's.
+  - No `blame.ignoreRevsFile`, the user's own included (a relative name there is a file the repository holds,
+    which may be a link to any file): every line is blamed on the commit that last changed it. Emacs's
+    vc-annotate and magit-blame honour it through plain git.
+  - The whole blame is read once, bounded by the runner's 16 MiB and 2 minutes; no incremental drawing. The
+    porcelain output repeats a header of about 55 bytes for every line, so a file of about 270,000 short lines
+    (under 2 MB: 300,000 lines of 7 bytes gave 18.9 MB with git 2.56) already passes 16 MiB: it is not blamed, the buffer saying `(the blame could
+    not be read: see *vc-process*)` and the message `git blame failed (its output was too long): see *vc-process*`.
+- **Not in it:** overlays, a margin or a gutter in the file's own window (the plan's Risks; owner decision 11
+  keeps gutter marks cut); scrolling the two windows together; blaming at another revision or from a line's
+  commit's parent (magit's `b` and `B` in its blame); `-w`, `-M` and `-C`; chunk motions (magit's `n` and `p`);
+  jj's `jj file annotate` (a jj workspace with no git work tree is refused, a colocated one blamed through git);
+  the Emacs keymap (`C-x v g` is unbound).
+- **Image replay and edwind.** `git-blame` checks `Ed.proc.refusal()` before anything, and git runs through
+  `Vc.run`, which refuses under the replay, in a web frame and in edwind.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-vc` (179 passed, 0 failed,
+  test/vc-blame.test.mts's 11 among them), `edwin-typecheck` (passed), `edwin-scheme` (38 passed),
+  `edwin-headless` (21 passed) and `edit-frame` (24 passed), which load scm/evil.scm and scm/init.scm. The four
+  new or changed blame cases were also run against the code before the fix: each failed. With nixpkgs' git in
+  the check (git 2.56 when run by hand), under a throwaway HOME, in throwaway repositories,
+  test/vc-blame.test.mts (11):
+  - A file of five lines in three commits by Alice (2026-01-01 +0000), Bartholomew Longname-Smythe (23:30 on
+    2026-02-03 at -0500, the 4th in UTC) and Carol (00:30 on 2026-03-01 at +0200, February in UTC), its last
+    line a TAB, `five` and a BEL: `SPC g b` from line 3 ends with `(blaming f.txt…)` as the text, the blame in
+    the left window and selected, the file in a new right one; then the five lines whole (`Bartholomew
+    Longnam…`, the days 2026-02-03 and 2026-03-01, `\tfive?`), each line's commit compared with `git blame -l
+    --root`'s, point on line 3, the argv after `blame` exactly `--no-textconv --no-ignore-revs-file --porcelain
+    -- f.txt` (the buffer unchanged: the file on disk) with the hooks off, the faces of the hash, author and day
+    and the plain text.
+  - RET on line 2 shows its commit in `*git-revision: hist*` (`Commit:` its full hash, its message), `q` back.
+  - A line inserted in the file's buffer and not saved, then `g r`: `(blaming f.txt…)` under the old lines,
+    then `00000000 Not committed yet` with a dim hash and no day on line 1, the others shifted, as `git blame
+    --contents -` of the buffer's text says, the argv ending `--contents - -- f.txt`; the file on disk
+    unchanged; point kept on line 2; RET on line 1 visits the file there.
+  - `SPC g b` from the file's window at line 5 with the blame shown: still two windows, one blame buffer, the
+    blame selected, read again, point on line 5.
+  - `sub/-x y.txt`: `*git-blame: sub/-x y.txt*`, `--` then the path as one argument, point on line 2; then its
+    buffer killed and `g r`: the file on disk, no `--contents`.
+  - An untracked file: the message and the buffer's could-not-be-read line; a repository with no commit:
+    `Not blamed: ` and git's reason; an empty file: `(the file is empty)`; a buffer with no file, the blame buffer itself, a file outside any
+    repository and the image's replay each refused with no child started and no window added.
+  - A repository whose own configuration names core.fsmonitor, core.pager, diff.external, a textconv, a
+    filter's clean, smudge and process, and alias.blame, all a marker script, with `* diff=evil filter=evil`:
+    plain `git blame --contents -` runs the clean filter (the control); `SPC g b` and `g r` run none of them.
+    Then its blame.ignoreRevsFile names a file outside it holding `SECRET-TOKEN-123` and its mailmap.file a
+    FIFO: plain `git blame` dies with `invalid object name: SECRET-TOKEN-123`, still does with `-c
+    blame.ignoreRevsFile=`, and hangs on the FIFO alone (the controls); `g r` draws both lines, the token in
+    neither *Messages* nor *vc-process*, `mailmap.file=` on the argv, and runs none of the programs.
+  - A file of the bytes `63 61 66 e9 0a 78 0a` (not UTF-8), committed, its buffer unchanged: `SPC g b` gives
+    both lines its commit (`caf` then U+FFFD shown), as `git blame -l` says; RET on line 1 shows the commit.
+  - With the host's true names those of the file system: the file's buffer killed, then visited through a
+    symbolic link to the repository's directory, `SPC g b` selects `*git-blame: f.txt*`, with no `<2>`, the
+    path `f.txt` after `--`, point on line 2; a line inserted in the linked buffer and `g r` blames its text
+    (`--contents`), line 1 `Not committed yet`.
 
 ## Backends declared in init.scm reach edwind's models (done)
 

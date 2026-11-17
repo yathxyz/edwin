@@ -1496,7 +1496,7 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 
 ;; Dired, as evil-collection binds it.  j and k move; the marks choose what
 ;; D, R and C act on, and with none they act on the file at point.
-(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode git-log-mode git-revision-mode
+(set! evil-motion-state-modes (append evil-motion-state-modes '(dired-mode git-status-mode git-log-mode git-revision-mode git-blame-mode
                                                                 jj-log-mode jj-change-mode)))
 (evil-define-key 'motion 'dired-mode
   "RET" 'dired-find-file
@@ -1615,6 +1615,12 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "C-k" 'git-status-previous-section
   "g j" 'git-status-next-sibling
   "g k" 'git-status-previous-sibling
+  "q" 'quit-window)
+;; The blame buffer (SPC g b): RET on a line shows the commit that last
+;; changed it, g r blames the file again.
+(evil-define-key 'motion 'git-blame-mode
+  "RET" 'git-status-visit
+  "g r" 'git-status-refresh
   "q" 'quit-window)
 
 ;; jj's log (SPC g J, SPC g g in a jj workspace): RET shows the change at

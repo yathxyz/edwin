@@ -161,6 +161,7 @@
   "SPC g g" 'vc-status               ; git's status, a jj workspace's log (vile-vcs-status)
   "SPC g G" 'git-status              ; git's status, a colocated jj workspace's too (vile-magit-status)
   "SPC g J" 'jj-log                  ; jj's log (vile-majutsu-status)
+  "SPC g b" 'git-blame               ; the file's blame beside it (magit-blame)
   "SPC g t" 'git-timemachine         ; desktop only
   "SPC g j" 'gptel-send
   "SPC g l" 'gptel-preset-menu
@@ -229,7 +230,7 @@
 ;; share the same leader keys through their own maps.
 (for-each (lambda (mode) (evil-define-key 'motion mode "SPC" (lookup-key evil-normal-state-map "SPC")))
           '(special-mode brain-agenda-mode brain-mode dired-mode git-status-mode git-log-mode git-revision-mode
-            jj-log-mode jj-change-mode))
+            git-blame-mode jj-log-mode jj-change-mode))
 
 ;; M-s g: grep (rg, grep-command) in the buffer's directory into *grep*, as
 ;; init.el binds it; M-g n steps through the rows, g r in *grep* runs it again.

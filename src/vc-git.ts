@@ -41,7 +41,12 @@
    in the repository (readSeq) is the status header's line and its todo section, and what git stopped on is said.
 
    r i rebases interactively (docs/steps.md, "The interactive rebase"): the frame is git's sequence editor and
-   editor (Vc's edit), the todo a buffer in git-rebase-todo-mode handed back to git. */
+   editor (Vc's edit), the todo a buffer in git-rebase-todo-mode handed back to git.
+
+   SPC g b blames the file the buffer visits (docs/steps.md, "Blame"): `git blame --porcelain` of the file, or of
+   the buffer's text when it has changes not saved, read in the background and drawn as a view of its own in a
+   window beside the file's, a line for each of the file's lines; RET on one shows its commit in the revision
+   buffer. */
 
 (function () {
 'use strict';
@@ -110,8 +115,14 @@ interface GitLogView extends GitViewBase { kind: 'log'; log: GitLog }
 interface GitShowView extends GitViewBase { kind: 'show'; show: GitShow }
 /* a view another module draws (VcView.open): its kind and its model, which only that kind reads */
 interface GitExtView extends GitViewBase { kind: 'ext'; ext: VcViewKind; model: unknown }
-type GitView = GitStatus | GitLogView | GitShowView | GitExtView;
-const VIEW_MODES = new Set(['git-status-mode', 'git-log-mode', 'git-revision-mode']);
+/* A file's blame: FILE (absolute) is PATH in the repository; a line for each of its lines (null until read),
+   whether it is being read, why the last read failed (null: it did not), and the line point goes to once it is
+   read (null: none). */
+interface GitBlameLine { oid: string; author: string; date: string; text: string }
+interface GitBlame { file: string; path: string; lines: GitBlameLine[] | null; reading: boolean; note: string | null; line: number | null }
+interface GitBlameView extends GitViewBase { kind: 'blame'; blame: GitBlame }
+type GitView = GitStatus | GitLogView | GitShowView | GitExtView | GitBlameView;
+const VIEW_MODES = new Set(['git-status-mode', 'git-log-mode', 'git-revision-mode', 'git-blame-mode']);
 
 const viewOf = (b: EdBuffer) => (b.gitView as GitView | undefined) || signal('user-error', 'Not a git buffer') as never;
 const statusOf = (b: EdBuffer) => { const v = b.gitView as GitView | undefined; return v && v.kind === 'status' ? v : signal('user-error', 'Not a git status buffer') as never; };
@@ -535,7 +546,8 @@ function drawShow(v: GitShowView, d: Drawer) {
 }
 
 /* The buffer's lines and rows for view V. */
-const build = (v: GitView) => drawing(v, d => (v.kind === 'status' ? drawStatus(v, d) : v.kind === 'log' ? drawLog(v, d) : v.kind === 'ext' ? v.ext.draw(v.model, v.repo, d) : drawShow(v, d)));
+const build = (v: GitView) => drawing(v, d => (v.kind === 'status' ? drawStatus(v, d) : v.kind === 'log' ? drawLog(v, d) : v.kind === 'ext' ? v.ext.draw(v.model, v.repo, d)
+  : v.kind === 'blame' ? drawBlame(v, d) : drawShow(v, d)));
 
 /* The row of point's line in B, and how far into the line point is. */
 function here(b: EdBuffer): { row: GitRow | undefined; col: number; line: number } {
@@ -561,6 +573,7 @@ function draw(b: EdBuffer, at: string | null = null) {
 async function refresh(b: EdBuffer) {
   const v = viewOf(b);
   if (v.kind === 'log') { void loadLog(b, true).catch(Ed.reportError); return; }   // in the background, as l l reads
+  if (v.kind === 'blame') { void loadBlame(b).catch(Ed.reportError); return; }
   const seq = ++v.seq;
   if (v.kind === 'status') {
     const m = await collect(v.repo);
@@ -788,6 +801,133 @@ function selectedRows(b: EdBuffer, kind: VcViewKind): VcRowExtra[] {
 /* Draw B, a view buffer, from its model again, without reading. */
 const redraw = (b: EdBuffer) => { draw(b); Ed.scheduleRender(); };
 globalThis.VcView = { faces: F, open: openView, model: modelOf, at: atPoint, selected: selectedRows, redraw, refresh, hunks, fileHeading, shown };
+
+/* ---------- blame ---------- */
+/* P's true name, every symbolic link followed; P where the host cannot say. */
+const truename = (p: string) => { try { return Ed.host.files!.truename(p); } catch (e) { return p; } };
+/* The blame buffer's author column: as wide as its longest author, at most this, a longer one cut with … */
+const AUTHOR_MAX = 20;
+/* The day of an author date (seconds since the epoch and git's zone, `+0100`) in the author's own zone, as
+   `YYYY-MM-DD`; ? for a time that is no date. */
+function dayOf(time: string, tz: string): string {
+  const z = /^([+-])(\d\d)(\d\d)$/.exec(tz), off = z ? (z[1] === '-' ? -1 : 1) * (Number(z[2]) * 60 + Number(z[3])) * 60 : 0;
+  const d = new Date((Number(time) + off) * 1000);
+  return /^\d+$/.test(time) && !isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : '?'.padEnd(10);
+}
+const isZero = (oid: string) => /^0+$/.test(oid);
+/* `git blame --porcelain`'s output as a line for each of the file's, in order: each line's group starts with `OID
+   ORIG FINAL [COUNT]`, a commit's headers (author, author-time, author-tz and others) follow only the first time
+   it is named, and the line's text follows a TAB. A line not committed has the zero hash. Anything else is
+   refused. */
+function readBlame(out: string): GitBlameLine[] {
+  const commits = new Map<string, { author: string; time: string; tz: string }>(), lines: GitBlameLine[] = [];
+  const bad = (l: string) => signal('process-error', `git blame printed a line Edwin cannot read: ${shown(l).slice(0, 200)}`);
+  let at: { oid: string; final: number } | null = null;
+  for (const l of out.split('\n')) {
+    if (l.startsWith('\t')) {
+      if (!at || at.final !== lines.length + 1) bad(l);
+      const c = commits.get(at!.oid)!, zero = isZero(at!.oid);
+      lines.push({ oid: at!.oid, author: zero ? 'Not committed yet' : c.author, date: zero ? ''.padEnd(10) : dayOf(c.time, c.tz), text: l.slice(1) });
+      at = null;
+      continue;
+    }
+    const h = /^([0-9a-f]{40,64}) \d+ (\d+)(?: \d+)?$/.exec(l);
+    if (h && !at) {
+      at = { oid: h[1], final: Number(h[2]) };
+      if (!commits.has(h[1])) commits.set(h[1], { author: '', time: '', tz: '' });
+      continue;
+    }
+    const sp = l.indexOf(' '), key = sp < 0 ? l : l.slice(0, sp), c = at && commits.get(at.oid);
+    if (!c) { if (l) bad(l); continue; }
+    if (key === 'author') c.author = l.slice(sp + 1);
+    else if (key === 'author-time') c.time = l.slice(sp + 1);
+    else if (key === 'author-tz') c.tz = l.slice(sp + 1);
+  }
+  if (at) bad(`${at.oid} with no line after it`);
+  return lines;
+}
+
+/* The blame buffer's lines: line K is the file's line K, its commit's short hash, author and day, then its text
+   (a control character but TAB shown as ?). A last line past the file's says when it is being read or could not
+   be, or that the file is empty. */
+function drawBlame(v: GitBlameView, d: Drawer) {
+  const g = v.blame, ls = g.lines || [];
+  const width = Math.min(AUTHOR_MAX, ls.reduce((n, l) => Math.max(n, shown(l.author).length), 0));
+  ls.forEach((l, k) => {
+    const zero = isZero(l.oid), a = shown(l.author), author = a.length > width ? a.slice(0, width - 1) + MARK : a.padEnd(width);
+    const head = `${l.oid.slice(0, 8)} ${author} ${l.date} `, text = l.text.replace(/\r$/, '').replace(/[\u0000-\u0008\u000a-\u001f\u007f]/g, '?');
+    d.line('l' + k, head + text, [[0, 8, zero ? F.DIM : F.HASH], [9, head.length - 1, F.DIM]], { show: zero ? undefined : l.oid, visit: { path: g.path, line: k + 1 } });
+  });
+  const tail = (text: string) => d.line('tail', text, [[0, text.length, F.DIM]]);
+  if (g.reading) tail(`(blaming ${shown(g.path)}…)`);
+  else if (g.note) tail(`(${g.note})`);
+  else if (g.lines && !ls.length) tail('(the file is empty)');
+}
+
+/* Read B's blame, in the background: of the text of the buffer that visits its file when that buffer has
+   changes not saved (`--contents -`, so its lines are the buffer's), else of the file as it is on disk (its
+   bytes, which a buffer's text decoded from a file that is not UTF-8 no longer matches). A read started later
+   wins; a buffer killed meanwhile is left. Point then goes to the line asked for, once. */
+async function loadBlame(b: EdBuffer) {
+  const v = b.gitView as GitBlameView, g = v.blame, seq = ++v.seq;
+  g.reading = true; g.note = null;
+  draw(b); Ed.scheduleRender();
+  try {
+    const src = E.buffers.find(x => x.modified && x.file && !x.gitView && truename(x.file) === g.file);
+    const x = await Vc.run(v.repo, ['blame', '--porcelain', ...(src ? ['--contents', '-'] : []), '--', g.path], { ...READ, lossy: true, input: src ? src.text : undefined });
+    if (x.error || x.timedOut || x.truncated) failed(x, 'git blame');
+    if (x.code !== 0) signal('process-error', `Not blamed: ${reason(x)} (see *vc-process*)`);
+    const lines = readBlame(x.out);
+    if (seq === v.seq) g.lines = lines;
+  } catch (e) {
+    if (seq === v.seq) g.note = 'the blame could not be read: see *vc-process*';
+    throw e;
+  } finally {
+    if (seq === v.seq) {
+      g.reading = false;
+      if (E.buffers.includes(b)) {
+        draw(b);
+        if (g.line !== null && g.lines) {
+          b.pt = lineStartB(b, Math.max(1, Math.min(g.line, g.lines.length)));
+          for (const w of Ed.windowList()) if (w.buffer === b && w !== E.sel) w.pt = b.pt;
+          g.line = null;
+        }
+        Ed.scheduleRender();
+      }
+    }
+  }
+}
+
+/* Blame the file the current buffer visits in `*git-blame: PATH*`, beside it: the blame in the window the file
+   was in and the file in a new window on its right (or the blame selected where it is already shown), point on
+   the line point was on in the file once the blame is read. The command ends at once; the blame is read in the
+   background. The file is taken by its true name, so a name through a symbolic link blames, and selects, the
+   file it names. */
+function openBlame(): false {
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  const src = cur(), visited = src.gitView ? null : src.file;
+  if (!visited || !visited.startsWith('/')) signal('user-error', `${shown(src.name)} visits no file: git-blame blames a file's lines`);
+  const file = truename(visited!);
+  const dir = file!.slice(0, file!.lastIndexOf('/')) || '/', r = Vc.repo(dir, 'git');
+  if (!r) signal('user-error', `Not in a git repository: ${shown(dir)}`);
+  const path = file!.slice(r!.root === '/' ? 1 : r!.root.length + 1), line = lineNoB(src, src.pt);
+  let b = E.buffers.find(x => { const v = x.gitView as GitView | undefined; return !!v && v.kind === 'blame' && v.blame.file === file; });
+  if (!b) {
+    const name = `*git-blame: ${shown(path)}*`;
+    b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
+    b.mode = 'git-blame-mode'; b.readOnly = true; b.evilState = 'motion';
+    b.gitView = { ...newView(r!), kind: 'blame', blame: { file: file!, path, lines: null, reading: false, note: null, line } } as GitBlameView;
+    b.pt = 0;
+  } else (b.gitView as GitBlameView).blame.line = line;
+  const shownIn = Ed.windowFor(b);
+  if (shownIn) Ed.selectWindow(shownIn);
+  else { Ed.splitWindow(E.sel, 'right'); Ed.setWindowBuffer(b); }
+  void loadBlame(b).catch(Ed.reportError);
+  Ed.scheduleRender();
+  return false;
+}
+CMD('git-blame', '', '', 'Blame the file the current buffer visits (SPC g b), beside it: a line for each of its lines with the commit that last changed it, its author and day, read in the background from the file, or from the buffer\'s text when it has changes not saved (a line changed and not committed says so); RET on a line shows its commit, g r reads it again.', () => openBlame());
 
 CMD('git-log', '', '', 'Show the log of HEAD in the current buffer\'s git repository (l l in the status buffer): a commit per line, read a page at a time in the background; RET on a commit shows it, + reads the next page.', () => openLog());
 CMD('git-log-more', '', '', 'Read the log\'s next page (+), in the background.', () => { logOf(cur()); return logMore(); });
@@ -1788,7 +1928,6 @@ interface RebaseEditor { edit: (file: string) => Promise<boolean | null>; aborte
 interface GitTodoPending { done(ok: boolean): void }
 /* the steps whose message git asks the frame for, by their todo verb */
 const EDITED_STEPS = new Set(['reword', 'r', 'squash', 's', 'fixup', 'f']);
-const truename = (p: string) => { try { return Ed.host.files!.truename(p); } catch (e) { return p; } };
 
 /* The frame as git's editors for a rebase in R: only the todo and COMMIT_EDITMSG of R's own git directory (a
    linked worktree's own), by their true names, are taken; any other file is left unanswered. Only `rebase -i`
@@ -1977,11 +2116,12 @@ for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-to
   'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete',
   'git-fetch', 'git-fetch-all', 'git-pull', 'git-push', 'git-push-force', 'git-merge', 'git-merge-abort', 'git-cherry-pick', 'git-cherry-pick-skip',
   'git-cherry-pick-abort', 'git-revert', 'git-revert-skip', 'git-revert-abort', 'git-rebase', 'git-rebase-upstream', 'git-rebase-continue', 'git-rebase-skip',
-  'git-rebase-abort', 'git-rebase-interactive', 'git-rebase-todo-finish', 'git-rebase-todo-abort']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-rebase-abort', 'git-rebase-interactive', 'git-rebase-todo-finish', 'git-rebase-todo-abort', 'git-blame']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-rebase-todo-mode'] = 'Git Rebase Todo';
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 Ed.MODE_NAMES['git-log-mode'] = 'Git Log';
 Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';
+Ed.MODE_NAMES['git-blame-mode'] = 'Git Blame';
 
 /* ---------- faces ---------- */
 interface GitLex { ver: number; from: number; to: number; cls: Uint8Array; names: string[] }

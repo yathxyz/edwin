@@ -249,7 +249,7 @@ test('status of a git and a jj repository, in the root, with the fixed argv and 
     GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_EDITOR: 'false', GIT_SEQUENCE_EDITOR: 'false', GIT_PAGER: 'cat',
     GIT_DIR: null, GIT_WORK_TREE: null, GIT_INDEX_FILE: null, LC_ALL: null, LANGUAGE: null, LC_MESSAGES: 'C',
   });
-  assert.deepEqual(proc.calls[proc.calls.length - 2].argv.slice(-5), ['config', '--show-scope', '--null', '--get-regexp', '^(filter|merge|diff|gpg)\\.'], 'a read asks for the repository\'s drivers and signature programs first');
+  assert.deepEqual(proc.calls[proc.calls.length - 2].argv.slice(-5), ['config', '--show-scope', '--null', '--get-regexp', '^(filter|merge|diff|gpg|mailmap)\\.'], 'a read asks for the repository\'s drivers, signature programs and mailmap first');
   /* diff-producing subcommands get --no-ext-diff and --no-textconv after the subcommand; commit keeps hooks */
   await Vc.run(g, ['diff', '--stat'], T);
   assert.deepEqual(last().argv.slice(last().argv.indexOf('diff')), ['diff', '--no-ext-diff', '--no-textconv', '--submodule=short', '--ignore-submodules=dirty', '--stat']);

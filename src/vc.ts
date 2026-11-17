@@ -173,7 +173,11 @@ const NO_EXT = ['--no-ext-diff', '--no-textconv', '--submodule=short'];
 const GIT_AFTER: Record<string, string[]> = {
   diff: [...NO_EXT, '--ignore-submodules=dirty'], 'diff-files': [...NO_EXT, '--ignore-submodules=dirty'], 'diff-index': [...NO_EXT, '--ignore-submodules=dirty'],
   show: NO_EXT, log: NO_EXT, 'diff-tree': NO_EXT,
-  status: ['--ignore-submodules=dirty'], blame: ['--no-textconv'], annotate: ['--no-textconv'],
+  status: ['--ignore-submodules=dirty'],
+  /* blame.ignoreRevsFile, the repository's or the user's (a name relative to the work tree is a file, or a link,
+     the repository holds), names a file git reads, dying with its first line when that names no commit: all
+     dropped (an empty `-c blame.ignoreRevsFile=` drops none of the others) */
+  blame: ['--no-textconv', '--no-ignore-revs-file'], annotate: ['--no-textconv', '--no-ignore-revs-file'],
   /* a submodule fetched or pushed would run git under the submodule's own configuration, which
      transportOverrides does not read */
   fetch: ['--no-recurse-submodules'], pull: ['--no-recurse-submodules'], push: ['--no-recurse-submodules'],
@@ -321,22 +325,29 @@ function spawnLogged(r: VcRepo, argv: string[], env: Record<string, string | nul
    worktree scopes, the files they include) names runs: each filter and merge driver it declares emptied (git
    then fails to run the empty command, `cannot run : No such file`, and goes on), and each signature program it
    names set back to the user's (global, system or command scope; git's default when they name none). The user's
-   own drivers (git-lfs) stay. */
+   own drivers (git-lfs) stay. The mailmap.file it names, a file blame and log read (a FIFO there hangs them),
+   is set back to the user's too (none when they name none). */
 async function repoOverrides(r: VcRepo): Promise<string[]> {
   const out: string[] = [];
-  const p = spawnLogged(r, ['git', ...GIT_BASE, '-c', 'core.hooksPath=/dev/null', 'config', '--show-scope', '--null', '--get-regexp', '^(filter|merge|diff|gpg)\\.'],
+  const p = spawnLogged(r, ['git', ...GIT_BASE, '-c', 'core.hooksPath=/dev/null', 'config', '--show-scope', '--null', '--get-regexp', '^(filter|merge|diff|gpg|mailmap)\\.'],
     ENV.git, { maxBytes: 1024 * 1024, onOut: s => { out.push(s); } });
   p.closeStdin();
   const x = await p.exit;
   if (x.code === 1) return [];   // none
   if (x.code !== 0 || x.truncated) signal('process-error', `git config could not list ${r.root}'s drivers and signature programs: see ${LOG}`);
   const parts = out.join('').split('\0'), filters = new Set<string>(), merges = new Set<string>(), diffs = new Set<string>(), repoGpg = new Set<string>(), userGpg: Record<string, string> = {};
+  let repoMailmap = false, userMailmap = '';
   for (let i = 0; i + 1 < parts.length; i += 2) {
     const ofRepo = parts[i] === 'local' || parts[i] === 'worktree', nl = parts[i + 1].indexOf('\n');
     const key = nl < 0 ? parts[i + 1] : parts[i + 1].slice(0, nl), format = GPG_KEYS[key];
     if (format) {
       if (ofRepo) repoGpg.add(format);
       else if (nl >= 0) userGpg[format] = parts[i + 1].slice(nl + 1);   // the last one is git's
+      continue;
+    }
+    if (key === 'mailmap.file') {
+      if (ofRepo) repoMailmap = true;
+      else userMailmap = nl < 0 ? '' : parts[i + 1].slice(nl + 1);   // the last one is git's
       continue;
     }
     /* A driver's keys have three parts (filter.NAME.clean, merge.NAME.driver, diff.NAME.textconv); merge's and
@@ -355,6 +366,7 @@ async function repoOverrides(r: VcRepo): Promise<string[]> {
   for (const n of diffs) c.push('-c', `diff.${n}.textconv=`, '-c', `diff.${n}.command=`);
   for (const [key, format] of Object.entries(GPG_KEYS))
     if (repoGpg.has(format)) c.push('-c', `${key}=${userGpg[format] ?? GPG_DEFAULT[format]}`);
+  if (repoMailmap) c.push('-c', `mailmap.file=${userMailmap}`);
   return c;
 }
 
