@@ -84,7 +84,7 @@ const done = async (mark: number) => { await until(() => Ed.getBuffer('*Messages
 /* Answer the minibuffer with TEXT, then wait for the command to end. */
 const answer = async (text: string) => { await ed.type(text + '\n'); await Ed.whenIdle(); };
 /* git's writes run since call N (every subcommand but the reads these commands make). */
-const READS = new Set(['status', 'diff', 'log', 'config', 'rev-parse', 'for-each-ref', 'symbolic-ref', 'check-ref-format', 'ls-tree', 'ls-files']);
+const READS = new Set(['status', 'diff', 'log', 'config', 'rev-parse', 'for-each-ref', 'symbolic-ref', 'check-ref-format', 'ls-tree', 'ls-files', 'grep']);
 const writes = (n: number) => proc.calls.slice(n).map(c => c.argv).filter(a => a[0] === 'git').map(a => a.find((x, i) => i > 0 && !x.startsWith('-') && a[i - 1] !== '-c')!).filter(s => !READS.has(s));
 const argvOf = (sub: string) => { const c = proc.calls.filter(x => x.argv.includes(sub)).at(-1)!.argv; return c.slice(c.indexOf(sub)); };
 

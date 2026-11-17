@@ -174,6 +174,8 @@ const GIT_AFTER: Record<string, string[]> = {
   diff: [...NO_EXT, '--ignore-submodules=dirty'], 'diff-files': [...NO_EXT, '--ignore-submodules=dirty'], 'diff-index': [...NO_EXT, '--ignore-submodules=dirty'],
   show: NO_EXT, log: NO_EXT, 'diff-tree': NO_EXT,
   status: ['--ignore-submodules=dirty'],
+  /* submodule.recurse would grep inside a submodule, by a git under the submodule's own configuration */
+  grep: ['--no-textconv', '--no-recurse-submodules'],
   /* blame.ignoreRevsFile, the repository's or the user's (a name relative to the work tree is a file, or a link,
      the repository holds), names a file git reads, dying with its first line when that names no commit: all
      dropped (an empty `-c blame.ignoreRevsFile=` drops none of the others) */

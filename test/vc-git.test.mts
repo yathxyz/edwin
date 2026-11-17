@@ -150,9 +150,10 @@ test('SPC g g shows the sections of a repository with every kind of change', asy
     '',
   ].join('\n'));
   assert.equal(b.pt, 0, 'point at the start');
-  /* only reads ran: status, diff, log, rev-parse and config, each hardened by the runner */
+  /* only reads ran: status, diff, log, rev-parse, grep (the TODO section, test/vc-todos.test.mts) and config, each
+     hardened by the runner */
   const subs = proc.calls.map(c => c.argv[c.argv.findIndex((a: string, i: number) => i > 0 && !a.startsWith('-') && c.argv[i - 1] !== '-c')]);
-  assert.deepEqual([...new Set(subs)].sort(), ['config', 'diff', 'log', 'rev-parse', 'status']);
+  assert.deepEqual([...new Set(subs)].sort(), ['config', 'diff', 'grep', 'log', 'rev-parse', 'status']);
   for (const c of proc.calls) assert.ok(c.argv.includes('core.hooksPath=/dev/null') && (c.argv.includes('config') || c.argv.includes('--no-lazy-fetch')), c.argv.join(' '));
   /* faces: a section heading, the head's branch and upstream, a label, a hash */
   assert.deepEqual(new Set(classes(b, lineOf('Untracked files (2)'))), new Set(['git-section']));

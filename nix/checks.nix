@@ -333,6 +333,11 @@ in
   # refused with no child; p p; q; a name with a space, a leading - and glob characters as a literal pathspec; a
   # deletion left out; a merge that changed the file; a revision not UTF-8; a symbolic link; refusals with no child
   # started; the repository's own programs not run.
+  # The TODO section (test/vc-todos.test.mts): the TODO: and FIXME: lines of a fixture's tracked files listed last
+  # in the status buffer by one git grep, lines that only look like them, untracked, ignored and binary files and a
+  # submodule left out, under a repository configuration that would change git grep's output or run a program;
+  # RET visiting, s, u and x refused, g j, C-k, TAB and g r; none; more than 200; git grep failing; c c with no
+  # git grep; the image's replay.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -347,7 +352,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts ${edwin}/edwin/test/vc-conflict.test.mts ${edwin}/edwin/test/vc-rebase.test.mts ${edwin}/edwin/test/vc-flow.test.mts ${edwin}/edwin/test/vc-blame.test.mts ${edwin}/edwin/test/vc-timemachine.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts ${edwin}/edwin/test/vc-conflict.test.mts ${edwin}/edwin/test/vc-rebase.test.mts ${edwin}/edwin/test/vc-flow.test.mts ${edwin}/edwin/test/vc-blame.test.mts ${edwin}/edwin/test/vc-timemachine.test.mts ${edwin}/edwin/test/vc-todos.test.mts
         touch $out
       '';
 

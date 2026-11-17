@@ -1936,7 +1936,8 @@ jj views) starts its children here, never through `Ed.proc` directly.
     when the user names none): blame and log read that file, and a FIFO there hangs them.
   - after the subcommand: diff, show, log, diff-tree, diff-files and diff-index get `--no-ext-diff --no-textconv
     --submodule=short`; status, diff, diff-files and diff-index `--ignore-submodules=dirty`; blame and annotate
-    `--no-textconv --no-ignore-revs-file` (the second added by git-blame). A read with no such switch (`reflog -p`, `range-diff`) is held by the emptied diff drivers:
+    `--no-textconv --no-ignore-revs-file` (the second added by git-blame); grep `--no-textconv
+    --no-recurse-submodules` (added by git-todos). A read with no such switch (`reflog -p`, `range-diff`) is held by the emptied diff drivers:
     git fails to run the empty textconv program (`reflog -p` exits 128) rather than run the repository's.
     The submodule switches keep a read out of a submodule's work tree: the git that would look there runs under
     the submodule's own configuration, and its filter drivers are not the superproject's to empty. On the command
@@ -2262,7 +2263,7 @@ and `vile-magit-status`. It is the first user of the runner (git-runner) and of 
   names are strict.
 - **Not in it:** no staging, discarding, committing or any other write (git-stage on); no commit view (RET on a
   commit does nothing: git-log-show); no in-progress merge or rebase header (git-sequencer); no TODO section
-  (git-todos); no numbered fold levels (1-4), no S-TAB cycling, no auto-refresh on save; no ignored files; no
+  (git-todos, "The TODO section", added it since); no numbered fold levels (1-4), no S-TAB cycling, no auto-refresh on save; no ignored files; no
   submodule's own changes (the runner shows a submodule by its commit only).
 - **Image replay and edwind.** The commands check `Ed.proc.refusal()` first, and every child goes through
   `Vc.run`, which refuses under the image's replay, in a web frame and in edwind (no `host.proc`); `Vc.repo` reads
@@ -3969,6 +3970,81 @@ revisions stepped, point kept by line.
     clean, smudge and process, all a marker script, with `* diff=evil filter=evil`: plain `git show --textconv`
     runs the textconv (the control; the others are only present); `SPC g t` and `p` show both revisions as
     committed and run none of them.
+
+## The TODO section (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-todos`, on git-timemachine): the TODO and FIXME lines of
+the tracked files listed in the status buffer, as magit-todos does in the Emacs config; proved by edwin-vc on a
+fixture; `git grep` run once per refresh, for the cost on a large repository.
+
+- **The section.** The status buffer's last section, after the commits, is `TODOs (N)`: a line for each TODO or
+  FIXME line of the tracked files as the work tree has them (a change not staged counts, an untracked or ignored
+  file does not), `KEYWORD PATH:LINE TEXT`, the keyword padded to six columns, TEXT the rest of the line after the
+  keyword's colon, trimmed. They are in git grep's order: by path, then line. RET on one visits the file at that
+  line (`git-status-visit`, as on a hunk's line); s, u and x there say `Nothing to stage here`, `Nothing to
+  unstage here` and `Nothing to discard here` and run nothing; TAB folds the section, kept folded through `g r`;
+  its heading is a section heading as the others are, which `g j`, `g k`, C-j and C-k go to (its lines are no
+  sections: C-j and C-k step over them).
+  No line found: no section. Faces: the heading `git-section`, the keyword `git-hash`, `PATH:LINE` `git-dim`.
+- **What counts.** `TODO` or `FIXME` in capitals, not inside a word (`XTODO:`, `TODOS:` are not), then an
+  optional `(...)`, then a colon: `TODO: x`, `FIXME(ann): x`. A keyword with no colon (`TODO later`) is not
+  listed, nor `todo:`. Binary files are left out (`-I`).
+- **One git grep per read.** Each time the status buffer is read (SPC g g, `g r`, the refresh after a stage,
+  commit or any other write), `git grep --no-color --no-column --full-name -n -z -I -E -e '(^|[^[:alnum:]_])(TODO|FIXME)(\([^)]*\))?:'
+  --` runs beside status and the two diffs, so on a large repository its time overlaps theirs. The commit
+  commands' own read of what is staged (c c, c a, c w, c f) runs none. The runner adds
+  `--no-textconv --no-recurse-submodules` after `grep` (src/vc.ts, GIT_AFTER), and, grep being a read, its usual
+  hardening: hooks off, no pager, no fsmonitor, no lazy fetch, the repository's filter and diff drivers emptied.
+  The switches fix the output's shape against the repository's or the user's grep.patternType (`-E` beats it),
+  grep.column, grep.lineNumber, grep.fullName and color.grep; `-z` keeps a name unquoted, so a name with a space,
+  a leading `-`, brackets or a newline is read whole (the output is read as `PATH NUL LINE NUL TEXT LF` in turn)
+  and visited by its true name, a control character in it shown as `?`.
+- **Bounds.** At most 200 lines listed, the rest counted as `(K more)` under them and in the heading's N; a
+  line's text cut at 200 characters with `…`. git grep is given 10 s and 16 MiB. When it takes longer, prints
+  more, fails, or prints a line Edwin cannot read, the section is one line, `TODOs (the TODOs are not listed:
+  REASON)`, `git grep failed (exit 128): see *vc-process*` and the like; the rest of the status is shown as
+  ever. Exit 1 (no line found) is no failure.
+- **Choices**, each reversible:
+  - TODO and FIXME alone, as the plan asks, not magit-todos' whole hl-todo list (HACK, XXX, NOTE, ...); the colon
+    as magit-todos' default keyword suffix has it, so prose that names a keyword is not listed.
+  - One flat list in git grep's order, unfolded: magit-todos can group by keyword and file, and folds the
+    section past 10 items.
+  - Tracked files only, the work tree's text (git grep's default), so an untracked or ignored file (a build's
+    output) never fills the section.
+  - The section at the bottom (magit-todos' default place).
+  - Read with the rest of the status, every time: no cache, no asynchronous second pass; the 10 s bound keeps a
+    huge repository's status from waiting longer on it.
+- **Not in it:** other keywords; a TODO section in jj's log; a jump to the next TODO from a file; org's
+  `* TODO` headings without a colon; the submodules' own TODOs; magit-todos' branch-diff mode (TODOs added on the
+  branch alone).
+- **Image replay and edwind.** git grep runs through `Vc.run`, which refuses under the image's replay, in a web
+  frame and in edwind; the status commands check `Ed.proc.refusal()` first.
+- **Changed elsewhere:** test/vc-git.test.mts, test/vc-history.test.mts, test/vc-sequencer.test.mts and
+  test/vc-stage.test.mts count `grep` among the reads a status refresh runs.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-vc` (196 passed, 0 failed,
+  test/vc-todos.test.mts's 7 among them), `edwin-typecheck` (passed), `nix build .#edwin` (passed). With
+  nixpkgs' git in the check, under a throwaway HOME, in throwaway repositories, test/vc-todos.test.mts (7):
+  - A fixture whose tracked `a.c` holds `// TODO: tidy this`, `// FIXME(me): broken`, `/* FIXME: */`, a TODO of
+    250 characters and the lines `// TODO without a colon`, `// TODOS: not the keyword`, `// XTODO: not a word`
+    and `// todo: lower case`; `crlf.txt` with CRLF endings; `new\nline.txt`; `sp ace/-lead [x].txt`; a binary
+    file, an untracked and an ignored file and a submodule each with a TODO; the repository's grep.patternType
+    perl, grep.column, grep.lineNumber false, grep.fullName false, color.grep and color.ui always,
+    submodule.recurse, and core.fsmonitor, a textconv and a filter that would leave a marker file. `SPC g g`:
+    `TODOs (7)` last, its seven lines exactly (the long one cut at 200 with `…`, the newline shown as `?`), one
+    git grep with the argv above after `grep` and the runner's hardening before it, run in the root, no marker.
+  - RET visits `sp ace/-lead [x].txt` at line 2 and `new\nline.txt` by its true name; `s` on a TODO line says
+    `Nothing to stage here`, `u` and `x` the same, the index's bytes and the buffer unchanged; `g j` from
+    `Recent commits` and C-k from the first TODO line go to `TODOs (7)`; TAB folds, `g r` keeps it folded, TAB
+    unfolds.
+  - A TODO added to a file not staged and a file deleted from the work tree: `g r` runs one git grep and lists
+    the new line, not the deleted file's.
+  - A repository whose only file says `TODO without a colon`: the status with no section and no note. 205 TODOs:
+    `TODOs (205)`, the first 200, `(5 more)`.
+  - grep.threads set to a value git refuses: the status shown, its last section `TODOs (the TODOs are not
+    listed: git grep failed (exit 128): see *vc-process*)`.
+  - A TODO staged: the status lists it; `c c` reads the status for the commit, opens the message buffer and
+    starts no git grep.
+  - `vc-status` under the image's replay refused, no git grep started.
 
 ## Backends declared in init.scm reach edwind's models (done)
 

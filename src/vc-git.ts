@@ -50,7 +50,10 @@
 
    SPC g t is the time machine (docs/steps.md, "The time machine"): the file's committed revisions, read with
    `git log --follow`, one at a time in a buffer of the file's mode with git-timemachine-mode on, p and n stepping,
-   point kept on its line. */
+   point kept on its line.
+
+   The status buffer's last section lists the TODO: and FIXME: lines of the tracked files (docs/steps.md, "The
+   TODO section"), read with one `git grep` each time the status is read. */
 
 (function () {
 'use strict';
@@ -81,7 +84,13 @@ interface GitModel {
   stashes: GitStash[]; unpulled: GitCommit[]; unpushed: GitCommit[]; recent: GitCommit[];
   /* the merge, cherry-pick, revert or rebase in progress (null: none) */
   seq: GitSeq | null;
+  /* the TODO and FIXME lines of the tracked files (at most TODO_MAX), how many there are, and why they are not
+     listed (null: they are) */
+  todos: GitMark[]; todoCount: number; todoNote: string | null;
 }
+/* A TODO or FIXME line: its file (from the repository's root), its line (from 1), its keyword, and its text after
+   the keyword's colon. */
+interface GitMark { path: string; line: number; keyword: string; text: string }
 /* A merge, cherry-pick, revert or rebase in progress, or a `git am` (shown, never gone on with here), as git's files
    say it: the commit it stopped at (a merge's: the commit merged; null between two steps); for a rebase, the branch
    rebased (null: a detached HEAD), the commit it goes onto, the commit the branch was at, and the step it is at of
@@ -278,17 +287,54 @@ async function readSeq(r: VcRepo): Promise<GitSeq | null> {
   return null;
 }
 
-/* Everything the buffer shows, read from REPO. */
-async function collect(r: VcRepo): Promise<GitModel> {
+/* The TODO section: a keyword as a word, then an optional `(...)`, then a colon (magit-todos' default suffix), as
+   git grep's extended expression and as JavaScript's, which takes the line apart. At most TODO_MAX lines are
+   listed, each cut at TODO_COLS characters; git grep is given TODO_TIME. */
+const TODO_ERE = '(^|[^[:alnum:]_])(TODO|FIXME)(\\([^)]*\\))?:';
+const TODO_RE = /(?:^|[^A-Za-z0-9_])(TODO|FIXME)(?:\([^)]*\))?:/;
+const TODO_MAX = 200, TODO_COLS = 200, TODO_TIME = 10000;
+/* The TODO and FIXME lines of R's tracked files as their work tree has them, by `git grep`: the switches fix the
+   output's shape against the user's and the repository's grep.patternType, grep.column, grep.lineNumber,
+   grep.fullName and color.grep; the runner adds --no-textconv and --no-recurse-submodules. Binary files are left
+   out (-I). Exit 1 is no line found. Read lossily (it is only shown); a failure is the section's note, never the
+   status's. */
+async function readTodos(r: VcRepo): Promise<{ todos: GitMark[]; count: number; note: string | null }> {
+  const x = await Vc.run(r, ['grep', '--no-color', '--no-column', '--full-name', '-n', '-z', '-I', '-E', '-e', TODO_ERE, '--'],
+    { timeout: TODO_TIME, maxBytes: MAX_BYTES, lossy: true });
+  const none = (note: string) => ({ todos: [], count: 0, note: 'the TODOs are not listed: ' + note });
+  if (x.timedOut) return none(`git grep took longer than ${TODO_TIME / 1000} s`);
+  if (x.truncated) return none(`git grep printed more than ${MAX_BYTES / 1024 / 1024} MiB`);
+  if (x.code === 1 && !x.error) return { todos: [], count: 0, note: null };
+  if (x.code !== 0 || x.error) return none(`git grep failed (${x.error || `exit ${x.code}`}): see *vc-process*`);
+  /* `PATH NUL LINE NUL TEXT LF`, one after another: a path may hold a newline, the text cannot */
+  const todos: GitMark[] = [], out = x.out;
+  let count = 0;
+  for (let at = 0; at < out.length;) {
+    const a = out.indexOf('\0', at), b = a < 0 ? -1 : out.indexOf('\0', a + 1), e = b < 0 ? -1 : out.indexOf('\n', b + 1);
+    if (e < 0 || !/^[1-9]\d*$/.test(out.slice(a + 1, b))) return none('git grep printed a line Edwin cannot read');
+    const path = out.slice(at, a), line = +out.slice(a + 1, b), text = out.slice(b + 1, e).replace(/\r$/, ''), m = TODO_RE.exec(text);
+    at = e + 1;
+    if (!m) continue;   // the two expressions agree on what they take; a line JavaScript does not take is left out
+    if (++count > TODO_MAX) continue;
+    const rest = text.slice(m.index + m[0].length).trim();
+    todos.push({ path, line, keyword: m[1], text: rest.length > TODO_COLS ? rest.slice(0, TODO_COLS) + MARK : rest });
+  }
+  return { todos, count, note: null };
+}
+
+/* Everything the buffer shows, read from REPO; the TODO lines only with TODOS (a status drawn, not a commit's
+   check of what is staged). */
+async function collect(r: VcRepo, todos = false): Promise<GitModel> {
   const m: GitModel = {
     branch: null, oid: null, head: null, upstream: null, gone: false, merge: null, ahead: 0, behind: 0,
     untracked: [], unmerged: [], unstaged: [], staged: [], diffs: { unstaged: [], staged: [] }, notes: { unstaged: null, staged: null },
-    stashes: [], unpulled: [], unpushed: [], recent: [], seq: null,
+    stashes: [], unpulled: [], unpushed: [], recent: [], seq: null, todos: [], todoCount: 0, todoNote: null,
   };
-  const [st, un, ix] = await Promise.all([
+  const [st, un, ix, todo] = await Promise.all([
     Vc.run(r, ['status', '--porcelain=v2', '--branch', '--show-stash', '-z', '--untracked-files=normal', '--find-renames'], { ...READ, lossy: true }),
-    readDiff(r, ['diff']), readDiff(r, ['diff', '--cached']),
+    readDiff(r, ['diff']), readDiff(r, ['diff', '--cached']), todos ? readTodos(r) : { todos: [], count: 0, note: null },
   ]);
+  m.todos = todo.todos; m.todoCount = todo.count; m.todoNote = todo.note;
   if (st.code !== 0 || st.truncated) failed(st, 'git status');
   const stashes = readStatus(m, st.out);
   m.diffs = { unstaged: un.files, staged: ix.files };
@@ -504,6 +550,18 @@ function drawStatus(v: GitStatus, d: Drawer) {
     const heading = 'Recent commits';
     if (m.recent.length) { section('recent', heading, [[0, heading.length, F.SECTION]], true, () => m.recent.forEach(c => commitLine(c))); line('end:recent', ''); }
   }
+  /* the TODO and FIXME lines: `KEYWORD PATH:LINE TEXT`, RET visiting the line; or why they are not listed */
+  if (m.todoNote) {
+    const t = `TODOs (${m.todoNote})`;
+    line('todos', t, [[0, 5, F.SECTION], [6, t.length, F.DIM]]);
+    line('end:todos', '');
+  } else top_('todos', 'TODOs', m.todoCount, () => {
+    for (const t of m.todos) {
+      const kw = t.keyword.padEnd(6), at = `${shown(t.path)}:${t.line}`, text = `${kw}${at}${t.text ? ' ' + shown(t.text) : ''}`;
+      line(`L${t.line}:${t.path}`, text, [[0, t.keyword.length, F.HASH], [kw.length, kw.length + at.length, F.DIM]], { visit: { path: t.path, line: t.line } });
+    }
+    if (m.todoCount > m.todos.length) { const more = `(${m.todoCount - m.todos.length} more)`; line('more', more, [[0, more.length, F.DIM]]); }
+  });
 }
 
 /* The log buffer's lines: a heading, a line per commit (its short hash, the refs at it, its subject, then its
@@ -580,7 +638,7 @@ async function refresh(b: EdBuffer) {
   if (v.kind === 'blame') { void loadBlame(b).catch(Ed.reportError); return; }
   const seq = ++v.seq;
   if (v.kind === 'status') {
-    const m = await collect(v.repo);
+    const m = await collect(v.repo, true);
     if (seq !== v.seq || !E.buffers.includes(b)) return;
     v.model = m;
   } else if (v.kind === 'ext') {
@@ -625,7 +683,7 @@ async function status(only?: 'git'): Promise<false> {
   if (r!.vcs === 'jj') return VcJj.log(r!);
   let b = buffersOf(r!, 'status')[0];
   if (b) { await refresh(b); Ed.setWindowBuffer(b); Ed.scheduleRender(); return false; }
-  const m = await collect(r!);
+  const m = await collect(r!, true);
   b = buffersOf(r!, 'status')[0];   // opened while this one read
   if (b) await refresh(b);
   else { b = viewBuffer(r!, 'status', 'git-status-mode', () => ({ ...newView(r!), kind: 'status', model: m })); draw(b); }
@@ -634,7 +692,7 @@ async function status(only?: 'git'): Promise<false> {
 }
 
 CMD('vc-status', '', '', 'Show the status of the repository the current buffer is in (SPC g g): git\'s status buffer, or a jj workspace\'s log (jj-log).', () => status());
-CMD('git-status', '', '', 'Show the status of the git repository the current buffer is in, a colocated jj workspace\'s too (SPC g G): the head, the untracked files, the unstaged and staged changes with their hunks, the stashes and the commits not yet pushed or pulled.', () => status('git'));
+CMD('git-status', '', '', 'Show the status of the git repository the current buffer is in, a colocated jj workspace\'s too (SPC g G): the head, the untracked files, the unstaged and staged changes with their hunks, the stashes, the commits not yet pushed or pulled and the TODO and FIXME lines of the tracked files.', () => status('git'));
 CMD('git-status-refresh', '', '', 'Read the repository again (g r), keeping the folds and point; in a log buffer, its log from HEAD again, as many commits as it shows, in the background.', async () => { await refresh(cur()); return false; });
 
 /* The innermost section point's line is in. */
