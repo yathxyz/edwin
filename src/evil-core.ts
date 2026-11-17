@@ -746,7 +746,7 @@ D('evil--find-char', 'COUNT CHAR FORWARD TILL &optional REPEAT', 'Position of th
 const PAIRS: Record<string, string | undefined> = { '(': ')', '[': ']', '{': '}' }, CLOSE: Record<string, string | undefined> = { ')': '(', ']': '[', '}': '{' };
 function matchBracket(b: EdBuffer, k: number): number | null {
   const t = b.rope, ch = t.at(k)!;
-  if (Ed.isLisp(b) && (ch === '(' || ch === ')')) { const cls = Ed.lexOf(b)!; if (cls[k] === Ed.C.PAR) { const o = Ed.matchParen(t, cls, k); return o === null || o === undefined ? null : o; } }
+  if (Ed.isLisp(b) && (ch === '(' || ch === ')' || ch === '[' || ch === ']')) { const cls = Ed.lexOf(b)!; if (cls[k] === Ed.C.PAR) { const o = Ed.matchParen(t, cls, k); return o === null || o === undefined ? null : o; } }
   if (PAIRS[ch]) { let d = 0; for (let j = k; j < t.length; j++) { if (t.at(j) === ch) d++; else if (t.at(j) === PAIRS[ch] && --d === 0) return j; } return null; }
   if (CLOSE[ch]) { let d = 0; for (let j = k; j >= 0; j--) { if (t.at(j) === ch) d++; else if (t.at(j) === CLOSE[ch] && --d === 0) return j; } return null; }
   return null;
@@ -783,7 +783,10 @@ D('evil-select-region', 'BEG END', 'Select the text from BEG to END in character
 });
 D('evil--jump-item', '', 'Position of the bracket matching the first bracket at or after point on this line, or nil.', () => {
   const b = cur(), t = b.rope, le = eol(t, b.pt);
-  let k = b.pt; while (k < le && !PAIRS[t.at(k)!] && !CLOSE[t.at(k)!]) k++;
+  /* In Lisp a ( ) [ or ] in a string, a comment or a character literal (#\() is not a bracket. */
+  const cls = Ed.isLisp(b) ? Ed.lexOf(b)! : null;
+  const bracket = (k: number) => { const c = t.at(k)!; return (PAIRS[c] || CLOSE[c]) && (!cls || c === '{' || c === '}' || cls[k] === Ed.C.PAR); };
+  let k = b.pt; while (k < le && !bracket(k)) k++;
   if (k >= le) return false;
   const m = matchBracket(b, k); return m === null ? false : m + 1;
 });

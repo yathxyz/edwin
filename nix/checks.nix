@@ -178,6 +178,12 @@ in
     touch $out
   '';
 
+  # Structural editing in Lisp buffers, the fix track of the Emacs-to-Edwin plan, each case of the audit by its id:
+  # the lexer's character literals (#\( #\" #\;), [ ] as brackets and #; over the next datum, through %, C-M-f/b/u,
+  # = and show-paren; the incremental lex against a whole one after random edits, the worker pool's lexer against
+  # the main thread's, gg=G on scm/evil.scm moving no line for its character literals, and the 2 ms keystroke budget.
+  edwin-structural = suite "structural" [ "structural.test.mts" ];
+
   # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm
   # declares; each library loads with py-tree-sitter, exports its symbol and has an ABI version tree-sitter
   # accepts, and each query file the manifest lists is there, has patterns and compiles against its grammar.

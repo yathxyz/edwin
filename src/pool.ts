@@ -1423,7 +1423,7 @@ const C = Ed.C, lex = Ed.lex, markDocstrings = Ed.markDocstrings;
 function parenDepths(t: string, cls: Uint8Array | number[], from: number, to: number, depth: number, d?: Uint8Array) {
   const ret = arguments.length > 5;
   d = d || new Uint8Array(t.length);
-  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 40) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
+  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 40 || t.charCodeAt(k) === 91) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
   return ret ? depth : d;
 }
 define('lex', (a, ctx) => { const t = ctx.buffer(a.id), cls = markDocstrings(t, lex(t)); return { cls, d: parenDepths(t, cls, 0, t.length, 0) }; });

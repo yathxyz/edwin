@@ -914,7 +914,7 @@ function diffSpan(a: string, b: string) {
 function parenDepths(t: EdText, cls: ArrayLike<number>, from: number, to: number, depth: number, d?: Uint8Array): number | Uint8Array {
   const ret = arguments.length > 5;
   d = d || new Uint8Array(t.length);
-  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 40) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
+  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 40 || t.charCodeAt(k) === 91) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
   return ret ? depth : d;
 }
 
@@ -927,10 +927,24 @@ const KEYWORDS = new Set(('define define-syntax define-macro define-record-type 
   'evil-define-text-object evil-define-key evil-ex-define-cmd define-key global-set-key').split(' '));
 const isWS = (c: string) => c === ' ' || c === '\n' || c === '\t' || c === '\r' || c === '\f';
 const isDelim = (c: string | undefined) => c === undefined || isWS(c) || '()";\'`,[]'.includes(c);
+/* Brackets are ( ) and [ ] (Emacs Lisp vectors, R7RS's other parentheses), one depth for both kinds as in
+   Emacs's scan-lists. A datum comment #; comments out the next datum: PEND holds the start and the depth of
+   each #; still waiting, and the first datum that ends at that depth (an atom, a string, a character literal,
+   a list once closed) is classed CMT back to its #;, so #;#;a b comments out both, as R7RS reads it. A close
+   bracket before any datum drops the #; waiting inside the list it closes. A #; whose datum the text ends
+   inside (an open list) comments out the rest, as an unterminated string or #| does: the classes before an
+   edit then never depend on a bracket after it, so lexOf can restart at a column-0 paren. A slice that ends
+   with a #; still waiting is dirty, and lexOf lexes on to the end. A # prefix right before a bracket (#( #u8(
+   #s() belongs to the list's datum, as the reader takes #( whole, and is no datum of its own. The CMT fills are
+   made at the end, latest first, each up to the lowest start filled so far, so a run of #; fills each character
+   once. */
 function lex(t: string, info?: EcLexInfo) {
-  const n = t.length, cls = new Uint8Array(n);
+  const n = t.length, cls = new Uint8Array(n), pend: number[] = [], fills: number[] = [];
   if (info) info.dirty = false;
-  let i = 0, quoted = false, afterParen = false, defName = false;
+  let i = 0, quoted = false, afterParen = false, defName = false, depth = 0;
+  const datum = () => {
+    if (pend.length && pend[pend.length - 1] === depth) { pend.pop(); fills.push(pend.pop()!, i); quoted = false; defName = false; }
+  };
   while (i < n) {
     const ch = t[i];
     if (ch === ';') { while (i < n && t[i] !== '\n') cls[i++] = C.CMT; continue; }
@@ -938,18 +952,28 @@ function lex(t: string, info?: EcLexInfo) {
       cls[i++] = C.STR;
       while (i < n && t[i] !== '"') { if (t[i] === '\\' && i + 1 < n) cls[i++] = C.STR; cls[i++] = C.STR; }
       if (i < n) cls[i++] = C.STR; else if (info) info.dirty = true;
-      quoted = false; afterParen = false; continue;
+      quoted = false; afterParen = false; datum(); continue;
     }
-    if (ch === '(' || ch === ')') { if (ch === '(' && i > 0 && t[i - 1] === '\n') { quoted = false; defName = false; } cls[i++] = C.PAR; afterParen = ch === '('; continue; }
+    if (ch === '(' || ch === '[') { if (ch === '(' && i > 0 && t[i - 1] === '\n') { quoted = false; defName = false; } cls[i++] = C.PAR; afterParen = ch === '('; depth++; continue; }
+    if (ch === ')' || ch === ']') {
+      cls[i++] = C.PAR; afterParen = false; depth--;
+      while (pend.length && pend[pend.length - 1] > depth) pend.length -= 2;
+      datum(); continue;
+    }
     if (isWS(ch)) { i++; continue; }
     if (ch === "'" || ch === '`' || ch === ',' || ch === '@' || (ch === '#' && t[i + 1] === "'")) {
       cls[i++] = C.QUO; if (ch === '#') cls[i++] = C.QUO; quoted = ch !== ',' && ch !== '@'; afterParen = false; continue;
     }
+    /* A character literal: the character after #\ belongs to it whatever it is (#\( #\" #\;), and a name
+       (#\space, #\x41) runs on to the next delimiter only when that first character is not one. */
     if (ch === '#' && t[i + 1] === '\\') {
-      cls[i++] = C.NUM; cls[i++] = C.NUM; while (i < n && !isDelim(t[i])) cls[i++] = C.NUM; afterParen = false; continue;
+      let j = i + 2;
+      if (j < n && !isDelim(t[j++])) while (j < n && !isDelim(t[j])) j++;
+      cls.fill(C.NUM, i, j); i = j; quoted = false; afterParen = false; datum(); continue;
     }
-    if (ch === '#' && (t[i + 1] === 't' || t[i + 1] === 'f') && isDelim(t[i + 2])) { cls[i++] = C.CONST; cls[i++] = C.CONST; afterParen = false; continue; }
-    if (ch === '#' && t[i + 1] === ':') { let j = i + 2; while (j < n && !isDelim(t[j])) j++; for (let m = i; m < j; m++) cls[m] = C.CONST; i = j; afterParen = false; continue; }
+    if (ch === '#' && t[i + 1] === ';') { cls[i] = cls[i + 1] = C.CMT; pend.push(i, depth); i += 2; continue; }
+    if (ch === '#' && (t[i + 1] === 't' || t[i + 1] === 'f') && isDelim(t[i + 2])) { cls[i++] = C.CONST; cls[i++] = C.CONST; afterParen = false; datum(); continue; }
+    if (ch === '#' && t[i + 1] === ':') { let j = i + 2; while (j < n && !isDelim(t[j])) j++; for (let m = i; m < j; m++) cls[m] = C.CONST; i = j; afterParen = false; datum(); continue; }
     if (ch === '#' && t[i + 1] === '|') { let j = t.indexOf('|#', i + 2); if (j < 0 && info) info.dirty = true; j = j < 0 ? n : j + 2; for (let m = i; m < j; m++) cls[m] = C.CMT; i = j; continue; }
     let j = i; while (j < n && !isDelim(t[j])) { if (t[j] === '\\') j++; j++; }
     if (j === i) { i++; continue; }
@@ -960,8 +984,12 @@ function lex(t: string, info?: EcLexInfo) {
     else if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) k = C.NUM;
     else if (afterParen && KEYWORDS.has(tok)) { k = C.KW; defName = /^(define|define-syntax|define-macro|define-record-type|define-command|evil-define-(motion|operator|text-object|command))$/.test(tok); }
     for (let m = i; m < Math.min(j, n); m++) cls[m] = k;
-    i = j; quoted = false; afterParen = false;
+    i = Math.min(j, n); afterParen = false;
+    if (tok[0] === '#' && (t[i] === '(' || t[i] === '[')) continue;
+    quoted = false; datum();
   }
+  if (pend.length) { fills.push(pend[0], n); if (info) info.dirty = true; }
+  for (let f = fills.length - 2, low = n; f >= 0; f -= 2) if (fills[f] < low) { cls.fill(C.CMT, fills[f], Math.min(fills[f + 1], low)); low = fills[f]; }
   return cls;
 }
 /* Docstrings: a string that directly follows the argument list of a defun/defmacro.
@@ -986,15 +1014,15 @@ function markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, 
 const inStr = (c: number) => c === C.STR || c === C.DOC;
 function forwardSexp(t: EdText, cls: ArrayLike<number>, p: number) {
   const n = t.length;
-  for (;;) { while (p < n && isWS(t.charAt(p))) p++; if (p < n && cls[p] === C.CMT) { while (p < n && t.charCodeAt(p) !== 10) p++; continue; } break; }
+  for (;;) { while (p < n && isWS(t.charAt(p))) p++; if (p < n && cls[p] === C.CMT) { while (p < n && cls[p] === C.CMT) p++; continue; } break; }
   while (p < n && cls[p] === C.QUO) p++;
   if (p >= n) return null;
   const c = t.charAt(p);
   if (c === '"' && inStr(cls[p])) { let k = p + 1; while (k < n && t.charCodeAt(k) !== 34) { if (t.charCodeAt(k) === 92) k++; k++; } return Math.min(n, k + 1); }
-  if (c === ')' && cls[p] === C.PAR) return null;
-  if (c === '(' && cls[p] === C.PAR) {
+  if ((c === ')' || c === ']') && cls[p] === C.PAR) return null;
+  if (cls[p] === C.PAR) {
     let d = 0;
-    for (; p < n; p++) if (cls[p] === C.PAR) { if (t.charCodeAt(p) === 40) d++; else if (--d === 0) return p + 1; }
+    for (; p < n; p++) if (cls[p] === C.PAR) { const k = t.charCodeAt(p); if (k === 40 || k === 91) d++; else if (--d === 0) return p + 1; }
     return null;
   }
   while (p < n && (cls[p] === C.NUM || !isDelim(t.charAt(p)))) p++;
@@ -1005,10 +1033,10 @@ function backwardSexp(t: EdText, cls: ArrayLike<number>, p: number) {
   if (p <= 0) return null;
   const c = t.charAt(p - 1);
   if (inStr(cls[p - 1])) { p--; while (p > 0 && inStr(cls[p - 1])) p--; }
-  else if (c === '(' && cls[p - 1] === C.PAR) return null;
-  else if (c === ')' && cls[p - 1] === C.PAR) {
+  else if ((c === '(' || c === '[') && cls[p - 1] === C.PAR) return null;
+  else if (cls[p - 1] === C.PAR) {
     let d = 0;
-    for (p = p - 1; p >= 0; p--) if (cls[p] === C.PAR) { if (t.charCodeAt(p) === 41) d++; else if (--d === 0) break; }
+    for (p = p - 1; p >= 0; p--) if (cls[p] === C.PAR) { const k = t.charCodeAt(p); if (k === 41 || k === 93) d++; else if (--d === 0) break; }
     if (p < 0) return null;
   } else {
     while (p > 0 && (cls[p - 1] === C.NUM || !isDelim(t.charAt(p - 1)))) p--;
@@ -1016,9 +1044,9 @@ function backwardSexp(t: EdText, cls: ArrayLike<number>, p: number) {
   while (p > 0 && cls[p - 1] === C.QUO) p--;
   return p;
 }
-function upList(t: EdText, cls: ArrayLike<number>, p: number) { let d = 0; for (let k = p - 1; k >= 0; k--) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 41) d++; else if (d-- === 0) return k; } return null; }
+function upList(t: EdText, cls: ArrayLike<number>, p: number) { let d = 0; for (let k = p - 1; k >= 0; k--) if (cls[k] === C.PAR) { const c = t.charCodeAt(k); if (c === 41 || c === 93) d++; else if (d-- === 0) return k; } return null; }
 function matchParen(t: EdText, cls: ArrayLike<number>, k: number) {
-  if (t.charAt(k) === '(') { const e = forwardSexp(t, cls, k); return e === null ? null : e - 1; }
+  if (t.charAt(k) === '(' || t.charAt(k) === '[') { const e = forwardSexp(t, cls, k); return e === null ? null : e - 1; }
   return backwardSexp(t, cls, k + 1);
 }
 
@@ -1877,11 +1905,18 @@ function computeFlags(b: EdBuffer, opts: EcRenderOpts, from: number, to: number,
 function parenFlags(b: EdBuffer, cls: ArrayLike<number>, flags: Uint8Array, onChar: boolean | undefined, from: number, to: number) {
   const t = b.rope, p = b.pt, c0 = t.charAt(p);
   let k = -1;
-  if (onChar && (c0 === '(' || c0 === ')') && cls[p] === C.PAR) k = p;
-  else if (p > 0 && t.charAt(p - 1) === ')' && cls[p - 1] === C.PAR) k = p - 1;
-  else if (c0 === '(' && cls[p] === C.PAR) k = p;
+  /* ( ) and [ ] are counted as one kind (matchParen), so a pair that does not match, ( with ], shows as a
+     mismatch, as show-paren-mode does. */
+  const close = (c: string) => c === ')' || c === ']';
+  if (onChar && cls[p] === C.PAR) k = p;
+  else if (p > 0 && close(t.charAt(p - 1)) && cls[p - 1] === C.PAR) k = p - 1;
+  else if (!close(c0) && cls[p] === C.PAR) k = p;
   const set = (i: number, f: number) => { if (i >= from && i < to) flags[i - from] |= f; };
-  if (k >= 0) { const o = matchParen(t, cls, k); if (o === null || o === undefined) set(k, FLAG.MISMATCH); else { set(k, FLAG.PAREN); set(o, FLAG.PAREN); } }
+  if (k >= 0) {
+    const o = matchParen(t, cls, k);
+    if (o === null || o === undefined || (t.charAt(Math.min(k, o)) === '(') !== (t.charAt(Math.max(k, o)) === ')')) set(k, FLAG.MISMATCH);
+    else { set(k, FLAG.PAREN); set(o, FLAG.PAREN); }
+  }
 }
 function spanClass(cls: string, f: number) {
   let cn = cls;

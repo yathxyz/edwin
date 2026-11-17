@@ -4630,6 +4630,71 @@ indent was its mode's (`define-language :indent`) and the user's.
   names and directories; no escapes, ranges or malformed brackets): no difference. Nothing here runs in edwind's editing of a served buffer: edwind loads the file, and its hooks run only on a
   frame's visit and `save-buffer`.
 
+## The Lisp lexer: character literals, [ ] and #; (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-lexer`): B1, B4 and B5 of the structural-editing audit
+(`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). Before, after `#\` the lexer took
+nothing when the character was a delimiter, so `#\(` opened a list and `#\"` a string that ran on through the
+file; `[ ]` were not brackets; and `#;` was a one-character token followed by a line comment. Every reader of the
+lexer's classes was off: `%`, `C-M-f/b/u/k`, `=` and newline indentation, highlighting and the rainbow depths,
+`eval-last-sexp`.
+
+- **Character literals** (`lex`, `src/editor-core.ts`): the character after `#\` belongs to the literal whatever
+  it is (`#\(` `#\)` `#\[` `#\]` `#\"` `#\;` `#\'` `` #\` `` `#\,` `#\ ` `#\\`); a name (`#\space`, `#\x41`) runs on
+  to the next delimiter only when that first character is not one, so `#\(x` is `#\(` and then `x`. Emacs Lisp's
+  `?\(` was already read whole, by the token's backslash escape.
+- **`[ ]` are brackets** (class PAR) in Scheme and Emacs Lisp buffers: `forwardSexp`, `backwardSexp`, `upList`,
+  `matchParen`, the rainbow depths (`parenDepths`, and its copy in `src/pool.ts` for the main-thread lex job),
+  `%` (`evil--jump-item`, `matchBracket` in `src/evil-core.ts`) and show-paren. Both kinds share one depth, as
+  Emacs's `scan-lists` counts them, so `C-M-f` crosses `(a ]`; show-paren marks such a pair as a mismatch
+  (`parenFlags`), as `show-paren-mode` does. `{ }` stay outside the Lisp lexer.
+- **`#;` comments out the next datum**: an atom, a string, a character literal, a quoted datum, a whole list or
+  a vector (`#(`, and likewise `#u8(` and `#s(`: a `#` prefix right before a bracket belongs to the list, as
+  Edwin's reader takes `#(` whole), over any number of lines and with comments between; the `#;` and its datum
+  are class CMT, so they are drawn as a comment and the motions skip them. `#;#;a b` comments out both `a` and
+  `b`, as R7RS and Racket read it; a run of `#;` lexes in linear time (each character is classed CMT once).
+  A close bracket before any datum (`(a #;)`) ends the list and comments nothing more. A `#;` whose datum the
+  text ends inside (`#;(` unclosed) comments out the rest of the buffer, as an unterminated string or `#|` does.
+- **`%` in Lisp** looks for the next bracket on the line among the real ones: a `( ) [ ]` in a string, a comment
+  or a character literal is passed over, so `%` on `(list #\( x)` goes to the closing `)`.
+- **`C-M-f` over comments** skips a run of comment characters, not to the end of the line: `#| ) |#` and
+  `#;(b)` in the middle of a line are crossed and the motion goes on to the next datum on it.
+- **Choices:**
+  - The incremental lex (`lexOf`) still restarts at a column-0 paren the old lex classed as a paren. A datum
+    comment keeps that sound: a `#;` still waiting at the end of the re-lexed slice marks the slice dirty and the
+    lex runs on to the end, as for an unterminated string, and an unclosed datum is a comment to the end of the
+    text, so the classes before an edit never depend on a bracket after it. The random-edit test found the second
+    rule: without it, closing a list far below a `#;(` changed the classes above the edit.
+  - Exact parity: Emacs's scheme-mode gives `{ }` paren syntax as well; Edwin leaves them as plain characters
+    (no audit case uses them, and Emacs Lisp does not).
+- **gg=G on `scm/evil.scm`** (1,750 lines at 561495a, the base of this package): with the old lexer it changed
+  1,009 lines; with every delimiter character literal made `#\a` (which both lexers read the same) 303. With
+  this lexer it changes the same 303 lines as the neutral copy, line for line, so none of the 716 lines the
+  literals moved is touched: the 303 are the indenter's own differences from the file's style (the Scheme `if`
+  rule and forms with a body on the head line, B3, se-indent's), 10 of which the cascade had hidden. (The audit
+  counted 606 cascade lines at 73d9f03; the file has grown since.) In `scm/babel.scm` the changed lines go from
+  211 to 25; the other `scm/*.scm` files are unchanged.
+- **Not in it:** the text objects, `ds` and `cs` and expreg still scan raw characters (B2, B9, B10:
+  `di(-charlit`, `di(-charlit-close`, `di(-elisp-charlit`, `ds(-charlit`, se-pair-objects); the indenter's rules
+  (B3, se-indent), though `=G-elisp-vector` now passes, since a line inside a vector lines up under its first
+  element once `[` opens a list; `%` in non-Lisp buffers (B11, `pct-nix-string-brace`, se-match-nonlisp). The
+  other failing audit cases on these keys are not lexer defects and stay open: `CMb` (`C-M-b` from a Normal-state
+  cursor on a `)`), `d-CMf` (`C-M-f` as an operator's motion), `[(` and `pct-clj-string` (`.clj` is not a Lisp
+  buffer yet, lang-lisp-modes). A docstring is found from the nearest column-0 paren before an edit, so one whose
+  form starts above a column-0 paren inside it can come back as a plain string after an edit; that predates this
+  package (it showed on the old lexer under the same random edits) and only changes its colour.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`, the new check and
+  `test/structural.test.mts` (36): the audit's 12 cases that failed at 73d9f03 (`pct-charlit-open`, `-close`,
+  `-dquote`, `-semicolon`, `pct-datum-comment`, `CMf-charlit`, `CMf-list-with-charlit`, `CMf-elisp-vector`,
+  `CMf-scheme-brackets`, `=G-charlit`, `=G-elisp-vector`, `=G-idem-evil-surround-pairs`) and 15 that passed and
+  still must, driven by keys; the classes and motions for every delimiter literal, `[ ]`, the `#;` forms (vectors, a run of 200,000 in linear time, an unclosed one
+  too) and `#| |#`; `%` passing over a bracket in a literal, a string and a comment; show-paren on matched and mismatched pairs in a model frame; the incremental lex against a whole lex
+  after 750 seeded random edits of `#;`, `#\(`, `#\;`, `#(`, brackets, strings and comments (with the depths); the worker
+  pool's lex (`Ed.LEX_SOURCE` in a thread) and the main thread's against `Ed.lexOf` on `scm/evil.scm`; gg=G on
+  `scm/evil.scm` against its neutral copy; and a keystroke in a 10,000-line Scheme buffer re-lexed in 2 ms
+  (median of 50; about 0.15 ms in the check). On the old lexer (561495a) 18 or 19 of the 36 fail: the 2 ms keystroke test is timing-dependent there, passing at a median of 1.6 ms in a full-suite run and failing at about 4.4 ms in two runs of it alone. Also passed: `edwin-typecheck`,
+  `edwin-headless` (21), `edwin-display` (20), `edwin-scheme` (38), `edwin-pool` (21), `edwin-prog` (41), `edwin-proc` (13), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36). `edwin-markdown` (20), `edit-frame` (24), `edwin-syntax` (6), and `nix flake check` (exit 0; two earlier runs each failed one timing test only, `edwin-proc`'s direnv timeout and `edwin-markdown`'s 2 ms font-lock budget at 2.5 ms; `edwin-proc` passed in the second run and `edwin-markdown` alone after it). The whole audit corpus (219 cases) run headless on the old lexer and on this lexer as it was before the `#(` fix (b388475): exactly the 12 cases above go from failing to passing, and no other case changes its result or its output; not rerun since.
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a
