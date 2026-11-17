@@ -1029,7 +1029,7 @@ references drawn as their resolved text (a DOM pass in `markdown.ts`), screen-li
 visual-line-mode falls back to buffer lines in a model frame), and per-character pixel metrics for proportional
 fonts (DT2 decides).
 
-## Step AS1: agent sessions in Edwin (in progress)
+## Step AS1: agent sessions in Edwin (done)
 
 Issue #7: Edwin is the complete text interface to the hub's agents and to the sessions harnesses report.
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
@@ -1037,12 +1037,12 @@ Edwin never starts or speaks ACP to an agent itself.
 
 **State of the work.** All four implementation stages are complete: HTTP/SSE and the live shared list;
 structured replay/folds; durable drafts and global permission/elicitation/steering; resource attachments,
-named reuse and multi-session sends. Draft text/resources survive kill and restart, and successful
-destinations are durably removed before partial-failure retry. The affected eight suites passed 108 checks;
-all three TypeScript projects passed. Served-frame smoke exercised folds, file/line, diff, recall, off-point
-and tail streaming, reconnect metadata and a 3 MiB live output without reconnect. Desktop embedded-source
-lookup cold boot and real Chromium console keys/visuals also pass: list RET, tool TAB, draft editing,
-exact preview and send/replay. Both packaged loaders include the three modules. Final full-suite gate next.
+named reuse and multi-session sends. All 33 agent checks and all three TypeScript projects pass; the offline
+native Cargo run passed 31 tests with one existing ignored test. Actual Chromium and the newly built
+terminal exercised list/transcript opening, folds, draft editing, exact preview and send/replay.
+The complete Node run finished 458/460: two unchanged debugger source-path checks fail in this worktree's
+`agent-sessions` directory, then all seven debugger checks pass in the documented packaged `edwin/` layout.
+The verification record below preserves this exception; no unrelated debugger change or full rerun hides it.
 
 ### Requirements
 
@@ -1081,10 +1081,11 @@ History-only reconnects now include current structural metadata. Large live chan
 sequenced chunks, yielding between them rather than overflowing a frame's outbound queue. A pre-kill
 buffer hook can veto teardown when draft persistence fails, preserving the acknowledged journal.
 
-Measured on this shared machine: 8,192 events / 25,141,248 content bytes replayed and rendered in 83.46 ms
-in the pure journal fold (5 visible folded lines); a real daemon + frame opened a 1,201-event,
-3,706,679-byte transcript with 1,200 tool folds in 490.5 ms. The latter retained its point away from the
-tail as another event arrived. These are observed runs, not latency guarantees.
+Measured in the final full run on this shared machine: 8,192 events / 25,141,248 content bytes replayed and
+rendered in 18.36 ms in the pure journal fold (5 visible folded lines). A real daemon + frame opened
+1,201 events with 1,200 tool folds in 165.3 ms; after live updates including 3 MiB of raw tool output it held
+1,205 events / 9,998,712 rendered bytes without reconnect. Off-tail point stayed put and no undo group
+was added. These are observed runs, not latency guarantees.
 
 Drafts are ordinary editable daemon buffers backed by private state files, with an adjacent durable record of
 destinations and content blocks. Sending flushes pending edits and takes the same snapshot as preview. Named
@@ -1137,6 +1138,43 @@ canonical name without creating a frame; it does not pretend to be a file argume
 | AS-C7 | Config route works on a supporting stub and says unsupported on an older hub. Read-only observed records reject steering. File/line and diff actions use structural data. |
 | AS-C8 | A distinctive stub token, including one echoed maliciously in an error/record, appears in no buffer, wire result or daemon log; opening its file (including a symlink) is refused. |
 | AS-C9 | Run affected Node suites/type checks at stage boundaries; exercise an actual model frame's displayed folded surface and keys. At the end run the repository's full available suite once and quote its final lines. No external network or real credentials. |
+
+### Verification record
+
+- Node v24.21.0; all three `tsc -p` projects (`.`, `src`, `native/js`) passed without diagnostics.
+- `NODE_PATH=tools/node_modules node --test --test-concurrency=2 test/*.test.mts` ran all 36 files with
+  default OT_RUNS=10000 and CRASH_ROUNDS=1000. Final lines:
+
+  ```text
+  ℹ tests 460
+  ℹ suites 1
+  ℹ pass 458
+  ℹ fail 2
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 1128004.130386
+  ```
+
+  The failures are `debug.test.mts` R4.50/R4.48: `server/debug.mts:343` requires `/edwin/` in a captured
+  absolute source path, but this worktree is `/home/yanni/proj/edwin-wt/agent-sessions`.
+  `nix/checks.nix:30` documents its check tree's required `edwin` name. Copying the same sources and running
+  only `node --test test/debug.test.mts` in `/tmp/edwin-agent-gate.*/edwin` gave 7 passed, 0 failed.
+  No debugger code/test was changed. An earlier full-run attempt was cancelled before completion when
+  the console/native embedding omissions were found; the numbers above are the completed run after fixes.
+- Offline `cargo test --offline --locked --jobs 1 -- --test-threads=1` on the same sources in a private
+  `/tmp` tree used the exact Cargo.lock vendor catalogue and V8 archive already in the Nix store.
+  Results: 4 unit + 3 GUI-harness + 24 terminal tests passed; the existing GUI latency test is ignored.
+  The GUI harness retains its prerequisite-dependent early returns; no physical native GUI window was
+  exercised. A separate actual `edwinclient -t` smoke displayed/unfolded a journal and edited, previewed
+  and sent a draft into a new immutable prompt heading.
+- `node --stack-size=6900 test/scheme-bench.mts`: shadow overhead 6.3% (limit 10%),
+  generator/direct 1.19x (limit 3x), `ok`.
+- Real Chromium loaded the shipped console scripts, displayed the list and folded transcript, and used
+  RET, TAB, typing, C-c C-p and C-c C-c. The new heading appeared after the send. Model-frame checks also
+  cover file/line, diffs, recall, off-point/tail streaming, reconnect metadata and bounded live publication.
+- All HTTP traffic was loopback stubs; no real credentials or external network. Throwaway scripts and
+  private build/fixture directories were removed. Nix system/module evaluation and deployment were not run.
 
 ### Open decisions and API constraints
 
