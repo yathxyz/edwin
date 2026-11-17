@@ -261,3 +261,85 @@ test('optional enumerated elicitation fields may be skipped rather than silently
   await pending('beta', request.seq); await keys('C-c a !'); await mini('accept'); await mini('Skip field');
   assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/elicitation')).at(-1)!.body!.response, { action: 'accept', content: {} });
 });
+
+test('AS-C10: host RPC addresses a transcript without selecting it: folds, structural prompts, recall, quick text and steering', async () => {
+  await frame();
+  const sid = 'phone-controls', text = '# Inside the prompt\n```\n## Prompt #999\n```\nKeep this immutable';
+  hub.add(sid, [
+    { seq: 1, e: 'prompt', prompt: [{ type: 'text', text }] },
+    { seq: 2, e: 'update', update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thought body\n' } } },
+    { seq: 3, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'phone-tool', title: 'Read source', status: 'completed', rawOutput: 'retained output\n' } },
+    { seq: 4, e: 'prompt', prompt: [{ type: 'text', text: 'second prompt' }] },
+  ]);
+  const rpc = Ed.agentSessions.rpc, id = await rpc('agent-session-open', [sid]), b = await Ed.sync.open(id);
+  const spans = b.meta.locals.agentSession.spans, first = spans[0], tool = spans[2], last = spans[3];
+  show(Ed.getBufferCreate('*Phone host elsewhere*')); const other = E.current, point = other.pt;
+  assert.equal(b.folds.length, 2);
+  const toggled = await rpc('agent-session-toggle-fold', [id, tool.start]);
+  assert.equal(toggled.bufferId, id); assert.equal(toggled.point, b.pt); assert.equal(toggled.folds.length, 1);
+  assert.equal((await rpc('agent-session-open-folds', [id])).folds.length, 0);
+  b.pt = first.foldStart + 1;
+  const closed = await rpc('agent-session-close-folds', [id]);
+  assert.equal(closed.folds.length, 4); assert.equal(closed.point, first.start);
+  assert.equal((await rpc('agent-session-next-prompt', [id, first.start])).point, last.start);
+  assert.equal((await rpc('agent-session-previous-prompt', [id, last.start])).point, first.start);
+  await assert.rejects(rpc('agent-session-previous-prompt', [id, first.start]), /No previous prompt/);
+  for (const pos of [-1, 1.5, b.rope.length + 1]) await assert.rejects(rpc('agent-session-toggle-fold', [id, pos]), /zero-based/);
+  const recalled = await rpc('agent-session-recall', [sid, first.seq]);
+  assert.deepEqual((await rpc('agent-prompt-preview', [recalled])).blocks, [{ type: 'text', text }]);
+  const drafts = E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length;
+  await rpc('agent-session-prompt', [sid, { text: 'Sent from an ordinary host text field' }]);
+  await until(() => b.text.includes('Sent from an ordinary host text field'), 'host quick prompt replay');
+  assert.equal(E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length, drafts, 'host text does not create a draft buffer');
+  assert.deepEqual(hub.journals.get(sid)!.at(-1)!.prompt, [{ type: 'text', text: 'Sent from an ordinary host text field' }]);
+  await rpc('agent-session-cancel', [sid]);
+  await rpc('agent-session-mode', [sid, { modeId: 'auto' }]);
+  await rpc('agent-session-config', [sid, { id: 'model', value: 'large' }]);
+  assert.deepEqual(hub.calls.filter(c => c.method === 'POST' && c.path.startsWith(`/v1/sessions/${sid}/`)).map(c => [c.path.split('/').at(-1), c.body]), [
+    ['prompt', { text: 'Sent from an ordinary host text field' }], ['cancel', undefined], ['mode', { modeId: 'auto' }], ['config', { id: 'model', value: 'large' }],
+  ]);
+  assert.equal(E.current, other); assert.equal(other.pt, point);
+});
+
+test('AS-C11: host state subscriptions expose offered requests and steering, reject stale answers, and unsubscribe', async () => {
+  await frame();
+  const sid = 'phone-state', modes = { currentModeId: 'ask', availableModes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Automatic' }] };
+  const configOptions = [{ id: 'model', name: 'Model', type: 'select', currentValue: 'small', options: [{ value: 'small', name: 'Small' }, { value: 'large', name: 'Large' }] }];
+  const summary = hub.add(sid, [{ seq: 1, e: 'session', modes, configOptions }]);
+  const api = Ed.agentSessions, id = await api.rpc('agent-session-open', [sid]), b = await Ed.sync.open(id);
+  const states: Core[] = [], off = api.onChange(b, (s: Core) => states.push(s));
+  try {
+    assert.equal(states.length, 1); assert.equal(states[0].state, 'idle'); assert.equal(states[0].steerable, true);
+    assert.equal(states[0].epoch, summary.createdAt); assert.equal(states[0].modeId, 'ask');
+    assert.deepEqual(states[0].modes, modes); assert.deepEqual(states[0].configOptions, configOptions);
+    assert.deepEqual(await api.rpc('agent-session-state', [sid]), api.state(b));
+    const version = b.sver, text = b.text;
+    summary.state = 'running'; summary.updatedAt++; hub.emit('session', summary);
+    await until(() => states.at(-1).state === 'running', 'summary-only state notification');
+    assert.equal(b.sver, version); assert.equal(b.text, text);
+    const options = [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'no', name: 'Reject', kind: 'reject_once' }];
+    const req = hub.append(sid, { e: 'permission', toolCall: { title: 'Read on phone' }, options });
+    await until(() => states.at(-1).pending[0]?.req === req.seq, 'phone permission');
+    const shown = states.at(-1).pending[0];
+    assert.deepEqual(shown.options, options); assert.equal(shown.epoch, summary.createdAt);
+    await api.rpc('agent-session-permission', [sid, { req: shown.req, epoch: shown.epoch, outcome: { outcome: 'selected', optionId: 'once' } }]);
+    await until(() => !states.at(-1).pending.length, 'permission removed');
+    await assert.rejects(api.rpc('agent-session-permission', [sid, { req: shown.req, epoch: shown.epoch, outcome: { outcome: 'cancelled' } }]), /already|resolved|pending/i);
+    const request = { message: 'Phone form', requestedSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } } };
+    const elicitation = hub.append(sid, { e: 'elicitation', request });
+    await until(() => states.at(-1).pending[0]?.req === elicitation.seq, 'phone elicitation');
+    assert.deepEqual(states.at(-1).pending[0].request, request);
+    await assert.rejects(api.rpc('agent-session-elicitation', [sid, { req: elicitation.seq, epoch: summary.createdAt - 1, response: { action: 'accept', content: { answer: 'obsolete' } } }]), /stale/i);
+    await api.rpc('agent-session-elicitation', [sid, { req: elicitation.seq, epoch: summary.createdAt, response: { action: 'accept', content: { answer: 'phone answer' } } }]);
+    await until(() => !states.at(-1).pending.length, 'elicitation removed');
+    assert.deepEqual(hub.journals.get(sid)!.at(-1)!.response, { action: 'accept', content: { answer: 'phone answer' } });
+    hub.append(sid, { e: 'update', update: { sessionUpdate: 'current_mode_update', currentModeId: 'auto' } });
+    await until(() => states.at(-1).modeId === 'auto', 'mode notification');
+    hub.append(sid, { e: 'update', update: { sessionUpdate: 'config_option_update', configOptions: [{ ...configOptions[0], currentValue: 'large' }] } });
+    await until(() => states.at(-1).configOptions[0].currentValue === 'large', 'config notification');
+    off(); const heard = states.length;
+    summary.state = 'idle'; summary.updatedAt++; hub.emit('session', summary);
+    await until(() => api.state(b).state === 'idle', 'unsubscribed metadata still updates');
+    assert.equal(states.length, heard);
+  } finally { off(); }
+});

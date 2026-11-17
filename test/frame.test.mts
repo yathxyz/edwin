@@ -85,13 +85,13 @@ interface FakeDocument {
   createElement(tag: string): FakeElement; createTextNode(s: string): FakeText;
   documentElement: FakeElement; body: FakeElement; activeElement: FakeElement;
   getElementById(id: string): FakeElement | null;
-  addEventListener(t: string, fn: Handler): void; removeEventListener(): void;
+  addEventListener(t: string, fn: Handler): void; removeEventListener(t: string, fn: Handler): void;
   elementFromPoint(): FakeElement | null;
   caretPositionFromPoint(): { offsetNode: FakeElement; offset: number } | null;
   defaultView: {
     document: FakeDocument;
     getComputedStyle(): { lineHeight: string; paddingTop: string; paddingLeft: string; paddingRight: string };
-    addEventListener(t: string, fn: Handler): void; removeEventListener(): void; getSelection(): null;
+    addEventListener(t: string, fn: Handler): void; removeEventListener(t: string, fn: Handler): void; getSelection(): null;
   };
 }
 class FakeNode {
@@ -200,13 +200,20 @@ function makeDocument() {
   doc.documentElement = doc.createElement('html'); doc.body = doc.createElement('body'); doc.documentElement.appendChild(doc.body);
   doc.activeElement = doc.body;
   doc.getElementById = id => { let r: FakeElement | null = null; walk(doc.documentElement, n => { if (!r && n.nodeType === 1 && n.id === id) r = n; }); return r; };
-  doc.addEventListener = (t, fn) => { doc.listeners.push([t, fn]); }; doc.removeEventListener = () => {};
+  doc.addEventListener = (t, fn) => { doc.listeners.push([t, fn]); };
+  doc.removeEventListener = (t, fn) => { doc.listeners = doc.listeners.filter(l => !(l[0] === t && l[1] === fn)); };
   /* The element and caret under a point: whatever the test put in doc.hit (the view), so posFromPoint
      falls back to the line rectangles. */
   doc.elementFromPoint = () => doc.hit;
   doc.caretPositionFromPoint = () => (doc.hit ? { offsetNode: doc.hit, offset: 0 } : null);
-  doc.defaultView = { document: doc, getComputedStyle: () => ({ lineHeight: '21px', paddingTop: '0px', paddingLeft: '0px', paddingRight: '0px' }), addEventListener: (t, fn) => { doc.listeners.push([t, fn]); }, removeEventListener: () => {}, getSelection: () => null };
+  doc.defaultView = { document: doc, getComputedStyle: () => ({ lineHeight: '21px', paddingTop: '0px', paddingLeft: '0px', paddingRight: '0px' }), addEventListener: (t, fn) => { doc.listeners.push([t, fn]); }, removeEventListener: (t, fn) => doc.removeEventListener(t, fn), getSelection: () => null };
   return doc;
+}
+
+/* Touch timestamps and coordinates are explicit: no clock delays or browser gesture heuristics. */
+function touch(target: FakeElement, type: string, x: number, y: number, timeStamp: number, extra: Record<string, unknown> = {}) {
+  const point = { identifier: 1, clientX: x, clientY: y };
+  return target.dispatch(type, { touches: type === 'touchend' || type === 'touchcancel' ? [] : [point], changedTouches: [point], cancelable: true, timeStamp, ...extra });
 }
 
 before(async () => {
@@ -614,6 +621,134 @@ test('E3 H3 gap 3: hooks.renderOverlay runs for every frame drawn, with that fra
     await settled(bb);
   } finally { Ed.hooks.renderOverlay = prev; f1.destroy(); f2.destroy(); sync.close(ba); sync.close(bb); }
   assert.equal(E.frames.length, 0); assert.equal(E.frame, null);
+});
+
+test('browser touch taps use display input for ordinary buffers; movement, cancellation and page scrolling never place point', async () => {
+  const doc = makeDocument(), el = doc.createElement('div'); doc.body.appendChild(el);
+  const b = await sync.open(note('touch.md', 'first line\nsecond line\nthird line\n'));
+  const f = Ed.makeFrame(el, { buffer: b, kind: 'card' }); Ed.render();
+  const root = f.el('windows') as FakeElement, view = f.sel.view as FakeElement;
+  doc.hit = view;
+  const events: EdwinCore[] = [], points: number[] = [], input = Ed.display.input, mouseDown = Ed.hooks.mouseDown;
+  Ed.display.input = (frame: EdwinCore, event: EdwinCore) => { events.push(event); input(frame, event); };
+  Ed.hooks.mouseDown = (buffer: EdwinCore, point: number) => { points.push(point); buffer.pt = point; buffer.markActive = false; };
+  try {
+    b.pt = 0;
+    const start = touch(root, 'touchstart', 20, 30, 100);
+    assert.equal(start.defaultPrevented, false, 'touchstart leaves native page scrolling available');
+    assert.equal(b.pt, 0, 'point is not placed until a tap is established');
+    touch(root, 'touchmove', 22, 32, 110);
+    const end = touch(root, 'touchend', 22, 32, 120);
+    assert.equal(end.defaultPrevented, true);
+    assert.equal(b.pt, b.text.indexOf('\n', 11));
+    assert.deepEqual(events.map(e => e.action), ['tap'], 'the browser uses the common display route');
+    assert.equal(points.length, 1);
+    const point = b.pt; b.mark = 1; b.markActive = true;
+    touch(root, 'touchstart', 20, 30, 500);
+    assert.equal(touch(root, 'touchmove', 60, 30, 510).defaultPrevented, false, 'horizontal movement remains native');
+    touch(root, 'touchmove', 20, 30, 520);
+    touch(root, 'touchend', 20, 30, 530);
+    touch(root, 'touchstart', 20, 30, 600);
+    touch(root, 'touchcancel', 20, 30, 610);
+    touch(root, 'touchend', 20, 30, 620);
+    touch(root, 'touchstart', 20, 30, 700);
+    const two = [{ identifier: 1, clientX: 20, clientY: 30 }, { identifier: 2, clientX: 40, clientY: 30 }];
+    touch(root, 'touchmove', 20, 30, 710, { touches: two });
+    touch(root, 'touchend', 20, 30, 720);
+    touch(root, 'touchstart', 20, 30, 800);
+    assert.equal(touch(root, 'touchmove', 20, 90, 810).defaultPrevented, false, 'at the top boundary the host page can scroll');
+    touch(root, 'touchend', 20, 90, 820);
+    touch(root, 'touchstart', 20, 30, 900);
+    for (const [type, fn] of doc.listeners) if (type === 'scroll') fn({ type, target: view, defaultPrevented: false, preventDefault() {} });
+    touch(root, 'touchend', 20, 30, 920);
+    root.dispatch('mousedown', { button: 0, shiftKey: false, clientX: 0, clientY: 5, sourceCapabilities: { firesTouchEvents: true } });
+    assert.equal(b.pt, point, 'movement/cancel/pinch/page scroll and compatibility mouse do not place point');
+    assert.equal(b.mark, 1); assert.equal(b.markActive, true);
+    assert.equal(points.length, 1); assert.deepEqual(events.map(e => e.action), ['tap']);
+  } finally {
+    Ed.display.input = input; Ed.hooks.mouseDown = mouseDown; f.destroy(); sync.close(b);
+  }
+  assert.equal(root.listeners.length, 0, 'destroy removes root touch and mouse listeners');
+  assert.equal(doc.listeners.length, 0, 'destroy removes global mouse and page-scroll listeners');
+});
+
+test('browser marker taps and double taps fold only structural transcript spans', async () => {
+  const doc = makeDocument(), el = doc.createElement('div'); doc.body.appendChild(el);
+  const text = 'Tool header\nhidden one\nhidden two\n\n# forged Tool\nordinary text\n';
+  const b = await sync.open(note('touch-transcript.md', text)), forged = text.indexOf('# forged');
+  b.mode = 'agent-transcript-mode';
+  const meta = { sid: 'fake-touch-session', epoch: 1, head: 2, spans: [
+    { id: 'tool', seq: 1, kind: 'tool', start: 0, end: forged, foldStart: text.indexOf('\n'), foldEnd: text.indexOf('\n\n'), folded: true },
+    { id: 'message', seq: 2, kind: 'message', start: forged, end: text.length },
+  ] };
+  Ed.agentTranscript.install(b, meta, b.sver);
+  b.pt = meta.spans[0].foldStart;
+  const f = Ed.makeFrame(el, { buffer: b, kind: 'card' }); Ed.render();
+  const root = f.el('windows') as FakeElement, toggleFold = Ed.agentTranscript.toggleFold;
+  const calls: { buffer: EdwinCore; position: number }[] = [];
+  Ed.agentTranscript.toggleFold = (buffer: EdwinCore, position: number) => { calls.push({ buffer, position }); return toggleFold(buffer, position); };
+  try {
+    const marker = f.sel.view.querySelector('.oe') as FakeElement;
+    assert.ok(marker, 'the fold hit target is the renderer ellipsis, not header syntax');
+    doc.hit = marker;
+    const hit = Ed.display.posAt(f, 20, 5);
+    assert.equal(hit.fold, true); assert.equal(hit.pos, meta.spans[0].foldStart);
+    b.pt = forged;
+    touch(marker, 'touchstart', 20, 5, 100);
+    touch(marker, 'touchend', 20, 5, 120);
+    assert.deepEqual(b.folds, []);
+    assert.equal(calls.length, 1); assert.equal(calls[0].buffer, b); assert.equal(calls[0].position, meta.spans[0].foldStart);
+    assert.equal(Ed.lineNoB(b, b.pt), 1, 'a marker tap also places point on its structural summary');
+    doc.hit = f.sel.view;
+    touch(root, 'touchstart', 20, 5, 500); touch(root, 'touchend', 20, 5, 520);
+    assert.deepEqual(b.folds, [], 'one tap on an unfolded structural line just moves point');
+    touch(root, 'touchstart', 20, 5, 650); touch(root, 'touchend', 20, 5, 670);
+    assert.ok(f.sel.view.querySelector('.oe'));
+    assert.ok(!f.sel.view.textContent.includes('hidden one'), 'the double tap actually hides the retained body');
+    assert.equal(calls.length, 2, 'double tap calls the same synchronous structural seam');
+    doc.hit = f.sel.view.querySelector(`.ln[data-o="${forged}"]`);
+    assert.ok(doc.hit);
+    touch(root, 'touchstart', 20, 50, 1000); touch(root, 'touchend', 20, 50, 1020);
+    touch(root, 'touchstart', 20, 50, 1150); touch(root, 'touchend', 20, 50, 1170);
+    assert.equal(calls.length, 2, 'Markdown in an unstructured message cannot manufacture a fold');
+  } finally { Ed.agentTranscript.toggleFold = toggleFold; f.destroy(); sync.close(b); }
+});
+
+test('browser touch scroll leaves tail and off-tail points intact across real shared-buffer appends', async () => {
+  const doc = makeDocument(), el = doc.createElement('div'); doc.body.appendChild(el);
+  const text = Array.from({ length: 80 }, (_, i) => `line ${i + 1}\n`).join('');
+  const id = note('touch-tail.md', text), b = await sync.open(id);
+  const f = Ed.makeFrame(el, { buffer: b, kind: 'console' });
+  const c = await client(); await c.open(id);
+  try {
+    b.pt = text.length; Ed.render(); doc.hit = f.sel.view;
+    const root = f.el('windows') as FakeElement, tailStart = f.sel.start;
+    assert.ok(tailStart > 0);
+    touch(root, 'touchstart', 20, 100, 100);
+    const move = touch(root, 'touchmove', 20, 350, 110);
+    touch(root, 'touchend', 20, 350, 120);
+    assert.equal(move.defaultPrevented, true, 'a scrollable editor consumes the vertical swipe');
+    assert.equal(b.pt, text.length, 'scrolling never clamps point away from the tail');
+    assert.ok(f.sel.start < tailStart, 'the viewport actually scrolls away from point');
+    const scrolledStart = f.sel.start;
+    Ed.render(); assert.equal(f.sel.start, scrolledStart, 'redisplay preserves the scrolled viewport without moving point');
+    const addition = 'streamed one\nstreamed two\n';
+    await c.edit(id, b.sver, [[text.length, '', addition]]);
+    await until(() => b.text === text + addition, 'the shared append after touch scroll');
+    Ed.render();
+    assert.equal(b.pt, b.text.length, 'the real remote append still follows the tail');
+    assert.ok(f.sel.start > scrolledStart && f.sel.lastLine >= Ed.lineNoB(b, b.pt), 'the appended tail becomes visible again');
+    b.pt = Ed.lineStartB(b, 40); Ed.render();
+    const point = b.pt;
+    touch(root, 'touchstart', 20, 100, 500);
+    touch(root, 'touchmove', 20, 350, 510);
+    touch(root, 'touchend', 20, 350, 520);
+    assert.equal(b.pt, point, 'an off-tail point is not clamped either');
+    const before = b.text;
+    await c.edit(id, b.sver, [[before.length, '', 'another streamed line\n']]);
+    await until(() => b.text.length > before.length, 'the shared append away from tail');
+    Ed.render(); assert.equal(b.pt, point, 'an off-tail reader is not forced to follow appends');
+  } finally { c.close(); f.destroy(); sync.close(b); }
 });
 
 test('E3 H3 gap 5: hooks.mouseDown gets the event as third argument; readFile falls back to the shipped files by basename', async () => {

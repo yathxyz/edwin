@@ -185,6 +185,8 @@ export class AgentSessions implements AgentBackend {
       if (s.kind === 'acp' && (!f || f.epoch !== s.createdAt || f.head < s.acp?.headSeq)) void this.refreshFacts(s.sid).catch(() => {});
     }
     if (this.listOpened) this.publishing = this.publishing.then(() => this.drawList()).catch(() => {});
+    for (const sid of this.transcripts.keys()) this.publishState(sid);
+    for (const sid of this.openedObserved) this.publishState(sid);
   }
   refreshFacts(sid: string): Promise<void> {
     const existing = this.factReads.get(sid); if (existing) return existing;
@@ -249,7 +251,9 @@ export class AgentSessions implements AgentBackend {
       (sb as SBuf & { agentMeta?: boolean }).agentMeta = true;
       sb.meta = () => ({ ...oldMeta(), modified: false, locals: (sb!.ed.agentLocals || {}) });
     }
-    sb.ed.agentLocals = this.clean(locals); B.sendMeta(sb); return sb;
+    const sid = locals.agentSession?.sid;
+    sb.ed.agentLocals = this.clean(sid ? this.withState(sid, locals) : locals);
+    B.sendMeta(sb); return sb;
   }
   async drawList() {
     const rows = this.rows();
@@ -274,11 +278,65 @@ export class AgentSessions implements AgentBackend {
     sidOf(sid); if (this.observed.has(sid) && !this.sessions.has(sid)) throw new Error('Reported session is read-only and cannot be steered');
     const s = await this.request('GET', 'sessions/' + sid);
     if (s.kind !== 'acp') throw new Error('This session is not a hub-run ACP agent and cannot be steered');
-    s.promptCapabilities ??= this.transcripts.get(sid)?.render().promptCapabilities;
+    const t = this.transcripts.get(sid);
+    if (t && t.epoch === s.createdAt) s.promptCapabilities ??= t.render().promptCapabilities;
     return s;
+  }
+  snapshot(sid: string): Json {
+    const s = this.sessions.get(sid), observed = !s ? this.observed.get(sid) : undefined, t = this.transcripts.get(sid);
+    const observedView = !s && (!!observed || this.openedObserved.has(sid));
+    // Journal data is usable only inside the current summary's incarnation.
+    const view = s && s.kind === 'acp' && t && t.epoch === s.createdAt ? t.render() : undefined;
+    const pending = view?.pending.filter(p => s!.acp?.pending?.some((q: Json) => q.req === p.req && q.kind === p.kind)) || [];
+    return {
+      sid, bufferId: `name:*Agent${observedView ? ' Observed' : ''}: ${sid}*`, epoch: s?.createdAt ?? null,
+      state: s ? s.state || (s.alive ? 'running' : 'ended') : observed?.state || (observed ? 'reported' : 'removed'),
+      steerable: !!s && s.kind === 'acp' && s.alive !== false && this.status === 'connected',
+      connection: this.status, modeId: view?.modeId ?? null, modes: view?.modes ?? null,
+      configOptions: view?.configOptions ?? null, pending
+    };
+  }
+  withState(sid: string, locals: Json): Json {
+    const state = this.snapshot(sid), session = locals.agentSession;
+    return { ...locals, agentState: state, ...(session ? { agentSession: {
+      ...session, pending: state.pending, modeId: state.modeId, modes: state.modes, configOptions: state.configOptions,
+      ...(session.epoch !== state.epoch ? { resolved: [] } : {})
+    } } : {}) };
+  }
+  publishState(sid: string) {
+    const state = this.clean(this.snapshot(sid)), sb = this.server.buffers.byId.get(state.bufferId);
+    if (!sb?.ed.agentLocals || JSON.stringify(state) === JSON.stringify(sb.ed.agentLocals.agentState)) return;
+    const locals = this.clean(this.withState(sid, sb.ed.agentLocals));
+    sb.ed.agentLocals = locals; this.server.buffers.sendMeta(sb);
+  }
+  async state(sid: string): Promise<Json> {
+    sidOf(sid);
+    if (this.sessions.has(sid) || !this.transcripts.has(sid)) await this.open(sid);
+    return this.snapshot(sid);
+  }
+  async answer(sid: string, kind: 'permission' | 'elicitation', body: Json): Promise<Json> {
+    sidOf(sid);
+    const s = await this.requireSession(sid);
+    if (!body || typeof body !== 'object' || !Number.isInteger(body.req) || body.req < 1) throw new Error('An exact pending request id is required');
+    if (body.epoch !== s.createdAt) throw new Error('Stale agent session incarnation; refresh the request');
+    if (!s.acp?.pending?.some((p: Json) => p.req === body.req && p.kind === kind)) throw new Error('Request is already resolved or no longer pending; refresh the session');
+    await this.open(sid);
+    const state = this.snapshot(sid);
+    if (body.epoch !== state.epoch) throw new Error('Stale agent session incarnation; refresh the request');
+    const pending = state.pending.find((p: Json) => p.req === body.req && p.kind === kind);
+    if (!pending) throw new Error('Request is already resolved or no longer pending; refresh the session');
+    if (kind === 'permission') {
+      const outcome = body.outcome;
+      if (!outcome || (outcome.outcome !== 'cancelled' && (outcome.outcome !== 'selected' ||
+        !Array.isArray(pending.options) || !pending.options.some((option: Json) => typeof option.optionId === 'string' && option.optionId === outcome.optionId)))) {
+        throw new Error('Permission outcome must select an offered option or cancel the request');
+      }
+    }
+    return this.request('POST', `sessions/${sid}/${kind}`, body);
   }
   async open(sid: string): Promise<string> {
     sidOf(sid);
+    const registered = this.sessions.has(sid), revision = this.registryRevision;
     let observed = this.observed.has(sid) && !this.sessions.has(sid), s: Json;
     try { s = await this.request('GET', (observed ? 'observed/' : 'sessions/') + sid); }
     catch (e) {
@@ -286,12 +344,13 @@ export class AgentSessions implements AgentBackend {
       s = await this.request('GET', 'observed/' + sid); observed = true;
     }
     const current = observed ? this.observed.get(sid) : this.sessions.get(sid);
-    // An in-flight detail reply must not undo a newer stream incarnation or head.
-    if (current && (observed ? current.lastAt > s.lastAt : current.createdAt > s.createdAt ||
-      current.createdAt === s.createdAt && (current.updatedAt > s.updatedAt || (current.acp?.headSeq || 0) > (s.acp?.headSeq || 0)))) s = current;
-    if (observed) this.observed.set(sid, s);
+    if (!observed && registered && !current && revision !== this.registryRevision) throw new Error('Agent session was removed; refresh the sessions list');
+    // A detail reply begun before a stream update cannot undo its state, removal, incarnation or head.
+    if (current && (this.streamActive && revision !== this.registryRevision ||
+      (observed ? current.lastAt > s.lastAt : current.createdAt > s.createdAt ||
+      current.createdAt === s.createdAt && (current.updatedAt > s.updatedAt || (current.acp?.headSeq || 0) > (s.acp?.headSeq || 0))))) s = current;
+    if (observed) this.observed.set(sid, s); else this.sessions.set(sid, s);
     if (!observed && s.kind === 'acp') {
-      this.sessions.set(sid, s);
       if (!this.transcripts.has(sid) || !this.server.buffers.byId.has(`name:*Agent: ${sid}*`)) this.transcripts.set(sid, new Transcript(sid));
       await this.replay(sid);
       return `name:*Agent: ${sid}*`;
@@ -309,7 +368,9 @@ export class AgentSessions implements AgentBackend {
         const epoch = this.sessions.get(sid)?.createdAt;
         if (typeof epoch === 'number' && t.epoch !== epoch) t.reset(epoch);
         const reply = await this.request('GET', `sessions/${sid}/events?since=${t.head}`) as TranscriptReply;
-        if (this.sessions.get(sid)?.createdAt !== reply.epoch) continue;
+        const current = this.sessions.get(sid);
+        if (!current) return;
+        if (current.createdAt !== reply.epoch) continue;
         t.apply(reply);
         const view = t.render();
         await this.publish(`*Agent: ${sid}*`, 'agent-transcript-mode', view.text, { agentSession: { ...view, text: undefined, host: this.sessions.get(sid)?.host } });
@@ -339,10 +400,11 @@ export async function install(server: Server) {
   cmd('agent-session-info', () => hub.request('GET', 'info'));
   cmd('agent-session-list', async () => (await hub.request('GET', 'sessions')).sessions.filter((s: Json) => s.kind === 'acp'));
   cmd('agent-session-details', async a => { await hub.open(a[0]); return { ...hub.transcripts.get(a[0])?.render(), text: undefined }; });
+  cmd('agent-session-state', a => hub.state(a[0]));
   cmd('agent-session-pending', () => [...hub.sessions.values()].flatMap(s => (s.acp?.pending || []).map((p: Json) => ({ ...p, sid: s.sid, epoch: s.createdAt }))));
   cmd('agent-session-request', async a => {
     await hub.open(a[0]);
-    const r = hub.transcripts.get(a[0])?.render().pending.find((p: Json) => p.req === a[1]);
+    const r = hub.snapshot(a[0]).pending.find((p: Json) => p.req === a[1]);
     if (!r) throw new Error('Request is no longer pending; refresh the session');
     return { ...r, sid: a[0] };
   });
@@ -359,7 +421,8 @@ export async function install(server: Server) {
     return found.id;
   });
   cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
-  for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt', 'permission', 'elicitation']) cmd('agent-session-' + action, async a => { const sid = sidOf(a[0]); await hub.requireSession(sid); return hub.request('POST', `sessions/${sid}/${action}`, a[1]); });
+  for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt']) cmd('agent-session-' + action, async a => { const sid = sidOf(a[0]); await hub.requireSession(sid); return hub.request('POST', `sessions/${sid}/${action}`, a[1]); });
+  for (const action of ['permission', 'elicitation'] as const) cmd('agent-session-' + action, a => hub.answer(a[0], action, a[1]));
   cmd('agent-session-remove', a => hub.request('DELETE', 'sessions/' + sidOf(a[0]) + '?forget=true'));
   server.statusProviders.push(() => ({ agentHub: hub.status, agentSessions: hub.sessions.size, agentObserved: hub.observed.size }));
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });

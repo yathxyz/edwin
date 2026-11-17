@@ -48,6 +48,9 @@ test('AS-C1/C2: daemon-owned list is live in a served frame; waiting first, both
   assert.equal(hub.calls.filter(c => c.method === 'POST').length, 0, 'viewing never starts an agent');
   const reported = await c.call('agent-session-open', ['o_report']); const report = await c.open(reported.value);
   assert.match(report.text!, /cannot steer/);
+  const reportedState = (await c.call('agent-session-state', ['o_report'])).value;
+  assert.equal(reportedState.bufferId, reported.value); assert.equal(reportedState.state, 'running'); assert.equal(reportedState.steerable, false);
+  assert.deepEqual(report.meta!.locals.agentState, reportedState);
   assert.match((await c.call('agent-session-cancel', ['o_report'])).error.report, /read-only|cannot be steered/);
   const start = await c.call('agent-session-start', [{ agent: 'stub', host: 'remote', cwd: '/work/demo' }]);
   assert.match(start.value, /^name:\*Agent: api_/);
@@ -193,4 +196,138 @@ test('AS-C3: an old detail reply cannot replace a newer stream incarnation while
   await untilText(c, 'name:*Agent Sessions*', 'Detail replacement'); release.resolve();
   const opened = await Promise.race([opening, sleep(2000).then(() => { throw new Error('Opening stuck on stale detail epoch'); })]);
   assert.ok((await c.open(opened.value)).text!.includes('new detail incarnation'));
+});
+
+test('host state exposes redacted journal controls and full requests; summary-only changes publish metadata without edits', async t => {
+  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
+  fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
+  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const session = hub.add('host_state');
+  const modes = { currentModeId: 'ask', availableModes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Automatic' }] };
+  const configOptions = [{ id: 'model', type: 'select', currentValue: 'small', options: [{ value: 'small', name: 'Small' }, { value: 'large', name: 'Large' }], description: hub.token }];
+  const schema = { type: 'object', required: ['count'], properties: { count: { type: 'number' }, labels: { type: 'array', items: { type: 'string' } } } };
+  const url = 'https://approval.example.invalid/full/path?request=visible';
+  hub.append('host_state', { e: 'session', modes, configOptions });
+  const permission = hub.append('host_state', { e: 'permission', toolCall: { title: 'Read source', locations: [{ path: 'source.ts', line: 12 }] }, options: [{ optionId: 'once', name: 'Allow ' + hub.token, kind: 'allow_once' }] });
+  const form = hub.append('host_state', { e: 'elicitation', request: { message: 'Supply form', requestedSchema: schema } });
+  const linked = hub.append('host_state', { e: 'elicitation', request: { message: 'External approval ' + hub.token, mode: 'url', url, elicitationId: 'approval-1' } });
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  const result = await c.call('agent-session-state', ['host_state']); assert.equal(result.error, undefined);
+  const state = result.value, id = state.bufferId, opened = await c.open(id);
+  assert.equal(id, 'name:*Agent: host_state*'); assert.equal(state.sid, 'host_state'); assert.equal(state.epoch, session.createdAt);
+  assert.equal(state.state, 'idle'); assert.equal(state.modeId, 'ask'); assert.deepEqual(state.modes, modes);
+  assert.deepEqual(state.configOptions, [{ ...configOptions[0], description: '[redacted]' }]);
+  assert.equal(state.pending.length, 3);
+  const shownPermission = state.pending.find((p: { req: number }) => p.req === permission.seq);
+  assert.equal(shownPermission.kind, 'permission'); assert.equal(shownPermission.epoch, session.createdAt);
+  assert.deepEqual(shownPermission.toolCall, permission.toolCall);
+  assert.deepEqual(shownPermission.options, [{ optionId: 'once', name: 'Allow [redacted]', kind: 'allow_once' }]);
+  assert.deepEqual(state.pending.find((p: { req: number }) => p.req === form.seq).request, form.request);
+  assert.deepEqual(state.pending.find((p: { req: number }) => p.req === linked.seq).request, { ...linked.request, message: 'External approval [redacted]' });
+  assert.deepEqual(opened.meta!.locals.agentState, state);
+  assert.ok(!JSON.stringify({ result, opened }).includes(hub.token), 'state results, text and metadata share the token-redaction path');
+  session.state = 'running'; hub.emit('session', session);
+  const running = await c.next(m => m.t === 'meta' && m.buf === id && m.locals?.agentState?.state === 'running');
+  assert.equal(running.ver, opened.ver); assert.equal(running.locals.agentState.steerable, true);
+  assert.deepEqual(running.locals.agentState.pending, state.pending);
+  for (const stream of hub.streams) stream.destroy();
+  const offline = await c.next(m => m.t === 'meta' && m.buf === id && m.locals?.agentState?.connection.startsWith('offline'));
+  assert.equal(offline.ver, opened.ver); assert.equal(offline.locals.agentState.steerable, false);
+  const online = await c.next(m => m.t === 'meta' && m.buf === id && m.locals?.agentState?.connection === 'connected');
+  assert.equal(online.ver, opened.ver); assert.equal(online.locals.agentState.steerable, true);
+  hub.sessions.delete('host_state'); hub.emit('gone', { sid: 'host_state', epoch: session.createdAt });
+  const removed = await c.next(m => m.t === 'meta' && m.buf === id && m.locals?.agentState?.state === 'removed' && m.locals.agentState.connection === 'connected');
+  assert.equal(removed.ver, opened.ver);
+  assert.deepEqual(removed.locals.agentState, { ...state, epoch: null, state: 'removed', steerable: false, connection: 'connected', modeId: null, modes: null, configOptions: null, pending: [] });
+  assert.deepEqual(removed.locals.agentSession.pending, []); assert.equal(removed.locals.agentSession.configOptions, null);
+  assert.deepEqual((await c.call('agent-session-state', ['host_state'])).value, removed.locals.agentState);
+  assert.ok(!c.queue.some(m => m.t === 'edits' && m.buf === id), 'state, connection and removal do not enter the transcript sequencer');
+});
+
+test('host answers require the exact request kind and epoch, accept only offered permission options, and preserve hub errors without retries', async t => {
+  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
+  fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
+  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const session = hub.add('host_answers');
+  const permission = hub.append('host_answers', { e: 'permission', toolCall: { title: 'Read source' }, options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }] });
+  const elicitation = hub.append('host_answers', { e: 'elicitation', request: { message: 'Supply form', requestedSchema: { type: 'object', properties: { count: { type: 'number' } } } } });
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  const state = (await c.call('agent-session-state', ['host_answers'])).value;
+  const shown = state.pending.find((p: { req: number }) => p.req === permission.seq);
+  const answer = { req: shown.req, epoch: shown.epoch, outcome: { outcome: 'selected', optionId: 'once' } };
+  assert.equal(shown.epoch, session.createdAt);
+  for (const body of [{ ...answer, req: undefined }, { ...answer, req: '1' }]) {
+    assert.match((await c.call('agent-session-permission', ['host_answers', body])).error.report, /exact.*request id/i);
+  }
+  for (const epoch of [undefined, String(session.createdAt), session.createdAt - 1]) {
+    assert.match((await c.call('agent-session-permission', ['host_answers', { ...answer, epoch }])).error.report, /stale/i);
+  }
+  for (const req of [permission.seq + 100, elicitation.seq]) {
+    assert.match((await c.call('agent-session-permission', ['host_answers', { ...answer, req }])).error.report, /already|resolved/i);
+  }
+  for (const outcome of [{ outcome: 'selected', optionId: 'not-offered' }, { outcome: 'allow' }]) {
+    assert.match((await c.call('agent-session-permission', ['host_answers', { ...answer, outcome }])).error.report, /offered/i);
+  }
+  assert.equal(hub.calls.filter(call => call.method === 'POST').length, 0, 'invalid captures never reach a mutation route');
+  assert.equal((await c.call('agent-session-permission', ['host_answers', answer])).error, undefined);
+  const sent = hub.calls.filter(call => call.path.endsWith('/permission'));
+  assert.equal(sent.length, 1); assert.deepEqual(sent[0].body, answer);
+  assert.match((await c.call('agent-session-permission', ['host_answers', answer])).error.report, /already|resolved/i);
+  const response = { req: elicitation.seq, epoch: session.createdAt, response: { action: 'accept', content: { count: 2.5 } } };
+  assert.match((await c.call('agent-session-elicitation', ['host_answers', { ...response, req: permission.seq }])).error.report, /already|resolved/i);
+  assert.equal((await c.call('agent-session-elicitation', ['host_answers', response])).error, undefined);
+  assert.match((await c.call('agent-session-elicitation', ['host_answers', response])).error.report, /already|resolved/i);
+  const next = hub.append('host_answers', { e: 'permission', options: [{ optionId: 'no', name: 'Reject once', kind: 'reject_once' }] });
+  assert.match((await c.call('agent-session-permission', ['host_answers', answer])).error.report, /already|resolved/i);
+  const handle = hub.handle.bind(hub); let attempts = 0;
+  hub.handle = async (req, res) => {
+    if (req.method === 'POST' && req.url === '/v1/sessions/host_answers/permission') {
+      attempts++; req.resume();
+      res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'competing answer ' + hub.token, code: 'already_resolved' })); return;
+    }
+    await handle(req, res);
+  };
+  const refused = await c.call('agent-session-permission', ['host_answers', { req: next.seq, epoch: session.createdAt, outcome: { outcome: 'cancelled' } }]);
+  assert.match(refused.error.report, /409.*already_resolved.*competing answer \[redacted\]/);
+  assert.equal(attempts, 1); assert.ok(!JSON.stringify(refused).includes(hub.token));
+});
+
+test('a summary-only incarnation reset immediately clears stale controls while its new journal replay is in flight', async t => {
+  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
+  fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
+  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const old = hub.add('host_epoch');
+  hub.append('host_epoch', { e: 'session', modes: { currentModeId: 'auto', availableModes: [{ id: 'auto', name: 'Automatic' }] }, configOptions: [{ id: 'model', currentValue: 'old' }] });
+  const request = hub.append('host_epoch', { e: 'permission', options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }] });
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  const release = Promise.withResolvers<void>();
+  t.after(async () => { release.resolve(); c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  const state = (await c.call('agent-session-state', ['host_epoch'])).value, opened = await c.open(state.bufferId);
+  assert.equal(state.pending[0].req, request.seq); assert.equal(state.modeId, 'auto');
+  const replacement = { ...old, createdAt: old.createdAt + 1, acp: { ...old.acp, pending: [], headSeq: 1 } };
+  const entered = Promise.withResolvers<void>(), handle = hub.handle.bind(hub);
+  hub.handle = async (req, res) => {
+    if (req.url?.startsWith('/v1/sessions/host_epoch/events?') && hub.sessions.get('host_epoch') === replacement) {
+      entered.resolve(); await release.promise;
+    }
+    await handle(req, res);
+  };
+  hub.sessions.set('host_epoch', replacement);
+  hub.journals.set('host_epoch', [{ seq: 1, e: 'session', note: 'fresh incarnation without old controls' }]);
+  hub.emit('session', replacement); await entered.promise;
+  const reset = await c.next(m => m.t === 'meta' && m.buf === state.bufferId && m.locals?.agentState?.epoch === replacement.createdAt);
+  assert.equal(reset.ver, opened.ver);
+  assert.deepEqual(reset.locals.agentState.pending, []); assert.equal(reset.locals.agentState.modeId, null);
+  assert.equal(reset.locals.agentState.modes, null); assert.equal(reset.locals.agentState.configOptions, null);
+  assert.deepEqual(reset.locals.agentSession.pending, []); assert.equal(reset.locals.agentSession.configOptions, null);
+  assert.ok(!c.queue.some(m => m.t === 'edits' && m.buf === state.bufferId), 'incarnation invalidation is metadata-only before journal replay');
+  const stale = await c.call('agent-session-permission', ['host_epoch', { req: request.seq, epoch: old.createdAt, outcome: { outcome: 'selected', optionId: 'once' } }]);
+  assert.match(stale.error.report, /stale/i); assert.equal(hub.calls.filter(call => call.method === 'POST').length, 0);
+  release.resolve();
+  const fresh = (await c.call('agent-session-state', ['host_epoch'])).value;
+  assert.equal(fresh.epoch, replacement.createdAt); assert.deepEqual(fresh.pending, []);
+  assert.equal(fresh.modes, null); assert.equal(fresh.configOptions, null);
+  assert.match((await c.open(state.bufferId)).text!, /fresh incarnation without old controls/);
 });

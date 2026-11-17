@@ -24,12 +24,12 @@ function metadata(b: EdBuffer = E.current): Meta | null {
   return typeof b.sver !== 'number' && isMeta(v) ? v : null;
 }
 function needMeta(b: EdBuffer = E.current): Meta { return metadata(b) || signal('user-error', 'Not an agent transcript') as never; }
-function spanAt(b: EdBuffer = E.current): Span | null {
+function spanAt(b: EdBuffer = E.current, position = b.pt): Span | null {
   const spans = metadata(b)?.spans;
   if (!spans) return null;
   let lo = 0, hi = spans.length;
-  while (lo < hi) { const m = (lo + hi) >>> 1; if (spans[m].start <= b.pt) lo = m + 1; else hi = m; }
-  const s = spans[lo - 1]; return s && b.pt < s.end ? s : null;
+  while (lo < hi) { const m = (lo + hi) >>> 1; if (spans[m].start <= position) lo = m + 1; else hi = m; }
+  const s = spans[lo - 1]; return s && position < s.end ? s : null;
 }
 function folds(b: EdBuffer, p: Presentation) {
   const list: EdFold[] = [];
@@ -59,22 +59,45 @@ H.bufferMeta = (b, locals, ver) => {
   if (isMeta(locals.agentSession)) install(b, locals.agentSession, ver);
 };
 
-CMD('agent-session-toggle-fold', '', '', 'Toggle the structural transcript block at point (TAB); keep this runtime’s choice through journal updates.', () => {
-  const b = E.current, p = presentation(b), s = spanAt(b);
+function target(value?: SchemeValue): EdBuffer {
+  if (value === undefined) return E.current;
+  const b = E.buffers.find(b => b.id === value);
+  return b || signal('user-error', 'Open the transcript buffer before calling its presentation commands') as never;
+}
+function position(b: EdBuffer, value?: SchemeValue): number {
+  const pos = value === undefined ? b.pt : value;
+  if (typeof pos !== 'number' || !Number.isInteger(pos) || pos < 0 || pos > b.rope.length) return signal('user-error', 'Transcript position must be a zero-based buffer offset') as never;
+  return pos;
+}
+function result(b: EdBuffer) { return { bufferId: b.id, point: b.pt, folds: (b.folds || []).map(f => ({ s: f.s, e: f.e })) }; }
+function toggleFold(b: EdBuffer, pos = b.pt) {
+  const p = presentation(b), s = spanAt(b, position(b, pos));
   if (!s || s.foldStart === undefined || s.foldEnd === undefined) return signal('user-error', 'No foldable transcript block here');
   const closed = !(p.choices.get(s.id) ?? s.folded === true);
   p.choices.set(s.id, closed); folds(b, p);
-  if (closed && b.pt > s.foldStart) b.pt = s.start;
-  Ed.scheduleRender(); return false;
-});
-function navigate(direction: number) {
-  const b = E.current, m = needMeta(b), prompts = m.spans.filter(s => s.kind === 'prompt');
-  const s = direction > 0 ? prompts.find(s => s.start > b.pt) : prompts.findLast(s => s.start < b.pt);
-  if (!s) return signal('user-error', direction > 0 ? 'No next prompt' : 'No previous prompt');
-  b.pt = s.start; Ed.scheduleRender(); return false;
+  if (closed && b.pt > s.foldStart && b.pt <= s.foldEnd) b.pt = s.start;
+  Ed.scheduleRender(); return result(b);
 }
-CMD('agent-session-next-prompt', '', '', 'Go to the next journal prompt, ignoring headings and fences in content (] ]).', () => navigate(1));
-CMD('agent-session-previous-prompt', '', '', 'Go to the previous journal prompt, ignoring headings and fences in content ([ [).', () => navigate(-1));
+CMD('agent-session-toggle-fold', '', '&optional BUFFER POSITION', 'Toggle the structural transcript block at point or POSITION in BUFFER (TAB).', ([id, pos]: SchemeValue[]) => {
+  const b = target(id); return toggleFold(b, position(b, pos));
+});
+function setFolds(b: EdBuffer, closed: boolean) {
+  const p = presentation(b);
+  for (const s of p.meta.spans) if (s.foldStart !== undefined && s.foldEnd !== undefined) p.choices.set(s.id, closed);
+  folds(b, p);
+  if (closed) { const s = spanAt(b); if (s?.foldStart !== undefined && s.foldEnd !== undefined && b.pt > s.foldStart && b.pt <= s.foldEnd) b.pt = s.start; }
+  Ed.scheduleRender(); return result(b);
+}
+CMD('agent-session-open-folds', '', '&optional BUFFER', 'Open all structural transcript folds in BUFFER or the current transcript.', ([id]: SchemeValue[]) => setFolds(target(id), false));
+CMD('agent-session-close-folds', '', '&optional BUFFER', 'Close all structural transcript folds in BUFFER or the current transcript.', ([id]: SchemeValue[]) => setFolds(target(id), true));
+function navigate(b: EdBuffer, direction: number, pos = b.pt) {
+  const m = needMeta(b), prompts = m.spans.filter(s => s.kind === 'prompt');
+  const s = direction > 0 ? prompts.find(s => s.start > pos) : prompts.findLast(s => s.start < pos);
+  if (!s) return signal('user-error', direction > 0 ? 'No next prompt' : 'No previous prompt');
+  b.pt = s.start; Ed.scheduleRender(); return result(b);
+}
+CMD('agent-session-next-prompt', '', '&optional BUFFER POSITION', 'Go to the next structural prompt from POSITION in BUFFER (] ]).', ([id, pos]: SchemeValue[]) => { const b = target(id); return navigate(b, 1, position(b, pos)); });
+CMD('agent-session-previous-prompt', '', '&optional BUFFER POSITION', 'Go to the previous structural prompt from POSITION in BUFFER ([ [).', ([id, pos]: SchemeValue[]) => { const b = target(id); return navigate(b, -1, position(b, pos)); });
 CMD('agent-session-visit-location', '', '', 'Visit a tool’s structural file location through edwind’s filesystem authority (RET). Remote-agent paths are not local files.', async () => {
   const b = E.current, m = needMeta(b), s = spanAt(b);
   const locations = s?.kind === 'tool' && Array.isArray(s.locations) ? s.locations.filter(l => object(l) && typeof l.path === 'string') : [];
@@ -133,6 +156,6 @@ H.setup = () => {
     Ed.defineKey(map, key, intern(cmd));
   }
 };
-for (const name of ['agent-session-toggle-fold', 'agent-session-next-prompt', 'agent-session-previous-prompt', 'agent-session-visit-location', 'agent-session-diff', 'agent-session-recall']) L.put(intern(name), 'evil-repeat', intern('abort'));
-(Ed as typeof Ed & { agentTranscript: { metadata: typeof metadata; spanAt: typeof spanAt; install: typeof install } }).agentTranscript = { metadata, spanAt, install };
+for (const name of ['agent-session-toggle-fold', 'agent-session-open-folds', 'agent-session-close-folds', 'agent-session-next-prompt', 'agent-session-previous-prompt', 'agent-session-visit-location', 'agent-session-diff', 'agent-session-recall']) L.put(intern(name), 'evil-repeat', intern('abort'));
+(Ed as typeof Ed & { agentTranscript: { metadata: typeof metadata; spanAt: typeof spanAt; install: typeof install; toggleFold: typeof toggleFold } }).agentTranscript = { metadata, spanAt, install, toggleFold };
 })();

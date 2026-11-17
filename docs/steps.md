@@ -1035,14 +1035,16 @@ Issue #7: Edwin is the complete text interface to the hub's agents and to the se
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
 Edwin never starts or speaks ACP to an agent itself.
 
-**State of the work.** All four implementation stages are complete: HTTP/SSE and the live shared list;
-structured replay/folds; durable drafts and global permission/elicitation/steering; resource attachments,
-named reuse and multi-session sends. All 33 agent checks and all three TypeScript projects pass; the offline
-native Cargo run passed 31 tests with one existing ignored test. Actual Chromium and the newly built
-terminal exercised list/transcript opening, folds, draft editing, exact preview and send/replay.
-The complete Node run finished 458/460: two unchanged debugger source-path checks fail in this worktree's
-`agent-sessions` directory, then all seven debugger checks pass in the documented packaged `edwin/` layout.
-The verification record below preserves this exception; no unrelated debugger change or full rerun hides it.
+**State of the work.** All four original implementation stages are complete: HTTP/SSE and the shared list;
+structured replay/folds; durable drafts and permission/elicitation/steering; resources, names and multi-send.
+The phone addition (AS1.12–14) adds explicit host commands, subscribed control-state metadata and generic
+browser touch input. Its final daemon/prompt checks pass 25/25, and frame/display/console checks pass 48/48.
+A real 390×844 Chromium frame exercised touch folds, point-preserving scrolling/tail append, an external
+text field and a captured permission button, without Ctrl/Meta. The post-commit agent/type gate is next.
+The original complete Node run finished 458/460: two unchanged debugger source-path checks fail in this
+worktree's `agent-sessions` directory; all seven pass in the documented packaged `edwin/` layout.
+The original native run passed 31 with one existing ignored test. The verification record preserves these
+baseline results; this addition does not claim a new full-repository or physical native GUI run.
 
 ### Requirements
 
@@ -1059,6 +1061,9 @@ The verification record below preserves this exception; no unrelated debugger ch
 | AS1.9 | Compose in an ordinary shared Markdown buffer with a prompt minor mode: `C-c C-c` sends, `C-c C-k` abandons the view, retaining the draft. Drafts survive buffer kills and daemon restart. Earlier transcript prompts stay read-only. Keep drafts after failed/ambiguous sends; successful destinations are removed before retrying a multi-session send. |
 | AS1.10 | Attach files as ACP resource links or embedded resources; attach regions and buffers as embedded resources, not pasted text. Preview is the exact JSON blocks and destinations that send uses. Persist attachments with the draft; named prompts can be saved, listed and reused, and one draft can target several sessions. |
 | AS1.11 | Any attached terminal/browser/card may open `name:*Agent: SID*` after `agent-session-open SID`; that command returns its canonical buffer id. Browser `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)` show it; terminal `edwinclient -e '(agent-session-open "SID")'` materialises it and a frame visits its returned name (or runs `M-x agent-session-open`). No second page-side API token. |
+| AS1.12 | A host page needs no Ctrl/Meta keys or Edwin minibuffer. Every transcript presentation action and every session mutation is a named command with explicit buffer/session arguments, through `Ed.agentSessions.rpc`. Presentation stays local; journal reads and mutations stay daemon-owned. Host text-field prompts use the direct text endpoint without creating a draft buffer. |
+| AS1.13 | A host can read a session buffer's pending requests, offered outcomes/forms/URLs, incarnation, state, mode and config options, and subscribe to changes. Reply with the req and epoch actually shown, never a newly fetched replacement. A stale incarnation or no-longer-pending request fails; a page must refresh its controls rather than silently answering a different question. |
+| AS1.14 | Browser taps use the existing frame input route: a tap places point, tapping the rendered fold marker or double-tapping a foldable transcript line toggles its structural fold. Touch scrolling never places/clamps point or becomes a tap, and retains tail-follow eligibility. No agent-only gesture listeners or second renderer. |
 
 ### Data flow and buffer model
 
@@ -1125,6 +1130,65 @@ const newFrame = Ed.makeFrame(rootElement, { buffer });
 `edwinclient --socket /path/to/edit.sock -e '(agent-session-open "SID")'` materialises and prints the
 canonical name without creating a frame; it does not pretend to be a file argument.
 
+### Host-page commands and touch
+
+Use `await Ed.agentSessions.rpc(command, args)`. Open the canonical transcript as above first for
+presentation commands. `id` below is `buffer.id`; `sid` is the hub session id; positions are zero-based
+UTF-16 buffer offsets (the editor's native coordinate), not Markdown lines. Explicit-buffer presentation
+commands do not select another frame/window or change an unrelated buffer's point.
+For a particular unselected card, pass `frame.point()` as the position and apply the returned point with
+`frame.setPoint(result.point)`; these existing frame methods do not take keyboard focus.
+
+| Command | Arguments | Result |
+|---|---|---|
+| `agent-session-toggle-fold` | `[id, position]` | `{bufferId, point, folds:[{s,e}]}` after toggling the containing structural block. |
+| `agent-session-open-folds` / `agent-session-close-folds` | `[id]` | The same presentation result after opening/closing every current structural fold. Closing a fold containing point puts point on its summary, not in hidden text. |
+| `agent-session-previous-prompt` / `agent-session-next-prompt` | `[id, position]` (position defaults to that buffer's point) | The same result with point at the previous/next structural prompt. No such prompt is a rejected `user-error`. |
+| `agent-session-recall` | `[sid, promptSeq]` | Canonical id of a new durable prompt draft; use `Ed.sync.open` and this page's frame to show it if wanted. Get `promptSeq` from `buffer.meta.locals.agentSession.spans` (`kind === 'prompt'`); no Markdown parsing. |
+| `agent-session-state` | `[sid]` | The state snapshot described below, refreshed from the daemon/hub. |
+| `agent-session-permission` | `[sid, {req, epoch, outcome}]` | Hub JSON acknowledgement. `outcome` is `{outcome:'selected', optionId}` from the shown options, or `{outcome:'cancelled'}`. |
+| `agent-session-elicitation` | `[sid, {req, epoch, response}]` | Hub JSON acknowledgement. `response` is `{action:'accept', content:{...}}`, `{action:'decline'}` or `{action:'cancel'}`; use the shown form schema. URL requests remain explicit and are never automatically opened. |
+| `agent-session-cancel` | `[sid]` | Hub JSON acknowledgement; no session removal. |
+| `agent-session-mode` | `[sid, {modeId}]` | Hub JSON acknowledgement; choose from the snapshot's `modes.availableModes`. |
+| `agent-session-config` | `[sid, {id:optionId, value}]` | Hub JSON acknowledgement; choose from `configOptions`. An old hub's 404/405/501 rejects with an explicit unsupported-config explanation. |
+| `agent-session-prompt` | `[sid, {text}]` | Hub JSON acknowledgement; sends this text directly without a prompt buffer. The host owns retaining its text until success, and must not automatically retry an ambiguous/lost reply. |
+
+RPC failure rejects with Edwin's `user-error` condition and its redacted report. Permission/elicitation
+answers require the exact shown req, kind and epoch; an already resolved/replaced request or stale
+incarnation is an error, never success or retargeting. The hub still arbitrates an answer racing another
+client after Edwin's check. Observed records cannot be steered. Mutation acknowledgements are the hub's
+JSON, `{}` in the stub; they do not fabricate a new local mode/state before the journal/summary confirms it.
+The local rejection reports are `Stale agent session incarnation; refresh the request` and
+`Request is already resolved or no longer pending; refresh the session`. Other hub refusals retain their
+HTTP status/code in the redacted report.
+
+`Ed.agentSessions.state(buffer)` synchronously reads the latest daemon metadata snapshot:
+`{sid, bufferId, epoch, state, steerable, connection, modeId, modes, configOptions, pending}`.
+`pending` contains full permission options or elicitation request/schema/URL plus `req`, `kind` and
+`epoch`, not just the registry's short title. Treat snapshots as read-only. Incarnation changes clear
+obsolete choices; disconnected/removed/observed sessions are not steerable. `connection` is the daemon's
+hub status string, not an invented agent state. A page can additionally listen to `Ed.sync.on('state', ...)`
+for its own connection to edwind.
+
+```js
+const dispose = Ed.agentSessions.onChange(buffer, snapshot => {
+  drawSessionButtons(snapshot); // called once immediately, then when state metadata changes
+});
+// A permission button retains the request it was drawn for:
+const shown = Ed.agentSessions.state(buffer).pending.find(p => p.kind === 'permission');
+await Ed.agentSessions.rpc('agent-session-permission', [
+  shown.sid, { req: shown.req, epoch: shown.epoch,
+    outcome: { outcome: 'selected', optionId: shown.options[0].optionId } }
+]);
+dispose(); // when the card is unmounted
+```
+
+Notifications use the existing versioned buffer-metadata path, including state-only SSE changes with no
+text edit. Repeated equivalent metadata is not a change; unsubscribe stops callbacks. Fold choices stay
+local to the existing frame runtime. Browser gestures extend the existing generic frame input wiring,
+not these agent modules: a movement/cancel/multi-touch is not a tap, and touch scroll keeps point while
+the next journal append resumes tail following if point was at the tail.
+
 ### Checks
 
 | Check | Observable result |
@@ -1138,8 +1202,13 @@ canonical name without creating a frame; it does not pretend to be a file argume
 | AS-C7 | Config route works on a supporting stub and says unsupported on an older hub. Read-only observed records reject steering. File/line and diff actions use structural data. |
 | AS-C8 | A distinctive stub token, including one echoed maliciously in an error/record, appears in no buffer, wire result or daemon log; opening its file (including a symlink) is refused. |
 | AS-C9 | Run affected Node suites/type checks at stage boundaries; exercise an actual model frame's displayed folded surface and keys. At the end run the repository's full available suite once and quote its final lines. No external network or real credentials. |
+| AS-C10 | A host RPC targets an explicit transcript while another buffer is current: toggle/open/close folds, navigate structural prompts despite injected headings/fences, recall exact immutable blocks, send text without a draft, cancel and set mode/config. Invalid offsets and prompt boundaries fail plainly. |
+| AS-C11 | Read/subscription exposes complete offered permission/elicitation and mode/config data; state-only summaries notify without text edits. Replies use the captured req/epoch, stale/resolved/replaced requests fail, incarnation reset clears choices, and unsubscribe stops notifications. |
+| AS-C12 | Browser-frame tests dispatch actual DOM touch events for tap point, marker/double-tap folds, scroll without point movement (then live tail append), cancelled/multi-touch gestures, and listener teardown. Ordinary buffers use the same input route. |
 
 ### Verification record
+
+**Original four-stage feature gate (before the phone addition):**
 
 - Node v24.21.0; all three `tsc -p` projects (`.`, `src`, `native/js`) passed without diagnostics.
 - `NODE_PATH=tools/node_modules node --test --test-concurrency=2 test/*.test.mts` ran all 36 files with
@@ -1175,6 +1244,25 @@ canonical name without creating a frame; it does not pretend to be a file argume
   cover file/line, diffs, recall, off-point/tail streaming, reconnect metadata and bounded live publication.
 - All HTTP traffic was loopback stubs; no real credentials or external network. Throwaway scripts and
   private build/fixture directories were removed. Nix system/module evaluation and deployment were not run.
+
+**Phone addition (AS-C10–12):**
+
+- Final pre-commit daemon/prompt gate: `node --test --test-concurrency=2 test/agent-sessions.test.mts test/agent-prompts.test.mts`,
+  25 passed, 0 failed, duration_ms 8499.879536.
+- `node --test --test-concurrency=2 test/frame.test.mts test/display.test.mts test/console.test.mts`:
+  48 passed, 0 failed, duration_ms 4749.63043. The initial combined run exposed a new test's reliance on
+  the renderer's incidental fold-line-count cache; the corrected assertion checks the visible folded body
+  instead. The browser smoke also caught marker taps not placing point; both point and fold now use the
+  common input path, and the regression checks the summary's point placement.
+- Actual Chromium, 390×844 with touch enabled, loaded the shipped console runtime against a private
+  edwind/fake hub. Trusted touch marker tap opened retained output; double tap closed it. A trusted swipe
+  changed viewport start 2802 → 2721 while point stayed 3389 (tail); the next append moved point to 3439
+  (new tail) and made it visible. External text-field typing and Send/Allow buttons used no Ctrl/Meta
+  events. The captured req/epoch reached the stub unchanged; repeating it rejected with the documented
+  no-longer-pending report. Chromium reported no page runtime errors. No physical phone was exercised.
+- Throwaway browser fixture, daemon state, Chromium profile and listeners were removed/stopped.
+- After this implementation commit, run all agent suites (`node --test --test-concurrency=2 test/agent*.test.mts`)
+  and all three TypeScript projects (`tsc -p .`, `tsc -p src`, `tsc -p native/js`); record their final results.
 
 ### Open decisions and API constraints
 

@@ -5,7 +5,27 @@ const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
 type Row = { sid?: string; observedId?: string; waiting?: boolean };
 type List = { rows: Row[]; status: string };
+/* Presentation commands run in this replica; mutations still go through edwind. */
+const presentationCommands: Record<string, true> = {
+  'agent-session-toggle-fold': true, 'agent-session-open-folds': true, 'agent-session-close-folds': true,
+  'agent-session-next-prompt': true, 'agent-session-previous-prompt': true,
+};
+const listeners = new WeakMap<EdBuffer, Set<(state: EdAgentSessionState) => void>>();
+const revisions = new WeakMap<EdBuffer, string>();
+function state(b: EdBuffer): EdAgentSessionState {
+  const value = b.meta?.locals?.agentState;
+  if (!value || typeof value !== 'object') return signal('user-error', 'No agent session state in this buffer') as never;
+  return value as EdAgentSessionState;
+}
+function onChange(b: EdBuffer, fn: (value: EdAgentSessionState) => void): () => void {
+  const current = state(b);
+  let list = listeners.get(b); if (!list) listeners.set(b, list = new Set());
+  list.add(fn);
+  try { fn(current); } catch (e) { list.delete(fn); throw e; }
+  return () => { list!.delete(fn); };
+}
 async function rpc(cmd: string, args: unknown[] = []): Promise<unknown> {
+  if (Object.hasOwn(presentationCommands, cmd)) return L.call(cmd, args as SchemeValue[]);
   if (!Ed.sync?.started) return signal('user-error', 'No agent hub here: this Edwin is not attached to edwind');
   const r = await Ed.sync.call({ cmd, args });
   if (r.error) return signal('user-error', r.error.report || r.error.condition);
@@ -26,7 +46,7 @@ async function refresh() {
   const s = E.current.meta?.locals?.agentSession as { sid: string } | undefined;
   return s ? open(s.sid) : show(await rpc('agent-sessions') as string);
 }
-Ed.agentSessions = { rpc, show, open, selected, refresh };
+Ed.agentSessions = { rpc, show, open, selected, refresh, state, onChange };
 CMD('agent-sessions', '', '', 'List hub-run and reported agent sessions, waiting first.', async () => { await show(await rpc('agent-sessions') as string); return false; });
 CMD('agent-session-open', async () => [await Ed.readMini('Session: ', '', null)], 'SID', 'Show the session journal in its stable shared buffer.', async ([sid]: SchemeValue[]) => {
   const r = row(); await open(typeof sid === 'string' && sid ? sid : r?.sid || r?.observedId || selected()); return false;
@@ -57,6 +77,13 @@ const prevMeta = H.bufferMeta;
 H.bufferMeta = (b, locals, ver) => {
   if (prevMeta) prevMeta(b, locals, ver);
   if (locals.agentList || locals.agentSession) b.evilState = 'motion';
+  if (locals.agentState) {
+    const value = state(b), revision = JSON.stringify(value);
+    if (revision !== revisions.get(b)) {
+      revisions.set(b, revision);
+      for (const fn of [...(listeners.get(b) || [])]) { try { fn(value); } catch (e) { Ed.reportError(e); } }
+    }
+  }
 };
 Ed.MODE_NAMES['agent-sessions-mode'] = 'Agent Sessions';
 })();

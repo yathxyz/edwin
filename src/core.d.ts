@@ -721,6 +721,20 @@ interface EdFold {
   n?: number;
 }
 
+/* Small daemon-owned state for embedded agent controls; treat snapshots as read-only. */
+interface EdAgentSessionState {
+  sid: string;
+  bufferId: string;
+  epoch: number | null;
+  state: string;
+  steerable: boolean;
+  connection: string;
+  modeId: unknown;
+  modes: unknown;
+  configOptions: unknown;
+  pending: Record<string, unknown>[];
+}
+
 /* A shared buffer's sync state (sync.ts). */
 interface EdBufferSync {
   sverText: string;
@@ -1449,6 +1463,8 @@ interface EdApi {
     open(sid: string): Promise<EdBuffer>;
     selected(): string;
     refresh(): Promise<unknown>;
+    state(buffer: EdBuffer): EdAgentSessionState;
+    onChange(buffer: EdBuffer, fn: (state: EdAgentSessionState) => void): () => void;
   };
   /* the lexer's source, for the workers */
   LEX_SOURCE: string;
@@ -1583,7 +1599,7 @@ interface EdApi {
   percent(w: EdWindow): string;
   foldsOf(b: EdBuffer): EdFold[] | null;
   onScroll(w: EdWindow): void;
-  scrollWindow(w: EdWindow, lines: number): void;
+  scrollWindow(w: EdWindow, lines: number, preservePoint?: boolean): void;
   /* lines of a buffer, and shown lines (folds hide some) */
   lineIndex(b: EdBuffer): number[];
   lineNoB(b: EdBuffer, p: number): number;
@@ -1996,11 +2012,11 @@ type EdDisplayEvent =
   | { type: 'key'; key: string }
   | { type: 'paste'; text: string }
   | { type: 'focus'; focused: boolean }
-  | { type: 'mouse'; action: 'down' | 'drag' | 'up' | 'wheel'; x: number; y: number; button?: number; dy?: number; shift?: boolean; meta?: boolean; ctrl?: boolean }
+  | { type: 'mouse'; action: 'down' | 'drag' | 'up' | 'wheel' | 'tap' | 'scroll'; x: number; y: number; button?: number; dy?: number; shift?: boolean; meta?: boolean; ctrl?: boolean; clicks?: number; event?: MouseEvent }
   | { type: 'resize' };
 /* What is at a cell of a model frame. */
 type EdDisplayHit =
-  | { area: 'text'; window: EdWindow; pos: number }
+  | { area: 'text'; window: EdWindow; pos: number; fold?: boolean }
   | { area: 'modeline'; window: EdWindow }
   | { area: 'divider' | 'echo'; window?: undefined }
   | null;

@@ -2009,11 +2009,11 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
       if (k === le) {
         flush(k);
         if (le < n && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
-        if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
         break;
       }
       if (k > start && kb[k - ls] !== kb[start - ls]) { flush(k); start = k; }
     }
+    if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
     const val: EcLineVal = !R ? html : wantHtml ? { html, runs: R } : R;
     if (ck !== null) next!.set(ck, val);
     pushLine(val, le);
@@ -2055,11 +2055,18 @@ function syncLines(view: EcView, lines: EcLine[]) {
   }
   while (kids.length > lines.length) view.removeChild(view.lastChild!);
 }
-/* Scrolling moves the window start by whole lines, as in Emacs; the view itself never scrolls. */
-function scrollWindow(w: EdWindow, lines: number) {
+/* Scrolling moves the window start by whole lines, as in Emacs; the view itself never scrolls.
+   Touch scrolling may leave point off screen until point or the buffer changes; in particular a point
+   at the tail must stay there so subsequent streamed text can keep following it. */
+type EcScrollWindow = EdWindow & { _scrollAnchor?: { buffer: EdBuffer; point: number; ver: number } };
+function scrollWindow(w: EcScrollWindow, lines: number, preservePoint = false) {
   const b = w.buffer, cur = vLineNo(b, w.start), total = vLineCount(b);
   const target = Math.max(1, Math.min(total, cur + lines));
   w.start = vLineStart(b, target);
+  if (preservePoint) {
+    const anchor = w._scrollAnchor || (w._scrollAnchor = { buffer: b, point: 0, ver: 0 });
+    anchor.buffer = b; anchor.point = w === selWin() ? b.pt : w.pt; anchor.ver = b.ver;
+  } else w._scrollAnchor = undefined;
 }
 function onScroll(w: EdWindow) { void w; }
 function percent(w: EdWindow) {
@@ -2198,6 +2205,12 @@ function scrollStart(w: EdWindow, b: EdBuffer, ptLine: number, rows: number, sel
   w.start = bol(b.rope, w.start);
   let startLine = vLineNo(b, w.start);
   const rc = selected ? E.recenter : null;
+  const sw = w as EcScrollWindow, anchor = sw._scrollAnchor;
+  if (anchor) {
+    const point = w === selWin() ? b.pt : w.pt;
+    if (!rc && anchor.buffer === b && anchor.point === point && anchor.ver === b.ver) return startLine;
+    sw._scrollAnchor = undefined;
+  }
   if (rc === 'top') startLine = ptLine;
   else if (rc === 'bottom') startLine = Math.max(1, ptLine - rows + 1);
   else if (rc) startLine = Math.max(1, ptLine - Math.floor(rows / 2));
