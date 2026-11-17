@@ -776,6 +776,101 @@ fn edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone() {
     assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
 }
 
+/// The ping proves reachability, not that hello will get a welcome. Both a frame and -e must give up, name
+/// the daemon and return the terminal when it stalls or closes after hello.
+fn welcome_failure(closes: bool) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let d = workdir(if closes {
+        "welcome-close"
+    } else {
+        "welcome-timeout"
+    });
+    let c = client(&d);
+    for eval in [false, true] {
+        let socket = d.join(if eval { "eval.sock" } else { "frame.sock" });
+        let listener = UnixListener::bind(&socket).unwrap();
+        let stub = std::thread::spawn(move || {
+            let (peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(40)))
+                .unwrap();
+            let mut peer = BufReader::new(peer);
+            let mut line = String::new();
+            peer.read_line(&mut line).unwrap();
+            assert!(line.contains("\"t\":\"ping\""), "{line}");
+            peer.get_mut()
+                .write_all(b"{\"t\":\"error\",\"code\":\"hello\",\"msg\":\"hello first\"}\n")
+                .unwrap();
+            line.clear();
+            peer.read_line(&mut line).unwrap();
+            assert!(line.contains("\"t\":\"hello\""), "{line}");
+            if !closes {
+                let mut rest = Vec::new();
+                peer.read_to_end(&mut rest).unwrap();
+                assert!(rest.is_empty(), "sent requests before welcome: {rest:?}");
+            }
+        });
+        let socket = socket.to_str().unwrap();
+        let args = if eval {
+            vec!["--socket", socket, "-e", "1"]
+        } else {
+            vec!["--socket", socket, "a.txt"]
+        };
+        let mut t = Pty::spawn_program(&d, &c, &args, &[]);
+        let end = Instant::now() + Duration::from_secs(if closes { 5 } else { 35 });
+        while t.status.is_none() && Instant::now() < end {
+            t.pump(20);
+            t.reap(false);
+        }
+        assert_eq!(t.status, Some(1), "screen tail: {:?}", tail(&t.out));
+        t.pump(100);
+        let why = if closes {
+            "connection closed before welcome"
+        } else {
+            "no welcome in 30 s"
+        };
+        let said = format!("edwinclient: cannot attach to edwind at {socket}: {why}\r\n");
+        if eval {
+            assert_eq!(String::from_utf8_lossy(&t.out), said);
+        } else {
+            assert!(
+                contains(&t.out, b"\x1b[?1049h"),
+                "the terminal was not taken"
+            );
+            let reset = b"\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+            assert!(contains(&t.out, reset), "terminal modes not reset");
+            let leave = t
+                .out
+                .windows(8)
+                .position(|w| w == b"\x1b[?1049l")
+                .expect("alternate screen not left");
+            assert!(
+                contains(&t.out[leave + 8..], said.as_bytes()),
+                "{:?}",
+                tail(&t.out)
+            );
+            // SAFETY: tcgetattr writes a termios to our pty master's local buffer.
+            let mut term = std::mem::MaybeUninit::<libc::termios>::uninit();
+            assert_eq!(unsafe { libc::tcgetattr(t.fd, term.as_mut_ptr()) }, 0);
+            let term = unsafe { term.assume_init() };
+            let modes = libc::ECHO | libc::ICANON | libc::ISIG;
+            assert_eq!(term.c_lflag & modes, modes, "tty still raw");
+        }
+        stub.join().unwrap();
+    }
+}
+
+#[test]
+fn edwinclient_times_out_waiting_for_welcome() {
+    welcome_failure(false);
+}
+
+#[test]
+fn edwinclient_reports_close_before_welcome() {
+    welcome_failure(true);
+}
+
 /// edwinclient -e: each form evaluated in edwind as a client of kind cli and its value printed, with no terminal;
 /// a definition stays in edwind's image for the next client; the first error ends the run with status 1.
 #[test]

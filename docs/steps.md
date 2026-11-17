@@ -398,7 +398,9 @@ edwind when none answers, as `emacsclient -a ''` starts an Emacs daemon. Both ar
   machine (DT1).
 - **The connection.** The start waits up to 30 s for the remote edwind to answer (a ping before hello, which
   draws an error reply and proves the whole path; since 2026-11-13 a local edwind is asked the same way) and otherwise exits with status 1 and ssh's reason ("Could not
-  resolve hostname", "open failed: connect failed"), before the terminal or a window is taken. After that, a dropped connection is retried while the
+  resolve hostname", "open failed: connect failed"), before the terminal or a window is taken. The subsequent
+  hello must receive welcome within another 30 s; a timeout or a connection that closes before welcome ends the
+  client with status 1 and a message naming the edwind, restoring the terminal if taken. After welcome, a dropped connection is retried while the
   editor runs, as the browser's frames retry: the frame keeps its replica, edits wait in its queue, and ssh's
   reason goes in the log (`~/.local/state/edwin/edwin.log`). Remote latency touches only acknowledgements.
 - **`-a`, `--start-daemon`.** When no edwind answers on `$EDWIN_SOCKET` or the user's socket, edwinclient runs
@@ -445,6 +447,9 @@ split is in Edwin itself, on every host, and the terminal stays the default of b
   one. `-a` has nothing to start for an edwind that `--socket`, `--remote` or a remote `$EDWIN_SOCKET` names.
   `-t` (`-nw`, `--tty`) asks for a terminal frame, the default, and `-c` (`--create-frame`) for a window, which
   `--geometry` sizes; `-g` is edwin's.
+  After hello, both a frame and `-e` wait up to 30 s for welcome. If it does not arrive, or the connection closes
+  first, edwinclient names the edwind and the reason and exits with status 1; a frame leaves the alternate screen
+  and resets the terminal modes before saying why.
 - **`-e`, `--eval`.** The arguments after it are Scheme forms, not files (a FILE before it is one too, as
   emacsclient takes it), and at least one must follow it. edwinclient says hello as a client of kind `cli` (device
   `edwinclient`) and sends the forms as `call`s, one after another; a cli client's failing form answers with its
@@ -460,7 +465,9 @@ split is in Edwin itself, on every host, and the terminal stays the default of b
 - **Checked by** the pseudo-terminal suite: `edwin_never_attaches` (an edwind answers on both sockets; the user's
   init binds a key, the note is written to the disk, and edwind opens nothing for edwin),
   `edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone` (also a socket that closes unanswered,
-  neither variable set, and `-a` without `edwin-daemon`), `dash_a_starts_the_daemon_and_attaches` (also an
+  neither variable set, and `-a` without `edwin-daemon`), `edwinclient_times_out_waiting_for_welcome` and
+  `edwinclient_reports_close_before_welcome` (a stub answers the ping then stalls or closes after hello; both a
+  frame's terminal restoration and `-e`'s error), `dash_a_starts_the_daemon_and_attaches` (also an
   `edwin-daemon` that refuses because an edwind started meanwhile), `eval_prints_values_and_stops_at_an_error` (a
   definition read back by a second edwinclient), `help_version_and_bad_options_need_no_terminal` (also the
   command lines main.rs and main.ts must read alike), and DT1's and DT3's attached tests, which run edwinclient
