@@ -178,6 +178,15 @@ in
     touch $out
   '';
 
+  # format-buffer (src/format.ts) and define-formatter (scm/prog.scm) in the headless runtime, host.proc stood in by
+  # test/fake-proc.mts: real alejandra, black and shfmt format their buffers in place as a line diff, point and the mark
+  # staying on their lines, one undo step; shfmt given the file's absolute name and reading its directory's
+  # .editorconfig; a failing formatter (alejandra on broken Nix, a non-zero exit, no output, non-UTF-8, a signal, past
+  # 16 MiB, not on PATH), a buffer changed or killed meanwhile, and C-g on a hung one leave text, point and the
+  # modified flag as they were; a formatter only on the direnv PATH found; nothing starts while the image replays
+  # (where a declaration is skipped), in a web frame or with no host.proc.
+  edwin-format = suiteWith [ pkgs.alejandra pkgs.python3Packages.black pkgs.shfmt ] "format" [ "format.test.mts" ];
+
   # Structural editing in Lisp buffers, the fix track of the Emacs-to-Edwin plan, each case of the audit by its id:
   # the lexer's character literals (#\( #\" #\;), [ ] as brackets and #; over the next datum, through %, C-M-f/b/u,
   # = and show-paren; the pair and quote text objects (i( a( i" ...), ds, cs and expreg reading the lexer, Visual a(

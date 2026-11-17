@@ -4630,6 +4630,111 @@ indent was its mode's (`define-language :indent`) and the user's.
   names and directories; no escapes, ranges or malformed brackets): no difference. Nothing here runs in edwind's editing of a served buffer: edwind loads the file, and its hooks run only on a
   frame's visit and `save-buffer`.
 
+## format-buffer: the buffer through its mode's formatter (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-format-buffer`, on lang-editorconfig and proc-direnv):
+src/format.ts runs the language's formatter by argv through Ed.proc and applies the result as a line diff; nothing
+changes on a non-zero exit. The `apheleia-format-buffer` desktop-only stub goes. Risk named: the Nix formatter is
+the owner's choice (answer 8: alejandra).
+
+- **`format-buffer`** (`SPC b f`, src/format.ts, a new core file through the seven places of the touch list, after
+  `editorconfig`): the buffer's text on the standard input of its major mode's formatter, run through
+  `Ed.proc.spawn` in the file's directory (so the formatter finds its own settings there: `.editorconfig`,
+  `rustfmt.toml`, `pyproject.toml`, `.clang-format`) with the changes `Ed.proc.envFor` gives for that directory (what
+  direnv exports). What it prints on its standard output takes the buffer's place through `Ed.applyLineDiff`, so
+  point, the mark and every marker on a line the formatter leaves alone stay on that line at their column, and
+  the change is one undo step. Past the line diff's budget (more than 1000 differing lines, or its work limit:
+  `Rope.diffLines`, src/text.ts) the diff is one replacement of everything between the common prefix and suffix;
+  then point, the other windows' points and the markers inside it keep their line number and column, clamped to
+  the line (in Normal state to its last character) and to the replacement. That is their own line only where the
+  formatter changed no line count above them: a first black run over a 1000-line file that adds blank lines
+  leaves point that many lines off. The same rule serves a change that is one hunk. The buffer is then modified; the echo area says `Formatted NAME with PROGRAM`, or
+  `NAME is formatted already (PROGRAM)` when the output is the text (nothing is touched then).
+- **Nothing changes** (text, point, the mark, undo, the modified flag) when the formatter exits non-zero, is killed
+  by a signal, runs past 30 s (killed), prints more than 16 MiB or anything that is not UTF-8, prints nothing for a
+  buffer that holds something, or is not on PATH (`process-error: cannot run ...`); nor when the file's directory does not exist yet (a new file
+  under a new directory: `user-error` `PROGRAM runs in DIR, which does not exist yet; create it first`, nothing
+  started); nor when the buffer was changed
+  or killed while it ran. The echo area says why with the first non-blank line of the formatter's error output,
+  ending `; the buffer is left as it was`; the whole error output, without colours, is in `*Format Output*`.
+  alejandra is such a case: on a parse error it prints its input back and exits 1.
+- **`(define-formatter MODES COMMAND)`** (scm/prog.scm, through `%format-declare` in src/format.ts): MODES is a
+  mode or a list of modes, COMMAND an argv, a list of strings with the program first; the symbol `file` anywhere
+  in it stands for the buffer's file name, absolute. `#f` takes the formatter away; declaring a mode again
+  replaces it. A malformed declaration signals `error`. The shipped ones:
+
+  | modes | argv |
+  |---|---|
+  | `nix-mode` | `alejandra --quiet -` |
+  | `rust-mode` | `rustfmt --edition=2021 --emit=stdout --quiet` |
+  | `go-mode` | `gofmt` |
+  | `python-mode` | `black --quiet -` |
+  | `c-mode`, `c++-mode` | `clang-format --assume-filename FILE` |
+  | `sh-mode` | `shfmt --filename FILE` |
+
+  Each argv was run on ex44 against the nixpkgs build as written here (alejandra 4.0.0, shfmt 3.14.1, black
+  26.5.1, rustfmt, clang-format, gofmt): each reads its standard input and writes its standard output. Their
+  settings files are data only. prettier is not shipped: it loads a repository's `prettier.config.js`,
+  `.prettierrc.cjs` and the plugins its configuration names, so running it in a cloned repository runs that
+  repository's code (and format on save would do so unasked); a user who wants it declares it.
+- **The image never reaches a formatter (R16.15).** The argv is kept in src/format.ts, not in a Scheme variable,
+  and a declaration made while the image replays (`Ed.proc.replaying()`, added to `Ed.proc` here as lsp-sessions
+  adds it, the same line) is skipped with `define-formatter: MODES is not declared while the image replays`: an
+  argv a replayed form set would otherwise run on the user's next `SPC b f`. Clearing one (`#f`) is never refused,
+  as it starts nothing. format-buffer itself asks `Ed.proc.envFor` before its first wait, which refuses while the
+  image replays; in a web frame and on edwind's Node host it says `format-buffer: No processes ...` before reading
+  anything.
+- **Choices**, each reversible:
+  - The command is `format-buffer`, with no `apheleia-format-buffer` alias (Emacs names are dropped, as elsewhere).
+  - The formatter is looked up by the buffer's major mode alone, not the modes it derives from.
+  - Spawned, not `Ed.proc.run`: the wait holds every key (pool.ts), so it is `EdPool.interruptible` and C-g kills
+    the formatter (KILL) and quits, the text untouched; `run` gives no handle to kill.
+  - The file name is passed as its own argument (`--filename FILE`), always absolute, so a file named `-x` is
+    `/dir/-x` and never reads as an option. A buffer with no file, or whose file is edwind's (a shared buffer, a
+    served note: not on this machine), refuses a formatter that needs the name, and runs one that does not in the
+    program's own directory.
+  - Empty output for a buffer that holds something is a failure, not an empty buffer: a formatter that exits 0
+    having printed nothing (a wrapper that formats in place, a misconfigured one) would otherwise wipe the buffer.
+  - rustfmt is given the 2021 edition: on its standard input it cannot read Cargo.toml's and would take 2015's,
+    which does not parse `async fn`. The flag beats a `rustfmt.toml`'s `edition` (checked: with `edition =
+    "2015"` there, `async fn` still formats), so a 2024-edition crate is formatted as 2021; redeclare rust-mode's
+    formatter for that.
+  - Nothing from `.editorconfig` is passed on the command line: the formatters that honour it (shfmt)
+    read it from the directory they run in, and Edwin's own reading (src/editorconfig.ts) sets only the buffer's
+    indent.
+- **Differences from Emacs** (apheleia): no `apheleia-mode` yet (format on save is lang-format-on-save); a
+  formatter is one argv on standard input and output, with no in-place formatters writing a temporary file, no
+  `npx` or project-local `node_modules/.bin` lookup, and no formatter chains; the result is applied by line diff,
+  not apheleia's RCS-patch walk, with the same effect on point within the diff's budget.
+- **In an edwinclient frame** the shipped declarations stand: `Ed.bootServed` evaluates scm/prog.scm in
+  `Ed.boot`, before it connects and outside any replay; only edwind's init.scm, evaluated after, is replayed.
+  Seen in src/sync.ts, not tested through a real edwind.
+- **Not in it:** format on save (lang-format-on-save); a region formatter; JavaScript, TypeScript, JSON and YAML
+  (prettier, above); terraform (`terraform fmt -`, unfree in
+  nixpkgs, so not checked here), Java, C#, TOML, Typst, Just and the other declared languages have no formatter
+  until one is declared; a formatter declared in the user's init.scm in an edwinclient frame, where edwind's
+  init.scm is evaluated as the image, is skipped as lsp-sessions' declarations are. **For the owner (fleet):**
+  alejandra, shfmt and gofmt must be on the frames' PATH; home/edwin-tools.nix has rustfmt, black, clang-tools
+  and go, but not alejandra or shfmt.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-format` (new, test/format.test.mts, 11 passed),
+  with real alejandra, black and shfmt in the sandbox: alejandra's output in a Nix buffer equal to what it prints
+  run directly, its argv and directory, point on a kept line at its column and the mark with its line, one undo
+  and redo, a second run changing nothing; past the diff's budget (2000 lines, every other one changed by `sed`) point, the
+  mark, an after marker and another window's point on their line and column, one undo, and a column past a line
+  made shorter clamped (the case fails on the code before the rule); black on Python; shfmt given `/…/sh/-odd name.sh` as one argument and
+  taking its directory's `.editorconfig` (`indent_size = 3`); alejandra on broken Nix, and sh formatters exiting
+  2, printing nothing, printing a byte that is not UTF-8, killed by TERM and past 16 MiB, and a program not on
+  PATH, each leaving text, point, the mark, undo and the modified flag; a buffer edited and one killed while the
+  formatter ran; C-g killing a hung one; a formatter found only on the PATH a stand-in direnv exports for an
+  `.envrc` directory, and not found outside it; no formatter for the mode, a read-only buffer and a buffer with no
+  file and one whose directory does not exist refused with nothing spawned; malformed declarations; a declaration inside `Ed.proc.replay` skipped (taking
+  the check out fails the case) and `(format-buffer)` inside it, in a web frame and with no `host.proc` starting
+  nothing; `SPC b f` bound to `format-buffer` and the stub gone.
+  Also passed, each exit 0, on the final tree: `edwin-typecheck`, `edwin-native` (31), `edwin-prog` (41). Passed
+  before the line-number rule and the directory check, not run again since: `edwin-headless` (21), `edwin-proc` (13), `edwin-shell-command` (8), `edwin-scheme` (38), `edit-security` (21), `edit-lockdown` (6),
+  `edit-frame` (24), `edwin-display` (20); `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1
+  ignored, `tests/terminal.rs` 36). Not run: the whole `nix flake check`.
+
 ## The Lisp lexer: character literals, [ ] and #; (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-lexer`): B1, B4 and B5 of the structural-editing audit

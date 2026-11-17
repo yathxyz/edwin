@@ -27,6 +27,7 @@
   "src/lsp-rpc.js",
   "src/syntax.js",
   "src/editorconfig.js",
+  "src/format.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

@@ -119,7 +119,6 @@
 
 (desktop-only consult-eglot-symbols "SPC p s" "LSP symbols")
 (desktop-only citar-open "SPC y o" "citar: open a reference")
-(desktop-only apheleia-format-buffer "SPC b f" "apheleia: format the buffer")
 (desktop-only embark-act "SPC e a" "embark-act")
 (desktop-only devdocs-lookup "SPC h d" "devdocs")
 (desktop-only org-journal-new-entry "SPC n j j" "org-journal")
@@ -149,7 +148,7 @@
   "SPC b n" 'evil-next-buffer
   "SPC b p" 'evil-prev-buffer
   "SPC b M" 'view-messages
-  "SPC b f" 'apheleia-format-buffer  ; desktop only
+  "SPC b f" 'format-buffer
   "SPC RET" 'bookmark-jump
   ;; project
   "SPC p f" 'project-find-file

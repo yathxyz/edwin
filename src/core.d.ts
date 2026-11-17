@@ -1745,6 +1745,8 @@ interface EdProcApi {
   envFor(dir: string): Promise<Record<string, string | null>>;
   /* run FN as the image's replay (sync.ts): no child starts in it, nor before the next turn of the loop */
   replay<T>(fn: () => T): T;
+  /* true while the image replays (inside replay, and until the loop's next turn) */
+  replaying(): boolean;
 }
 
 /* ---------- editor: edwind's client (sync.ts) ---------- */

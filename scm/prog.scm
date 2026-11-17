@@ -1,5 +1,6 @@
 ;;; prog.scm: prog-mode, the mode every programming language's mode derives from, and define-language,
-;;; which declares one language: the files that open in it, its comment syntax and its indent width.
+;;; which declares one language: the files that open in it, its comment syntax and its indent width; and
+;;; define-formatter, which names the program format-buffer runs on a mode's buffers.
 ;;;
 ;;; A language's mode is a define-derived-mode of prog-mode, so it has the usual NAME-map and NAME-hook, and
 ;;; prog-mode-hook runs in every one of them. Visiting a file turns its mode on (Ed.visit), so the indent width
@@ -112,6 +113,29 @@ prog-mode's. The option values are evaluated. Declaring MODE again replaces all 
 (define-language nasm-mode "NASM" :files '("\\.nasm$") :comment '(";") :indent 4)
 (define-language nginx-mode "Nginx" :files '("(^|/)nginx\\.conf$" "/nginx/.+\\.conf$") :comment '("#") :indent 4)
 (define-language typst-mode "Typst" :files '("\\.typ$") :comment '("//" "/*" "*/") :indent 2)
+
+;;;; Formatters: format-buffer (SPC b f, src/format.ts) runs the buffer's mode's formatter
+
+(define (define-formatter modes command)
+  "(define-formatter MODES COMMAND) makes COMMAND the formatter format-buffer runs in buffers of MODES (a mode, or
+a list of modes). COMMAND is an argv: a list of strings, the program first (found on PATH, and on the PATH the
+directory's direnv gives), and the symbol file anywhere for the buffer's file name, absolute. The formatter gets
+the buffer's text on its standard input and prints it formatted on its standard output; it runs in the file's
+directory. #f for COMMAND takes MODES' formatter away. Declaring a mode again replaces its formatter. Skipped,
+with a message, while the image replays."
+  (%format-declare modes command))
+
+;; Each reads its standard input and writes its standard output, and finds its own settings from the file's
+;; directory, settings that are data only (.editorconfig, rustfmt.toml, pyproject.toml, .clang-format): no
+;; prettier, which loads a repository's prettier.config.js and plugins and so runs its code. Nix's is alejandra
+;; (the owner's choice). rustfmt is told the 2021 edition, since on its standard input it cannot read Cargo.toml's
+;; and would take 2015's, which does not parse async fn; the flag beats a rustfmt.toml's edition.
+(define-formatter 'nix-mode '("alejandra" "--quiet" "-"))
+(define-formatter 'rust-mode '("rustfmt" "--edition=2021" "--emit=stdout" "--quiet"))
+(define-formatter 'go-mode '("gofmt"))
+(define-formatter 'python-mode '("black" "--quiet" "-"))
+(define-formatter '(c-mode c++-mode) '("clang-format" "--assume-filename" file))
+(define-formatter 'sh-mode '("shfmt" "--filename" file))
 
 ;;;; ws-butler: trailing blanks removed on save from the lines that changed, and from no others
 
