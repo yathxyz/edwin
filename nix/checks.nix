@@ -245,6 +245,18 @@ in
     touch $out
   '';
 
+  # Syntax trees per buffer (src/syntax.ts, Ed.syntax), with the desktop program's host.syntax stood in: fast-check
+  # over edits, undo, whole-text replacement and forgotten or trimmed logs, the stand-in's text always the
+  # buffer's; a run of edits crossing as one span, a whole parse only when the log cannot say what changed, a new
+  # grammar, a refused edit, a killed buffer's tree freed, no tree without host.syntax. Tree-sitter's side is the
+  # package's cargo tests (nix build .#edwin). lang-syntax-highlight adds its golden face runs here.
+  # SYNTAX_RUNS raises the run count.
+  edwin-syntax = pkgs.runCommand "edwin-syntax" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+    export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
+    node --test ${edwin}/edwin/test/syntax.test.mts
+    touch $out
+  '';
+
   # Ed.openUrl (src/proc.ts): a URL or a file in the desktop's application, through the host, in a served frame
   # against a real edwind: what reaches the host, nothing while the image replays (R16.15), nothing from edwind's
   # Node host, an Org https link. The opener's own checks and argv (native/src/open.rs) are cargo tests, which

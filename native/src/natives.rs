@@ -822,6 +822,35 @@ fn syn_query(
     set(scope, o, "captures", flat.into());
     rv.set(o.into());
 }
+/// synEdit(tree, pos, del, ins): the tree's text changed, DEL code units at POS replaced by INS, and the tree parsed
+/// again from itself (syntax::edit); throws when the edit is not in its text or the reparse fails, which frees it.
+fn syn_edit(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let mut count = |i: i32| {
+        args.get(i)
+            .number_value(scope)
+            .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0)
+            .map(|n| n as usize)
+    };
+    let (Some(pos), Some(del)) = (count(1), count(2)) else {
+        return throw(
+            scope,
+            "synEdit: the position and the length deleted are string indices",
+        );
+    };
+    let Ok(s) = v8::Local::<v8::String>::try_from(args.get(3)) else {
+        return throw(scope, "synEdit: the text inserted is not a string");
+    };
+    let mut ins = vec![0u16; s.length()];
+    s.write(scope, &mut ins, 0, v8::WriteOptions::NO_NULL_TERMINATION);
+    if let Err(e) = syntax::edit(id, pos, del, &ins) {
+        throw(scope, &e);
+    }
+}
 /// synFree(tree): the tree forgotten; false when there was none.
 fn syn_free(
     scope: &mut v8::HandleScope,
@@ -988,7 +1017,7 @@ macro_rules! natives {
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
             "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind,
             "procSpawn" proc_spawn, "procWrite" proc_write, "procCloseStdin" proc_close_stdin, "procKill" proc_kill, "procList" proc_list,
-            "openExternal" open_external, "synLoad" syn_load, "synParse" syn_parse, "synQuery" syn_query, "synFree" syn_free
+            "openExternal" open_external, "synLoad" syn_load, "synParse" syn_parse, "synQuery" syn_query, "synFree" syn_free, "synEdit" syn_edit
         )
     };
 }
@@ -1080,7 +1109,18 @@ mod tests {
       eq(err(() => __n.synParse('rust', 5)), 'synParse: the text is not a string', 'not a string');
       eq(err(() => __n.synQuery(t, 'highlights', -1)), 'synQuery: start and end are string indices', 'a negative start');
       eq(err(() => __n.synQuery(t, 'folds')), 'rust has no "folds" query', 'a kind the bundle lacks');
+      // An edit at indices of the JS string: 𝔸 is two of them, and the edit after it moves Foo along.
+      const at = text.indexOf('Foo'), edited = text.slice(0, at) + 'Bar' + text.slice(at + 3);
+      eq(__n.synEdit(t, at, 3, 'Bar'), undefined, 'an edit');
+      const after = __n.synQuery(t, 'highlights'), got = [];
+      for (let i = 0; i < after.captures.length; i += 4) got.push([after.names[after.captures[i]], edited.slice(after.captures[i + 1], after.captures[i + 2])]);
+      if (!got.some(s => s[0] === 'constructor' && s[1] === 'Bar') || got.some(s => s[1] === 'Foo')) throw new Error(`after the edit: ${JSON.stringify(got)}`);
+      eq(err(() => __n.synEdit(t, edited.length, 1, '')), `synEdit: 1 deleted at ${edited.length} goes past syntax tree ${t}'s text of ${edited.length}`, 'past the end');
+      eq(err(() => __n.synEdit(t, -1, 0, '')), 'synEdit: the position and the length deleted are string indices', 'a negative position');
+      eq(err(() => __n.synEdit(t, 0.5, 0, '')), 'synEdit: the position and the length deleted are string indices', 'a fraction');
+      eq(err(() => __n.synEdit(t, 0, 0, 5)), 'synEdit: the text inserted is not a string', 'not a string');
       eq([__n.synFree(t), __n.synFree(t)], [true, false], 'freed once');
+      eq(err(() => __n.synEdit(t, 0, 0, 'x')), `no syntax tree ${t}`, 'editing a freed tree');
       eq(err(() => __n.synQuery(t, 'highlights')), `no syntax tree ${t}`, 'a freed tree');
       'ok'
     "#;

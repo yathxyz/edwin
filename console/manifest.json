@@ -25,6 +25,7 @@
   "src/vc-jj.js",
   "src/compile.js",
   "src/lsp-rpc.js",
+  "src/syntax.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

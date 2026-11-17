@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tree_sitter::{
-    Language, Node, ParseOptions, Parser, Query, QueryCursor, QueryCursorOptions,
+    InputEdit, Language, Node, ParseOptions, Parser, Point, Query, QueryCursor, QueryCursorOptions,
     StreamingIterator, Tree, LANGUAGE_VERSION, MIN_COMPATIBLE_LANGUAGE_VERSION,
 };
 
@@ -188,6 +188,12 @@ impl Grammar {
 
     /// TEXT parsed (UTF-16, as JS holds it), stopped after PARSE_LIMIT.
     pub fn parse(&self, text: &[u16]) -> Result<Tree, String> {
+        self.reparse(text, None)
+    }
+
+    /// TEXT parsed again from OLD, a tree of the text before the edits OLD has been told of (Tree::edit):
+    /// tree-sitter reuses what the edits left alone, so the cost follows the edits. None: a whole parse.
+    pub fn reparse(&self, text: &[u16], old: Option<&Tree>) -> Result<Tree, String> {
         let mut parser = Parser::new();
         parser
             .set_language(&self.language)
@@ -204,7 +210,7 @@ impl Grammar {
         parser
             .parse_utf16_le_with_options(
                 &mut |i, _| if i < len { &text[i..] } else { &[] },
-                None,
+                old,
                 Some(ParseOptions::new().progress_callback(&mut stop)),
             )
             .ok_or_else(|| {
@@ -340,6 +346,93 @@ pub fn parse(name: &str, text: Vec<u16>) -> Result<u32, String> {
     }))
 }
 
+const LF: u16 = b'\n' as u16;
+
+/// The point of code unit AT in TEXT as tree-sitter counts a UTF-16 text: rows by line feeds, columns in bytes
+/// (two a code unit).
+fn point(text: &[u16], at: usize) -> Point {
+    let before = &text[..at];
+    let line = before.iter().rposition(|&c| c == LF).map_or(0, |i| i + 1);
+    Point {
+        row: before.iter().filter(|&&c| c == LF).count(),
+        column: (at - line) * 2,
+    }
+}
+
+/// The point just past TEXT when TEXT starts at FROM.
+fn past(from: Point, text: &[u16]) -> Point {
+    match text.iter().rposition(|&c| c == LF) {
+        Some(i) => Point {
+            row: from.row + text.iter().filter(|&&c| c == LF).count(),
+            column: (text.len() - i - 1) * 2,
+        },
+        None => Point {
+            row: from.row,
+            column: from.column + text.len() * 2,
+        },
+    }
+}
+
+fn lead(c: u16) -> bool {
+    (0xd800..0xdc00).contains(&c)
+}
+fn trail(c: u16) -> bool {
+    (0xdc00..0xe000).contains(&c)
+}
+
+/// Tree ID's text changed, the DEL code units at POS replaced by INS: the tree is told of the edit and parsed
+/// again from itself, so the parse costs what the edit touched. A reparse that fails (past PARSE_LIMIT) frees the
+/// tree, which is never left out of step with its text.
+///
+/// JS indices can fall between the halves of a surrogate pair, and tree-sitter, decoding a lead half, reads the
+/// unit after it without counting it as looked at: a token ending at such an edit would be reused though its
+/// character changed. So an edit is widened to whole characters first, by the lead half before it and the trail
+/// half after it.
+pub fn edit(id: u32, pos: usize, del: usize, ins: &[u16]) -> Result<(), String> {
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let p = s.trees.get_mut(&id).ok_or(format!("no syntax tree {id}"))?;
+        let len = p.text.len();
+        if pos > len || del > len - pos {
+            return Err(format!(
+                "synEdit: {del} deleted at {pos} goes past syntax tree {id}'s text of {len}"
+            ));
+        }
+        let (mut pos, mut del, mut ins) = (pos, del, ins.to_vec());
+        if pos > 0 && lead(p.text[pos - 1]) {
+            pos -= 1;
+            del += 1;
+            ins.insert(0, p.text[pos]);
+        }
+        if pos + del < len && trail(p.text[pos + del]) {
+            ins.push(p.text[pos + del]);
+            del += 1;
+        }
+        let ins = &ins[..];
+        let start_position = point(&p.text, pos);
+        let old_end_position = past(start_position, &p.text[pos..pos + del]);
+        p.text.splice(pos..pos + del, ins.iter().copied());
+        p.tree.edit(&InputEdit {
+            start_byte: pos * 2,
+            old_end_byte: (pos + del) * 2,
+            new_end_byte: (pos + ins.len()) * 2,
+            start_position,
+            old_end_position,
+            new_end_position: past(start_position, ins),
+        });
+        match p.grammar.reparse(&p.text, Some(&p.tree)) {
+            Ok(tree) => {
+                p.tree = tree;
+                Ok(())
+            }
+            Err(e) => {
+                s.trees.remove(&id);
+                Err(format!("{e}; syntax tree {id} is freed"))
+            }
+        }
+    })
+}
+
 /// Tree ID's captures of its grammar's KIND query between code units START and END (None: to the text's end),
 /// and the query's capture names.
 pub fn query(
@@ -382,6 +475,13 @@ pub(crate) mod tests {
             dir.display()
         );
         dir
+    }
+
+    /// The tests that time a parse, or take a second or more of the machine, run one at a time, so that neither
+    /// slows the other past its bound.
+    fn heavy() -> std::sync::MutexGuard<'static, ()> {
+        static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        HEAVY.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn utf16(s: &str) -> Vec<u16> {
@@ -787,6 +887,7 @@ pub(crate) mod tests {
     /// A text too long to parse within PARSE_LIMIT stops with an error instead of holding the frame.
     #[test]
     fn a_parse_past_its_bound_stops() {
+        let _alone = heavy();
         let g = Grammar::load(&bundle(), "json").unwrap();
         // 64 MiB of a JSON array (millions of nodes) takes tree-sitter well over a second.
         let text = utf16(&format!("[{}1]", "[1,2,3],".repeat(8 << 20)));
@@ -800,5 +901,364 @@ pub(crate) mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    /* ---------- incremental reparse ---------- */
+
+    /// Tree ID and its text, for a test to compare with a whole parse.
+    fn kept<T>(id: u32, f: impl FnOnce(&Tree, &[u16]) -> T) -> T {
+        STATE.with(|s| {
+            let s = s.borrow();
+            let p = &s.trees[&id];
+            f(&p.tree, &p.text)
+        })
+    }
+
+    /// Where trees A and B first differ, node by node in preorder: kind, field, extent in bytes and in points, and
+    /// the named, error and missing flags. None when they are the same tree.
+    fn differ(a: &Tree, b: &Tree) -> Option<String> {
+        let key = |c: &tree_sitter::TreeCursor| {
+            let n = c.node();
+            format!(
+                "{} {:?} {:?} {:?}-{:?} named {} error {} missing {}",
+                n.kind(),
+                c.field_name(),
+                n.byte_range(),
+                n.start_position(),
+                n.end_position(),
+                n.is_named(),
+                n.is_error(),
+                n.is_missing()
+            )
+        };
+        let (mut x, mut y) = (a.walk(), b.walk());
+        loop {
+            if key(&x) != key(&y) {
+                return Some(format!("{} against {}", key(&x), key(&y)));
+            }
+            let down = x.goto_first_child();
+            if down != y.goto_first_child() {
+                return Some(format!("children differ: {} against {}", key(&x), key(&y)));
+            }
+            if down {
+                continue;
+            }
+            loop {
+                let next = x.goto_next_sibling();
+                if next != y.goto_next_sibling() {
+                    return Some(format!("siblings differ: {} against {}", key(&x), key(&y)));
+                }
+                if next {
+                    break;
+                }
+                if !x.goto_parent() {
+                    return None;
+                }
+                y.goto_parent();
+            }
+        }
+    }
+
+    /// A seeded xorshift: the same edits on every run.
+    struct Rng(u64);
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            (x % n.max(1) as u64) as usize
+        }
+    }
+
+    /// Per grammar, a source the random edits start from; the scanners (Python's indentation, Bash's heredocs,
+    /// YAML's blocks) are among them.
+    const SOURCES: &[(&str, &str)] = &[
+        (
+            "rust",
+            "// é 𝔸\nfn main() {\n    let x = vec![1, 2];\n    for y in &x {\n        println!(\"{y} é\");\n    }\n}\n\nstruct A { b: u8 }\n",
+        ),
+        (
+            "python",
+            "def f(x):\n    if x:\n        return [x, 'é']\n    else:\n        pass\n\nclass A:\n    y = \"\"\"𝔸\n doc\"\"\"\n",
+        ),
+        (
+            "bash",
+            "for f in *.txt; do\n  echo \"$f é\"\ndone\ncat <<EOF\nhello $USER\nEOF\nif [ -n \"$x\" ]; then x=1; fi\n",
+        ),
+        (
+            "yaml",
+            "a: 1\nb:\n  - x\n  - 'é'\nc: |\n  block 𝔸\n  text\nd: {e: f}\n",
+        ),
+        (
+            "nix",
+            "{ pkgs, ... }:\nlet\n  x = \"é ${pkgs.hello}\";\nin {\n  y = [ 1 2 ];\n  z = ''\n    𝔸\n  '';\n}\n",
+        ),
+        (
+            "json",
+            "{\"a\": [1, 2.5, true, null],\n \"b\": {\"c\": \"é 𝔸\"}}\n",
+        ),
+        (
+            "javascript",
+            "function f(a, b) {\n  return `é ${a}` + b;\n}\nconst o = { x: [1, 2], y: /re/g };\n",
+        ),
+        (
+            "c",
+            "#include <stdio.h>\nint main(void) {\n  /* é */\n  printf(\"%d\\n\", 1);\n  return 0;\n}\n",
+        ),
+    ];
+
+    /// What the random edits insert: tokens, brackets and quotes that open and close, line breaks and indentation,
+    /// characters of two and four bytes, and a lone half of a surrogate pair (JS indices can split a pair).
+    const PIECES: &[&str] = &[
+        " ", "\n", "\n    ", "\t", "(", ")", "{", "}", "[", "]", "\"", "'", "`", ";", ",", ":",
+        "=", "x", "foo", "1", "#", "//", "/*", "*/", "-", "é", "𝔸", "${", "EOF", "do", "let", "in",
+        "''",
+    ];
+
+    /// Random edits through edit(), each compared with a whole parse of the same text. TEXT's tree must equal the
+    /// whole parse's whenever that has no error; where both hold an error the two may recover differently (as
+    /// tree-sitter's own corpus tests allow), so those are counted, and the edits are then undone one by one, which
+    /// must bring back the very tree of the source.
+    fn random_edits(name: &str, src: &str, seed: u64, rounds: usize) -> (usize, usize) {
+        use_dir(&bundle());
+        let g = grammar(name).unwrap();
+        let source = utf16(src);
+        let first = g.parse(&source).unwrap();
+        assert!(
+            !first.root_node().has_error(),
+            "{name}: {}",
+            first.root_node().to_sexp()
+        );
+        let id = parse(name, source.clone()).unwrap();
+        let mut rng = Rng(seed);
+        let mut text = source.clone();
+        let mut undo: Vec<(usize, usize, Vec<u16>)> = Vec::new();
+        let (mut same, mut recovered) = (0, 0);
+        let mut check = |text: &[u16], what: &str| {
+            kept(id, |tree, kept| {
+                assert_eq!(kept, text, "{name}: the kept text");
+                let whole = g.parse(text).unwrap();
+                // The points edit() gives are tree-sitter's own.
+                let mut c = whole.walk();
+                'nodes: loop {
+                    let n = c.node();
+                    assert_eq!(
+                        point(text, n.start_byte() / 2),
+                        n.start_position(),
+                        "{name}: {n:?}"
+                    );
+                    assert_eq!(
+                        point(text, n.end_byte() / 2),
+                        n.end_position(),
+                        "{name}: {n:?}"
+                    );
+                    if c.goto_first_child() {
+                        continue;
+                    }
+                    while !c.goto_next_sibling() {
+                        if !c.goto_parent() {
+                            break 'nodes;
+                        }
+                    }
+                }
+                match differ(tree, &whole) {
+                    None => same += 1,
+                    Some(d) if whole.root_node().has_error() && tree.root_node().has_error() => {
+                        let _ = d;
+                        recovered += 1
+                    }
+                    Some(d) => panic!(
+                        "{name}, seed {seed}, after {what}: {d}\ntext {:?}\nincremental {}\nwhole       {}",
+                        String::from_utf16_lossy(text),
+                        tree.root_node().to_sexp(),
+                        whole.root_node().to_sexp()
+                    ),
+                }
+            })
+        };
+        let apply =
+            |text: &mut Vec<u16>, undo: &mut Vec<_>, pos: usize, del: usize, ins: Vec<u16>| {
+                edit(id, pos, del, &ins).unwrap();
+                let old: Vec<u16> = text.splice(pos..pos + del, ins.iter().copied()).collect();
+                undo.push((pos, ins.len(), old));
+            };
+        for round in 0..rounds {
+            let len = text.len();
+            let pos = rng.below(len + 1);
+            match rng.below(6) {
+                // Retype a line: delete it, then insert it again a code unit at a time.
+                0 => {
+                    let start = text[..pos]
+                        .iter()
+                        .rposition(|&c| c == LF)
+                        .map_or(0, |i| i + 1);
+                    let end = text[pos..]
+                        .iter()
+                        .position(|&c| c == LF)
+                        .map_or(len, |i| pos + i);
+                    let line = text[start..end].to_vec();
+                    apply(&mut text, &mut undo, start, end - start, vec![]);
+                    check(&text, "deleting a line");
+                    for (i, &c) in line.iter().enumerate() {
+                        apply(&mut text, &mut undo, start + i, 0, vec![c]);
+                        check(&text, "retyping");
+                    }
+                }
+                // A lone half of a surrogate pair.
+                1 => apply(&mut text, &mut undo, pos, 0, vec![0xd835]),
+                // Delete, insert or replace up to a few pieces.
+                k => {
+                    let del = if k == 2 {
+                        0
+                    } else {
+                        rng.below(12).min(len - pos)
+                    };
+                    let ins: Vec<u16> = if k == 3 {
+                        vec![]
+                    } else {
+                        (0..1 + rng.below(3))
+                            .flat_map(|_| utf16(PIECES[rng.below(PIECES.len())]))
+                            .collect()
+                    };
+                    apply(&mut text, &mut undo, pos, del, ins);
+                }
+            }
+            check(&text, &format!("round {round}"));
+        }
+        while let Some((pos, del, ins)) = undo.pop() {
+            edit(id, pos, del, &ins).unwrap();
+            text.splice(pos..pos + del, ins);
+            check(&text, "undoing");
+        }
+        assert_eq!(text, source);
+        kept(id, |tree, _| {
+            assert_eq!(
+                differ(tree, &first),
+                None,
+                "{name}: the source's tree again"
+            )
+        });
+        assert!(free(id));
+        (same, recovered)
+    }
+
+    /// The property: after random edits, the incremental tree is the tree a whole parse gives.
+    #[test]
+    fn incremental_trees_equal_whole_parses_after_random_edits() {
+        let _alone = heavy();
+        for &(name, src) in SOURCES {
+            let (mut same, mut recovered) = (0, 0);
+            for seed in 1..=8u64 {
+                let (s, r) = random_edits(name, src, seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 60);
+                same += s;
+                recovered += r;
+            }
+            eprintln!("{name}: {same} edits gave the whole parse's tree, {recovered} recovered from an error otherwise");
+            assert!(
+                same > 10 * recovered,
+                "{name}: {same} the same, {recovered} not"
+            );
+        }
+    }
+    /// Per grammar of the budget test, ten lines of source that the test repeats to 10,000, and where in them a
+    /// character is typed (inside an identifier, so the text stays without an error).
+    const BLOCKS: &[(&str, &str, &str)] = &[
+        (
+            "rust",
+            "fn f(x: u32) -> u32 {\n    let y = x * 2; // é\n    if y > 3 {\n        return y;\n    }\n    match x {\n        0 => 1,\n        _ => x + g(\"𝔸\").len() as u32,\n    }\n}\n",
+            "return y",
+        ),
+        (
+            "c",
+            "int f(int x) {\n  int y = x * 2; /* é */\n  if (y > 3) {\n    return y;\n  }\n  for (int i = 0; i < x; i++) {\n    printf(\"%d 𝔸\", i);\n  }\n  return y;\n}\n",
+            "return y",
+        ),
+        (
+            "javascript",
+            "function f(x) {\n  const y = x * 2; // é\n  if (y > 3) {\n    return y;\n  }\n  for (const i of [1, 2]) {\n    console.log(i, \"𝔸\");\n  }\n  return { a: y };\n}\n",
+            "return y",
+        ),
+        (
+            "nix",
+            "{\n  a = x: x * 2; # é\n  b = if c then 3 else 4;\n  d = [ 1 2 ];\n  e = \"𝔸 ${f}\";\n  g = let h = 1; in h;\n  i = {\n    j = k.l;\n  };\n}\n",
+            "in h",
+        ),
+        (
+            "python",
+            "def f(x):\n    y = x * 2  # é\n    if y > 3:\n        return y\n    for i in range(x):\n        print(i, \"𝔸\")\n    return [\n        y,\n    ]\n\n",
+            "return y",
+        ),
+    ];
+
+    /// The keystroke budget: in a text of 10,000 lines, a character typed or taken back again is an edit and a
+    /// reparse within 2 ms (the median of 50 keystrokes, the best of three such runs, so that what is measured is
+    /// the work and not other builds on the machine), and far below a whole parse of the same text. Python's
+    /// grammar does not keep that budget: its reparse re-reads every statement of the file (its top-level
+    /// repetition is fragile, and a `def` cannot be reused where the scanner's state counts), so for Python the
+    /// test holds it to under half of a whole parse.
+    /// Timing on a shared machine is noisy, so the package build skips it; it runs on request and alone, as the
+    /// package build with only this test, from the repository:
+    /// nix build --no-link -L --impure --expr '(builtins.getFlake (toString ./.)).packages.x86_64-linux.edwin
+    ///   .overrideAttrs (o: { cargoTestFlags = [ "--bins" ]; checkFlags = [ "--ignored" "--nocapture"
+    ///   "keystroke_in_10000_lines" ]; })'
+    #[test]
+    #[ignore]
+    fn a_keystroke_in_10000_lines_reparses_within_its_budget() {
+        let _alone = heavy();
+        use_dir(&bundle());
+        let median = |mut v: Vec<Duration>| {
+            v.sort();
+            v[v.len() / 2]
+        };
+        for &(name, block, word) in BLOCKS {
+            assert_eq!(block.lines().count(), 10);
+            let text = utf16(&block.repeat(1000));
+            let g = grammar(name).unwrap();
+            assert!(!g.parse(&text).unwrap().root_node().has_error(), "{name}");
+            let id = parse(name, text.clone()).unwrap();
+            for (place, block_no) in [("first", 0), ("middle", 500), ("last", 999)] {
+                let at = block_no * block.encode_utf16().count()
+                    + block[..block.find(word).unwrap()].encode_utf16().count()
+                    + word.encode_utf16().count();
+                let (mut key, mut whole) = (Duration::MAX, Duration::MAX);
+                for _ in 0..3 {
+                    let t = Instant::now();
+                    g.parse(&text).unwrap();
+                    whole = whole.min(t.elapsed());
+                    let keys = (0..50)
+                        .map(|i| {
+                            let t = Instant::now();
+                            if i % 2 == 0 {
+                                edit(id, at, 0, &utf16("z")).unwrap();
+                            } else {
+                                edit(id, at, 1, &[]).unwrap();
+                            }
+                            t.elapsed()
+                        })
+                        .collect();
+                    key = key.min(median(keys));
+                }
+                eprintln!("{name}: a keystroke in the {place} ten lines of 10,000: {key:?}; a whole parse {whole:?}");
+                if name == "python" {
+                    assert!(
+                        key * 2 < whole,
+                        "{name}, {place}: {key:?} against a whole parse's {whole:?}"
+                    );
+                } else {
+                    assert!(key < Duration::from_millis(2), "{name}, {place}: {key:?}");
+                    assert!(
+                        key * 10 < whole,
+                        "{name}, {place}: {key:?} against a whole parse's {whole:?}"
+                    );
+                }
+            }
+            kept(id, |tree, kept| {
+                assert_eq!(kept, &text[..]);
+                assert_eq!(differ(tree, &g.parse(&text).unwrap()), None);
+            });
+            assert!(free(id));
+        }
     }
 }

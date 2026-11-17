@@ -25,6 +25,7 @@ pub const JS: &[(&str, &str)] = &[
     ("vc-jj", include_str!("../../src/vc-jj.js")),
     ("compile", include_str!("../../src/compile.js")),
     ("lsp-rpc", include_str!("../../src/lsp-rpc.js")),
+    ("syntax", include_str!("../../src/syntax.js")),
     ("ot", include_str!("../../src/ot.js")),
     ("sync", include_str!("../../src/sync.js")),
     ("display", include_str!("../../src/display.js")),

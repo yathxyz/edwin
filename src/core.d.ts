@@ -1672,6 +1672,8 @@ interface EdApi {
   openUrl(target: string, opts?: { confirmed?: boolean }): string | null;
   /* set by compile.ts */
   compile: EdCompileApi;
+  /* set by syntax.ts */
+  syntax: EdSyntaxApi;
 }
 
 /* ---------- editor: compile (compile.ts) ---------- */
@@ -1839,6 +1841,18 @@ interface EdHostProc {
   closeStdin(id: number): void;
   kill(id: number, signal?: EdProcSignal): boolean;
 }
+/* tree-sitter in the desktop program (host-native.ts over native/src/syntax.rs), trees by number: parse TEXT with
+   the bundle's GRAMMAR, an edit of a tree's text (DEL code units at POS replaced by INS) and its reparse, free */
+interface EdHostSyntax {
+  parse(grammar: string, text: string): number;
+  edit(tree: number, pos: number, del: number, ins: string): void;
+  free(tree: number): boolean;
+}
+interface EdSyntaxApi {
+  /* B's syntax tree with GRAMMAR, kept in step with its text by its edit log: the tree's number, null when the
+     host has no tree-sitter (a web frame, edwind) */
+  tree(b: EdBuffer, grammar: string): number | null;
+}
 interface EdHostFiles {
   read(name: string): string | null;
   write(name: string, text: string): void;
@@ -1893,6 +1907,7 @@ interface EdHost {
   /* native */
   files?: EdHostFiles;
   proc?: EdHostProc;
+  syntax?: EdHostSyntax;
   /* a session that keeps nothing of the text and polls no file (edwin --private: ui-sensitive-session sets it) */
   readonly private?: boolean;
   readonly dirs?: { home: string; cwd: string; config: string; state: string };
@@ -2508,6 +2523,10 @@ interface EdNatives {
   synParse(name: string, text: string): number;
   synQuery(tree: number, kind: string, start?: number, end?: number): { names: string[]; captures: number[] };
   synFree(tree: number): boolean;
+  /* the tree's text changed, DEL code units at POS replaced by INS, and the tree parsed again from itself (an edit
+     beside a surrogate pair's half is widened to the whole character); throws when the edit is not in the tree's
+     text, or when the reparse fails, which frees the tree */
+  synEdit(tree: number, pos: number, del: number, ins: string): void;
 }
 type EdProcSignal = 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT' | 'STOP' | 'CONT' | 'USR1' | 'USR2';
 interface EdProcSpawnOptions {

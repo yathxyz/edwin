@@ -4525,6 +4525,82 @@ reparse, highlighting, imenu, expand-region, indentation). Nothing in the core c
   54.7 ms before and 57.9 after, fastest 23.2 and 21.8. Nothing of tree-sitter runs before the first draw. The
   program grows by 2.4 MB (66.2 to 68.6). Also passed: `nix flake check` (exit 0).
 
+## Incremental reparse (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a
+reparse costs what the edit touched, for the tree-sitter packages after it (highlighting, imenu, expand-region,
+indentation). Nothing draws from the trees yet: lang-syntax-highlight is the first to ask for one.
+
+- **`syntax::edit` and the native `synEdit(tree, pos, del, ins)`** (native/src/syntax.rs, natives.rs, typed in
+  `src/core.d.ts`): the tree's kept text has DEL code units at POS replaced by INS; the tree is told of the edit
+  (`Tree::edit` with its start, old end and new end in bytes and in points) and parsed again from itself, so
+  tree-sitter reuses what the edit left alone. The tree keeps its number. It throws `synEdit: DEL deleted at POS
+  goes past syntax tree N's text of LEN`, `synEdit: the position and the length deleted are string indices`
+  (negative, a fraction, not a number), `synEdit: the text inserted is not a string` and `no syntax tree N`.
+- **Points** are counted as tree-sitter counts a UTF-16 text: a row per line feed, a column in bytes (two a code
+  unit). The start point is counted from the kept text (a scan to the edit), the ends from the start and the
+  deleted or inserted text. The property test checks them against every node's own points in a whole parse.
+- **Byte versus UTF-16 offsets** (the plan's risk) were settled by lang-syntax-native: offsets are JS string
+  indices, bytes are twice them. What was left: a JS index can fall between the halves of a surrogate pair, and
+  tree-sitter, decoding a lead half, reads the unit after it without counting it as looked at, so a token ending
+  at such an edit was reused though its character changed (found by the property test, a YAML retyping of `𝔸`).
+  An edit is widened to whole characters first, by the lead half before it and the trail half after it.
+- **A reparse past its bound** (`PARSE_LIMIT`, 1 s) frees the tree and throws `parsing NAME took over 1000 ms;
+  syntax tree N is freed`: a tree is never left out of step with its text. (Not exercised by a test: no text
+  parses whole within the bound and reparses past it reliably.)
+- **`src/syntax.ts`, `Ed.syntax.tree(b, grammar)`** (new, through the seven places of the touch list), the edit
+  hook on the frame's side: B's tree with GRAMMAR, brought to B's version when asked. It reads the buffer's edit
+  log, as the other caches do: `Ed.spanOf` joins every edit since the tree's version into one span, and only that
+  span's text crosses (`host.syntax.edit`), not the buffer's. A whole parse instead when the log no longer reaches
+  the tree's version (trimmed past it, or forgotten), when the grammar asked for differs, or when the edit throws.
+  The trees of killed buffers are freed before the next whole parse (which is when the native side's limit of
+  256 trees counts). `host.syntax` (parse, edit, free over the natives) is the desktop program's only
+  (native/js/host-native.ts); in a web frame and in edwind `tree` gives null. Nothing of it is reachable from
+  Scheme, and it starts no process and reads no file: a grammar is named, and the native side loads it from the
+  program's own bundle.
+- **Choices:** the edits are read from the log when a tree is asked for, not pushed on each change (the core's
+  one `edited` hook belongs to org.ts and markdown.ts), so a run of keystrokes costs one reparse when the tree is
+  next wanted; a run of edits crosses as one span, so a reparse is one `Tree::edit` and one parse; the edit and
+  its reparse are one native call (no tree is kept edited but not reparsed); the changed ranges of a reparse are
+  not returned (lang-syntax-highlight adds them if it needs them).
+- **The keystroke budget, measured.** On 10,000 lines (ten-line functions repeated), the median of 50 keystrokes,
+  best of three runs, on ex44 under load: Rust about 1.7 to 1.9 ms, C 0.6 ms, JavaScript 1.0 to 1.4 ms, Nix 0.1 to
+  1.7 ms, against a whole parse of 20 to 77 ms; on 2026-11-17 at a load average near 3: Rust 0.52 to 0.56 ms, C
+  0.24 to 0.26 ms, JavaScript 0.38 to 0.50 ms, Nix 0.03 to 0.44 ms, Python 1.0 to 1.9 ms, against a whole parse of
+  19 to 31 ms. Tree-sitter reuses the top-level items but rebuilds the
+  repetition holding them (its nodes are fragile: the repetition's reduction is ambiguous in the parse table), so
+  a reparse's cost grows with the number of top-level items as well as with the edit. **Python does not keep the
+  2 ms budget under load:** 2.4 to 9 ms against a 25 to 50 ms whole parse (its `def` cannot be reused where the indentation
+  scanner's state counts, so a reparse re-reads most statements of the file). lang-syntax-highlight and the
+  indent packages cannot put a Python reparse on the 2 ms path: they should draw from the last tree and reparse
+  after the key.
+- **Not in it:** highlighting, faces, queries from `Ed` (lang-syntax-highlight), the changed ranges, a tree for
+  the region of an Org source block (lang-src-block-highlight), tree-sitter in web frames or edwind.
+- **Checked by** `nix build .#edwin` on ex44 (the build's check sets `EDWIN_TEST_GRAMMARS` to the bundle: unit
+  tests 30 passed and 1 ignored (the keystroke budget), 2 of them new, `tests/gui.rs` 5 passed and 1 ignored, `tests/terminal.rs` 35 passed), check
+  `edwin-syntax` (new, 6 tests), `nix flake check` (exit 0; it builds `edwin-typecheck`, `edwin-headless`,
+  `edit-lockdown` and `edit-security` among the rest, which pass with edwind's Node host loading src/syntax.ts,
+  where it does nothing; run before the budget test was ignored, not run again after). The timings quoted above come from runs of the same cargo tests outside the package
+  build (opt-level 3, `--nocapture`), since cargo hides a passing test's output in the build log. The new cargo
+  tests:
+  `syntax::tests::incremental_trees_equal_whole_parses_after_random_edits`, the plan's property: for Rust,
+  Python, Bash, YAML, Nix, JSON, JavaScript and C, eight seeds of 60 random edits each (insertions, deletions and
+  replacements of tokens, brackets, quotes, line breaks, `é`, `𝔸` and a lone surrogate half; a line deleted and
+  retyped a code unit at a time), every edit through `syntax::edit` and compared node by node (kind, field,
+  extent in bytes and points, named, error and missing) with a whole parse of the same text, then every edit
+  undone the same way, back to the very tree of the source. The trees are equal whenever the whole parse has no
+  error (35,600 comparisons gave the whole parse's tree). Where both hold an error the two may recover differently (tree-sitter's own corpus
+  tests allow it); that happened only in Bash, 2 times in 4,300 there (120 in 35,000 with 64 seeds, run once), and
+  the test bounds it to a tenth. `a_keystroke_in_10000_lines_reparses_within_its_budget`: the numbers above,
+  2 ms and a tenth of a whole parse asserted for Rust, C, JavaScript and Nix at the first, middle and last ten
+  lines, half a whole parse for Python; the tests that time a parse run one at a time. It is `#[ignore]`d, as
+  `tests/gui.rs`'s latency budget is: a wall-clock bound in the package build would fail it on a loaded or slower
+  builder. It runs on request and alone, as the package build with only that test (the command is in its doc
+  comment: `cargoTestFlags = [ "--bins" ]`, `checkFlags = [ "--ignored" "--nocapture" "keystroke_in_10000_lines" ]`
+  over `.#edwin`); its 2026-11-17 run passed with the numbers above. And
+  `natives::tests::the_syntax_natives_from_javascript` gained `synEdit`: the edit at JS indices after `𝔸` moves
+  the capture along, and its refusals.
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

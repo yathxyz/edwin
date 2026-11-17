@@ -172,13 +172,20 @@ const proc: EdHostProc = {
   kill: (id, signal) => N.procKill(id, signal),
 };
 
+/* ---------- tree-sitter: the natives of native/src/syntax.rs, for Ed.syntax (src/syntax.ts) ---------- */
+const syntax: EdHostSyntax = {
+  parse: (grammar, text) => N.synParse(grammar, text),
+  edit: (tree, pos, del, ins) => N.synEdit(tree, pos, del, ins),
+  free: tree => N.synFree(tree),
+};
+
 function createHost(opts: { storage?: EdHostStorage; dark?: boolean } = {}): EdHost {
   const attrs = new Map<string, unknown>(), vars = new Map<string, string>(), suspend: (() => void)[] = [];
   const storage = opts.storage || deferredStorage();
   const tryRead = (p: string) => { try { return read(p); } catch (e) { return null; } };
   const host: EdHost = {
     kind: 'native', headless: true,
-    storage, files, proc,
+    storage, files, proc, syntax,
     config: name => (Object.prototype.hasOwnProperty.call(globalThis.__scm, name) ? globalThis.__scm[name] : null),
     userConfig: name => tryRead(join(CONFIG_DIR, name)),
     readFile: p => tryRead(p),
