@@ -204,13 +204,21 @@ test('a long replay retains at least 20 MiB verbatim and reports replay time, ev
   t.diagnostic(JSON.stringify({ ms: Number(ms.toFixed(2)), events: count, bytes, renderedBytes: Buffer.byteLength(r.text), foldedVisibleLines: visibleLines }));
 });
 
-test('many maximum-size prompt bodies remain inspectable without overflowing metadata wire frames', () => {
-  const tr = new Transcript('prompt-budget'), payload = 'context\n'.repeat(120000);
-  tr.apply(reply(Array.from({ length: 19 }, (_, i) => ({ seq: i + 1, e: 'prompt', prompt: [{ type: 'text', text: `${i}:` + payload }] }))));
+test('many oversized prompt bodies have an explicit per-event bound without overflowing metadata wire frames', () => {
+  const limit = 1024 * 1024, tr = new Transcript('prompt-budget'), payload = 'context\n'.repeat(180000) + 'discarded-tail';
+  const events = Array.from({ length: 19 }, (_, i) => ({ seq: i + 1, e: 'prompt', prompt: [{ type: 'text', text: `${i}:` + payload }] }));
+  tr.apply(reply(events));
   const rendered = tr.render();
-  assert.ok(Buffer.byteLength(rendered.text) > 16 * 1024 * 1024);
+  assert.ok(Buffer.byteLength(rendered.text) > 16 * 1024 * 1024, 'ordinary aggregate history is not capped');
   assert.ok(Buffer.byteLength(JSON.stringify({ ...rendered, text: undefined })) < 16 * 1024 * 1024, 'the /edit frame limit applies to structure too');
-  assert.ok(rendered.text.includes('18:' + payload));
+  assert.equal(rendered.spans.length, 19);
+  for (const span of rendered.spans) {
+    const text = rendered.text.slice(span.start, span.end);
+    assert.ok(text.length <= limit, `event #${span.seq} exceeds its UTF-16 budget`);
+    assert.match(text, /EVENT CONTENT TRUNCATED/);
+    assert.doesNotMatch(text, /discarded-tail/);
+  }
+  assert.strictEqual(tr.journal[18], events[18], 'the cap affects presentation, not the journal');
 });
 
 test('foreign-session mode/config and plan updates cannot replace the main session state', () => {
@@ -226,4 +234,199 @@ test('foreign-session mode/config and plan updates cannot replace the main sessi
   assert.deepEqual(rendered.configOptions, [{ id: 'model', currentValue: 'main-model' }]); assert.equal(rendered.modeId, 'ask');
   assert.ok(rendered.text.includes('main plan')); assert.ok(rendered.text.includes('child plan'));
   assert.equal(rendered.spans.filter(s => s.kind === 'plan').length, 2);
+});
+
+test('all event presentations share one 1 Mi UTF-16 budget across literal content, JSON and summaries', () => {
+  const limit = 1024 * 1024, payload = '😀'.repeat(600000) + 'discarded-tail', tr = new Transcript('event-budget');
+  const diff = { type: 'diff', path: '/work/retained.ts', oldText: 'before\n', newText: 'after\n' };
+  const events = [
+    { seq: 1, e: 'prompt', prompt: [{ type: 'text', text: payload }] },
+    chunk(2, payload),
+    { seq: 3, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 't', title: 'Large output', content: [diff, { type: 'text', text: payload }], rawOutput: payload } },
+    { seq: 4, e: 'update', update: { sessionUpdate: 'plan', entries: [{ content: payload, status: 'in_progress' }] } },
+    { seq: 5, e: 'future_event', payload },
+    { seq: 6, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'large-title', title: payload, content: [{ type: 'text', text: payload }] } },
+    { seq: 7, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'partial-diff', content: [{ ...diff, oldText: payload }] } },
+  ];
+  tr.apply(reply(events));
+  const r = tr.render();
+  assert.equal(r.spans.length, events.length);
+  for (const span of r.spans) {
+    const text = r.text.slice(span.start, span.end);
+    assert.ok(text.length <= limit, `${span.kind} #${span.seq} exceeds its UTF-16 budget`);
+    assert.match(text, /EVENT CONTENT TRUNCATED/);
+    assert.doesNotMatch(text, /discarded-tail/);
+    if (span.foldStart !== undefined) {
+      assert.equal(r.text[span.foldStart], '\n'); assert.equal(r.text[span.foldEnd], '\n');
+      assert.ok(span.start < span.foldStart && span.foldEnd < span.end);
+    }
+  }
+  const retained = r.spans.find(s => s.seq === 3)!.diffs[0];
+  assert.equal(r.text.slice(retained.oldStart, retained.oldEnd), diff.oldText);
+  assert.equal(r.text.slice(retained.newStart, retained.newEnd), diff.newText);
+  assert.deepEqual(r.spans.find(s => s.seq === 7)!.diffs, [], 'a clipped diff is not offered as a complete diff');
+  assert.deepEqual(tr.journal, events);
+});
+
+test('the event budget bounds tool history entries without capping their combined block', () => {
+  const limit = 1024 * 1024, tr = new Transcript('tool-history-budget'), payload = 'tool output\n'.repeat(70000);
+  const events = [
+    { seq: 1, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 't', title: 'Large tool', content: [{ type: 'text', text: 'first\n' + payload }] } },
+    { seq: 2, e: 'update', update: { sessionUpdate: 'tool_call_update', toolCallId: 't', status: 'completed', content: [{ type: 'text', text: 'second\n' + payload }] } },
+  ];
+  tr.apply(reply(events));
+  const r = tr.render(), span = r.spans[0], text = r.text.slice(span.start, span.end);
+  assert.equal(r.spans.length, 1); assert.equal(span.eventCount, 2);
+  assert.ok(text.length > limit); assert.ok(text.length <= 2 * limit);
+  assert.equal(text.split('EVENT CONTENT TRUNCATED').length - 1, 2);
+  assert.match(text, /### Update #1\nfirst\n/); assert.match(text, /### Update #2\nsecond\n/);
+  assert.deepEqual(tr.journal, events);
+});
+
+test('incremental publication patches reconstruct text and preserve structural positions across successive replies', () => {
+  const tr = new Transcript('incremental');
+  const oldDiff = { type: 'diff', path: '/work/a.ts', oldText: 'old\n', newText: 'first\n' };
+  const newDiff = { type: 'diff', path: '/work/a.ts', oldText: 'first\n', newText: 'final\n' };
+  tr.apply(reply([
+    { seq: 1, e: 'prompt', prompt: [{ type: 'text', text: 'immutable prompt' }] },
+    { seq: 2, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 't', title: 'Edit', content: [oldDiff] } },
+    chunk(3, 'first answer'),
+  ]));
+  let previous = tr.render();
+  const publish = () => {
+    const next = tr.render(), patch = next.patch!;
+    assert.ok(patch);
+    assert.equal(patch.previousHead, previous.head); assert.equal(patch.previousEpoch, previous.epoch);
+    assert.equal(previous.text.slice(0, patch.start) + patch.text + previous.text.slice(patch.start + patch.remove), next.text);
+    for (const span of next.spans) {
+      assert.equal(next.text.slice(span.start, span.start + 3), '## ');
+      assert.ok(span.start < span.end && span.end <= next.text.length);
+      if (span.foldStart !== undefined) {
+        assert.equal(next.text[span.foldStart], '\n'); assert.equal(next.text[span.foldEnd], '\n');
+        assert.ok(span.start < span.foldStart && span.foldEnd < span.end);
+      }
+    }
+    const tool = next.spans.find(s => s.kind === 'tool');
+    if (tool) for (const [i, d] of tool.diffs.entries()) {
+      const expected = [oldDiff, newDiff][i];
+      assert.equal(next.text.slice(d.oldStart, d.oldEnd), expected.oldText);
+      assert.equal(next.text.slice(d.newStart, d.newEnd), expected.newText);
+    }
+    previous = next;
+    return patch;
+  };
+  tr.apply(reply([{ seq: 4, e: 'prompt', prompt: [{ type: 'text', text: 'second prompt' }] }], { from: 4 }));
+  const oldEnd = previous.text.length, append = publish();
+  assert.equal(append.start, oldEnd); assert.equal(append.remove, 0);
+  tr.apply(reply([chunk(5, 'second answer')], { from: 5 })); publish();
+  tr.apply(reply([chunk(6, ' continued')], { from: 6 }));
+  publish();
+  assert.match(previous.text, /second answer continued/);
+  tr.apply(reply([{ seq: 7, e: 'update', update: { sessionUpdate: 'tool_call_update', toolCallId: 't', status: 'completed', content: [newDiff] } }], { from: 7 }));
+  publish();
+  tr.apply(reply([], { head: 8, from: 8 })); const unchanged = publish();
+  assert.equal(unchanged.remove, 0); assert.equal(unchanged.text, '');
+  tr.apply(reply([chunk(1, 'replacement epoch')], { epoch: 200 })); publish();
+  assert.equal(previous.epoch, 200); assert.doesNotMatch(previous.text, /immutable prompt/);
+});
+
+test('assembled split-token redaction precedes navigation and exact tool-diff offsets', () => {
+  const token = 'secret-token-for-transcript', replacement = '[redacted]'.padEnd(token.length, '•');
+  const clean = (text: string) => text.replaceAll(token, replacement), tr = new Transcript(token, clean);
+  tr.apply(reply([chunk(1, 'answer secret-token-')]));
+  const before = tr.render();
+  const diff = { type: 'diff', path: '/work/a.ts', oldText: `old ${token}\n`, newText: `new ${token}\n` };
+  tr.apply(reply([
+    chunk(2, 'for-transcript done'),
+    { seq: 3, e: 'prompt', prompt: [{ type: 'text', text: `next ${token}` }] },
+    { seq: 4, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 't', title: token, content: [diff] } },
+  ], { from: 2 }));
+  const r = tr.render(), patch = r.patch!;
+  assert.equal(before.text.slice(0, patch.start) + patch.text + before.text.slice(patch.start + patch.remove), r.text);
+  assert.ok(!r.text.includes(token)); assert.ok(!patch.text.includes(token));
+  assert.ok(r.text.includes(`answer ${replacement} done`));
+  assert.ok(r.text.startsWith(`# Agent: ${replacement}\n`));
+  const prompt = r.spans.find(s => s.kind === 'prompt')!, tool = r.spans.find(s => s.kind === 'tool')!;
+  assert.equal(r.text.slice(prompt.start, prompt.start + 12), '## Prompt #3');
+  assert.equal(r.text.slice(tool.start, tool.start + 8), '## Tool:');
+  assert.ok(r.text.slice(tool.start, tool.foldStart).includes(replacement));
+  const renderedDiff = tool.diffs[0];
+  assert.equal(r.text.slice(renderedDiff.oldStart, renderedDiff.oldEnd), clean(diff.oldText));
+  assert.equal(r.text.slice(renderedDiff.newStart, renderedDiff.newEnd), clean(diff.newText));
+  for (const span of r.spans) {
+    assert.equal(r.text[span.foldStart], '\n'); assert.equal(r.text[span.foldEnd], '\n');
+    assert.ok(span.start < span.foldStart && span.foldEnd < span.end);
+  }
+});
+
+test('authoritative pending reconciliation marks unavailable resolutions without inventing an outcome', () => {
+  let cleanCalls = 0;
+  const tr = new Transcript('lost-resolution', text => { cleanCalls++; return text; });
+  const permission = (seq: number): Event => ({ seq, e: 'permission', toolCall: { toolCallId: `t${seq}`, title: 'Run' }, options: [{ optionId: 'allow', kind: 'allow_once', name: 'Allow' }] });
+  tr.apply(reply([permission(2), { seq: 5, e: 'elicitation', request: { message: 'Choose', mode: 'form' } }, chunk(10, 'recent')], { head: 10, from: 8, truncated: true }));
+  const initial = tr.controls();
+  assert.equal(cleanCalls, 0, 'current requests are available before any history is rendered');
+  assert.deepEqual(initial.pending.map(e => e.req), [2, 5]);
+  assert.deepEqual(initial.pending[0].options, permission(2).options);
+  const before = tr.render();
+  tr.reconcilePending([{ req: 5, kind: 'elicitation' }]);
+  const callsBeforeControls = cleanCalls, controls = tr.controls();
+  assert.equal(cleanCalls, callsBeforeControls, 'request projection does not render history');
+  let r = tr.render();
+  assert.deepEqual(controls.pending, r.pending); assert.deepEqual(controls.resolved, r.resolved);
+  assert.deepEqual(r.pending.map(e => e.req), [5]);
+  assert.deepEqual(r.resolved.map(e => [e.req, e.status]), [[2, 'unavailable']]);
+  assert.equal(r.resolved[0].by, undefined); assert.equal(r.resolved[0].seq, undefined);
+  assert.match(r.text, /permission \[no longer pending; resolution unavailable\] #2/);
+  assert.equal(r.spans.find(s => s.req === 2)!.status, 'unavailable');
+  assert.equal(before.text.slice(0, r.patch!.start) + r.patch!.text + before.text.slice(r.patch!.start + r.patch!.remove), r.text);
+  tr.apply(reply([permission(3), permission(11)], { head: 11, from: 11 }));
+  r = tr.render();
+  assert.deepEqual(r.pending.map(e => e.req), [5, 11], 'new requests are not judged against an older registry');
+  assert.deepEqual(r.resolved.map(e => [e.req, e.status]), [[2, 'unavailable'], [3, 'unavailable']], 'late pinned events retain authoritative absence through refolding');
+  tr.reconcilePending([{ req: 11, kind: 'permission' }]);
+  r = tr.render();
+  assert.deepEqual(r.pending.map(e => e.req), [11]);
+  assert.equal(r.resolved.find(e => e.req === 5)!.status, 'unavailable');
+  tr.apply(reply([{ seq: 12, e: 'permission_resolved', req: 2, by: 'user', outcome: { outcome: 'selected', optionId: 'allow' } }], { from: 12 }));
+  r = tr.render();
+  assert.equal(r.resolved.find(e => e.req === 2)!.status, 'resolved');
+  assert.equal(r.resolved.find(e => e.req === 2)!.by, 'user');
+  assert.match(r.text, /permission \[resolved\] #2/);
+  assert.equal(r.resolved.find(e => e.req === 3)!.status, 'unavailable');
+  tr.apply(reply([permission(2)], { reset: true }));
+  r = tr.render();
+  assert.deepEqual(r.pending.map(e => e.req), [2]); assert.equal(r.resolved.length, 0);
+  assert.doesNotMatch(r.text, /resolution unavailable/);
+});
+
+test('growing assistant messages publish only new text, not their already displayed body', () => {
+  const tr = new Transcript('message-appends', text => text, 63), opening = 'earlier output\n'.repeat(10000);
+  tr.apply(reply([chunk(1, opening)]));
+  let prior = tr.render();
+  for (let seq = 2; seq < 12; seq++) {
+    const addition = `visible chunk ${seq}\n` + 'streaming text\n'.repeat(500);
+    tr.apply(reply([chunk(seq, addition)]));
+    const next = tr.render(), patch = next.patch!;
+    assert.equal(patch.remove, 0, 'ordinary streaming never deletes already displayed text');
+    assert.equal(patch.text, addition, 'the edit payload is independent of the growing message history');
+    assert.equal(prior.text.slice(0, patch.start) + patch.text + prior.text.slice(patch.start), next.text);
+    assert.equal(next.spans[0].eventCount, seq);
+    assert.equal(next.text[next.spans[0].foldEnd], '\n');
+    prior = next;
+  }
+  assert.equal(prior.spans.length, 1);
+  assert.ok(prior.text.includes(opening));
+});
+
+test('oversized Unicode events truncate without publishing unpaired UTF-16 surrogates', () => {
+  const tr = new Transcript('unicode-budget'), large = '😀'.repeat(1024 * 1024);
+  tr.apply(reply([0, 1].map(n => ({ seq: n + 1, e: 'prompt', prompt: [{ type: 'text', text: 'x'.repeat(n) + large }] }))));
+  const view = tr.render();
+  assert.equal(view.text.isWellFormed(), true);
+  for (const span of view.spans) {
+    const text = view.text.slice(span.start, span.end);
+    assert.ok(text.length <= 1024 * 1024);
+    assert.match(text, /EVENT CONTENT TRUNCATED/);
+  }
 });

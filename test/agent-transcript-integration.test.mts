@@ -77,7 +77,7 @@ test('AS-C3/C4/C9: long journal opens folded, streams off-point without undo, pr
   const large = 'x'.repeat(3 * 1024 * 1024) + 'large-output-end';
   hub.append('long', { e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'large', title: 'Large live output', status: 'completed', rawOutput: large } });
   await until(() => b.meta.locals.agentSession.head === s.acp.headSeq);
-  assert.equal(Ed.sync.state, 'online'); assert.ok(b.text.includes(large));
+  assert.equal(Ed.sync.state, 'online'); assert.match(b.text, /EVENT CONTENT TRUNCATED/); assert.ok(!b.text.includes('large-output-end'));
   assert.equal(b.undo.length, undo);
-  t.diagnostic(`Journal smoke: initial 1201 events opened in ${elapsed.toFixed(1)} ms; final ${events.length} events, ${Buffer.byteLength(b.text)} bytes, ${b.folds.length} folds; 3 MiB live output delivered without reconnect.`);
+  t.diagnostic(`Journal smoke: initial 1201 events opened in ${elapsed.toFixed(1)} ms; final ${events.length} events, ${Buffer.byteLength(b.text)} bytes, ${b.folds.length} folds; 3 MiB live output visibly bounded without reconnect.`);
 });
