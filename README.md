@@ -25,7 +25,7 @@ nix flake check -L          # the suites below, the type check (edwin-typecheck)
 
 ## TypeScript
 
-edwind (`server/*.mts`) and the suites (`test/*.mts`) are TypeScript that Node 24 runs as it is: Node strips
+edwind (`server/*.mts`), the suites (`test/*.mts`) and tools (`tools/*.mts`) are TypeScript that Node 24 runs as it is: Node strips
 the types at load, and `tsc -p .` (flake check `edwin-typecheck`, `--strict`) checks them. The rules that keep
 that working:
 - **Erasable syntax only** (`erasableSyntaxOnly`): no `enum`, `namespace`, parameter properties or `import =`.
@@ -98,6 +98,11 @@ edit.sock client.
   are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts, outside the notes tree.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
   `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
+  For a read-only live check, run `node tools/agent-live.mts URL TOKEN_FILE [SID]` from this checkout
+  (Node 24). Without SID it prints the session list; with SID it prints replay metrics, first/last
+  60 frame-visible lines with default/all-open folds, host control state and truncation notices.
+  It uses temporary state, loads no user init, installs no agent mutation commands and permits GET only.
+  All-open lines are cut to 200 Unicode characters; errors exit nonzero without dumping headers.
 - **Task rows carry `fields`**: every `key::` field (and Org property) of a task, by its lowercased key, in
   `notes-tasks`, `notes-task` and the reply of `notes-task-set`. The rows no longer single out `session`,
   `dispatched` and `target`, which only Workbench's dispatch gives a meaning.

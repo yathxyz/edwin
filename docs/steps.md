@@ -1039,11 +1039,13 @@ Edwin never starts or speaks ACP to an agent itself.
 are complete. All twelve findings have fixes and regression coverage: incarnation-bound actions/drafts;
 bounded incremental replay; serialized/coalesced publication; GET retry/reset/pending reconciliation;
 and view/stream teardown. Acknowledged prompt destinations never return to this daemon's retry set.
-Final gates: agent 67/67, all three TypeScript projects, native 31 passed with one existing ignored test.
+Feature gate at `73cef87`: agent 67/67, all three TypeScript projects, native 31 passed with one existing ignored test.
 A standalone served frame exercised folds, an external prompt, global permission, off-tail/undo preservation,
 cross-publication token redaction and replacement rejection. Measurements and API limitations are below.
 No real credential, external network or existing service was used. Earlier baseline records remain;
 this review does not claim another full Node run or physical native GUI exercise.
+`tools/agent-live.mts` now provides standalone GET-only live-hub inspection, checked against the stub;
+it is statically typechecked but never run by a suite.
 
 ### Requirements
 
@@ -1227,7 +1229,47 @@ the next journal append resumes tail following if point was at the tail.
 | AS-C17 | Concurrent attached-list replacements keep displayed rows identical to structural command targets. Fail the final journal GET once without another summary: automatic GET retry catches up. A same-incarnation lower head resets transcript/facts. Truncated/later pending snapshots mark lost resolutions unavailable rather than actionable. |
 | AS-C18 | Kill list, observed and transcript views during in-flight reads: later completions/summaries do not recreate them, and reopening explicitly works. Repeated 503 SSE responses with ongoing bytes close immediately; shutdown closes all outstanding attempts. |
 
+### Read-only live-hub inspection
+
+From the checkout, with Node 24 and the checkout's normal dependencies:
+
+```sh
+node tools/agent-live.mts URL TOKEN_FILE
+node tools/agent-live.mts URL TOKEN_FILE SID
+```
+
+This is a manual tool, not a suite. It constructs `AgentSessions` and real daemon buffers in-process,
+under a private temporary state directory removed on success or failure. No user init/image, listening
+socket, agent RPC installer or prompt store is loaded. The core modules registering agent start/send/
+answer/cancel/remove/mode/config/revive commands are omitted too; a GET-only override additionally
+refuses every write before HTTP. Only the feature's token reader opens the credential file.
+
+With no SID, print the live list buffer after model-fact reads/publication finish. With SID, wait for
+the initial stream snapshot and replay to the latest announced epoch/head, freeze that snapshot,
+then print open milliseconds (excluding boot/connection), retained journal event count, spans and
+default folds. Print first/last 60 **logical display lines**, without viewport wrapping, cursor or faces,
+through the actual frame fold/line/glyph code. Repeat with every fold open, cutting each line to 200
+Unicode characters. Short excerpts intentionally overlap. Print the host-page pending/control snapshot,
+authoritative replay truncation/from/gaps, and displayed per-event bound-marker occurrences (literal
+agent quotations can contain that marker too). Reported/PTY records say journal event count is unavailable.
+
+HTTP/auth failures, including background fact/journal reads or a refused stream, exit nonzero without
+partial normal output or dumped headers/response bodies. Hub I/O has a 120-second deadline. Normal
+inspection performs only GETs; pending permissions and elicitations are printed, never answered.
+
 ### Verification record
+
+**Read-only live tool (manual stub check):** `tsc -p .` exits 0, including `tools/*.mts`.
+A disposable driver ran the actual CLI against `test/fake-agent-hub.mts`, outside the suite runner:
+list/model/observed records; replay advancing during its first read; exactly 60 first/last frame lines;
+all-open Unicode clipping/control glyphs; pending permission/elicitation and mode/config state;
+hub/render truncation; reported-only records; 401, 503, partial-list/journal 502, stream refusal and missing SID.
+The transcript retained 148 events / 147 spans / 144 default folds, opening in 31.82 ms in this run.
+The driver and its private credential/state directory were removed afterward. Final output:
+
+```text
+agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header output absent
+```
 
 **Reviewer-hardening gate (after the last runtime/test edit):**
 
