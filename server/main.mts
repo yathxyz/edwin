@@ -33,6 +33,7 @@ import * as babelModule from './babel.mts';
 import * as fsModule from './fs.mts';
 import * as projectorModule from './projector.mts';
 import * as brainModule from './brain.mts';
+import * as agentSessionsModule from './agent-sessions.mts';
 import { TAG } from './projector.mts';
 import { lockdown, lockdownState } from './lockdown.mts';
 import type { By, CallCtx, CallResult, Condition, WireMessage } from './proto.mts';
@@ -77,6 +78,7 @@ export interface Config {
      brain-* commands read with and `taskCredential` what they write tasks with (server/brain.mts); without
      one, that part is off. */
   brain?: { url: string; credential?: string; readCredential?: string; taskCredential?: string; tags: string[] };
+  agentHub?: agentSessionsModule.AgentHubConfig;
 }
 
 /* A server command (§4.6): the result object, a promise of one, or undefined for a delayed result. */
@@ -90,7 +92,7 @@ export interface ServerModule { install(server: Server): Promise<void>; shutdown
 const require = createRequire(import.meta.url);
 /* The E2 modules, installed in this order after the buffers are loaded; each exports install(server) and
    may export shutdown(server) and name. */
-const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule, fsModule, projectorModule, brainModule];
+const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule, fsModule, projectorModule, brainModule, agentSessionsModule];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EDWIN = path.join(HERE, '..');
 export const BUILD = process.env.EDWIND_BUILD || 'dev';
@@ -110,7 +112,7 @@ export function makeLog(level: string = 'info'): Log {
 }
 
 /* ---------- config (R15.4): edit.json, unknown fields refused ---------- */
-const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'brain', 'host', 'logLevel']);
+const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'brain', 'agentHub', 'host', 'logLevel']);
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
   try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
@@ -170,6 +172,7 @@ export function loadConfig(file: string): Config {
     if (!Array.isArray(tags) || !tags.every(t => typeof t === 'string' && TAG.test(t))) throw new Error(`${file}: brain.tags must be a list of brain tags such as ["roam"]`);
     out.brain = { url: b.url, tags, ...(b.credential === undefined ? {} : { credential: b.credential }), ...(b.readCredential === undefined ? {} : { readCredential: b.readCredential }), ...(b.taskCredential === undefined ? {} : { taskCredential: b.taskCredential }) };
   }
+  if (cfg.agentHub !== undefined) out.agentHub = agentSessionsModule.validateAgentHub(cfg.agentHub);
   return out;
 }
 
@@ -211,6 +214,11 @@ export class Server {
        frame, and to a model through pi's tools (R14.6). */
     const credentials = modelsModule.credentialsDirectory();
     this.auth = new Authority(credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg);
+    if (cfg.agentHub) {
+      this.auth.refuse.push(cfg.agentHub.tokenFile);
+      let real = cfg.agentHub.tokenFile; try { real = fs.realpathSync(real); } catch { /* absent credential stays refused */ }
+      this.auth.realRefuse.push(real);
+    }
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */
@@ -235,6 +243,7 @@ export class Server {
     if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
     this.Ed = loadEdwin(host, { mode: 'gen' });
     this.L = (globalThis as any).L; // any: the core sets globalThis.L
+    agentSessionsModule.prepare(this);
     this.Ed.boot({ host });
     await this.Ed.whenIdle();
     this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });

@@ -1035,9 +1035,10 @@ Issue #7: Edwin is the complete text interface to the hub's agents and to the se
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
 Edwin never starts or speaks ACP to an agent itself.
 
-**State of the work.** Design recorded before implementation. Next: HTTP/SSE client and the live session
-list; then structured transcripts; then prompts, answers and steering; then persistent reusable prompts and
-ACP resources. Each stage is a separate commit with its affected suites run against a loopback stub API.
+**State of the work.** HTTP/SSE and the live daemon-owned sessions list are implemented in
+`server/agent-sessions.mts` and `src/agent-sessions.ts`; config and init accept only URL/token-file paths.
+The loopback API suite passes (3 checks), including a rendered model frame and RET, reconnect, remote start,
+reported records and token redaction/refusal. Next: journal transcripts, then steering and durable prompt resources.
 
 ### Requirements
 

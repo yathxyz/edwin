@@ -550,6 +550,7 @@ function applyMeta(b: SyncBuffer, m: Partial<SyncMeta>, ver?: number) {
   if (m.modified !== undefined) b.modified = !!m.modified;
   if (m.readOnly !== undefined && b.sver >= 0) b.readOnly = !!m.readOnly;
   anchorsChanged(b);
+  if (H.bufferMeta && m.locals) H.bufferMeta(b, m.locals, ver ?? b.sver);
   statusChanged();
 }
 /* b.meta.anchors in the replica's coordinates: the server positions mapped through inflight and the queue. */

@@ -218,6 +218,9 @@ in
   # session, and a switch of provider mid-session.
   edit-agent = suite "agent" [ "agent.test.mts" ];
 
+  # Hub HTTP/SSE agent sessions, with no real agents or credentials.
+  edit-agent-sessions = suite "agent-sessions" [ "agent-sessions.test.mts" ];
+
   # programs.edwin (nix/edwin-module.nix) evaluates into a system: the user unit runs `edwin --fg-daemon` from the
   # package, EDITOR is edwin. Evaluation only, so the edwin package itself is not built here.
   edwin-module =

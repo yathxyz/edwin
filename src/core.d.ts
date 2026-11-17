@@ -1325,6 +1325,8 @@ interface EdState {
 interface EdHooks {
   /* the major mode for a buffer name (org.ts, markdown.ts) */
   modeFor?: ((name: string) => string | null | undefined) | null;
+  /* Versioned non-text special-buffer structure, installed after shared metadata. */
+  bufferMeta?: ((b: EdBuffer, locals: Record<string, unknown>, ver: number) => void) | null;
   /* after edits were applied to B (sync.ts sends them) */
   applied?: ((b: EdBuffer, ops: EdAppliedOp[], origin: unknown) => void) | null;
   /* a buffer's text changed (org.ts, markdown.ts drop caches) */
@@ -1441,6 +1443,13 @@ interface EdApi {
   modeParents: Map<string, string>;
   modeChain(mode: string): string[];
   lighters(b: EdBuffer): string;
+  agentSessions: {
+    rpc(cmd: string, args?: unknown[]): Promise<unknown>;
+    show(id: string): Promise<EdBuffer>;
+    open(sid: string): Promise<EdBuffer>;
+    selected(): string;
+    refresh(): Promise<unknown>;
+  };
   /* the lexer's source, for the workers */
   LEX_SOURCE: string;
   /* the file store: the host's files, or its storage */

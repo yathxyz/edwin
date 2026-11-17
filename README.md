@@ -70,6 +70,7 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 | `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder, and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
 | `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
 | `console/manifest.json` | what a page that hosts frames loads, in order: `files` (the scripts) and `scm` (the Scheme sources), with `api` 1; `edwin-web` ships it as `manifest.json` |
+| `server/agent-sessions.mts`, `src/agent-sessions.ts` | daemon-owned mesh agent sessions (`agentHub: {url, tokenFile}`); `M-x agent-sessions`, Step AS1 |
 
 These files came from the published Edwin artifact (version 1791768765, 2026-10-12). From now on this directory is
 the source.
