@@ -1038,9 +1038,9 @@ Edwin never starts or speaks ACP to an agent itself.
 **State of the work.** All four original implementation stages are complete: HTTP/SSE and the shared list;
 structured replay/folds; durable drafts and permission/elicitation/steering; resources, names and multi-send.
 The phone addition (AS1.12–14) adds explicit host commands, subscribed control-state metadata and generic
-browser touch input. Its final daemon/prompt checks pass 25/25, and frame/display/console checks pass 48/48.
-A real 390×844 Chromium frame exercised touch folds, point-preserving scrolling/tail append, an external
-text field and a captured permission button, without Ctrl/Meta. The post-commit agent/type gate is next.
+browser touch input. The post-commit agent gate passes 41/41; frame/display/console checks pass 48/48.
+All three TypeScript projects pass. Actual 390×844 Chromium exercised folds, point-preserving scroll/
+tail append, an external text field and a captured permission button without Ctrl/Meta.
 The original complete Node run finished 458/460: two unchanged debugger source-path checks fail in this
 worktree's `agent-sessions` directory; all seven pass in the documented packaged `edwin/` layout.
 The original native run passed 31 with one existing ignored test. The verification record preserves these
@@ -1261,8 +1261,28 @@ the next journal append resumes tail following if point was at the tail.
   events. The captured req/epoch reached the stub unchanged; repeating it rejected with the documented
   no-longer-pending report. Chromium reported no page runtime errors. No physical phone was exercised.
 - Throwaway browser fixture, daemon state, Chromium profile and listeners were removed/stopped.
-- After this implementation commit, run all agent suites (`node --test --test-concurrency=2 test/agent*.test.mts`)
-  and all three TypeScript projects (`tsc -p .`, `tsc -p src`, `tsc -p native/js`); record their final results.
+- After implementation commit `c3dacb0`, all three TypeScript projects (`tsc -p .`, `tsc -p src`,
+  `tsc -p native/js`) passed without diagnostics.
+- The first post-commit all-agent run at concurrency 2 finished 40/41: the unchanged legacy
+  `test/agent.test.mts:164` image-agent case hit a 10-second protocol timeout. That case passed in the
+  pre-commit combined run, then the unchanged legacy suite passed 3/3 in isolation (duration_ms
+  1063.37864). The timeout's cause is unproven; no unrelated code or timeout threshold was changed.
+- Final post-commit command: `node --test --test-concurrency=1 test/agent*.test.mts` (all five suites,
+  including the legacy pi agent). Final lines:
+
+  ```text
+  ℹ tests 41
+  ℹ suites 0
+  ℹ pass 41
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 16701.429738
+  ```
+
+  This run also opened the 1,201-event daemon transcript in 152.2 ms and delivered its 3 MiB live output
+  without reconnect; the 8,192-event / 25,141,248-byte pure replay took 17.91 ms with 5 visible folded lines.
 
 ### Open decisions and API constraints
 
