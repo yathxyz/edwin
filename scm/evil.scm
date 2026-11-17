@@ -1727,6 +1727,16 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "C-c ^ l" 'vc-conflict-keep-theirs
   "C-c ^ a" 'vc-conflict-keep-both)
 
+;; The time machine (SPC g t, git-timemachine-mode): p and n show the file's
+;; older and newer revision, as git-timemachine's own keys and over evil's
+;; search; C-k and C-j as evil-collection binds them; q leaves.
+(evil-define-key 'normal 'git-timemachine-mode
+  "p" 'git-timemachine-show-previous-revision
+  "n" 'git-timemachine-show-next-revision
+  "C-k" 'git-timemachine-show-previous-revision
+  "C-j" 'git-timemachine-show-next-revision
+  "q" 'git-timemachine-quit)
+
 ;; Surround, snipe and comments take s, S and gc from the default bindings above.
 (define-key evil-normal-state-map "s" 'evil-snipe-s)
 (define-key evil-normal-state-map "S" 'evil-snipe-S)

@@ -481,6 +481,12 @@ C-c C-k aborts the rebase."
 (define-key vc-conflict-mode-map "C-c ^ l" 'vc-conflict-keep-theirs)
 (define-key vc-conflict-mode-map "C-c ^ a" 'vc-conflict-keep-both)
 
+;; The time machine (src/vc-git.ts, SPC g t), git-timemachine's keys: p and n show the file's older and newer
+;; revision, q leaves
+(define-key git-timemachine-mode-map "p" 'git-timemachine-show-previous-revision)
+(define-key git-timemachine-mode-map "n" 'git-timemachine-show-next-revision)
+(define-key git-timemachine-mode-map "q" 'git-timemachine-quit)
+
 ;; *grep* (src/compile.ts), out of Evil and in Emacs state: C-c C-p makes it editable once its grep has ended;
 ;; then C-c C-c or C-x C-s write its rows, C-c C-k gives them up
 (define-key grep-mode-map "C-c C-p" 'grep-change-to-grep-edit-mode)

@@ -46,7 +46,11 @@
    SPC g b blames the file the buffer visits (docs/steps.md, "Blame"): `git blame --porcelain` of the file, or of
    the buffer's text when it has changes not saved, read in the background and drawn as a view of its own in a
    window beside the file's, a line for each of the file's lines; RET on one shows its commit in the revision
-   buffer. */
+   buffer.
+
+   SPC g t is the time machine (docs/steps.md, "The time machine"): the file's committed revisions, read with
+   `git log --follow`, one at a time in a buffer of the file's mode with git-timemachine-mode on, p and n stepping,
+   point kept on its line. */
 
 (function () {
 'use strict';
@@ -928,6 +932,146 @@ function openBlame(): false {
   return false;
 }
 CMD('git-blame', '', '', 'Blame the file the current buffer visits (SPC g b), beside it: a line for each of its lines with the commit that last changed it, its author and day, read in the background from the file, or from the buffer\'s text when it has changes not saved (a line changed and not committed says so); RET on a line shows its commit, g r reads it again.', () => openBlame());
+
+/* ---------- the time machine ---------- */
+/* A file's revisions, newest first: each commit of HEAD's history that changed it (renames followed, a deletion
+   left out), the file's path in that commit, its author, author day and subject. */
+interface GitTimeRev { oid: string; path: string; author: string; date: string; subject: string }
+/* A time machine buffer's state: FILE (absolute, its true name) is PATH in REPO; its revisions (null until read),
+   the one shown (-1: none yet) and the one asked for, the read that wins, and where point goes in the first one
+   shown (the line and column point was on in the file). */
+interface GitTime { repo: VcRepo; src: EdBuffer; file: string; path: string; revs: GitTimeRev[] | null; at: number; want: number; seq: number; line: number; col: number }
+const timeMachines = new WeakMap<EdBuffer, GitTime>();
+const timeOf = (b: EdBuffer) => timeMachines.get(b) || signal('user-error', 'Not a git time machine buffer') as never;
+const timeMode = 'git-timemachine-mode';
+Ed.defineMinorMode({ name: timeMode, lighter: ' Timemachine', keymap: new Ed.Keymap(timeMode + '-map'), pretty: 'Git time machine',
+  doc: 'Toggle git-timemachine-mode, on in a buffer git-timemachine made: p and n (C-k and C-j) show the file\'s older and newer revision, point kept on its line, q leaves. The state is git-timemachine-enabled.' });
+
+/* `git log -z --name-only` of the revisions: each entry `\x01OID`, author, day and subject, then a newline and
+   the file's name in that commit (a merge's too, its diff against its first parent), each ended by a NUL.
+   Anything else is refused. */
+function readRevs(out: string): GitTimeRev[] {
+  const t = out.split('\0'), revs: GitTimeRev[] = [];
+  let i = 0;
+  for (; i + 4 < t.length; i += 5) {
+    const h = /^\x01([0-9a-f]{40,64})$/.exec(t[i]), name = t[i + 4];
+    if (!h || !/^\n[^]/.test(name)) break;
+    revs.push({ oid: h[1], author: t[i + 1], date: t[i + 2], subject: t[i + 3], path: name.slice(1) });
+  }
+  if (i !== t.length - 1 || t[i]) signal('process-error', `git log printed a line Edwin cannot read: ${shown(t.slice(i).join(' ')).slice(0, 200)}`);
+  return revs;
+}
+
+/* The note B shows in place of a revision: while its revisions are read, or why none is shown. */
+function timeNote(b: EdBuffer, text: string) {
+  b.text = `(${text})\n`; b.modified = false; b.undo = []; b.redo = []; b.pt = 0;
+  Ed.scheduleRender();
+}
+
+/* Show revision K of B's file, read in the background: point on the line, and column, it was on in the
+   revision shown before (on the file's line in the first), as near as the revision has one. A read asked for
+   later wins; a buffer killed meanwhile is left. */
+async function timeShow(b: EdBuffer, k: number) {
+  const t = timeOf(b), rev = t.revs![k], seq = ++t.seq, live = () => seq === t.seq && timeMachines.get(b) === t && E.buffers.includes(b);
+  try {
+    /* the hash first: a path with a leading - is no option; cat-file runs no filter or textconv */
+    const x = await Vc.run(t.repo, ['cat-file', 'blob', `${rev.oid}:${rev.path}`], { ...READ, lossy: true });
+    if (x.error || x.timedOut || x.truncated) failed(x, 'git cat-file');
+    if (x.code !== 0) signal('process-error', `${shown(rev.path)} at ${rev.oid.slice(0, 8)} not read: ${reason(x)} (see *vc-process*)`);
+    if (!live()) return;
+    let line = t.line, col = t.col;
+    if (t.at >= 0) { const w = E.sel && E.sel.buffer === b ? null : Ed.windowFor(b), pt = w ? w.pt : b.pt; line = lineNoB(b, pt); col = pt - lineStartB(b, line); }
+    b.text = x.out; b.modified = false; b.undo = []; b.redo = [];
+    const s = lineStartB(b, Math.max(1, Math.min(line, Ed.lineCountB(b))));
+    b.pt = Math.min(s + col, Ed.eol(b.rope, s));
+    if (H.clampPoint) H.clampPoint(b);   // in Normal state, on the last character, as evil keeps it
+    for (const w of Ed.windowList()) if (w.buffer === b && w !== E.sel) w.pt = b.pt;
+    t.at = k;
+    Ed.message(`${shown(rev.path)} at ${rev.oid.slice(0, 8)} (${t.revs!.length - k} of ${t.revs!.length}), ${rev.date}, ${shown(rev.author)}: ${shown(rev.subject)}`);
+    Ed.scheduleRender();
+  } catch (e) {
+    if (live()) {
+      t.want = t.at;
+      if (t.at < 0) timeNote(b, 'the revision could not be read: see *vc-process*');
+    }
+    throw e;
+  }
+}
+
+/* Read B's revisions, in the background, then show the newest. */
+async function timeLoad(b: EdBuffer) {
+  const t = timeOf(b), seq = ++t.seq, live = () => seq === t.seq && timeMachines.get(b) === t && E.buffers.includes(b);
+  try {
+    const x = await Vc.run(t.repo, ['log', '--no-color', '--encoding=UTF-8', '--format=%x01%H%x00%an%x00%as%x00%s', '-z', '--name-only', '--follow', '--diff-filter=d', '--diff-merges=first-parent',
+      '--', `:(literal)${t.path}`], { ...READ, lossy: true });
+    if (x.error || x.timedOut || x.truncated) failed(x, 'git log');
+    if (x.code !== 0) signal('process-error', `No revisions of ${shown(t.path)}: ${reason(x)} (see *vc-process*)`);
+    const revs = readRevs(x.out);
+    if (!live()) return;
+    t.revs = revs;
+    if (!revs.length) { timeNote(b, `${shown(t.path)} has no committed revision`); signal('user-error', `${shown(t.path)} has no committed revision`); }
+  } catch (e) {
+    if (live() && !t.revs) timeNote(b, 'the revisions could not be read: see *vc-process*');
+    throw e;
+  }
+  t.want = 0;
+  await timeShow(b, 0);
+}
+
+/* Step through the time machine's revisions: OLDER, or newer. Each press goes on from the revision asked for
+   last, so p p reads the one two back even while the first is still being read. */
+function timeStep(older: boolean): false {
+  const b = cur(), t = timeOf(b);
+  if (!t.revs) signal('user-error', 'Still reading the revisions');
+  if (t.want < 0) signal('user-error', 'No revision is shown');
+  const k = t.want + (older ? 1 : -1);
+  if (k >= t.revs!.length) signal('user-error', 'This is the oldest revision');
+  if (k < 0) signal('user-error', 'This is the newest revision');
+  t.want = k;
+  void timeShow(b, k).catch(Ed.reportError);
+  return false;
+}
+
+/* Show the file the current buffer visits as it was committed, in `*git-timemachine: PATH*` in this window:
+   its newest revision first, read in the background, point on the line point was on. The file is taken by its
+   true name. Run again from the file, its time machine starts over. */
+function openTime(): false {
+  const why = Ed.proc.refusal();
+  if (why) signal('process-error', why);
+  const src = cur(), visited = src.gitView ? null : src.file;
+  if (!visited || !visited.startsWith('/')) signal('user-error', `${shown(src.name)} visits no file: git-timemachine shows a file's revisions`);
+  const file = truename(visited!);
+  const dir = file.slice(0, file.lastIndexOf('/')) || '/', r = Vc.repo(dir, 'git');
+  if (!r) signal('user-error', `Not in a git repository: ${shown(dir)}`);
+  const path = file.slice(r!.root === '/' ? 1 : r!.root.length + 1), line = lineNoB(src, src.pt);
+  const t: GitTime = { repo: r!, src, file, path, revs: null, at: -1, want: -1, seq: 0, line, col: src.pt - lineStartB(src, line) };
+  let b = E.buffers.find(x => timeMachines.get(x)?.file === file);
+  if (!b) {
+    const name = `*git-timemachine: ${shown(path)}*`;
+    b = Ed.getBufferCreate(Ed.getBuffer(name) ? L.call('generate-new-buffer-name', [name]) as string : name);
+    /* the file's mode for its faces, set as a name sets it: no mode hook runs on a revision */
+    b.mode = Ed.modeFor(file); b.readOnly = true; b.evilState = 'normal';
+    const was = E.current; E.current = b;
+    try { L.call(timeMode, [1]); } finally { E.current = was; }
+  }
+  timeMachines.set(b, t);
+  timeNote(b, `reading the revisions of ${shown(path)}…`);
+  Ed.setWindowBuffer(b);
+  void timeLoad(b).catch(Ed.reportError);
+  return false;
+}
+
+/* Leave the time machine: its buffer killed, the file's buffer back in its windows. */
+function timeQuit(): false {
+  const b = cur(), t = timeOf(b), src = E.buffers.includes(t.src) ? t.src : E.buffers.find(x => !!x.file && !x.gitView && truename(x.file) === t.file);
+  if (src) for (const w of Ed.windowList()) if (w.buffer === b) Ed.setWindowBuffer(src, w);
+  L.call('kill-buffer', [b]);
+  return false;
+}
+CMD('git-timemachine', '', '', 'Step through the revisions of the file the current buffer visits (SPC g t): its newest committed revision in this window, read in the background; p and n (C-k and C-j) show the older and the newer one, point kept on its line; q leaves.', () => openTime());
+CMD('git-timemachine-show-previous-revision', '', '', 'Show the file\'s revision before this one (p, C-k), point kept on its line.', () => timeStep(true));
+CMD('git-timemachine-show-next-revision', '', '', 'Show the file\'s revision after this one (n, C-j), point kept on its line.', () => timeStep(false));
+CMD('git-timemachine-quit', '', '', 'Leave the time machine (q): its buffer killed, the file\'s buffer shown.', () => timeQuit());
 
 CMD('git-log', '', '', 'Show the log of HEAD in the current buffer\'s git repository (l l in the status buffer): a commit per line, read a page at a time in the background; RET on a commit shows it, + reads the next page.', () => openLog());
 CMD('git-log-more', '', '', 'Read the log\'s next page (+), in the background.', () => { logOf(cur()); return logMore(); });
@@ -2116,7 +2260,8 @@ for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-to
   'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete',
   'git-fetch', 'git-fetch-all', 'git-pull', 'git-push', 'git-push-force', 'git-merge', 'git-merge-abort', 'git-cherry-pick', 'git-cherry-pick-skip',
   'git-cherry-pick-abort', 'git-revert', 'git-revert-skip', 'git-revert-abort', 'git-rebase', 'git-rebase-upstream', 'git-rebase-continue', 'git-rebase-skip',
-  'git-rebase-abort', 'git-rebase-interactive', 'git-rebase-todo-finish', 'git-rebase-todo-abort', 'git-blame']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-rebase-abort', 'git-rebase-interactive', 'git-rebase-todo-finish', 'git-rebase-todo-abort', 'git-blame', 'git-timemachine',
+  'git-timemachine-show-previous-revision', 'git-timemachine-show-next-revision', 'git-timemachine-quit']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-rebase-todo-mode'] = 'Git Rebase Todo';
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 Ed.MODE_NAMES['git-log-mode'] = 'Git Log';

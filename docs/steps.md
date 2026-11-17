@@ -3863,6 +3863,113 @@ file with a jump to the commit, shown as a side buffer (no overlays); proved by 
     path `f.txt` after `--`, point on line 2; a line inserted in the linked buffer and `g r` blames its text
     (`--contents`), line 1 `Not committed yet`.
 
+## The time machine (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-timemachine`, on git-blame): a minor mode that shows
+earlier versions of the file with n/p, the git-timemachine desktop-only stub removed; proved by edwin-vc, three
+revisions stepped, point kept by line.
+
+- **`git-timemachine`** (`SPC g t` in Normal and Visual state, as the Emacs config binds it; M-x) shows the
+  committed revisions of the file the current buffer visits. The file is taken by its true name, its repository
+  is git's around it (`Vc.repo(dir, 'git')`, so a colocated jj workspace goes through git). The revisions go to
+  `*git-timemachine: PATH*` (PATH from the repository's root, `<2>` when another repository's file of that path
+  has one) in the window the file was in, one buffer a file: run again from the file, it starts over at the
+  newest. The buffer is read-only, in Normal state, in the file's major mode (set from the name, as a visited
+  file's is, so its faces are the file's, with no mode hook run) and with `git-timemachine-mode` on (lighter
+  ` Timemachine`). It visits no file: nothing saves a revision over the file, and auto-revert, the conflict
+  check and the LSP leave it alone.
+- **In the background.** The command ends at once with `(reading the revisions of PATH…)` as the text; then
+  `git log --no-color --encoding=UTF-8 --format=%x01%H%x00%an%x00%as%x00%s -z --name-only --follow
+  --diff-filter=d --diff-merges=first-parent -- :(literal)PATH` lists the revisions, newest first, and the newest
+  is read with `git cat-file blob OID:NAME` (NAME the file's name in that commit) and shown, point on the line
+  and column point was on in the file. Each step reads its revision the same way; a read asked for later wins
+  over one still running, and a read whose buffer was killed or started over shows nothing.
+- **The revisions.** Every commit of HEAD's history that changed the file: across renames (`--follow`; each
+  revision read by the name it had then), a merge that changed it against its first parent included (the file as
+  the merge left it), a commit that deleted it left out (a file deleted and added again steps from the one to the
+  other). PATH is a literal pathspec after `--`, so a name with `*`, `[` or `?` names only itself, and a name
+  with a leading `-` is no option (in `cat-file` the hash comes first). The output is read whole (lossily: it is
+  only shown); an entry not of the shape above is refused as `git log printed a line Edwin cannot read`.
+- **Keys** in `git-timemachine-mode` (scm/evil.scm, Normal state, over Normal state's `p` paste and `n`
+  search-next): `p` and `C-k` (`git-timemachine-show-previous-revision`) show the older revision, `n` and `C-j`
+  (`git-timemachine-show-next-revision`) the newer one, `q` (`git-timemachine-quit`) kills the buffer and shows
+  the file's buffer it was started from in its windows. scm/emacs.scm binds `p`, `n` and `q` in the mode's own
+  map. Each press goes on from the revision asked for last, so `p p` reads the one two back. At either end the
+  key says `This is the oldest revision` or `This is the newest revision` and starts nothing.
+- **Point kept by line.** After each step point is on the line number, and column, it was on in the revision
+  shown before (the selected window's point when the buffer is in it), the last line when the revision has
+  fewer, the line's end when it is shorter, then on the last character as Normal state keeps it; the
+  buffer's other windows go to the same place.
+- **Which revision.** Each step says it in the echo area, Edwin having no header line: `NAME at HASH (K of N),
+  DAY, AUTHOR: SUBJECT`, K counted from the oldest, DAY the author date's day in the author's zone (`%as`).
+- **Failures.** A file with no commit that changed it (untracked, or never committed) shows `(PATH has no
+  committed revision)` and says so; a repository with no commit, `(the revisions could not be read: see
+  *vc-process*)` and `No revisions of PATH: ` with git's reason; a revision git cannot read, `NAME at HASH not
+  read: ` with git's reason, the revision shown before kept. Refused before any child: a buffer that visits no
+  file (`NAME visits no file: git-timemachine shows a file's revisions`; the time machine's own buffer and the
+  git view buffers count as one), a file not in a git repository (`Not in a git repository: DIR`), the image's
+  replay; the three step and quit commands run (M-x) elsewhere say `Not a git time machine buffer`.
+- **The repository's configuration.** log and cat-file are the runner's reads: the hooks off, no pager, no
+  fsmonitor, no external diff, `--no-textconv` after `log`, the repository's filter and diff drivers emptied,
+  its signature programs and mailmap.file set back to the user's. `cat-file blob` runs no filter or textconv
+  (no `--filters`, no `--textconv`), so a revision is shown as committed. The format, `--follow`, `-z` and
+  `--diff-merges` fix the shape against the user's log.follow, log.date, format.pretty, core.quotePath and
+  log.diffMerges.
+- **Choices**, each reversible:
+  - The revision in its own buffer in the file's window, as git-timemachine does, rather than in the file's
+    buffer: the file's text, undo and unsaved changes are never touched.
+  - `p`/`n` as git-timemachine's own map, `C-k`/`C-j` as evil-collection's (the Emacs config runs
+    `evil-collection-init`); evil-collection's `gtg`, `gtt`, `gtc`, `gy`, `gY` and `gb` are not bound.
+  - The newest revision is the newest commit that changed the file, not the work tree's text: changes not
+    committed are not a revision.
+  - Revisions numbered from the oldest (`4 of 4` is the newest).
+  - A file not UTF-8 is shown decoded lossily (U+FFFD for a byte that is not), as it is only read.
+  - The revision list is read once, whole, bounded by the runner's 16 MiB and 2 minutes, as is each revision; a
+    larger one fails with `git log failed (its output was too long)` or `git cat-file failed (…)`.
+- **Not in it:** a header line (Edwin has none: the echo area says the revision); going to the nth revision or
+  picking one by its subject (`gtg`, `gtt`); copying the hash (`gy`, `gY`); blaming or showing the shown
+  revision's commit (`gb`, `c`); jj's file history (a jj workspace with no git work tree is refused, a colocated
+  one goes through git); a merge's other parents' sides (the first parent's diff decides); the Emacs keymap
+  (`C-x v` has no time machine key).
+- **Image replay and edwind.** `git-timemachine` checks `Ed.proc.refusal()` before anything, and git runs through
+  `Vc.run`, which refuses under the replay, in a web frame and in edwind.
+- **Removed:** the `git-timemachine` desktop-only stub in scm/init.scm; `SPC g t` names the command.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-vc` (189 passed, 0 failed,
+  test/vc-timemachine.test.mts's 10 among them), `edwin-typecheck` (passed), `edwin-scheme` (38 passed),
+  `edwin-headless` (21 passed) and `edit-frame` (24 passed), which load scm/evil.scm, scm/emacs.scm and
+  scm/init.scm; `nix build .#edwin` (passed). With nixpkgs' git in the check (git 2.56 when run by hand), under a throwaway HOME,
+  in throwaway repositories, test/vc-timemachine.test.mts (10):
+  - A file of five lines (Alice, 2026-01-01), cut to three (Bob, 23:30 on 2026-02-03 at -0500), renamed
+    `f.scm` to `g.scm` (Carol) past an unrelated commit, then six lines (Dave): `SPC g t` from line 2, column 3
+    looks up `git-timemachine`, ends with `(reading the revisions of g.scm…)` in the one window, then shows
+    Dave's revision as `git show` has it, in the file's mode (scheme-mode, so the display lexes it as the file), no file, read-only, Normal state, the mode
+    on, point on line 2 column 3, `g.scm at HASH (4 of 4), 2026-04-01, Dave: fourth`; exactly two children, the
+    log's argv after `log` and `cat-file blob OID:g.scm`, the hooks off.
+  - From line 5: `p` shows Carol's revision, point on its last line at the end; `p` Bob's, read as `f.scm`;
+    `C-k` Alice's, point kept on line 1 column 3; `p` at the oldest says so and starts nothing; `n`, `C-j`
+    and `n` back to Dave's, a column clamped to a shorter line; `n` at the newest says so and starts nothing;
+    the buffer never changed.
+  - `p p` reads the revision two back; with the buffer in two windows, the selected window's point is kept and
+    the other window goes to it.
+  - `q` shows the file's buffer, the time machine's killed; `SPC g t` twice from the file (the second after a
+    `p`): one buffer, the newest, point on the file's line.
+  - `sub/-x [y]*.txt` beside `sub/-x y-and-more.txt`, both changed twice: only its own two revisions, `--
+    :(literal)sub/-x [y]*.txt` on the argv.
+  - A file added, deleted and added again: two revisions, the deletion none.
+  - A merge of two branches that each changed a line of `m.txt`, then a merge that changed another file only:
+    the first merge is the newest revision, the merged text, then main's and side's; the second is none.
+  - A revision of the bytes `63 61 66 e9 0a` is shown as `caf` and U+FFFD; with the host's true names those of
+    the file system, a file visited through a symbolic link to the repository's directory is `g.scm` after
+    `--`, point on its line, and `q` goes back to the linked buffer.
+  - Untracked: `(u.txt has no committed revision)`, `p` then says `No revision is shown` with no child; a
+    repository with no commit: the could-not-be-read note and `No revisions of e.txt: `; a buffer with no file,
+    the time machine's own buffer, a file outside any repository and the image's replay each refused with no
+    child started; `git-timemachine-show-previous-revision` elsewhere says `Not a git time machine buffer`.
+  - A repository whose configuration names core.fsmonitor, core.pager, diff.external, a textconv and a filter's
+    clean, smudge and process, all a marker script, with `* diff=evil filter=evil`: plain `git show --textconv`
+    runs the textconv (the control; the others are only present); `SPC g t` and `p` show both revisions as
+    committed and run none of them.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

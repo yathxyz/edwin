@@ -117,7 +117,6 @@
      (define-command (name) what
        (message "~a runs ~a on the desktop (~a); it is not in Edwin" key 'name what)))))
 
-(desktop-only git-timemachine "SPC g t" "git-timemachine")
 (desktop-only consult-eglot-symbols "SPC p s" "LSP symbols")
 (desktop-only citar-open "SPC y o" "citar: open a reference")
 (desktop-only apheleia-format-buffer "SPC b f" "apheleia: format the buffer")
@@ -162,7 +161,7 @@
   "SPC g G" 'git-status              ; git's status, a colocated jj workspace's too (vile-magit-status)
   "SPC g J" 'jj-log                  ; jj's log (vile-majutsu-status)
   "SPC g b" 'git-blame               ; the file's blame beside it (magit-blame)
-  "SPC g t" 'git-timemachine         ; desktop only
+  "SPC g t" 'git-timemachine         ; step through the file's revisions (git-timemachine)
   "SPC g j" 'gptel-send
   "SPC g l" 'gptel-preset-menu
   "SPC g L" 'gptel-menu
