@@ -723,8 +723,8 @@ function changeLevel(b: EdBuffer, hs: number, delta: number, subtree: boolean) {
   const ls = lineStartB(b, ln);
   b.pt = Math.max(ls, Math.min(eol(b.rope, ls), ls + col + (onHead ? delta : 0)));
 }
-CMD('org-promote-subtree', '', '', 'Promote the headline at point and its subtree by one level (M-h, <<).', () => { const b = cur(); changeLevel(b, headlineOrError(b), -1, true); return false; });
-CMD('org-demote-subtree', '', '', 'Demote the headline at point and its subtree by one level (M-l, >>).', () => { const b = cur(); changeLevel(b, headlineOrError(b), 1, true); return false; });
+CMD('org-promote-subtree', '', '', 'Promote the headline at point and its subtree by one level (M-h, M-<left>); << promotes the headline alone.', () => { const b = cur(); changeLevel(b, headlineOrError(b), -1, true); return false; });
+CMD('org-demote-subtree', '', '', 'Demote the headline at point and its subtree by one level (M-l, M-<right>); >> demotes the headline alone.', () => { const b = cur(); changeLevel(b, headlineOrError(b), 1, true); return false; });
 CMD('org-promote', '', '', 'Promote the headline at point by one level, leaving its subtree alone.', () => { const b = cur(); changeLevel(b, headlineOrError(b), -1, false); return false; });
 CMD('org-demote', '', '', 'Demote the headline at point by one level, leaving its subtree alone.', () => { const b = cur(); changeLevel(b, headlineOrError(b), 1, false); return false; });
 L.alias('org-do-promote', 'org-promote'); L.alias('org-do-demote', 'org-demote');
@@ -784,16 +784,22 @@ CMD('org-meta-return', '', '', 'Insert a new headline or list item after this on
     const stars = star.repeat(level) + ' ';
     if (b.pt === ls) { Ed.replaceText(b, ls, ls, stars + '\n'); b.pt = ls + stars.length; }
     else if (b.pt < le) { const rest = r.slice(b.pt, le); Ed.replaceText(b, b.pt, le, '\n' + stars + rest); b.pt = b.pt + 1 + stars.length; }
-    else { const e = entryEnd(b, ls); Ed.replaceText(b, e, e, '\n' + stars); b.pt = e + 1 + stars.length; }
+    else {
+      /* After the entry's last line: before the newline that ends it, so the last entry of a buffer that ends in a
+         newline gets no blank line before its new headline. */
+      let e = entryEnd(b, ls); if (e === r.length && r.charAt(e - 1) === '\n') e--;
+      Ed.replaceText(b, e, e, '\n' + stars); b.pt = e + 1 + stars.length;
+    }
   } else if ((m = /^(\s*)([-+*]|\d+[.)])(\s+)(\[[ xX-]\]\s+)?/.exec(line)) && (m[1] || m[2] !== star)) {
     const bullet = /^\d/.test(m[2]) ? String(parseInt(m[2], 10) + 1) + m[2].slice(-1) : m[2];
     const head = m[1] + bullet + ' ' + (m[4] ? '[ ] ' : '');
-    const rest = b.pt < le ? r.slice(b.pt, le) : '';
-    Ed.replaceText(b, b.pt, le, '\n' + head + rest); b.pt = b.pt + 1 + head.length;
+    /* Ed.replaceText moves point past text inserted at point: place it from P, where it was before. */
+    const p = b.pt;
+    Ed.replaceText(b, p, le, '\n' + head + r.slice(p, le)); b.pt = p + 1 + head.length;
   } else {
     const hs = headlineBefore(b, ls), stars = star.repeat(hs === null ? 1 : levelAt(b, hs)) + ' ';
-    const rest = b.pt < le ? r.slice(b.pt, le) : '';
-    Ed.replaceText(b, b.pt, le, '\n' + stars + rest); b.pt = b.pt + 1 + stars.length;
+    const p = b.pt;
+    Ed.replaceText(b, p, le, '\n' + stars + r.slice(p, le)); b.pt = p + 1 + stars.length;
   }
   if (fromNormal) EC.enterInsert(b, 1, false);
   return false;

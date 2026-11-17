@@ -4999,6 +4999,47 @@ Expected behaviour was checked against evil-surround's own source (evil-surround
   `edit-conformance` (29), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36). `nix flake check` was
   not run.
 
+## Org M-RET and the subtree docstrings (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-org-meta-return`): B8 and B12 of the structural-editing
+audit (`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). Before, `M-RET` on a list item
+(`- foo`, `1. foo`, `- [ ] foo`) or a plain line made the new item but left point at the start of the line after
+it, so `M-RET bar` gave `- foo`, an empty `- ` and `bar`; and on the last headline of a buffer ending in a newline
+it put a blank line before the new headline. The docstrings of `org-promote-subtree` and `org-demote-subtree`
+named `<<` and `>>`, which act on the headline alone.
+
+- **Point on the new item** (`org-meta-return`, `src/org.ts`): `Ed.replaceText` moves point past text inserted at
+  point, and the item and plain-line branches then added the inserted length a second time. They now place point
+  from where it was before the edit, so the text typed goes on the new item, from Normal state (`M-RET`, `M-x
+  org-meta-return`), from Insert state at the end of the line, and when splitting a line in the middle.
+- **No blank line after the last headline**: the new headline goes before the newline that ends the entry, as it
+  already did before the next headline; `* A` then `M-RET B` gives `* A`, `* B`. The same in Markdown (`# A`) and
+  for `org-insert-todo-heading`, which goes through `org-meta-return`.
+- **Docstrings (B12)**: `org-promote-subtree` names `M-h` and `M-<left>`, `org-demote-subtree` `M-l` and
+  `M-<right>`, the keys bound to them, and each says that `<<` or `>>` changes the headline alone. The docstrings
+  are those of the commands in `src/org.ts`, where both are defined; no scm file holds them.
+- **Choices**: blank lines already at the end of the entry stay above the new headline, and none is added
+  (`* A`, blank, then `M-RET B` gives `* A`, blank, `* B`); Org's `org-blank-before-new-entry` is not modelled.
+- **Not in it**: the audit's other failing Org and Markdown cases, which are list-structure and Markdown features,
+  not B8: `M-l` and `M-j` on a list item (`org-M-l-item`, `org-M-j-item`), `o` continuing a list item
+  (`org-o-item`) and `M-l` demoting a Markdown heading (`md-M-l`).
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`; `test/structural.test.mts` now has
+  188 tests (16 new):
+  - The audit's 8 `M-RET` cases that failed at 73d9f03 and still at 6608209 (se-surround), driven by keys:
+    `org-M-RET-heading`, `org-M-RET-item`, `org-M-RET-numbered`, `org-M-RET-checkbox`, `org-M-x-meta-return-last`,
+    `org-M-RET-item-middle`, `org-M-x-meta-return-item-last`, `org-M-RET-item-insert-eol`.
+  - 5 audit cases that passed there and still must: `org-M-RET-middle`, `org-M-l`, `org-M-h`, `org->>`, `org-<<`.
+  - The last headline with a body, at level 2, with no final newline, with a trailing blank line, before a next
+    headline after a blank line, and in Markdown; items indented, with `+`, `1)` and a checked box (the new one is
+    `[ ]`); a plain line under a headline from Normal state and from the end of the line in Insert state; splitting
+    an item and a headline mid-line; `org-insert-todo-heading` on the last headline; the two docstrings, the
+    `M-<left>` and `M-<right>` bindings, and `M-l` `M-h` against `>>` on a subtree.
+
+  On 6608209 (se-surround), 11 of the 16 new tests fail: the 8 audit cases and the 3 behaviour tests. Also passed
+  on the final code, each exit 0: `edwin-typecheck`, `edwin-headless` (21), `edwin-markdown` (20), `edit-notes` (18)
+  and `edwin-scheme` (38), and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored,
+  `tests/terminal.rs` 36). `nix flake check` was not run.
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

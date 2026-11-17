@@ -10,7 +10,8 @@
 // comment-toggle-lines, in the mode's comment syntax, with any run of a repeated opener a comment (B6).
 // se-surround: ys repeats with ., takes a count and wraps lines from their first to their last non-blank, more than
 // one on lines of their own; ds( and cs( take the blanks inside, ds) and cs) keep them, and cs keeps the lines; f
-// wraps in a call of a function read from the minibuffer (B7).
+// wraps in a call of a function read from the minibuffer (B7). se-org-meta-return: Org M-RET leaves point on the new
+// item and adds no blank line after the last headline (B8); the subtree commands' docstrings name their keys (B12).
 // One Edwin per process, so the cases run in order on fresh buffers.
 // Run: node --test test/structural.test.mts
 import { test } from 'node:test';
@@ -39,7 +40,7 @@ async function buffer(ext: string, text: string) {
 }
 /* KEYS as the audit wrote them: "K:NAME" is one key by its name (C-M-f, Escape, Tab), "H:1b 3b" the bytes a
    terminal sends, read by the terminal decoder, anything else is typed. */
-const KEY_NAMES: Record<string, string> = { Escape: 'ESC', Tab: 'TAB', Enter: 'RET' };
+const KEY_NAMES: Record<string, string> = { Escape: 'ESC', Tab: 'TAB', Enter: 'RET', 'M-Enter': 'M-RET' };
 const Term = createRequire(import.meta.url)('../native/js/term.ts') as { decoder(): { feed(s: string): { type: string; key?: string }[] } };
 const decode = (s: string) => Term.decoder().feed(s).filter(e => e.type === 'key').map(e => e.key as string);
 async function press(keys: string[]) {
@@ -964,4 +965,88 @@ test('no surround case starting from a balanced Lisp buffer leaves it unbalanced
     n++;
   }
   assert.ok(n >= 15, `${n} cases`);
+});
+
+/* se-org-meta-return (B8, B12): M-RET on a list item or a line of text leaves point on the new item, where the
+   text typed goes, not a line past it (Ed.replaceText had moved point past what it inserted at point); on the last
+   headline of a buffer it inserts no blank line before the new one. The subtree commands' docstrings name the keys
+   that act on the subtree (M-h M-l, M-<left> M-<right>), not << and >>, which act on the headline alone.
+   ORG_FAILED failed at Edwin 73d9f03 and still at se-surround (6608209); ORG_GUARDS passed at both. */
+const ORG_FAILED: Case[] = [
+  ["org-M-RET-heading", "org", "* A\n", ["K:M-Enter", "B", "K:Escape"], "* A\n* B\n"],
+  ["org-M-RET-item", "org", "- foo\n", ["K:M-Enter", "bar", "K:Escape"], "- foo\n- bar\n"],
+  ["org-M-RET-numbered", "org", "1. foo\n", ["K:M-Enter", "bar", "K:Escape"], "1. foo\n2. bar\n"],
+  ["org-M-RET-checkbox", "org", "- [ ] foo\n", ["K:M-Enter", "bar", "K:Escape"], "- [ ] foo\n- [ ] bar\n"],
+  ["org-M-x-meta-return-last", "org", "* A\n", ["K:M-x", "org-meta-return", "K:Enter", "B", "K:Escape"], "* A\n* B\n"],
+  ["org-M-RET-item-middle", "org", "- foo\n- baz\n", ["K:M-Enter", "bar", "K:Escape"], "- foo\n- bar\n- baz\n"],
+  ["org-M-x-meta-return-item-last", "org", "- foo\n", ["K:M-x", "org-meta-return", "K:Enter", "bar", "K:Escape"], "- foo\n- bar\n"],
+  ["org-M-RET-item-insert-eol", "org", "- foo\n", ["A", "K:M-Enter", "bar", "K:Escape"], "- foo\n- bar\n"],
+];
+const ORG_GUARDS: Case[] = [
+  ["org-M-RET-middle", "org", "* A\n* C\n", ["K:M-Enter", "B", "K:Escape"], "* A\n* B\n* C\n"],
+  ["org-M-l", "org", "* A\n** B\n* C\n", ["K:M-l"], "** A\n*** B\n* C\n"],
+  ["org-M-h", "org", "* A\n** B\n", ["j", "K:M-h"], "* A\n* B\n"],
+  ["org->>", "org", "* A\n** B\n", [">>"], "** A\n** B\n"],
+  ["org-<<", "org", "** A\n*** B\n", ["<<"], "* A\n*** B\n"],
+];
+for (const [label, cases] of [['failed at 6608209', ORG_FAILED], ['a guard', ORG_GUARDS]] as const)
+  for (const [id, ext, input, keys, expected] of cases)
+    test(`audit case ${id} (${label})`, async () => {
+      await buffer(ext, input);
+      await press(keys);
+      assert.equal(ed.text(), expected);
+    });
+
+test('B8: M-RET after the last headline adds no blank line, with a body, a level, no final newline or in Markdown', async () => {
+  const M = (...typed: string[]) => [...typed.slice(0, -1), 'K:M-Enter', typed[typed.length - 1], 'K:Escape'];
+  for (const [ext, input, keys, expected] of [
+    ['org', '* A\nbody\n', M('B'), '* A\nbody\n* B\n'],
+    ['org', '* A\n** B\n', M('j', 'C'), '* A\n** B\n** C\n'],
+    ['org', '* A', M('B'), '* A\n* B'],
+    ['org', '* A\n\n', M('B'), '* A\n\n* B\n'],
+    ['org', '* A\n\n* C\n', M('B'), '* A\n\n* B\n* C\n'],
+    ['md', '# A\n', M('B'), '# A\n# B\n'],
+  ] as [string, string, string[], string][]) {
+    await buffer(ext, input);
+    await press(keys);
+    assert.equal(ed.text(), expected, `M-RET on ${JSON.stringify(input)}`);
+  }
+});
+
+test('B8: M-RET leaves point on the new item or headline, from Normal state, at the end of a line in Insert state and mid-line', async () => {
+  for (const [input, keys, expected] of [
+    ['  - a\n', ['K:M-Enter', 'b', 'K:Escape'], '  - a\n  - b\n'],
+    ['+ a\n', ['K:M-Enter', 'b', 'K:Escape'], '+ a\n+ b\n'],
+    ['1) a\n', ['K:M-Enter', 'b', 'K:Escape'], '1) a\n2) b\n'],
+    ['- [X] a\n', ['K:M-Enter', 'b', 'K:Escape'], '- [X] a\n- [ ] b\n'],
+    ['* A\ntext\n', ['j', 'K:M-Enter', 'B', 'K:Escape'], '* A\ntext\n* B\n'],
+    ['* A\ntext\n', ['jA', 'K:M-Enter', 'B', 'K:Escape'], '* A\ntext\n* B\n'],
+    ['- foobar\n', ['fbi', 'K:M-Enter', 'X', 'K:Escape'], '- foo\n- Xbar\n'],
+    ['* AB\n', ['fBi', 'K:M-Enter', 'X', 'K:Escape'], '* A\n* XB\n'],
+  ] as [string, string[], string][]) {
+    await buffer('org', input);
+    await press(keys);
+    assert.equal(ed.text(), expected, `${keys.join(' ')} on ${JSON.stringify(input)}`);
+  }
+  // M-S-RET (org-insert-todo-heading) goes through org-meta-return: on the last headline, no blank line either.
+  await buffer('org', '* A\n');
+  await press(['K:M-x', 'org-insert-todo-heading', 'K:Enter', 'B', 'K:Escape']);
+  assert.equal(ed.text(), '* A\n* TODO B\n');
+});
+
+test('B12: the subtree commands\' docstrings name the keys that act on the subtree, and those keys are bound to them', async () => {
+  const doc = (n: string) => (ed.L.get(n) as { doc: string }).doc;
+  assert.equal(doc('org-promote-subtree'), 'Promote the headline at point and its subtree by one level (M-h, M-<left>); << promotes the headline alone.');
+  assert.equal(doc('org-demote-subtree'), 'Demote the headline at point and its subtree by one level (M-l, M-<right>); >> demotes the headline alone.');
+  const map = ed.L.get('org-mode-map');
+  assert.equal(ed.L.call('lookup-key', [map, 'M-<left>']).name, 'org-promote-subtree');
+  assert.equal(ed.L.call('lookup-key', [map, 'M-<right>']).name, 'org-demote-subtree');
+  // M-h and M-l act on the subtree, << and >> on the headline alone (the guards above show the same from the keys).
+  await buffer('org', '* A\n** B\n');
+  await ed.keys('M-l');
+  assert.equal(ed.text(), '** A\n*** B\n');
+  await ed.keys('M-h');
+  assert.equal(ed.text(), '* A\n** B\n');
+  await ed.type('>>');
+  assert.equal(ed.text(), '** A\n** B\n');
 });
