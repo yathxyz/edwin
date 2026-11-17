@@ -4766,6 +4766,104 @@ state selected the same list.
   its second run (`--keep-going`); the first stopped at `edit-crash`'s R16.5 (random SIGKILL under a three-client load, "the history
   lost acked batches"), server code this package does not change, which then passed alone.
 
+## Lisp indentation as scheme-mode and emacs-lisp-mode (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-indent`): B3 of the structural-editing audit
+(`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). Before, `=`, `TAB` and the newline
+indentation used a small body table and one rule: a known form's body at +2, anything else under its first
+argument. So Scheme `if` put its else branch at +2, a body form on the head line (`(begin (foo)`) did not set the
+column for the rest, Emacs Lisp's `use-package` and `with-eval-after-load` lined up under their first argument,
+and gg=G on `scm/evil.scm` changed 303 lines once its literals were made neutral.
+
+- **The algorithm** (`lispIndentFor`, `src/editor-core.ts`) is Emacs 31's `calculate-lisp-indent` with
+  `scheme-indent-function` or `lisp-indent-function`:
+  - With nothing before the line in its list, the line goes one past the open paren.
+  - The column a line takes by default is that of the list's second element when it is on the head's line (the
+    head is not alone there and no blank follows the paren), else the head's. On a later line it is the first
+    sexp of the line holding the last complete sexp.
+  - A head that is a list, a vector or a string is data: under the first element, or under that line's first
+    sexp. Prefix characters (`'` `` ` `` `,` `#`) are read past, as Emacs reads them, so `('a 'b` is a call.
+  - A method of N puts the first N arguments at +4 on lines of their own (only the first and second; a later
+    one takes the default column) and the body at +2; `defun` puts the body at +2 when the last sexp is on the
+    head's line; Scheme's `let` method treats a named let as two arguments.
+  - A line that starts with `:` goes under an earlier `:keyword` that starts a line in the same list, as Emacs does
+    for `use-package` and `:hook`.
+- **The tables**:
+  - `SCHEME_INDENT` is scheme.el's table, including its MIT Scheme forms. To it are added the forms Edwin's own
+    Scheme defines (`save-excursion`, `with-current-buffer`, `dolist`, `dotimes`, `while`, `with-mutex`,
+    `on-server`, `evil-define-key`, the `evil-define-command`/`motion`/`operator`/`text-object` forms,
+    `evil--bind`, `gptel-make-preset` …), each given its Emacs Lisp namesake's method. In Scheme a head of more
+    than three characters that starts with `def` and has no method is a defun, as scheme-mode has it.
+  - `ELISP_INDENT` holds the `lisp-indent-function` values Emacs 31.1 reports, with `use-package`, gptel,
+    transient, evil, general and lispy loaded: the core special forms and macros (`if` 2, `defun` 2,
+    `with-eval-after-load` 1, `use-package` defun, `cl-*`, `pcase*`, `when-let*` …) and the macros of those
+    packages that the owner's configuration uses. Emacs Lisp no longer has the `def` rule.
+- **Dialect**: a buffer whose file (or name) ends in `.el` is indented as Emacs Lisp, the rest as Scheme. A `.el`
+  file still opens in Edwin's scheme-mode, and lang-lisp-modes gives it a mode of its own.
+- **Lines left alone**: a line that starts inside a string, a `#| |#` comment or a `#;` datum, and a `;;;` line,
+  as `lisp-indent-line` leaves them. An empty line stays empty under `=` (`indent-region`,
+  `src/editor-prims.ts`), as in Emacs.
+- **Edwin's own Scheme files** are not reformatted here. gg=G on the 18 `scm/*.scm` changes 22 lines, each the
+  way scheme-mode indents it (checked form by form with Emacs 31.1); the test names each form:
+  - `org.scm`, 17 lines: `(define note-capture-templates` and `(define dailies-capture-templates`, whose value
+    on the next line goes to +2 (a `define` is a defun), not the file's +6.
+  - `evil.scm`, `init.scm` and `markdown.scm`, 1 line each: the second line of a quoted list of symbols
+    (`'(dired-mode …`, the modes for `evil-define-key`, `evil-repeat`) goes under the list's second element, as
+    for a call, where the file put it under the first.
+  - `pi.scm`, 2 lines: `dynamic-wind`'s second and third thunks at +4 (method 3).
+  - Every other file is unchanged.
+- **Choices** (where Edwin differs from Emacs 31.1, written down in the test):
+  - Edwin's own forms have methods that scheme-mode lacks, so `(with-current-buffer b` puts its body at +2 where
+    scheme-mode puts it under `b`.
+  - A line after a string's last line goes under that line's first sexp. Emacs scans the string's tail as code:
+    in `(foo "a⏎b" c⏎d)` it puts `d` at column 0, Edwin puts it under `c`.
+  - A vector after a list that closed on its line takes the column `lisp-indent-line` (Emacs's `TAB`) gives.
+    Emacs's `indent-region` gives another column there, because it carries a parse state across the closed list.
+  - A line inside `#| |#` or a `#;` datum keeps its indentation; Emacs indents it as code.
+  - `cl-flet`'s and `cl-labels`' local definitions are indented as calls, not as defuns (Emacs's
+    `lisp--local-defform-body-p`); the owner's configuration does not use them.
+  - Emacs indents with tabs where `indent-tabs-mode` is on (Customize's `custom.el`); Edwin indents with spaces.
+  - No `lisp-indent-local-overrides` and no `(declare (indent …))` read from the buffer: the tables are fixed.
+- **Not in it**:
+  - `=G-idem-evil-jump-item` stays failing. It is lines 379-387 of `evil.scm` without the form's head, so its first
+    line is at top level, and Emacs 31.1 indents it to the same text as Edwin, byte for byte; the test asserts
+    that text. The whole form (`=G-idem-jump-item`) keeps its lines.
+  - `=G-nix`, `RET-nix` and `RET-py` belong to lang-syntax-indent-*, `=G-rkt` to lang-lisp-modes (`.rkt` is not
+    a Lisp buffer), `ysiwf-function` to se-surround, and the org `M-RET` cases to se-org-meta-return.
+  - `RET-indent` and `RET-indent-2` fail at 77557e9 and here alike. Insert-state `RET` (`evil-newline-and-indent`)
+    indents the new line right but leaves the blank before point at the end of the line it splits
+    (`(define (f x) ⏎  (g x))`), which Emacs's `newline-and-indent` drops. That is not an indenter rule.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`; `test/structural.test.mts` now has
+  124 tests (25 new):
+  - The audit's 10 cases on `=` that failed at 77557e9, driven by keys: `=G-if-scm`, `=G-use-package`,
+    `=G-with-eval-after-load`, `=G-idem-evil-comment-op`, `=G-idem-init-prog`, `=G-idem-jump-item`,
+    `=G-whole-evil.scm`, `=G-whole-emacs.scm`, `=G-whole-init-prog.el`, `=G-whole-evil.scm-neutralised`. The four
+    whole-file cases read the audit's snapshots from `test/fixtures/indent`, with one host and one user name in
+    `init-prog.el` replaced.
+  - 9 audit cases that passed there and still must: `=G-basic`, `=G-let`, `=G-if-el`, `=G-string`, `=G-comment`,
+    `=G-undo`, `=G-unbalanced`, `o-indent`, `TAB-indent`.
+  - `=G-idem-evil-jump-item` against Emacs's output.
+  - 23 forms whose expectations were checked against Emacs 31.1: Scheme and Emacs Lisp `if`, a body on the head
+    line, vectors and brackets, named let, `do`, `dynamic-wind`, the `def` rule in each dialect, `defun`,
+    `defcustom`, `gptel-make-openai`, `transient-define-prefix`, `condition-case`, Edwin's own forms, prefixed
+    and data heads.
+  - Empty lines, `;;;` lines, strings, `#| |#` and `#;` left alone.
+  - gg=G on a 184-line Scheme and a 238-line Emacs Lisp corpus compared line by line with Emacs 31.1's
+    `indent-region` (`corpus.emacs.scm` and `corpus.emacs.el`), equal everywhere but the 12 lines written down
+    as choices.
+  - gg=G on every `scm/*.scm`, which changes only the forms listed above.
+
+  On 77557e9, 16 of the 124 fail: the 10 cases and 6 of the new tests. Also by hand, with Emacs 31.1 in batch:
+  the owner's 15 `.el` files, indented by Edwin and by Emacs (with those packages loaded), come out the same,
+  except `custom.el`, where Emacs's tabs are the only difference. The audit's 216 cases with an expected text,
+  run headless with one runner before and after: 148 pass before and 158 after, exactly the 10 above gained and
+  none lost. With the runner then fixed to send `Tab` and `Enter` as keys, the final code passes 160 (the 2 more,
+  `TAB-indent` and `md-M-x-demote`, had not been driven before; `TAB-indent` passes at 77557e9 in the suite).
+  Also passed: `edwin-typecheck`, `edwin-headless` (21), `edwin-prog` (41), `edwin-scheme` (38), `edwin-markdown`
+  (20), `edit-babel` (14), `edit-notes` (18), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin`
+  (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36), each exit 0;
+  and `nix flake check --keep-going --max-jobs 2` on this commit's code, tests and fixtures before these notes were finished (exit 0, "all checks passed!").
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

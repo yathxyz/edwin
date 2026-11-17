@@ -1051,34 +1051,121 @@ function matchParen(t: EdText, cls: ArrayLike<number>, k: number) {
 }
 
 /* ---------- Lisp indentation ---------- */
-const BODY: Record<string, number> = { lambda: 1, let: 1, 'let*': 1, letrec: 1, 'letrec*': 1, 'named-lambda': 1, when: 1, unless: 1, while: 1, until: 1, if: 2, dolist: 1, dotimes: 1,
-  'condition-case': 2, 'unwind-protect': 1, catch: 1, 'with-current-buffer': 1, 'save-excursion': 0, begin: 0, 'ignore-errors': 0, do: 2,
-  parameterize: 1, guard: 1, 'let-values': 1, receive: 2, 'syntax-rules': 1, 'define-record-type': 2, 'when-let': 1, 'if-let': 1, 'and-let*': 1,
-  'define-syntax': 1, 'define-macro': 1, 'call/ec': 0, 'dynamic-wind': 0, 'let-syntax': 1, case: 1 };
-function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number) {
-  if (ls > 0 && inStr(cls[ls - 1]) && inStr(cls[ls])) return null;
+/* Emacs's calculate-lisp-indent with scheme-mode's scheme-indent-function or emacs-lisp-mode's lisp-indent-function
+   (Emacs 31). A form's method is how many of its arguments are distinguished (indented by 4 on lines of their own;
+   the body after them by 2), or defun (the body by 2), or let (Scheme's: a named let has two). A head with no method
+   lines its arguments up under the first one, or under the first sexp of the line before. SCHEME is scheme.el's table
+   (with its MIT Scheme forms, on by default, but not the -components ones) and the forms Edwin's own Scheme defines,
+   given the method of their Emacs Lisp namesakes; ELISP is the declare forms of the macros Emacs and the owner's
+   configuration use. In Scheme a head of more than three characters that starts with def and has no method is a
+   defun, as scheme-mode has it; Emacs Lisp no longer has that rule. */
+type IndentMethod = number | 'defun' | 'let';
+const SCHEME_INDENT: Record<string, IndentMethod> = {
+  begin: 0, case: 1, delay: 0, do: 2, lambda: 1, let: 'let', 'let*': 1, letrec: 1, 'let-values': 1, 'let*-values': 1, 'and-let*': 1,
+  sequence: 0, 'let-syntax': 1, 'letrec-syntax': 1, 'syntax-rules': 'defun', 'syntax-case': 2, 'with-syntax': 1, library: 1, 'eval-when': 1,
+  'call-with-input-file': 1, 'call-with-port': 1, 'with-input-from-file': 1, 'with-input-from-port': 1, 'call-with-output-file': 1,
+  'with-output-to-file': 1, 'with-output-to-port': 1, 'call-with-values': 1, 'dynamic-wind': 3, when: 1, unless: 1, 'letrec*': 1,
+  parameterize: 1, 'define-values': 1, 'define-record-type': 1, 'define-library': 1, guard: 1, receive: 2, 'test-group': 1,
+  'test-group-with-cleanup': 1, match: 1, 'match-lambda': 0, 'match-lambda*': 0, 'match-let': 'let', 'match-let*': 1, 'match-letrec': 1,
+  'opt-lambda': 1, 'opt*-lambda': 1, 'let-optionals': 2, 'let-optionals*': 2, 'check-case': 1, 'fluid-let': 1, 'in-package': 1,
+  'local-declare': 1, macro: 1, 'make-environment': 0, 'named-lambda': 1, 'using-syntax': 1, 'with-input-from-string': 1,
+  'with-output-to-string': 0, 'with-values': 1, 'syntax-table-define': 2, 'list-transform-positive': 1, 'list-transform-negative': 1,
+  'list-search-positive': 1, 'list-search-negative': 1,
+  while: 1, dolist: 1, dotimes: 1, 'save-excursion': 0, 'with-current-buffer': 1, 'with-inhibit-read-only': 0, 'ignore-errors': 0,
+  'with-mutex': 1, 'with-timeout': 1, 'on-server': 0, 'on-frames': 0, 'gptel-make-preset': 1, 'evil--bind': 1, 'evil-define-key': 'defun', 'evil-define-command': 'defun',
+  'evil-define-motion': 'defun', 'evil-define-operator': 'defun', 'evil-define-text-object': 'defun' };
+const ELISP_INDENT: Record<string, IndentMethod> = {
+  autoload: 'defun', progn: 0, defvar: 'defun', defalias: 'defun', defvaralias: 'defun', defconst: 'defun', prog1: 1, prog2: 2,
+  'save-excursion': 0, 'save-restriction': 0, 'save-current-buffer': 0, 'save-match-data': 0, 'save-window-excursion': 0,
+  let: 1, 'let*': 1, while: 1, if: 2, catch: 1, 'condition-case': 2, 'unwind-protect': 1, lambda: 'defun', defun: 2, defmacro: 2,
+  defsubst: 2, defcustom: 'defun', defface: 'defun', defgroup: 'defun', 'defvar-local': 'defun', 'defvar-keymap': 1,
+  'define-minor-mode': 'defun', 'define-derived-mode': 'defun', 'define-globalized-minor-mode': 'defun', 'define-advice': 2,
+  'define-inline': 'defun', defclass: 'defun', when: 1, unless: 1, dolist: 1, dotimes: 1, 'dolist-with-progress-reporter': 2,
+  'with-current-buffer': 1, 'with-temp-buffer': 0, 'with-temp-file': 1, 'with-output-to-string': 0, 'with-output-to-temp-buffer': 1,
+  'with-eval-after-load': 1, 'eval-after-load': 1, 'eval-and-compile': 0, 'with-selected-window': 1, 'with-selected-frame': 1,
+  'with-demoted-errors': 1, 'with-no-warnings': 0, 'with-suppressed-warnings': 1, 'with-silent-modifications': 0, 'with-syntax-table': 1,
+  'with-temp-message': 1, 'with-timeout': 1, 'with-local-quit': 0, 'with-help-window': 1, 'with-memoization': 1, 'with-mutex': 1,
+  'ignore-errors': 0, 'ignore-error': 1, 'handler-bind': 1, 'when-let': 1, 'when-let*': 1, 'if-let': 2, 'if-let*': 2, 'and-let*': 1,
+  'while-let': 1, 'named-let': 2, letrec: 1, dlet: 1, 'let-alist': 1, pcase: 1, 'pcase-exhaustive': 1, 'pcase-let': 1, 'pcase-let*': 1,
+  'pcase-dolist': 1, 'seq-doseq': 1, 'seq-let': 2, 'thread-first': 0, 'thread-last': 0, 'cl-defun': 2, 'cl-defmacro': 2, 'cl-defsubst': 2,
+  'cl-defmethod': 'defun', 'cl-defgeneric': 2, 'cl-defstruct': 1, 'cl-flet': 1, 'cl-labels': 1, 'cl-macrolet': 1, 'cl-letf': 1,
+  'cl-letf*': 1, 'cl-case': 1, 'cl-ecase': 1, 'cl-block': 1, 'cl-dolist': 1, 'cl-dotimes': 1, 'cl-destructuring-bind': 2,
+  'cl-multiple-value-bind': 2, 'ert-deftest': 2, 'use-package': 'defun', 'evil-define-key': 'defun', 'evil-define-key*': 'defun',
+  'evil-define-command': 'defun', 'evil-define-motion': 'defun', 'evil-define-operator': 'defun', 'evil-define-text-object': 'defun',
+  'transient-define-prefix': 'defun', 'transient-define-suffix': 'defun', 'transient-define-infix': 'defun',
+  'transient-define-argument': 'defun', 'general-def': 'defun', 'evil-with-state': 'defun', 'gptel-make-openai': 1,
+  'gptel-make-preset': 1, 'org-with-remote-undo': 1 };
+/* Whether the text from FROM to P on P's line is blanks only. */
+function blankTo(t: EdText, from: number, p: number) { for (let k = from; k < p; k++) { const c = t.charAt(k); if (c !== ' ' && c !== '\t') return false; } return true; }
+/* The first sexp that starts on P's line, before P: Emacs parses the line from its start, so it may be inside a
+   list that line closes. A string the line starts inside is passed over. */
+function firstSexpOnLine(t: EdText, cls: ArrayLike<number>, p: number) {
+  let k = bol(t, p);
+  if (k > 0 && inStr(cls[k - 1]) && inStr(cls[k])) while (k < p && inStr(cls[k])) k++;
+  for (; k < p; k++) {
+    const c = t.charAt(k);
+    if (c === ' ' || c === '\t' || cls[k] === C.CMT || ((c === ')' || c === ']') && cls[k] === C.PAR)) continue;
+    break;
+  }
+  return k;
+}
+/* The column for the line that starts at LS in a Lisp text, or null to leave it: it starts in a string or a
+   comment over lines (#| |#, a #; datum), or with ;;; (Emacs leaves those). ELISP: the text is Emacs Lisp. */
+function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp = false) {
+  if (ls > 0 && (inStr(cls[ls - 1]) || cls[ls - 1] === C.CMT) && (inStr(cls[ls]) || cls[ls] === C.CMT)) return null;
+  let ie = ls; while (ie < t.length && (t.charAt(ie) === ' ' || t.charAt(ie) === '\t')) ie++;
+  if (t.charAt(ie) === ';' && t.charAt(ie + 1) === ';' && t.charAt(ie + 2) === ';') return null;
   const open = upList(t, cls, ls);
   if (open === null) return 0;
-  const oc = column(t, open), le = eol(t, open);
-  let k = open + 1;
-  if (k >= le || t.charAt(k) === '(' || t.charAt(k) === '"' || t.charAt(k) === ';' || cls[k] === C.QUO) return oc + 1;
-  let j = k; while (j < t.length && !isDelim(t.charAt(j))) j++;
-  const head = t.slice(k, j);
-  let spec = BODY[head];
-  if (spec === undefined && /^(def|evil-define-(motion|operator|text-object|command)$)/.test(head)) spec = 0;
-  if (spec !== undefined) {
-    let n = 0, p = j;
-    /* Stop when a sexp makes no progress (a stray delimiter): the original looped forever there. */
-    for (;;) { const e = forwardSexp(t, cls, p); if (e === null || e > ls || e <= p) break; n++; p = e; }
-    return n < spec ? oc + 4 : oc + 2;
+  const oc = column(t, open);
+  /* The last whole sexp before the line; none: under the open paren's next character. */
+  const last = backwardSexp(t, cls, ls);
+  if (last === null || last <= open) return oc + 1;
+  const fe = forwardSexp(t, cls, open + 1)!, f = backwardSexp(t, cls, fe)!;
+  const fLine = last < eol(t, f) + 1;
+  /* The head past its prefix characters (' ` , @ #), which Emacs passes over to read it. */
+  let h = f; while (h < fe && (cls[h] === C.QUO || t.charAt(h) === '#')) h++;
+  const fc = t.charAt(h);
+  /* The head is no symbol (a list, a vector, a string): under it, or under the line before's first sexp. */
+  if (fc === '(' || fc === '[' || fc === '"')
+    return column(t, fLine ? f : firstSexpOnLine(t, cls, last));
+  /* normal-indent: on the head's line under the first argument, but under the head when it is alone there or the
+     open paren is followed by a blank; on later lines under the line before's first sexp. */
+  let normal: number;
+  if (!fLine) normal = column(t, firstSexpOnLine(t, cls, last));
+  else if (f === last || /\s/.test(t.charAt(open + 1))) normal = column(t, f);
+  else normal = column(t, backwardSexp(t, cls, forwardSexp(t, cls, fe)!)!);
+  const head = t.slice(h, fe), table = elisp ? ELISP_INDENT : SCHEME_INDENT;
+  let method: IndentMethod | undefined = Object.prototype.hasOwnProperty.call(table, head) ? table[head] : undefined;
+  if (method === undefined && !elisp && head.length > 3 && head.startsWith('def')) method = 'defun';
+  if (method === 'let') {
+    let a = fe; while (t.charAt(a) === ' ' || t.charAt(a) === '\t') a++;
+    method = /[-a-zA-Z0-9+*/?!@$%^&_:~]/.test(t.charAt(a)) ? 2 : 1;
   }
-  let a = j; while (a < le && (t.charAt(a) === ' ' || t.charAt(a) === '\t')) a++;
-  return a < le && t.charAt(a) !== ';' ? column(t, a) : oc + 1;
+  let want: number | null = null;
+  if (method === 'defun') { if (last < eol(t, open) + 1) want = oc + 2; }
+  else if (typeof method === 'number') {
+    /* The arguments that start before the line, counted up to one past the distinguished ones. */
+    let n = 0, p = fe;
+    while (n <= method) { const e = forwardSexp(t, cls, p); if (e === null || e > ls || e <= p) break; n++; p = e; }
+    const count = method - n;
+    if (count > 0) want = n <= 1 ? oc + 4 : normal;
+    else if (count === 0 && (method === 0 || oc + 2 <= normal)) want = oc + 2;
+    else want = normal;
+  }
+  if (want !== null) return want;
+  /* A line that starts with a keyword goes under the keyword that starts the line before, as Emacs does. */
+  if (t.charAt(ie) === ':') {
+    let p = last;
+    while (!blankTo(t, bol(t, p), p) && !blankTo(t, open + 1, p)) { const q = backwardSexp(t, cls, p); if (q === null || q <= open) break; p = q; }
+    if (p > f && t.charAt(p) === ':') return column(t, p);
+  }
+  return normal;
 }
 function indentLine(b: EdBuffer) {
   const t = b.rope, ls = bol(t, b.pt);
   const cls = lexOf(b)!;
-  const want = lispIndentFor(t, cls, ls);
+  const want = lispIndentFor(t, cls, ls, /\.el$/.test(b.file || b.name));
   if (want === null) return;
   let ie = ls; while (ie < t.length && (t.charAt(ie) === ' ' || t.charAt(ie) === '\t')) ie++;
   const have = column(t, ie);

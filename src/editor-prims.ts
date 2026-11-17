@@ -654,7 +654,9 @@ CMD('indent-region', '*r', 'START END', 'Indent each line in the region.', ([s, 
   const b = cur(), [a, z0] = region(b, s, e); let z = z0;
   const save = b.pt; b.pt = a;
   for (;;) {
-    const len = b.rope.length; Ed.indentLine(b); z += b.rope.length - len;
+    /* An empty line stays empty, as in Emacs. */
+    const ls = Ed.bol(b.rope, b.pt);
+    if (Ed.eol(b.rope, ls) > ls) { const len = b.rope.length; Ed.indentLine(b); z += b.rope.length - len; }
     const nx = b.rope.indexOf('\n', b.pt); if (nx < 0 || nx + 1 >= z) break; b.pt = nx + 1;
   }
   b.pt = Math.min(save, b.rope.length); b.markActive = false; return false;

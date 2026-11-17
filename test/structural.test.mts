@@ -10,7 +10,7 @@
 // Run: node --test test/structural.test.mts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { startEdwin } from './headless.mts';
 import type { Edwin } from './headless.mts';
 
@@ -29,9 +29,10 @@ async function buffer(ext: string, text: string) {
   ed.E.current.pt = 0;
   return ed.E.current;
 }
-/* KEYS as the audit wrote them: "K:NAME" is one key by its name (C-M-f, Escape), anything else is typed. */
+/* KEYS as the audit wrote them: "K:NAME" is one key by its name (C-M-f, Escape, Tab), anything else is typed. */
+const KEY_NAMES: Record<string, string> = { Escape: 'ESC', Tab: 'TAB' };
 async function press(keys: string[]) {
-  for (const k of keys) if (k.startsWith('K:')) await ed.keys(k.slice(2) === 'Escape' ? 'ESC' : k.slice(2)); else await ed.type(k);
+  for (const k of keys) if (k.startsWith('K:')) await ed.keys(KEY_NAMES[k.slice(2)] ?? k.slice(2)); else await ed.type(k);
 }
 const C = Ed.C;
 const classes = (t: string) => Array.from(Ed.lex(t) as Uint8Array);
@@ -269,7 +270,7 @@ test('gg=G on scm/evil.scm: its character literals no longer move any line', asy
   const plain = text.replace(/#\\[()[\]";'`,{}]/g, '#\\a');
   assert.ok(text.length === plain.length && text !== plain);
   const real = await reindented(text), neutral = await reindented(plain);
-  console.log(`gg=G on scm/evil.scm changes ${real.length} of ${text.split('\n').length - 1} lines, as with the literals made #\\a (the indenter's own differences, se-indent's)`);
+  console.log(`gg=G on scm/evil.scm changes ${real.length} of ${text.split('\n').length - 1} lines, as with the literals made #\\a`);
   assert.deepEqual(real, neutral);
 });
 
@@ -513,5 +514,163 @@ test('expreg: the string point is in is a step, and a string elsewhere on the li
     await press([...keys]);
     if ((globalThis as Globals).EvilCore.stateOf(ed.E.current) !== 'normal') await ed.keys('ESC');
     assert.equal(ed.text(), expected, `${keys.join(' ')} on ${JSON.stringify(input)}`);
+  }
+});
+
+/* se-indent: the Lisp indenter computes what Emacs 31's scheme-mode and emacs-lisp-mode do (B3): calculate-lisp-indent
+   with each dialect's indent function and table, a .el file read as Emacs Lisp. INDENT_FAILED failed at 77557e9
+   (se-pair-objects); INDENT_GUARDS passed there. The whole-file cases read the audit's snapshots of scm/evil.scm,
+   scm/emacs.scm and the owner's init-prog.el from test/fixtures/indent (the last with its one host and user name
+   replaced); =G-whole-evil.scm-neutralised is the evil.scm snapshot with its bracket and quote literals made #\x. */
+const fixture = (name: string) => readFileSync(new URL(`fixtures/indent/${name}`, import.meta.url), 'utf8');
+const auditEvil = fixture('audit-evil.scm'), auditNeutral = auditEvil.replace(/#\\[()[\]{}"]/g, '#\\x');
+const auditEmacs = fixture('audit-emacs.scm'), auditInitProg = fixture('audit-init-prog.el');
+const INDENT_FAILED: Case[] = [
+  ["=G-if-scm", "scm", "(if a\nb\nc)\n", ["=G"], "(if a\n    b\n    c)\n"],
+  ["=G-use-package", "el", "(use-package foo\n:hook x\n:config\n(bar))\n", ["=G"], "(use-package foo\n  :hook x\n  :config\n  (bar))\n"],
+  ["=G-with-eval-after-load", "el", "(with-eval-after-load 'x\n(foo))\n", ["=G"], "(with-eval-after-load 'x\n  (foo))\n"],
+  ["=G-idem-evil-comment-op", "scm", "(evil-define-operator (evil-comment-operator beg end type)\n  \"Comment the lines from BEG to END out, or back in when they all are (gc).\"\n  (let* ((prefix (comment-prefix))\n         (marker (string-trim prefix))\n         (lines (count-lines beg end))\n         (all-commented\n          (save-excursion\n            (goto-char beg)\n            (let loop ((i 0))\n              (cond ((= i lines) #t)\n                    ((begin (back-to-indentation) (or (looking-at (string-append (regexp-quote marker))) (eolp)))\n                     (forward-line 1) (loop (+ i 1)))\n                    (else #f))))))\n    (save-excursion\n      (goto-char beg)\n      (dotimes (_ lines)\n        (back-to-indentation)\n        (if all-commented\n            (when (looking-at (string-append (regexp-quote marker) \" ?\"))\n              (replace-match \"\"))\n            (unless (eolp) (insert prefix)))\n        (forward-line 1)))\n    (goto-char beg)\n    (evil--first-non-blank)))\n\n", ["=G"], "(evil-define-operator (evil-comment-operator beg end type)\n  \"Comment the lines from BEG to END out, or back in when they all are (gc).\"\n  (let* ((prefix (comment-prefix))\n         (marker (string-trim prefix))\n         (lines (count-lines beg end))\n         (all-commented\n          (save-excursion\n            (goto-char beg)\n            (let loop ((i 0))\n              (cond ((= i lines) #t)\n                    ((begin (back-to-indentation) (or (looking-at (string-append (regexp-quote marker))) (eolp)))\n                     (forward-line 1) (loop (+ i 1)))\n                    (else #f))))))\n    (save-excursion\n      (goto-char beg)\n      (dotimes (_ lines)\n        (back-to-indentation)\n        (if all-commented\n            (when (looking-at (string-append (regexp-quote marker) \" ?\"))\n              (replace-match \"\"))\n            (unless (eolp) (insert prefix)))\n        (forward-line 1)))\n    (goto-char beg)\n    (evil--first-non-blank)))\n\n"],
+  ["=G-idem-init-prog", "el", ";; Lisp\n(use-package lispy\n  :hook ((lisp-mode . lispy-mode)\n         (emacs-lisp-mode . lispy-mode)\n         (ielm-mode . lispy-mode)\n         (scheme-mode . lispy-mode)\n         (racket-mode . lispy-mode)\n         (clojure-mode . lispy-mode)\n         (clojurescript-mode . lispy-mode)\n         (clojurec-mode . lispy-mode))\n  :config\n  (setq lispy-close-quotes-at-end-p t))\n\n(with-eval-after-load 'elisp-mode\n  (define-key emacs-lisp-mode-map (kbd \"C-c i\") #'consult-outline))\n\n(use-package lispyville\n  :hook (lispy-mode . lispyville-mode)\n  :init\n  (setq lispyville-key-theme\n        '((operators normal) c-w (prettify insert) (atom-movement t)\n          slurp/barf-lispy additional additional-insert))\n  :config\n  (lispyville-set-key-theme)\n  (add-hook 'evil-escape-inhibit-functions\n            (defun +lispy-inhibit-evil-escape-fn ()\n              (and lispy-mode (evil-insert-state-p)))))\n", ["=G"], ";; Lisp\n(use-package lispy\n  :hook ((lisp-mode . lispy-mode)\n         (emacs-lisp-mode . lispy-mode)\n         (ielm-mode . lispy-mode)\n         (scheme-mode . lispy-mode)\n         (racket-mode . lispy-mode)\n         (clojure-mode . lispy-mode)\n         (clojurescript-mode . lispy-mode)\n         (clojurec-mode . lispy-mode))\n  :config\n  (setq lispy-close-quotes-at-end-p t))\n\n(with-eval-after-load 'elisp-mode\n  (define-key emacs-lisp-mode-map (kbd \"C-c i\") #'consult-outline))\n\n(use-package lispyville\n  :hook (lispy-mode . lispyville-mode)\n  :init\n  (setq lispyville-key-theme\n        '((operators normal) c-w (prettify insert) (atom-movement t)\n          slurp/barf-lispy additional additional-insert))\n  :config\n  (lispyville-set-key-theme)\n  (add-hook 'evil-escape-inhibit-functions\n            (defun +lispy-inhibit-evil-escape-fn ()\n              (and lispy-mode (evil-insert-state-p)))))\n"],
+  ["=G-idem-jump-item", "scm", "(evil-define-motion (evil-jump-item count)\n  \"Move to the bracket matching the next bracket on this line (%).\nWith COUNT, move to COUNT percent of the way through the buffer.\"\n  #:type inclusive #:jump\n  (if count\n      (begin\n        (set! evil-this-type 'line)\n        (evil-goto-line (max 1 (quotient (+ (* count (line-number-at-pos (point-max))) 99) 100))))\n      (let ((pos (evil--jump-item)))\n        (unless pos (user-error \"No matching bracket on this line\"))\n", ["=G"], "(evil-define-motion (evil-jump-item count)\n  \"Move to the bracket matching the next bracket on this line (%).\nWith COUNT, move to COUNT percent of the way through the buffer.\"\n  #:type inclusive #:jump\n  (if count\n      (begin\n        (set! evil-this-type 'line)\n        (evil-goto-line (max 1 (quotient (+ (* count (line-number-at-pos (point-max))) 99) 100))))\n      (let ((pos (evil--jump-item)))\n        (unless pos (user-error \"No matching bracket on this line\"))\n"],
+  ["=G-whole-evil.scm", "scm", auditEvil, ["=G"], auditEvil],
+  ["=G-whole-emacs.scm", "scm", auditEmacs, ["=G"], auditEmacs],
+  ["=G-whole-init-prog.el", "el", auditInitProg, ["=G"], auditInitProg],
+  ["=G-whole-evil.scm-neutralised", "scm", auditNeutral, ["=G"], auditNeutral],
+];
+const INDENT_GUARDS: Case[] = [
+  ["=G-basic", "scm", "(define (f x)\n(+ x\n1))\n", ["=G"], "(define (f x)\n  (+ x\n     1))\n"],
+  ["=G-let", "scm", "(let ((a 1)\n(b 2))\n(+ a b))\n", ["=G"], "(let ((a 1)\n      (b 2))\n  (+ a b))\n"],
+  ["=G-if-el", "el", "(if a\nb\nc)\n", ["=G"], "(if a\n    b\n  c)\n"],
+  ["=G-string", "scm", "(f \"a\nb\")\n", ["=G"], "(f \"a\nb\")\n"],
+  ["=G-comment", "scm", "(define (f)\n;; c\n(g))\n", ["=G"], "(define (f)\n  ;; c\n  (g))\n"],
+  ["=G-undo", "scm", "(define (f x)\n(+ x\n1))\n", ["=G","u"], "(define (f x)\n(+ x\n1))\n"],
+  ["=G-unbalanced", "scm", "(foo (bar\nbaz\n", ["=G"], "(foo (bar\n      baz\n"],
+  ["o-indent", "scm", "(define (f x)\n  (g x))\n", ["o(h","K:Escape"], "(define (f x)\n  (h)\n  (g x))\n"],
+  ["TAB-indent", "scm", "(define (f)\n(g))\n", ["j","i","K:Tab","K:Escape"], "(define (f)\n  (g))\n"],
+];
+for (const [label, cases] of [['failed at 77557e9', INDENT_FAILED], ['a guard', INDENT_GUARDS]] as const)
+  for (const [id, ext, input, keys, expected] of cases)
+    test(`audit case ${id} (${label})`, async () => {
+      await buffer(ext, input);
+      await press(keys);
+      if ((globalThis as Globals).EvilCore.stateOf(ed.E.current) !== 'normal') await ed.keys('ESC');
+      assert.equal(ed.text(), expected);
+    });
+
+/* gg=G on a buffer with extension EXT holding TEXT, and the text it leaves. */
+async function reindent(ext: string, text: string) {
+  await buffer(ext, text);
+  await ed.type('gg=G');
+  return ed.text();
+}
+
+test('audit case =G-idem-evil-jump-item: a fragment that starts inside a form indents as Emacs 31 indents it', async () => {
+  // Lines 379-387 of scm/evil.scm without the form's head: the first line is at top level, so it goes to column 0
+  // and the rest follow it. Emacs's indent-region gives the same text, byte for byte; =G-idem-jump-item, the whole form, keeps its lines.
+  assert.equal(await reindent('scm', "  \"Move to the bracket matching the next bracket on this line (%).\nWith COUNT, move to COUNT percent of the way through the buffer.\"\n  #:type inclusive #:jump\n  (if count\n      (begin\n        (set! evil-this-type 'line)\n        (evil-goto-line (max 1 (quotient (+ (* count (line-number-at-pos (point-max))) 99) 100))))\n      (let ((pos (evil--jump-item)))\n        (unless pos (user-error \"No matching bracket on this line\"))\n"),
+    "\"Move to the bracket matching the next bracket on this line (%).\nWith COUNT, move to COUNT percent of the way through the buffer.\"\n#:type inclusive #:jump\n(if count\n    (begin\n      (set! evil-this-type 'line)\n      (evil-goto-line (max 1 (quotient (+ (* count (line-number-at-pos (point-max))) 99) 100))))\n    (let ((pos (evil--jump-item)))\n      (unless pos (user-error \"No matching bracket on this line\"))\n");
+});
+
+test('B3: Scheme if, a body form on the head line, vectors, named let and the Emacs Lisp forms', async () => {
+  for (const [ext, input, expected] of [
+    // scheme-mode gives if no method: both branches under the test; emacs-lisp-mode's if is 2.
+    ['scm', '(if (a)\n(b)\n(c))\n', '(if (a)\n    (b)\n    (c))\n'],
+    ['el', '(if (a)\n(b)\n(c))\n', '(if (a)\n    (b)\n  (c))\n'],
+    // A body form on the head line sets the column for the rest.
+    ['scm', '(begin (foo)\n(bar)\n(baz))\n', '(begin (foo)\n       (bar)\n       (baz))\n'],
+    ['scm', '(when a (foo)\n(bar))\n', '(when a (foo)\n      (bar))\n'],
+    ['el', '(progn (a)\n(b))\n', '(progn (a)\n       (b))\n'],
+    // Vectors and brackets are lists: under the first argument, or under the head alone on its line.
+    ['scm', '(foo [a b\nc])\n', '(foo [a b\n        c])\n'],
+    ['el', '(foo [a\nb])\n', '(foo [a\n      b])\n'],
+    ['scm', '(let ([x 1]\n[y 2])\n(+ x y))\n', '(let ([x 1]\n      [y 2])\n  (+ x y))\n'],
+    // A named let has two distinguished arguments, do two and dynamic-wind three: the first two at +4, the third
+    // (past the second) at normal, which is under the line above.
+    ['scm', '(let loop ((i 0))\n(loop i))\n', '(let loop ((i 0))\n  (loop i))\n'],
+    ['scm', '(do ((i 0 (+ i 1)))\n((= i 3))\n(display i))\n', '(do ((i 0 (+ i 1)))\n    ((= i 3))\n  (display i))\n'],
+    ['scm', '(dynamic-wind (lambda () 1)\n(lambda () 2)\n(lambda () 3))\n', '(dynamic-wind (lambda () 1)\n    (lambda () 2)\n    (lambda () 3))\n'],
+    // A Scheme head of more than three characters starting with def is a defun; Emacs Lisp has no such rule.
+    ['scm', '(define-foo a\nb)\n', '(define-foo a\n  b)\n'],
+    ['el', '(define-foo a\nb)\n', '(define-foo a\n            b)\n'],
+    // Emacs Lisp forms of the owner's configuration.
+    ['el', '(defun f (x)\n"Doc."\nx)\n', '(defun f (x)\n  "Doc."\n  x)\n'],
+    ['el', '(defcustom c 1\n"Doc."\n:type \'integer)\n', '(defcustom c 1\n  "Doc."\n  :type \'integer)\n'],
+    ['el', '(gptel-make-openai "x"\n:host "y")\n', '(gptel-make-openai "x"\n  :host "y")\n'],
+    ['el', '(transient-define-prefix p ()\n"Doc."\n["a" ("x" "y" z)])\n', '(transient-define-prefix p ()\n  "Doc."\n  ["a" ("x" "y" z)])\n'],
+    ['el', '(condition-case err\n(foo)\n(error (bar)))\n', '(condition-case err\n    (foo)\n  (error (bar)))\n'],
+    // Edwin's own Scheme forms take the method of their Emacs Lisp namesakes (scheme-mode has none: under the argument).
+    ['scm', '(evil-define-key \'normal \'global\n"a" \'b)\n', '(evil-define-key \'normal \'global\n  "a" \'b)\n'],
+    ['scm', '(with-current-buffer b\n(foo))\n', '(with-current-buffer b\n  (foo))\n'],
+    // A head with a prefix (\' , #) is read past it, as Emacs reads it: these are calls, not data.
+    ['scm', "('a 'b\n'c)\n", "('a 'b\n    'c)\n"],
+    ['el', '(f `(,a :x 1\n:y 2))\n', '(f `(,a :x 1\n        :y 2))\n'],
+    // A list, a string or a vector at the head is data: under it.
+    ['scm', '((a) b\nc)\n', '((a) b\n c)\n'],
+  ] as const) {
+    assert.equal(await reindent(ext, input), expected, `${ext}: ${JSON.stringify(input)}`);
+  }
+});
+
+test('= leaves an empty line empty, a ;;; comment line where it is, and a line in a string, a #| |# or #; datum', async () => {
+  for (const [input, expected] of [
+    ['(define (f)\n\n(g))\n', '(define (f)\n\n  (g))\n'],
+    ['(define (f)\n;;; Section\n;; note\n(g))\n', '(define (f)\n;;; Section\n  ;; note\n  (g))\n'],
+    // Emacs re-indents a line inside #| |# or a #; datum as code; Edwin leaves what the writer put there.
+    ['(define (f)\n#| a\n   b |#\n(g))\n', '(define (f)\n  #| a\n   b |#\n  (g))\n'],
+    ['(define (f)\n#;(old\n x)\n(g))\n', '(define (f)\n  #;(old\n x)\n  (g))\n'],
+    ['(f "a\n   b"\nc)\n', '(f "a\n   b"\n   c)\n'],
+  ] as const) {
+    assert.equal(await reindent('scm', input), expected, JSON.stringify(input));
+  }
+});
+
+/* GNU Emacs 31.1's indent-region of test/fixtures/indent/corpus.scm and corpus.el (scheme-mode; emacs-lisp-mode with
+   use-package, gptel, transient, evil, general and lispy loaded) against gg=G, line by line. The lines where Edwin
+   differs, each by its text, with the column Edwin gives it: Edwin's own Scheme forms, which scheme-mode does not
+   know; a line after a string's last line, which Emacs indents as if that line started outside the string; cl-flet's
+   local definitions, which Edwin treats as calls; and a vector after a list closed on its line, where Emacs's
+   indent-region disagrees with its own TAB (lisp-indent-line gives Edwin's column). */
+const EMACS_DIFFERS: Record<string, Record<string, number>> = {
+  scm: { 'after-string)': 3, '(save-excursion-body))': 2, '(with-current-buffer-body))': 2, '(dotimes-body))': 2,
+    '"evil-key-a" \'b': 2, '"evil-key-c" \'d)': 2, '"motion-doc"': 2, '#:type motion-type': 2, '(motion-body))': 2 },
+  el: { 'after-string)': 3, 'local-defun-body))': 13, 'vector-tail])': 20 },
+};
+for (const ext of ['scm', 'el'] as const)
+  test(`gg=G on the corpus.${ext} fixture gives Emacs 31.1's indentation but on the lines written down`, async () => {
+    const got = (await reindent(ext, fixture(`corpus.${ext}`))).split('\n'), want = fixture(`corpus.emacs.${ext}`).split('\n');
+    assert.equal(got.length, want.length);
+    const differs = EMACS_DIFFERS[ext], seen = new Set<string>();
+    got.forEach((line, i) => {
+      if (line === want[i]) return;
+      const text = line.trim();
+      assert.ok(text in differs, `line ${i + 1}: Edwin ${JSON.stringify(line)}, Emacs ${JSON.stringify(want[i])}`);
+      assert.equal(line.length - line.trimStart().length, differs[text], text);
+      seen.add(text);
+    });
+    assert.deepEqual([...seen].sort(), Object.keys(differs).sort());
+    assert.ok(got.length > 180, `${got.length} lines`);
+  });
+
+/* The top-level forms gg=G changes lines of in Edwin's own Scheme files, by the form's first 40 characters, with the
+   number of its lines changed. Each is as scheme-mode indents it (checked form by form with Emacs 31.1): a define
+   whose value goes on the next line at +2, not +6 (org.scm), a quoted list of symbols under its second element
+   (evil.scm, init.scm, markdown.scm), dynamic-wind's thunks at +4 (pi.scm). The files are not reformatted here. */
+const SCM_CHANGES: Record<string, Record<string, number>> = {
+  'evil.scm': { '(set! evil-motion-state-modes (append ev': 1 },
+  'init.scm': { '(for-each (lambda (mode) (evil-define-ke': 1 },
+  'markdown.scm': { "(for-each (lambda (c) (put c 'evil-repea": 1 },
+  'org.scm': { '(define note-capture-templates': 15, '(define dailies-capture-templates': 2 },
+  'pi.scm': { '(define (pi--handler buf)': 2 },
+};
+test('gg=G on every scm/*.scm file changes only the forms written down', async () => {
+  const dir = new URL('../scm/', import.meta.url);
+  const files = readdirSync(dir).filter(f => f.endsWith('.scm')).sort();
+  assert.ok(files.length >= 18, files.join(' '));
+  for (const f of files) {
+    const text = readFileSync(new URL(f, dir), 'utf8'), a = text.split('\n'), z = (await reindent('scm', text)).split('\n');
+    assert.equal(z.length, a.length, f);
+    const forms: Record<string, number> = {};
+    a.forEach((l, i) => { if (l !== z[i]) { let j = i; while (j > 0 && a[j][0] !== '(') j--; const k = a[j].slice(0, 40); forms[k] = (forms[k] || 0) + 1; } });
+    assert.deepEqual(forms, SCM_CHANGES[f] || {}, f);
   }
 });

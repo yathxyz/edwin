@@ -183,7 +183,9 @@ in
   # = and show-paren; the pair and quote text objects (i( a( i" ...), ds, cs and expreg reading the lexer, Visual a(
   # growing, no operator leaving a balanced buffer unbalanced; the Visual-block case operators; the incremental lex
   # against a whole one after random edits, the worker pool's lexer against the main thread's, gg=G on scm/evil.scm
-  # moving no line for its character literals, and the 2 ms keystroke budget.
+  # moving no line for its character literals, and the 2 ms keystroke budget; the Lisp indenter as Emacs 31's
+  # scheme-mode and emacs-lisp-mode indent (Scheme if, a body on the head line, vectors, use-package and the def*
+  # forms), against Emacs's output in test/fixtures/indent, and gg=G on every scm/*.scm changing only the forms listed.
   edwin-structural = suite "structural" [ "structural.test.mts" ];
 
   # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm

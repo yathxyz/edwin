@@ -1520,7 +1520,7 @@ interface EdApi {
   matchParen(t: EdText, cls: Uint8Array | number[], k: number): number | null;
   indentLine(b: EdBuffer): void;
   /* null inside a string: leave the line alone */
-  lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number): number | null;
+  lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp?: boolean): number | null;
   isLisp(b: EdBuffer): boolean;
   modeFor(name: string): string;
   MODE_NAMES: Record<string, string>;
