@@ -462,6 +462,14 @@ vc-message-summary-max-length and a second line that is not blank are shown, and
 (define-key vc-message-mode-map "C-c C-c" 'vc-message-finish)
 (define-key vc-message-mode-map "C-c C-k" 'vc-message-abort)
 
+;; Conflict markers (src/vc.ts turns vc-conflict-mode on in a visited file that holds one), smerge's keys:
+;; C-c ^ n and C-c ^ p go to the next and the previous conflict, C-c ^ u, C-c ^ l and C-c ^ a keep ours, theirs, both
+(define-key vc-conflict-mode-map "C-c ^ n" 'vc-conflict-next)
+(define-key vc-conflict-mode-map "C-c ^ p" 'vc-conflict-previous)
+(define-key vc-conflict-mode-map "C-c ^ u" 'vc-conflict-keep-ours)
+(define-key vc-conflict-mode-map "C-c ^ l" 'vc-conflict-keep-theirs)
+(define-key vc-conflict-mode-map "C-c ^ a" 'vc-conflict-keep-both)
+
 ;; *grep* (src/compile.ts), out of Evil and in Emacs state: C-c C-p makes it editable once its grep has ended;
 ;; then C-c C-c or C-x C-s write its rows, C-c C-k gives them up
 (define-key grep-mode-map "C-c C-p" 'grep-change-to-grep-edit-mode)

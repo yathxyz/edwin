@@ -3496,6 +3496,117 @@ abort for sequenced operations, with their state shown in the status buffer.
   - In the status buffer, a Visual selection from the Head line over the Merge line to an unpulled commit: `A A`
     picks that commit alone.
 
+## Conflict markers (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-conflict`, on git-sequencer): a minor mode on files with
+conflict markers: jump, keep ours, theirs or both; each resolution exact for git's two-way, diff3 and zdiff3
+markers and jj's; nested and malformed markers left untouched with a message.
+
+- **`vc-conflict-mode`** (src/vc.ts, lighter ` Conflict`) turns on in a visited file whose text holds a
+  conflict (find-file-hook `vc--conflict-check`), and again when a buffer already open is visited again with one
+  (`H.visited`, chained after stack.ts's): a file auto-revert reloaded after a merge wrote its markers is caught
+  at the next visit, by find-file or by visit-location (the status buffer's RET). Once a resolution leaves no
+  conflict it says `No conflict left` and stays on, so `u` brings the markers back with their keys; Emacs's
+  smerge-auto-leave turns smerge-mode off there and puts its re-enabling on the undo list, which Edwin's undo
+  (snapshots of the text) has no place for. `M-x vc-conflict-mode` turns it off.
+- **Keys**, smerge's: `C-c ^ n` `vc-conflict-next`, `C-c ^ p` `vc-conflict-previous`, `C-c ^ u`
+  `vc-conflict-keep-ours`, `C-c ^ l` `vc-conflict-keep-theirs`, `C-c ^ a` `vc-conflict-keep-both` (scm/emacs.scm,
+  in `vc-conflict-mode-map`; the same five in Normal and Insert state, scm/evil.scm), and in Normal state `] n`
+  and `[ n` for next and previous, through lang-evil-minor-maps' per-minor-mode keys.
+- **Going to a conflict** puts point on its opening marker's line start: the first one after point, the last one
+  before it; `No later conflict` and `No earlier conflict` past the ends. A malformed one is gone to too, and said
+  why (below).
+- **Keeping** works on the conflict around point (from its opening marker's line to the end of its closing
+  marker's line): ours, theirs, or ours then theirs, the base never kept. It is one `Ed.replaceText`, so one change
+  for `u`, refused in a read-only buffer; point is left at the start of the kept text. Off a conflict: `No
+  conflict at point`.
+- **Parsing** (`Vc.conflicts(text)`, a list of `VcConflict`: start, end, style `git`, `jj` or null, ours, theirs,
+  why). A marker is a line that starts with a run of 7 or more of one of `< | = > % + \ -`, then a space, a CR or
+  the line's end. A conflict runs from a `<` marker to the first `>` marker of exactly its length after it, and
+  its other markers are those of that length, so git's conflict-marker-size, and jj's markers made longer than any
+  run in the text, are read, and a run of another length is text. A `<` marker that no `>` marker of its length
+  follows is text and the reading goes on at the next line: a file jj gave 11-character markers because its text
+  holds a `<<<<<<< ` line has that line read as text and jj's conflict after it read. Outside a conflict,
+  `=======`, `>>>>>>>` and `|||||||` lines (a setext heading, quoted mail) are text. A git conflict cut short
+  (no closing marker) is therefore text too, not refused: the mode does not find it.
+  - git's: `<` [`|` base] `=` `>`; ours is between the opening marker and the first separator, theirs between
+    `=======` and the closing marker, each byte for byte (CRLF lines kept). zdiff3 is read as diff3. git never
+    lengthens its markers, so a side that holds a line of them cannot be told from a marker: a `<` marker inside
+    is refused (below); a git conflict that another `>` marker of its length follows before the next `<` marker
+    of its length is refused too, since the file reads the same whether that later marker closes it (theirs
+    holding a `>>>>>>> ` line) or is text after it (quoted mail after a conflict), and resolving on either reading
+    would be a guess that leaves a marker behind or drops a line. The one left: a two-way conflict whose ours
+    holds a `||||||| ` line reads exactly as diff3's, and is read as it, that line and the rest of ours taken for
+    the base; its sides are then wrong, and nothing in git's format can detect it.
+  - jj's (its default style, `diff`, as jj 0.45 writes it): a conflict is jj's when the line after its opening
+    marker is `%%%%%%%` or `+++++++` and its markers' labels are jj's, `conflict N of M` and `conflict N of M
+    ends`; with any other labels it is git's, so a git conflict whose ours starts with a `+++++++ ` or `%%%%%%% `
+    line is read as git's. Side #1 is ours and side #2 theirs, by order: a `+++++++` section is a side
+    as it is; a `%%%%%%%` section, with the `\\\\\\\        to:` line after it, is a side as its ` ` and `+` lines
+    without their first character. A section whose (to:) label ends `(no terminating newline)` gives its side
+    without its last newline.
+  - Malformed, found but never resolved, `This conflict WHY: resolve it by hand`: `holds another conflict` (a `<`
+    marker of the same length before its closing marker: nested conflicts, or a git conflict whose ours holds a
+    `<<<<<<< ` line, which git's markers cannot tell apart), `ends ambiguously, another closing marker of its
+    length following it` (git's, above: theirs holding a `>>>>>>> ` line, or a quoted one after the conflict; the
+    conflict found runs to the first closing marker), `has its markers out of order, or one missing`
+    (git: no `=======`, two, or `|||||||` after it), `has a diff line that starts with neither a space, - nor +`,
+    `has N sides, not two`, `is in jj's snapshot style, which is not read here` (`-------`), `has a marker out of
+    place` (a `|`, `=` or stray `\` marker in jj's).
+- **Choices** where the package left one open, each reversible:
+  - jj's marker style: jj's default, `diff` (owner decision 12); jj's `snapshot` and `git` styles are not set
+    anywhere here. jj's `git` style writes git's markers, which are read as git's.
+  - For jj, ours is side #1 and theirs side #2, as `jj resolve --tool :ours` and `:theirs` name them.
+  - Keep both is ours then theirs, the base left out (Emacs's `C-c ^ a`, smerge-keep-all, keeps the base too).
+    With diff3 markers the lines both sides added are in each side, so both has them twice, where git merge-file's
+    --union has them once; with two-way and zdiff3 markers it is --union's text. A side with no final newline
+    (jj's, at the end of a file) gets one before the other side.
+  - git ends each side with a newline before the next marker, so a file whose sides had no final newline ends
+    with one after a resolution: the markers do not say that it had none.
+  - Command names are Edwin's (`vc-conflict-…`), the C-c ^ keys smerge's; `] n` and `[ n` are Edwin's own.
+- **Not in it:** no faces on the markers and sides (a minor mode cannot colour inside another mode's lexer), no
+  keep-base, no keep for a conflict of three or more sides, no ediff, no `smerge-refine`; the mode does not turn on
+  when auto-revert reloads an open buffer, only at its next visit. Nothing runs a process: the mode reads and edits
+  the buffer's text alone, in frames and in edwind alike.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-vc` (157 passed, 0 failed,
+  test/vc-conflict.test.mts's 10 among them), `edwin-typecheck` (passed), `edwin-scheme` (38 passed),
+  `edwin-headless` (21 passed) and `edit-frame` (24 passed), which load scm/evil.scm, and `nix build
+  .#edwin` (unit 22, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 35). `nix flake check path:$PWD`: all checks
+  passed on its first run, `edwin-lockdown` (6), `edwin-security` (21) and `edwin-display` (20) among them. With git 2.55 and jujutsu 0.45.1
+  under a throwaway HOME, in test/vc-conflict.test.mts:
+  - git merge-file's two-way, diff3 and zdiff3 markers (two conflicts each), a deletion against a change, sides
+    with no final newline, CRLF lines, and `--marker-size=9` over 7-character `=======`, `>>>>>>>` and `|||||||`
+    lines: each conflict resolved by its key with point on its last line, the text compared with merge-file's
+    `--ours`, `--theirs` and `--union` output (both with diff3 markers compared with its own text, as above);
+    and two-way markers whose ours starts with `+++++++ ` and `%%%%%%% ` lines, and with an 8-character
+    `<<<<<<<< ` line before the conflict; the mode on at the visit, still on after the last resolution.
+  - A real `git merge` with merge.conflictStyle=diff3: C-c ^ u gives merge-file --ours of the index's stages.
+  - A jj workspace whose `jj new one two` conflicts (jj's style checked as `diff`): f with a snapshot side #1
+    and a diff side #2, then a diff side #1, both with no terminating newline; g with runs of six marker
+    characters, so its markers are ten long. C-c ^ u and C-c ^ l give what `jj resolve --tool :ours` and
+    `:theirs` write (each undone with `jj undo`); C-c ^ a gives side #1 then side #2.
+  - A jj workspace whose file holds a `<<<<<<< sample` line and a `=======` line in the context of its
+    conflict, so jj's markers are 11 long: the 7-character line is text, `] n` goes to jj's conflict, and C-c ^ u
+    and C-c ^ l give `jj resolve --tool :ours` and `:theirs`'s text, C-c ^ a side #1 then side #2.
+  - The eleven malformed and nested texts above (two of them `holds another conflict`: a nested conflict, and a
+    `<<<<<<< ` line inside a conflict closed once; two `ends ambiguously`: a `>>>>>>> ` line inside theirs, and
+    one after the conflict): each key changes nothing, leaves the buffer unmodified and says why; `] n` goes to
+    one and says why. A good conflict after a malformed one is resolved, the mode left on.
+  - git merge-file's two-way markers over a theirs that holds a `>>>>>>> q` line (the output checked byte for
+    byte): one conflict, refused as `ends ambiguously`, running to that line; each key with point inside it changes
+    nothing and says so. Two conflicts with a `>>>>>>> quoted` line after the second: the first is read, the
+    second refused. A `>>>>>>>> ` line of another length after a conflict leaves it read.
+  - Lines of markers outside a conflict, an opening marker with no closing marker of its length among them: the
+    visit leaves the mode off; `No conflict at point`. `Vc.conflicts` reads the git conflict after an
+    8-character `<<<<<<<< ` line with no closing marker of its own, and after an unclosed `<<<<<<< ` line before a
+    conflict of 9-character markers; a git conflict whose ours starts with `+++++++ x` is git's.
+  - `] n`, `[ n`, `C-c ^ n`, `C-c ^ p` over two conflicts and past both ends; `u` brings the markers back; C-c ^ l
+    in Insert state; after the last conflict is resolved (`No conflict left`) the mode is still on, `u` brings
+    that conflict back and `] n` and C-c ^ l work on it; a buffer given markers while open turns the mode on at its next visit, by find-file and by
+    visit-location; a read-only buffer is not changed.
+  - In a markdown file with a conflict, the mode on: `] ]` (markdown-mode's) goes to the next heading, `C-c C-t`
+    cycles a task, `] b` and `[ b` go to another buffer.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

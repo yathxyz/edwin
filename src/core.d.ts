@@ -2272,6 +2272,18 @@ interface VcApi {
   run(r: VcRepo, args: string[], opts?: VcRunOptions & { input?: string }): Promise<EdProcResult>;
   /* ask once whether to save the changed buffers visiting files in the repository before DOING, and save them on y */
   offerSave(r: VcRepo, doing: string): Promise<void>;
+  /* the conflicts git's or jj's markers mark in a text, in order */
+  conflicts(text: string): VcConflict[];
+}
+/* vc.ts: a conflict between markers, from its opening marker's line start to the end of its closing marker's
+   line; its two sides as they are kept (jj's side #1 and #2), or, for one that is malformed, why (style null). */
+interface VcConflict {
+  start: number;
+  end: number;
+  style: 'git' | 'jj' | null;
+  ours: string;
+  theirs: string;
+  why: string | null;
 }
 
 /* vc-diff.ts: a unified diff as files and hunks, and the partial patches staging applies. A hunk's lines keep

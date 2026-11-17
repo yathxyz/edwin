@@ -573,5 +573,193 @@ async function offerSave(r: VcRepo, doing: string) {
   }
 }
 
-globalThis.Vc = { message, cleanMessage, repo, start, run, offerSave };
+/* ---------- conflict markers: vc-conflict-mode ----------
+
+   A file git or jj left in conflict holds each conflict between markers. git's (merge, diff3 and zdiff3 styles):
+
+     <<<<<<< ours          jj's (its default style, `diff`):  <<<<<<< conflict 1 of 1
+     ours' lines                                              %%%%%%% diff from: base
+     ||||||| base   (diff3, zdiff3)                           \\\\\\\        to: side #1
+     the base's lines                                         -a line of the base
+     =======                                                  +side #1's line in its place
+     theirs' lines                                             a line both have
+     >>>>>>> theirs                                           +++++++ side #2
+                                                              side #2's lines
+                                                              >>>>>>> conflict 1 of 1 ends
+
+   A marker is a line that starts with a run of 7 or more of one marker character, then a space or the line's end;
+   a conflict's markers all have its opening marker's length (git's conflict-marker-size, jj's markers made longer
+   than any such run in the text), so a run of another length is text. A conflict runs from an opening marker to
+   the first closing marker of its length after it; an opening marker that none follows is text (jj's longer
+   markers exist for the files that hold such a line). git never lengthens its markers, so a side that holds a line
+   of them is ambiguous: a `<` marker inside is refused below, and so is a git conflict that another `>` marker of
+   its length follows before the next `<` marker of its length, since that later `>` marker may be the real closing
+   marker and the one found a line of theirs (a `|` marker in ours of a two-way conflict cannot be told from
+   diff3's base marker, and is read as it). A conflict is jj's when its first line after the opening
+   marker is `%%%%%%%` or `+++++++` and its labels are jj's, `conflict N of M` and `conflict N of M ends`; else it
+   is git's, and those characters are text in it. For jj, side #1 is ours and side #2 theirs: its first
+   and second section, a snapshot (`+++++++`) as it is, a diff (`%%%%%%%`, then its `\\\\\\\` line) as its ` ` and
+   `+` lines without that first character; a section's label ending `(no terminating newline)` gives its side
+   without its last newline. Anything else between the markers (an opening marker of the same length, markers out
+   of order or missing, a diff line with no ` `, `-` or `+`, jj's snapshot style's `-------`, more than two sides)
+   makes the conflict malformed: it is found, and refused, never resolved by a guess. */
+const MARKER_CHARS = '<|=>%+\\-';
+interface Mark { ch: string; n: number; label: string; ls: number; next: number }
+/* The marker on the line from LS to LE (NEXT: the next line's start), or null. */
+function markOf(text: string, ls: number, le: number, next: number): Mark | null {
+  const ch = text[ls];
+  if (!ch || !MARKER_CHARS.includes(ch)) return null;
+  let k = ls;
+  while (k < le && text[k] === ch) k++;
+  const n = k - ls, rest = text.slice(k, le);
+  if (n < 7 || !(rest === '' || rest === '\r' || rest[0] === ' ')) return null;
+  return { ch, n, label: rest.replace(/\r$/, '').trim(), ls, next };
+}
+const NO_NEWLINE = /\(no terminating newline\)$/;
+const lastNewlineOff = (s: string) => (s.endsWith('\n') ? s.slice(0, -1) : s);
+
+/* A jj conflict's sides, from its marks between the opening and the closing one, or why it is malformed. */
+function jjSides(text: string, marks: Mark[], closer: Mark): string[] | string {
+  const sides: string[] = [];
+  for (let i = 0; i < marks.length; i++) {
+    const m = marks[i];
+    if (m.ch === '+') {
+      const body = text.slice(m.next, (marks[i + 1] || closer).ls);
+      sides.push(NO_NEWLINE.test(m.label) ? lastNewlineOff(body) : body);
+      continue;
+    }
+    if (m.ch !== '%') return m.ch === '-' ? 'is in jj\'s snapshot style, which is not read here' : 'has a marker out of place';
+    let from = m.next, to = m.label;
+    const t = marks[i + 1];
+    if (t && t.ch === '\\' && t.ls === m.next) { from = t.next; to = t.label; i++; }
+    const end = (marks[i + 1] || closer).ls, side: string[] = [];
+    for (let ls = from; ls < end;) {
+      let le = text.indexOf('\n', ls); if (le < 0 || le > end) le = end;
+      const c = text[ls];
+      if (c !== ' ' && c !== '-' && c !== '+') return 'has a diff line that starts with neither a space, - nor +';
+      if (c !== '-') side.push(text.slice(ls + 1, le < end ? le + 1 : le));
+      ls = le + 1;
+    }
+    const s = side.join('');
+    sides.push(NO_NEWLINE.test(to) ? lastNewlineOff(s) : s);
+  }
+  return sides.length === 2 ? sides : `has ${sides.length} sides, not two`;
+}
+
+/* The conflict whose opening marker OPEN is: up to the first closing marker of its length, its sides when its
+   markers are well formed, else why not; null, the opening marker being text, when no closing marker of its
+   length follows it (LAST: the start of the last closing marker of each length). */
+function conflictAt(text: string, open: Mark, last: Map<number, number>): VcConflict | null {
+  const n = open.n, marks: Mark[] = [];
+  if (!((last.get(n) ?? -1) > open.ls)) return null;
+  let nested = false, closer: Mark | null = null, followed = false;
+  /* past the closing marker, on to the next `<` or `>` marker of its length: a `>` one makes the end ambiguous */
+  for (let ls = open.next, done = false; !done;) {
+    let le = text.indexOf('\n', ls), next = le + 1;
+    if (le < 0) le = next = text.length;
+    const m = markOf(text, ls, le, next);
+    if (m && m.n === n) {
+      if (closer) { followed = m.ch === '>'; done = followed || m.ch === '<'; }
+      else if (m.ch === '<') nested = true;
+      else if (m.ch === '>') closer = m;
+      else marks.push(m);
+    }
+    ls = next;
+    if (ls >= text.length) done = true;
+  }
+  if (!closer) return null;
+  const start = open.ls, end = closer.next;
+  const bad = (why: string): VcConflict => ({ start, end, style: null, ours: '', theirs: '', why });
+  if (nested) return bad('holds another conflict');
+  const first = marks[0];
+  if (first && (first.ch === '%' || first.ch === '+') && first.ls === open.next
+      && JJ_LABEL.test(open.label) && closer.label === open.label + ' ends') {
+    const sides = jjSides(text, marks, closer);
+    if (typeof sides === 'string') return bad(sides);
+    return { start, end, style: 'jj', ours: sides[0], theirs: sides[1], why: null };
+  }
+  /* git's: markers out of order show as another sequence (jj's characters are text in git's conflicts) */
+  if (followed) return bad('ends ambiguously, another closing marker of its length following it');
+  const seq = marks.filter(m => '|='.includes(m.ch));
+  if (!(seq.length === 1 && seq[0].ch === '=' || seq.length === 2 && seq[0].ch === '|' && seq[1].ch === '=')) return bad('has its markers out of order, or one missing');
+  const sep = seq[seq.length - 1];
+  return { start, end, style: 'git', ours: text.slice(open.next, seq[0].ls), theirs: text.slice(sep.next, closer.ls), why: null };
+}
+const JJ_LABEL = /^conflict \d+ of \d+$/;
+
+/* The conflicts in TEXT, in order: each from its opening marker's line to the end of its closing marker's. A
+   closing or separating marker outside a conflict is text, and so is an opening marker that no closing marker of
+   its length follows. */
+function conflicts(text: string): VcConflict[] {
+  const last = new Map<number, number>();
+  const lines = (each: (ls: number, le: number, next: number) => number) => {
+    for (let ls = 0; ls < text.length;) {
+      let le = text.indexOf('\n', ls), next = le + 1;
+      if (le < 0) le = next = text.length;
+      ls = each(ls, le, next);
+    }
+  };
+  lines((ls, le, next) => {
+    const m = text[ls] === '>' ? markOf(text, ls, le, next) : null;
+    if (m) last.set(m.n, ls);
+    return next;
+  });
+  const out: VcConflict[] = [];
+  lines((ls, le, next) => {
+    const m = text[ls] === '<' ? markOf(text, ls, le, next) : null, c = m && conflictAt(text, m, last);
+    if (c) out.push(c);
+    return c ? c.end : next;
+  });
+  return out;
+}
+const HAS_OPENER = /^<{7,}(?: |\r?$)/m;
+
+const conflictMode = 'vc-conflict-mode';
+Ed.defineMinorMode({ name: conflictMode, lighter: ' Conflict', keymap: new Ed.Keymap(conflictMode + '-map'), pretty: 'Conflict mode',
+  doc: 'Toggle vc-conflict-mode, for a file with git\'s or jj\'s conflict markers: ] n and [ n go to the next and the previous conflict, C-c ^ u, C-c ^ l and C-c ^ a keep ours, theirs or both. It turns on when a file with a conflict is visited and stays on after the last one is resolved, so undo brings the markers back with their keys. The state is vc-conflict-enabled.' });
+
+/* Turn vc-conflict-mode on in B, a file's buffer, when its text holds a conflict. */
+function conflictCheck(b: EdBuffer) {
+  if (!b.file || Ed.minorOn(b, Ed.minorModes.get(conflictMode)!) || !HAS_OPENER.test(b.text) || !conflicts(b.text).length) return;
+  const was = E.current; E.current = b;
+  try { L.call(conflictMode, [1]); } finally { E.current = was; }
+}
+L.D('vc--conflict-check', '', 'find-file-hook: turn vc-conflict-mode on in a visited file that holds a conflict.', () => { conflictCheck(cur()); return false; });
+L.addHook('find-file-hook', intern('vc--conflict-check'));
+/* A buffer already open when a merge wrote markers into its file (auto-revert took them in) is checked again when
+   it is visited again, from the status buffer's RET too. */
+const prevVisited = H.visited;
+H.visited = (b, name, fresh) => {
+  if (prevVisited) prevVisited(b, name, fresh);
+  if (!fresh) try { conflictCheck(b); } catch (e) { Ed.reportError(e); }
+};
+
+function conflictMove(forward: boolean) {
+  const b = cur(), cs = conflicts(b.text);
+  const c = forward ? cs.find(x => x.start > b.pt) : cs.filter(x => x.start < b.pt).pop();
+  if (!c) signal('user-error', forward ? 'No later conflict' : 'No earlier conflict');
+  b.pt = c!.start;
+  if (c!.why) Ed.message(`This conflict ${c!.why}: resolve it by hand`);
+  return false;
+}
+/* Resolve the conflict around point with what KEEP takes from it, as one change, point at its start. A malformed
+   conflict is left as it is, said why. */
+function conflictKeep(keep: (c: VcConflict) => string) {
+  const b = cur(), cs = conflicts(b.text);
+  const c = cs.find(x => x.start <= b.pt && (b.pt < x.end || x.end === b.rope.length && b.pt === x.end));
+  if (!c) signal('user-error', 'No conflict at point');
+  if (c!.why) signal('user-error', `This conflict ${c!.why}: resolve it by hand`);
+  Ed.replaceText(b, c!.start, c!.end, keep(c!));
+  b.pt = c!.start;
+  if (!conflicts(b.text).length) Ed.message('No conflict left');
+  return false;
+}
+CMD('vc-conflict-next', '', '', 'Go to the next conflict\'s opening marker (] n, C-c ^ n).', () => conflictMove(true));
+CMD('vc-conflict-previous', '', '', 'Go to the previous conflict\'s opening marker ([ n, C-c ^ p).', () => conflictMove(false));
+CMD('vc-conflict-keep-ours', '', '', 'Resolve the conflict at point to ours: git\'s upper side, jj\'s side #1 (C-c ^ u).', () => conflictKeep(c => c.ours));
+CMD('vc-conflict-keep-theirs', '', '', 'Resolve the conflict at point to theirs: git\'s lower side, jj\'s side #2 (C-c ^ l).', () => conflictKeep(c => c.theirs));
+CMD('vc-conflict-keep-both', '', '', 'Resolve the conflict at point to ours, then theirs, the base left out (C-c ^ a).', () =>
+  conflictKeep(c => (c.ours && !c.ours.endsWith('\n') && c.theirs ? c.ours + '\n' : c.ours) + c.theirs));
+
+globalThis.Vc = { message, cleanMessage, repo, start, run, offerSave, conflicts };
 })();

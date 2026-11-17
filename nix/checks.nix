@@ -305,6 +305,14 @@ in
   # operation (in a files and a reftable repository), a real one beside it still read; a Visual selection in the
   # status buffer picking its commit lists' commits alone; a revision that would be a switch, a step with nothing
   # in progress, a second operation, a jj workspace and the replay refused.
+  # Conflict markers (test/vc-conflict.test.mts, vc-conflict-mode): git merge-file's two-way, diff3 and zdiff3
+  # markers (CRLF, a longer marker size, sides with no final newline among them) and a real diff3 merge, resolved
+  # by C-c ^ u, C-c ^ l and C-c ^ a to merge-file's --ours, --theirs and --union text; jj's default markers from a
+  # throwaway workspace (a snapshot and a diff side either way round, no terminating newline, longer markers, a
+  # 7-character <<<<<<< line in the context read as text) resolved to jj resolve's :ours and :theirs; nested and
+  # malformed markers left as they are with a message, an opening marker with no closing one of its length text; the
+  # mode on at a visit and still on after the last resolution, so undo brings it back with its keys, ] n and [ n,
+  # Insert state and read-only; ] b, [ b and markdown-mode's ] ] and C-c C-t still theirs while the mode is on.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -319,7 +327,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts ${edwin}/edwin/test/vc-sequencer.test.mts ${edwin}/edwin/test/vc-conflict.test.mts
         touch $out
       '';
 

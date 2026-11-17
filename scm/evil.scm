@@ -1690,6 +1690,18 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
   "Z Z" 'grep-edit-finish
   "Z Q" 'grep-edit-abort)
 
+;; Conflict markers (vc-conflict-mode): ] n and [ n go to the next and the previous conflict; the
+;; C-c ^ keys of scm/emacs.scm hold in Normal and Insert state too.
+(evil-define-key 'normal 'vc-conflict-mode
+  "] n" 'vc-conflict-next
+  "[ n" 'vc-conflict-previous)
+(evil-define-key '(normal insert) 'vc-conflict-mode
+  "C-c ^ n" 'vc-conflict-next
+  "C-c ^ p" 'vc-conflict-previous
+  "C-c ^ u" 'vc-conflict-keep-ours
+  "C-c ^ l" 'vc-conflict-keep-theirs
+  "C-c ^ a" 'vc-conflict-keep-both)
+
 ;; Surround, snipe and comments take s, S and gc from the default bindings above.
 (define-key evil-normal-state-map "s" 'evil-snipe-s)
 (define-key evil-normal-state-map "S" 'evil-snipe-S)
