@@ -280,6 +280,13 @@ in
   # z z, z i, z a with the index, z p with a conflict (the stash kept) and with local changes in the way, z k
   # asking, a stale stash line refused; t t lightweight under tag.gpgSign, t x asking; names and revisions that
   # would be switches refused before any write; a jj workspace and the image's replay refused.
+  # Fetch, pull and push (test/vc-remote.test.mts), against local bare remotes and a loopback HTTP server: p u
+  # setting the upstream, its progress in *vc-process*; F u fast-forward, merged and with a conflict, git's
+  # divergence refusal; f u and f a; a rejected push, p f asking (n pushes nothing), a stale lease refused, the
+  # forced push; the repository's own uploadpack, receivepack, gitProxy, alternateRefsCommand, vcs helper, ext::
+  # remote, sshCommand, askPass and credential helpers running nothing, the user's sshCommand and helper running
+  # instead, no prompt waited for; a detached HEAD, a local upstream, a second operation (also while the first
+  # readies), a jj workspace and the replay refused.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -294,7 +301,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts
         touch $out
       '';
 

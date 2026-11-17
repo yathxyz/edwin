@@ -2257,7 +2257,9 @@ interface VcRepo {
   vcs: VcTool;
   root: string;
 }
-type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'>;
+/* progress: the child's error output goes to *vc-process* as it comes, a run of progress updates (each ended by a
+   carriage return) shown as its latest, rather than its head once it has ended (fetch, pull and push) */
+type VcRunOptions = Omit<EdProcOptions, 'cwd' | 'env'> & { progress?: boolean };
 interface VcApi {
   message(opts: VcMessageOptions): Promise<string | null>;
   cleanMessage(text: string, comment: string): string;

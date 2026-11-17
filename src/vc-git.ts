@@ -29,7 +29,12 @@
    checkout, reset, stash and tags"): each a write through the runner on what point is on (a commit, a stash) or
    what is typed (refused as a switch: a revision is resolved to its hash first, a name checked as git checks
    one), the state git leaves said exactly (local changes in the way, a conflict, a commit left behind), then the
-   repository's status and log buffers read again. */
+   repository's status and log buffers read again.
+
+   f, F and p fetch, pull and push (docs/steps.md, "Fetch, pull and push"): the current branch with its upstream,
+   in the background once the command has ended, the progress in *vc-process*; the runner takes the transport's
+   programs from the user's configuration alone, and asks for no credentials (they come from the user's helper
+   or agent). A force push asks first and leases the remote branch at the commit the question named. */
 
 (function () {
 'use strict';
@@ -1293,11 +1298,203 @@ CMD('git-stash-drop', '', '', 'Drop the stash at point, or one asked for (z k), 
 CMD('git-tag-create', '', '', 'Tag the commit at point, or one asked for (t t), with a lightweight tag.', () => historyOp(tagCreate));
 CMD('git-tag-delete', '', '', 'Delete a tag (t x), after asking.', () => historyOp(r => tagDelete(r)));
 
+/* ---------- fetch, pull and push ---------- */
+/* Each reaches a remote: so long at most (a large fetch over a slow link, a push's hooks), its progress in
+   *vc-process* as it comes. It runs once the command has ended, so the frame takes keys meanwhile; one at a time
+   in a repository. */
+const REMOTE = { timeout: 1800000, maxBytes: MAX_BYTES, lossy: true, progress: true };
+const JJ_REMOTE = 'jj fetches and pushes with its own commands; SPC g G\'s status buffer works on its git repository';
+/* what runs, by repository root */
+const remoteBusy = new Map<string, string>();
+
+/* R's remotes, by name: those its configuration (a read) gives a URL. A name that holds a control character, is
+   not UTF-8 or starts with `-` is left out. */
+async function readRemotes(r: VcRepo): Promise<string[]> {
+  const x = await Vc.run(r, ['config', '--null', '--name-only', '--get-regexp', '^remote\\..+\\.url$'], { ...READ, lossy: true });
+  if (x.code === 1 && !x.error && !x.timedOut) return [];
+  if (x.code !== 0 || x.truncated || x.error) failed(x, 'git config');
+  const names = new Set<string>();
+  for (const k of x.out.split('\0')) {
+    const m = /^remote\.(.+)\.url$/s.exec(k);
+    if (m && !/[\u0000-\u001f\u007f�]/.test(m[1]) && !m[1].startsWith('-')) names.add(m[1]);
+  }
+  return [...names];
+}
+/* BRANCH's upstream: its remote ('.' for a local branch), the branch there (refs/heads/NAME) and the
+   remote-tracking ref that follows it; null when it has none, or one that names no branch. */
+interface GitUpstream { remote: string; ref: string; tracking: string }
+async function upstreamOf(r: VcRepo, branch: string): Promise<GitUpstream | null> {
+  const x = await Vc.run(r, ['for-each-ref', '--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)', 'refs/heads/' + branch], { ...READ, lossy: true });
+  if (x.code !== 0 || x.truncated || x.error) failed(x, 'git for-each-ref');
+  for (const l of x.out.split('\n')) {
+    const [ref, tracking, remote, merge] = l.split('\0');
+    if (ref !== 'refs/heads/' + branch || !tracking || !remote) continue;
+    /* the branch there goes into a refspec: no `:` and nothing else a ref name may not hold */
+    if (!/^refs\/heads\/[^\u0000- :~^?*[\\\u007f]+$/.test(merge) || /[\u0000-\u001f\u007f�]/.test(remote)) return null;
+    return { remote, ref: merge, tracking };
+  }
+  return null;
+}
+const upstreamName = (u: GitUpstream) => (u.remote === '.' ? '' : shown(u.remote) + '/') + shown(u.ref.slice(11));
+/* The branch a pull or a push is for: HEAD's; a detached HEAD refused. */
+async function branchFor(r: VcRepo, doing: string): Promise<string> {
+  const b = await currentBranch(r);
+  return b ?? signal('user-error', `HEAD is detached: check out a branch (b b) to ${doing}`) as never;
+}
+/* A remote read at PROMPT, origin (else the first) by default; refused when R has none. */
+async function askRemote(r: VcRepo, prompt: string): Promise<string> {
+  const remotes = await readRemotes(r);
+  if (!remotes.length) signal('user-error', `${shown(r.root)} has no remote (git remote add NAME URL adds one)`);
+  const name = await ask(prompt, remotes, remotes.includes('origin') ? 'origin' : remotes[0], true);
+  return remotes.includes(name) ? name : signal('user-error', `Not a remote: ${shown(name)}`) as never;
+}
+/* Raise git's failure X to reach a remote, WHAT saying what was not done; when it wanted credentials, where they
+   come from: nothing is asked here. */
+function unreached(x: EdProcResult, what: string): never {
+  const way = inTheWay(x);
+  if (way) return signal('user-error', `${what}: ${way}`) as never;
+  const creds = /terminal prompts disabled|Permission denied \(|Host key verification failed|Authentication failed|could not read (Username|Password)/i.test(x.err)
+    ? '; git asks no credentials here: they come from your credential helper or ssh agent' : '';
+  return signal('process-error', `${what}: ${reason(x)}${creds} (see *vc-process*)`) as never;
+}
+
+/* Run the remote operation PREP readies (asking what it needs) on the current buffer's git repository, a jj
+   workspace refused: PREP gives what is starting (`Fetching origin`) and the operation, or null for nothing. The
+   command ends once it has started; when it ends, the repository's status and log buffers are read again and
+   what it did is said. */
+async function remoteOp(prep: (r: VcRepo) => Promise<[string, () => Promise<string>] | null>): Promise<false> {
+  const r = gitRepo(JJ_REMOTE);
+  const running = remoteBusy.get(r.root);
+  if (running) signal('user-error', `${running} still runs in ${shown(r.root)}: see *vc-process*`);
+  /* the slot taken before PREP's git reads and questions, so that a second command started meanwhile is refused */
+  remoteBusy.set(r.root, 'A remote command');
+  let op: [string, () => Promise<string>] | null = null;
+  try { op = await prep(r); } finally { if (!op) remoteBusy.delete(r.root); }
+  if (!op) return false;
+  const [what, run] = op;
+  remoteBusy.set(r.root, what);
+  Ed.message(`${what}… (see *vc-process*)`);
+  void (async () => {
+    let said = '', err: unknown = null;
+    try { said = await run(); } catch (e) { err = e; }
+    remoteBusy.delete(r.root);
+    for (const s of buffersOf(r, 'status')) await refresh(s).catch(Ed.reportError);
+    for (const l of buffersOf(r, 'log')) void loadLog(l, true).catch(Ed.reportError);
+    if (err) Ed.reportError(err); else Ed.message(said);
+    Ed.scheduleRender();
+  })();
+  return false;
+}
+
+/* f u and f a: fetch from the current branch's upstream's remote (one asked for when it has none), or from every
+   remote. */
+async function fetchPrep(r: VcRepo, all: boolean): Promise<[string, () => Promise<string>]> {
+  if (all) {
+    if (!(await readRemotes(r)).length) signal('user-error', `${shown(r.root)} has no remote (git remote add NAME URL adds one)`);
+    return ['Fetching all remotes', () => fetchRun(r, ['--all'], 'all remotes')];
+  }
+  const branch = await currentBranch(r), up = branch === null ? null : await upstreamOf(r, branch);
+  const remote = up && up.remote !== '.' ? up.remote : await askRemote(r, 'Fetch from remote');
+  return [`Fetching ${shown(remote)}`, () => fetchRun(r, ['--end-of-options', remote], shown(remote))];
+}
+async function fetchRun(r: VcRepo, args: string[], from: string): Promise<string> {
+  const x = await Vc.run(r, ['fetch', '--progress', '--porcelain', ...args], REMOTE);
+  if (x.error || x.timedOut || x.truncated) failed(x, 'git fetch');
+  if (x.code !== 0) unreached(x, `Not fetched from ${from}`);
+  /* --porcelain: a line per ref it changed, `FLAG OLD NEW REF` */
+  const n = x.out.split('\n').filter(l => /^. [0-9a-f]+ [0-9a-f]+ /.test(l)).length;
+  return `Fetched ${from}: ${n ? `${n} ref${n === 1 ? '' : 's'} updated` : 'nothing new'}`;
+}
+
+/* F u: pull the current branch's upstream into it, merging or rebasing as the user's git configuration says
+   (pull.rebase, pull.ff). A branch with no upstream is given one first, asked for among the remote branches. */
+async function pullPrep(r: VcRepo): Promise<[string, () => Promise<string>]> {
+  const branch = await branchFor(r, 'pull into it');
+  await unmerged(r, 'Not pulled');
+  let up = await upstreamOf(r, branch);
+  if (!up) {
+    const refs = await readRefs(r), mine = refs.remotes.find(n => n.endsWith('/' + branch));
+    if (!refs.remotes.length) signal('user-error', `${shown(branch)} has no upstream, and there is no remote branch to pull from: f u fetches them`);
+    const name = await ask(`Set upstream of ${shown(branch)} and pull from`, refs.remotes, mine, true);
+    if (!refs.remotes.includes(name)) signal('user-error', `Not a remote branch: ${shown(name)}`);
+    const x = await gitWrite(r, ['branch', '--set-upstream-to=refs/remotes/' + name, '--end-of-options', branch]);
+    if (x.code !== 0) refused(x, 'No upstream set');
+    up = (await upstreamOf(r, branch)) || signal('user-error', `${shown(name)} is no branch git can pull ${shown(branch)} from`) as never;
+  }
+  const from = upstreamName(up);
+  return [`Pulling ${from} into ${shown(branch)}`, () => pullRun(r, branch, from)];
+}
+async function pullRun(r: VcRepo, branch: string, from: string): Promise<string> {
+  const before = await resolve(r, 'HEAD');
+  const x = await Vc.run(r, ['pull', '--progress'], REMOTE);
+  if (x.error || x.timedOut || x.truncated) failed(x, 'git pull');
+  if (x.code !== 0) {
+    if (/^CONFLICT /m.test(x.out + '\n' + x.err)) {
+      const files = await conflicted(r), rebase = /^Could not apply /m.test(x.out + '\n' + x.err);
+      return `Pulled ${from} with conflicts${files.length ? ' in ' + listed(files) : ''}: resolve them and stage them (s), then ${rebase ? 'continue the rebase (git rebase --continue)' : 'commit (c c)'}`;
+    }
+    if (/divergent branches/.test(x.err)) signal('user-error', `Not pulled: ${shown(branch)} and ${from} have diverged, and your git configuration does not say how to reconcile them (pull.rebase, pull.ff)`);
+    unreached(x, 'Not pulled');
+  }
+  const after = await resolve(r, 'HEAD');
+  if (!after || after === before) return `${shown(branch)} is up to date with ${from}`;
+  return `Pulled ${from} into ${shown(branch)}: now at ${await described(r, after)}${/^Fast-forward$/m.test(x.out) ? ' (fast-forward)' : ''}`;
+}
+
+/* p u and p f: push the current branch to its upstream (p u to a remote asked for, setting it as the upstream,
+   when it has none); p f force-pushes after asking, its lease the commit the remote-tracking branch is at when
+   asked, so what is overwritten is what the question named. */
+async function pushPrep(r: VcRepo, force: boolean): Promise<[string, () => Promise<string>] | null> {
+  const branch = await branchFor(r, 'push it'), up = await upstreamOf(r, branch);
+  if (up && up.remote === '.') signal('user-error', `${shown(branch)}'s upstream is the local branch ${upstreamName(up)}: nothing to push to a remote`);
+  if (!up) {
+    if (force) signal('user-error', `${shown(branch)} has no upstream: p u pushes it and sets one`);
+    const remote = await askRemote(r, `Set upstream of ${shown(branch)} and push to remote`), to = `${shown(remote)}/${shown(branch)}`;
+    return [`Pushing ${shown(branch)} to ${to}`, () => pushRun(r, branch, remote, 'refs/heads/' + branch, ['--set-upstream'], to)];
+  }
+  const to = upstreamName(up);
+  if (!force) return [`Pushing ${shown(branch)} to ${to}`, () => pushRun(r, branch, up.remote, up.ref, [], to)];
+  const lease = await resolve(r, up.tracking);
+  if (!lease) signal('user-error', `${to} has not been fetched: f u fetches it, to see what a force push would discard`);
+  const x = await Vc.run(r, ['rev-list', '--count', `refs/heads/${branch}..${lease}`, '--'], { ...READ, lossy: true });
+  if (x.code !== 0 || x.error || x.timedOut || x.truncated) failed(x, 'git rev-list');
+  const n = +x.out.trim();
+  const lost = n ? `, discarding ${n} commit${n === 1 ? '' : 's'} of ${to} not in ${shown(branch)} (the last ${await described(r, lease!)})` : '';
+  if (!await Ed.yesOrNo(`Force push ${shown(branch)} to ${to}${lost}?`)) { Ed.message('Nothing pushed'); return null; }
+  return [`Force-pushing ${shown(branch)} to ${to}`, () => pushRun(r, branch, up.remote, up.ref, [`--force-with-lease=${up.ref}:${lease}`], to)];
+}
+async function pushRun(r: VcRepo, branch: string, remote: string, ref: string, extra: string[], to: string): Promise<string> {
+  const x = await Vc.run(r, ['push', '--progress', '--porcelain', ...extra, '--end-of-options', remote, `refs/heads/${branch}:${ref}`], REMOTE);
+  if (x.error || x.timedOut || x.truncated) failed(x, 'git push');
+  /* --porcelain: `FLAG\tFROM:TO\tSUMMARY` for the ref */
+  const line = x.out.split('\n').find(l => /^[ +*!=-]\t/.test(l)), [flag, , summary = ''] = line ? line.split('\t') : [];
+  if (flag === '!') {
+    if (/\(stale info\)/.test(summary)) signal('user-error', `Not force-pushed: ${to} is no longer where it was when asked (someone pushed): f u fetches it, to see what a force push would discard`);
+    if (/\((non-fast-forward|fetch first)\)/.test(summary)) signal('user-error', `Not pushed: ${to} has commits ${shown(branch)} does not: pull them (F u) first, or force push (p f)`);
+    signal('process-error', `Not pushed: ${shown(summary)} (see *vc-process*)`);
+  }
+  if (x.code !== 0 || !line) {
+    if (/^error: failed to push some refs/m.test(x.err) && !/^(error|fatal): (?!failed to push some refs)/m.test(x.err)) signal('process-error', `Not pushed: the pre-push hook refused it (see *vc-process*)`);
+    unreached(x, 'Not pushed');
+  }
+  if (flag === '=') return `${to} is already at ${shown(branch)}: nothing to push`;
+  const upstream = extra.includes('--set-upstream') ? `; ${to} is now its upstream` : '';
+  if (flag === '*') return `Pushed ${shown(branch)} to ${to}, a new branch there${upstream}`;
+  return `${flag === '+' ? 'Force-pushed' : 'Pushed'} ${shown(branch)} to ${to} (${shown(summary)})${upstream}`;
+}
+
+CMD('git-fetch', '', '', 'Fetch from the current branch\'s upstream\'s remote, or one asked for (f u), in the background: its progress in *vc-process*.', () => remoteOp(r => fetchPrep(r, false)));
+CMD('git-fetch-all', '', '', 'Fetch from every remote (f a), in the background.', () => remoteOp(r => fetchPrep(r, true)));
+CMD('git-pull', '', '', 'Pull the current branch\'s upstream into it (F u), merging or rebasing as your git configuration says; a branch with no upstream is given one first. In the background: its progress in *vc-process*.', () => remoteOp(r => pullPrep(r)));
+CMD('git-push', '', '', 'Push the current branch to its upstream (p u), or to a remote asked for, which becomes its upstream. In the background: its progress in *vc-process*.', () => remoteOp(r => pushPrep(r, false)));
+CMD('git-push-force', '', '', 'Force push the current branch to its upstream (p f), after asking, with the commits it would discard named: --force-with-lease, so a push someone made since is not overwritten.', () => remoteOp(r => pushPrep(r, true)));
+
 for (const n of ['vc-status', 'git-status', 'git-status-refresh', 'git-status-toggle', 'git-status-next-section', 'git-status-previous-section',
   'git-status-next-sibling', 'git-status-previous-sibling', 'git-status-visit', 'git-status-stage', 'git-status-unstage', 'git-status-discard',
   'git-commit', 'git-commit-amend', 'git-commit-reword', 'git-commit-fixup', 'git-log', 'git-log-more',
   'git-checkout', 'git-branch-create', 'git-branch-new', 'git-branch-delete', 'git-branch-rename', 'git-reset-soft', 'git-reset-mixed',
-  'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete']) L.put(intern(n), 'evil-repeat', intern('abort'));
+  'git-reset-hard', 'git-stash', 'git-stash-index', 'git-stash-apply', 'git-stash-pop', 'git-stash-drop', 'git-tag-create', 'git-tag-delete',
+  'git-fetch', 'git-fetch-all', 'git-pull', 'git-push', 'git-push-force']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['git-status-mode'] = 'Git Status';
 Ed.MODE_NAMES['git-log-mode'] = 'Git Log';
 Ed.MODE_NAMES['git-revision-mode'] = 'Git Revision';

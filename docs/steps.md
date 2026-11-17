@@ -3069,6 +3069,159 @@ reported exactly, a hard reset asking first.
   - `nix flake check` on the final code (2026-11-17, after the review fixes): all checks passed, exit 0;
     `edwin-vc` 115 of 115.
 
+## Fetch, pull and push (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-remote`, on git-history-ops): remote operations with
+their progress in `*vc-process*`, credentials from the user's agent and never prompted in a way that blocks, a
+force push that asks and uses `--force-with-lease`.
+
+- **Keys**, in `git-status-mode` and `git-log-mode`, as evil-collection binds magit's transients (f fetch, F pull,
+  and p for magit's push P) and their suffixes: `f u` `git-fetch`, `f a` `git-fetch-all`, `F u` `git-pull`, `p u`
+  `git-push`, `p f` `git-push-force` (magit's `-f` switch, `--force-with-lease`, as a key of its own). Each is also
+  M-x from any buffer of a git repository; a jj workspace is refused (`ROOT is a jj workspace: jj fetches and
+  pushes with its own commands; SPC g G's status buffer works on its git repository`).
+- **In the background.** Each asks what it needs in the command, says `Fetching origin… (see *vc-process*)` and
+  ends; git runs meanwhile (up to 30 minutes), so the frame takes keys. When it ends, the repository's status
+  buffers are read again and its log buffers read again from HEAD, then what it did is said. One at a time in a
+  repository: a second is refused while one runs (`Fetching origin still runs in ROOT: see *vc-process*`), and
+  from the moment the first starts, before it has read the upstream (`A remote command still runs in ROOT: see
+  *vc-process*`); a question of the first quit with C-g frees the repository again.
+- **Progress in `*vc-process*`.** fetch, pull and push run with `--progress` (git has no terminal), and the
+  runner's new `progress` option logs their error output as it comes, each line once it ends; a run of updates
+  git writes over each other with a carriage return shows as its latest line, replaced in place while nothing else
+  is logged after it, so the log holds `Writing objects: 100% (3/3), 250 bytes | …, done.` and no `\r`.
+- **`f u`** fetches from the current branch's upstream's remote, or from a remote asked for (origin, else the
+  first, by default) when there is none or HEAD is detached: `fetch --progress --porcelain --end-of-options
+  REMOTE`. `Fetched origin: 1 ref updated` (the porcelain lines counted), `Fetched origin: nothing new`. **`f a`**:
+  `fetch --progress --porcelain --all`, `Fetched all remotes: …`.
+- **`F u`** pulls the current branch's upstream into it (`pull --progress`), merging or rebasing as the user's git
+  configuration says (pull.rebase, pull.ff). A branch with no upstream is first given one, asked among the remote
+  branches (`origin/NAME` by default): `branch --set-upstream-to=refs/remotes/R/B --end-of-options NAME`. Said:
+  `Pulled origin/main into main: now at HASH SUBJECT (fast-forward)` (or a merge's subject), `main is up to date
+  with origin/main`; diverged branches with nothing configured: `Not pulled: main and origin/main have diverged,
+  and your git configuration does not say how to reconcile them (pull.rebase, pull.ff)`; a conflict: `Pulled
+  origin/main with conflicts in a.txt: resolve them and stage them (s), then commit (c c)` (or `continue the
+  rebase (git rebase --continue)`), the status showing them. Refused while a conflict is left, and on a detached
+  HEAD. No editor runs: git's merge takes its own message when it has no terminal.
+- **`p u`** pushes the current branch to its upstream: `push --progress --porcelain --end-of-options REMOTE
+  refs/heads/B:refs/heads/UPSTREAM`, an explicit refspec, so a repository's `remote.R.push` or push.default is
+  not what decides. With no upstream it asks the remote (`Set upstream of main and push to remote (origin): `) and
+  pushes `--set-upstream` to a branch of the same name. Said from the porcelain line: `Pushed main to origin/main
+  (abc1234..def5678)`, `…, a new branch there; origin/main is now its upstream`, `origin/main is already at main:
+  nothing to push`; rejected: `Not pushed: origin/main has commits main does not: pull them (F u) first, or force
+  push (p f)`; the pre-push hook refusing: `Not pushed: the pre-push hook refused it (see *vc-process*)`. Refused: a detached HEAD, an
+  upstream that is a local branch.
+- **`p f`** needs an upstream, fetched: the lease is the commit its remote-tracking branch is at when asked, and
+  the question names what the push discards: `Force push main to origin/main, discarding 1 commit of origin/main
+  not in main (the last HASH SUBJECT)?` (`Force push main to origin/main?` when it discards none). n: `Nothing
+  pushed`. y: `--force-with-lease=refs/heads/UPSTREAM:OID`, an explicit lease, so a fetch made in between cannot
+  widen it; a remote that has moved since: `Not force-pushed: origin/main is no longer where it was when asked
+  (someone pushed): f u fetches it, …`; else `Force-pushed main to origin/main (OLD...NEW (forced update))`.
+- **Credentials and the transport's programs (owner decision 12), in the runner.** fetch, pull, push, ls-remote
+  and remote (GIT_TRANSPORT) get `-c protocol.ext.allow=never` (an `ext::` URL is a command line, and a
+  repository's `protocol.allow=always` would allow it) and, read by one `config --show-scope --get-regexp`: the
+  repository's credential helpers dropped (`credential.helper=` empties the list, then the user's own, by URL
+  too, are named again in order); its core.sshCommand set back to the user's (`ssh` when the user names none); its
+  core.askPass set back to the user's (none when the user names none). These settings go in the child's
+  environment (GIT_CONFIG_COUNT, GIT_CONFIG_KEY_N, GIT_CONFIG_VALUE_N, command scope as `-c` is), set only when
+  the repository names its own: not on the command line, which `*vc-process*` logs and anyone on the host can
+  read in /proc, so a helper's string is in neither; and a user's key `-c` could not name (a
+  `credential.URL.helper` whose URL holds `=`) is named as it is. Refused, as no later setting undoes them (git
+  takes the first one configured): a repository's `remote.R.uploadpack` or `receivepack` (run here, by the
+  shell, for a remote that is a path), its core.gitProxy, its core.alternateRefsCommand (run by the shell, when
+  the repository has alternates, to list their refs for a fetch's or push's negotiation: git documents no value
+  that turns it off), a `remote.R.vcs` that is not a plain name (`ROOT's own configuration names a program as
+  origin's uploadpack: not run here (see *vc-process*)`), a remote whose name starts with `-` (`… names a remote
+  whose name starts with `-`, which git would take as a switch: …`) and a remote group (`remotes.G`) holding such
+  a name (`… names a name starting with `-` in the remote group G, …`): `fetch --all` starts a fetch per remote,
+  and a fetch or a push of a group (or of a remote a group of the same name shadows: git 2.56 expands `origin`
+  to the group `remotes.origin`, for push too) one per name, each with no `--end-of-options` before the name, so
+  that a name `--upload-pack=CMD` or `--receive-pack=CMD` runs CMD. Both are refused for every command
+  of GIT_TRANSPORT, whichever remote it is for. A repository's group of plain names is left alone (one of the
+  same name as a remote still redirects `f u` and `p u` to its members, as the repository's own `url` could, and
+  one that names itself makes git 2.56's push start itself again until its argument list overflows, about 1800
+  levels down: it ends with an error, nothing of the repository's run).
+  fetch, pull and push also get
+  `--no-recurse-submodules`: a submodule's fetch or push would run under the submodule's own configuration. No
+  prompt can block: the child has no terminal (its own session), GIT_TERMINAL_PROMPT=0, and git's own askpass is
+  the user's; a failure for want of credentials says where they come from: `…: could not read Username for
+  'http://…': terminal prompts disabled; git asks no credentials here: they come from your credential helper or
+  ssh agent (see *vc-process*)`. Hooks: push keeps them (decision 12); fetch and pull run none
+  (`core.hooksPath=/dev/null`, as for every command but commit, push and the sequencer). A GIT_CONFIG_COUNT
+  Edwin itself was started with is replaced, for a transport command in a repository that names its own helper,
+  sshCommand or askPass.
+- **Nothing read becomes a switch.** Remote names come from `config --get-regexp '^remote\..+\.url$'` (a read),
+  those holding a control character, not UTF-8 or starting with `-` left out, and go after `--end-of-options`; the
+  upstream's branch (branch.B.merge) must be a `refs/heads/` name with no `:` or other character a ref may not
+  hold, else the branch counts as having none. The names git itself passes on to the fetches and pushes it
+  starts (`f a`'s `--all`, a remote group) come from the repository's configuration, where one starting with `-`
+  is refused (above). `fetch --all` reads remotes from the configuration alone: a `.git/remotes/NAME` or
+  `.git/branches/NAME` file named `--upload-pack=CMD` is not fetched by it (checked with git 2.56).
+- **Choices**, each reversible:
+  - The upstream alone (magit's `u` suffixes) and every remote (`f a`); no push-remote (`p p`, `f p`, `F p`) and
+    no elsewhere (`f e`, `F e`, `p e`).
+  - pull merges or rebases as the user's git configuration says; Edwin adds no `--ff-only` or `--rebase`.
+  - pull runs no hooks: decision 12 names commit, push and the sequencer.
+  - A push's signature (push.gpgSign) is a write's, kept as the repository has it, as commit's is; push runs the
+    repository's hooks anyway.
+  - The repository's sshCommand is set back to the user's core.sshCommand, else `ssh`: a user who chooses ssh by
+    the GIT_SSH variable alone gets `ssh` in a repository that names its own sshCommand (GIT_SSH_COMMAND still
+    beats both).
+  - A repository naming its own uploadpack, receivepack, gitProxy, alternateRefsCommand, a vcs helper path, or a
+    remote or group name starting with `-` is refused rather than worked around.
+- **Not in it:** magit's transients and their switches (`--prune`, `--tags`, `--rebase` and the rest), pushing
+  tags (`p t`, `p T`), a refspec typed (`p r`), pushing another branch (`p o`), `f o`, `f r`, `f m`; continuing or
+  aborting a pull's merge or rebase (git-sequencer); jj's git fetch and push (git-jj-remote).
+- **Image replay and edwind.** Each command checks `Ed.proc.refusal()` before anything (no child starts under the
+  image's replay), and every child goes through `Vc.run`, which refuses under the replay, in a web frame and in
+  edwind.
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-vc` (125 passed, test/vc-remote.test.mts's 10
+  among them; the other suites unchanged) and `edwin-typecheck`, with real git and jujutsu, against local bare
+  remotes and a loopback HTTP server, nothing reaching the network:
+  - `p u` with no upstream: the prompt, the push with `--set-upstream`, the remote and branch.main.merge after;
+    the argv whole, the hooks on, `protocol.ext.allow=never`; `*vc-process*` holding `Writing objects: 100%
+    (3/3), … done.`, no `\r` and none of the updates before it; the status read again (`Merge:     origin/main
+    first`).
+  - `p u` to a bare remote whose pre-receive hook writes `the hook waits` and then waits for a file: while git
+    still runs, `*vc-process*` holds `Writing objects: 100% (3/3), … done.` and `remote: the hook waits`, the
+    remote's main not yet set; the file made, the push ends (`Pushed main to origin/main, a new branch there; …`).
+  - `p u` of a new commit with a pre-push hook that exits 1: the hook run (given `origin`), `Not pushed: the pre-push
+    hook refused it (see *vc-process*)`, the remote unchanged; with one that exits 0: run again, `Pushed main to
+    origin/main (OLD..NEW)`; `F u` of another clone's commit (fast-forward,
+    the hooks off, the argv whole), again (`up to date`).
+  - `f u` (`1 ref updated`, the status's `Unpulled from origin/main (1)`), again (`nothing new`); `f a` with a
+    second remote, `--all`.
+  - A push the remote is ahead of: the rejection, the remote kept; `p f` n (no push run); y with the lease the
+    tracking branch named and the remote moved past it: refused as stale, the other commit kept; after `f u`, the
+    question naming the commit discarded, y: `Force-pushed …`, the argv whole with
+    `--force-with-lease=refs/heads/main:OID`, the remote at main.
+  - `F u` diverged: git's refusal said; under pull.rebase=false a merge commit, made with no editor; a conflict on
+    a.txt said with its file, `Unmerged paths (1)`; `F u` again refused with no pull run.
+  - A repository whose own configuration has `protocol.allow=always`, `protocol.ext.allow=always` and an `ext::`
+    remote running a marker script: plain git runs it (the control); `f a` fails with git's `transport 'ext' not
+    allowed`, no marker. Then each of remote.origin.uploadpack, receivepack (plain git runs both: the controls),
+    core.gitProxy, core.alternateRefsCommand with .git/objects/info/alternates naming the bare remote's objects
+    (plain git with the hooks off, `protocol.ext.allow=never`, `--no-recurse-submodules` and `--porcelain`,
+    as Vc fetches, runs it: the control) and a remote.origin.vcs path: `f u`, `f a`, `F u` and `p u` each
+    refused with the message above, no fetch, pull or push run, no marker. Then, written into .git/config, a
+    remote named `--upload-pack=MARKER;:` (plain git with `f a`'s switches and `--all` runs the marker: the
+    control), and a group `remotes.origin = "--upload-pack=MARKER;: --receive-pack=MARKER;:"` (plain git with
+    `f u`'s switches and `--end-of-options origin` runs the first, with `p u`'s the second: the controls): `f u`,
+    `f a`, `F u` and `p u` each refused, no fetch, pull or push run, no marker.
+  - core.sshCommand of the repository and of the user, both marker scripts, against an `ssh://` remote: plain git
+    runs the repository's (the control); `f u` runs the user's alone.
+  - A loopback HTTP server answering 401 with `WWW-Authenticate: Basic`, the repository's credential.helper, a
+    credential.URL.helper and core.askPass marker scripts (plain git runs all three: the control) and the user's
+    global helper and a global `credential.https://example.invalid/a=b.helper` markers: `f u` ends at once with the
+    message above, the server asked, the user's helper alone run, the child's environment naming
+    `credential.helper` empty, the user's two helpers and `core.askPass` empty, in that order, no helper on its
+    command line or in `*vc-process*`; then `f u` in a repository naming no helper fetches, nothing set in its
+    environment. The core.sshCommand case checks the environment the same way.
+  - Refused: `p u` and `F u` on a detached HEAD, `p f` with no upstream, `p u` with a local upstream, a second
+    `git-fetch` started before the first has read its upstream (`A remote command still runs …`) and one while
+    the first runs, `f u` asking again after its question was quit with C-g, `git-fetch` in a jj workspace with no child started, the five commands under
+    `Ed.proc.replay` with no child started.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

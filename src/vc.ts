@@ -143,7 +143,9 @@ Ed.host.page.addStyle('vc-css', CSS);
    other one, a subcommand not named anywhere here included, runs with core.hooksPath=/dev/null. */
 const GIT_HOOKED = new Set(['commit', 'push', 'merge', 'rebase', 'cherry-pick', 'revert', 'am']);
 /* git subcommands that write: they change the work tree, the index, the history or a remote, so they keep the
-   repository's filter and merge drivers, its signature programs and its transport, as the owner expects. Every
+   repository's filter and merge drivers and its signature programs, as the owner expects; those that reach a
+   remote (GIT_TRANSPORT) take its credential helpers, ssh and askpass programs from the user's configuration
+   only (owner decision 12). Every
    other subcommand, one named nowhere here included, is a read: for it nothing the repository's own configuration
    names runs. Its filter drivers are emptied (`git diff` runs a clean filter), its merge drivers too (`--remerge-diff`, and `-m` under
    log.diffMerges=remerge, merge a merge commit's parents again with the drivers of the merge attribute) and its
@@ -154,6 +156,9 @@ const GIT_HOOKED = new Set(['commit', 'push', 'merge', 'rebase', 'cherry-pick', 
 const GIT_WRITE = new Set([...GIT_HOOKED, 'add', 'apply', 'bisect', 'branch', 'checkout', 'checkout-index', 'clean', 'clone',
   'fetch', 'hash-object', 'init', 'ls-remote', 'merge-file', 'mv', 'notes', 'pull', 'read-tree', 'remote', 'reset', 'restore',
   'rm', 'stash', 'submodule', 'switch', 'tag', 'update-index', 'worktree']);
+/* git subcommands that reach a remote: no program the repository's own configuration names for the transport
+   runs (transportOverrides), nor the ext:: transport (a command line as a URL), whatever protocol.allow says. */
+const GIT_TRANSPORT = new Set(['fetch', 'pull', 'push', 'ls-remote', 'remote']);
 /* git subcommands that run a program the repository's configuration names and no setting turns off: difftool's
    and mergetool's tool commands, help's man viewer, the web browser of instaweb and web--browse. Refused. */
 const GIT_REFUSED = new Set(['difftool', 'mergetool', 'help', 'instaweb', 'web--browse']);
@@ -165,6 +170,9 @@ const GIT_AFTER: Record<string, string[]> = {
   diff: [...NO_EXT, '--ignore-submodules=dirty'], 'diff-files': [...NO_EXT, '--ignore-submodules=dirty'], 'diff-index': [...NO_EXT, '--ignore-submodules=dirty'],
   show: NO_EXT, log: NO_EXT, 'diff-tree': NO_EXT,
   status: ['--ignore-submodules=dirty'], blame: ['--no-textconv'], annotate: ['--no-textconv'],
+  /* a submodule fetched or pushed would run git under the submodule's own configuration, which
+     transportOverrides does not read */
+  fetch: ['--no-recurse-submodules'], pull: ['--no-recurse-submodules'], push: ['--no-recurse-submodules'],
 };
 /* The keys that name a signature program (gpg.program is gpg.openpgp.program's other name), by the format
    each is for, and the program git runs for a format no configuration names one for. */
@@ -223,11 +231,15 @@ function repo(dir: string, only?: 'git'): VcRepo | null {
 const LOG = '*vc-process*', LOG_MAX = 256 * 1024, ERR_KEPT = 8 * 1024;
 const shownArg = (a: string) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`);
 /* TEXT at the end of *vc-process*, which keeps its last LOG_MAX characters, from a line's start. The buffer is
-   read-only, never modified and keeps no undo. */
-function log(text: string) {
+   read-only, never modified and keeps no undo. With BY (a child's progress), TEXT replaces the last OVER
+   characters when BY wrote them last: its latest progress line, nothing logged after it. */
+let lastBy: object | null = null;
+function log(text: string, by: object | null = null, over = 0) {
   let b = Ed.getBuffer(LOG);
   if (!b) { b = Ed.getBufferCreate(LOG); b.readOnly = true; }
-  Ed.editText(b, b.rope.length, 0, text);
+  const replace = by !== null && lastBy === by && over <= b.rope.length ? over : 0;
+  lastBy = by;
+  Ed.editText(b, b.rope.length - replace, replace, text);
   if (b.rope.length > LOG_MAX) {
     const nl = b.rope.indexOf('\n', b.rope.length - LOG_MAX);
     Ed.editText(b, 0, nl < 0 ? b.rope.length - LOG_MAX : nl + 1, '');
@@ -242,19 +254,52 @@ function ending(x: EdProcExit) {
 }
 const UNSAFE = /detected dubious ownership in repository/;
 
+/* A child's error output into *vc-process* as it comes: each line once it ends, and meanwhile the latest of the
+   progress updates git writes over each other with a carriage return (`Receiving objects:  45% (450/1000)\r`),
+   each replacing the one before while nothing else is logged after it. */
+function progressLog() {
+  const me = {};
+  let tail = '', shownLen = 0;
+  const put = (line: string, done: boolean) => {
+    const text = line + '\n';
+    log(text, me, shownLen);
+    shownLen = done ? 0 : text.length;
+  };
+  return {
+    feed(s: string) {
+      tail += s;
+      for (let nl = tail.indexOf('\n'); nl >= 0; nl = tail.indexOf('\n')) {
+        const line = tail.slice(0, nl).replace(/\r$/, '');
+        tail = tail.slice(nl + 1);
+        put(line.slice(line.lastIndexOf('\r') + 1), true);
+      }
+      const segs = tail.split('\r');
+      if (segs.length < 2) return;
+      /* the latest update a carriage return has ended; one ending the text is kept with it, so that a \r\n split
+         across two pieces still ends that line */
+      const latest = segs[segs.length - 2];
+      if (latest) put(latest, false);
+      tail = segs[segs.length - 1] || latest + '\r';
+    },
+    end() { const t = tail.replace(/\r$/, ''); if (t) put(t.slice(t.lastIndexOf('\r') + 1), true); tail = ''; },
+  };
+}
+
 /* ARGV started in REPO's root with ENV, logged to *vc-process*: the whole argv when it starts, then its error
-   output (the first ERR_KEPT characters) and how it ended. The exit rejects with user-error when git refuses
+   output (the first ERR_KEPT characters; with PROGRESS, all of it as it comes) and how it ended. The exit rejects with user-error when git refuses
    the repository as unsafe (safe.directory): that is shown as it is, never retried. */
 function spawnLogged(r: VcRepo, argv: string[], env: Record<string, string | null>, opts: VcRunOptions): EdProc {
-  const { onErr, ...rest } = opts;
+  const { onErr, progress, ...rest } = opts;
   let err = '';
+  const live = progress ? progressLog() : null;
   const p = Ed.proc.spawn(argv, {
     ...rest, cwd: r.root, env,
-    onErr: s => { if (err.length < ERR_KEPT) err += s; if (onErr) onErr(s); },
+    onErr: s => { if (err.length < ERR_KEPT) err += s; if (live) live.feed(s); if (onErr) onErr(s); },
   });
   log(`$ ${argv.map(shownArg).join(' ')}\n  [${p.id}] in ${r.root}\n`);
   const exit = p.exit.then(x => {
-    const e = err.length > ERR_KEPT ? err.slice(0, ERR_KEPT) + '\n…' : err;
+    const e = live ? '' : err.length > ERR_KEPT ? err.slice(0, ERR_KEPT) + '\n…' : err;
+    if (live) live.end();
     log(`${e ? e.replace(/\n?$/, '\n') : ''}  [${p.id}] ${ending(x)}\n`);
     if (argv[0] === 'git' && x.code === 128 && UNSAFE.test(err)) {
       const why = `git refuses ${r.root} as unsafe: it belongs to another user (safe.directory); see ${LOG}`;
@@ -307,6 +352,71 @@ async function repoOverrides(r: VcRepo): Promise<string[]> {
   return c;
 }
 
+/* The settings a command that reaches a remote runs with, so that no program the repository's own configuration
+   (local and worktree scopes, the files they include) names for the transport runs (owner decision 12): its
+   credential helpers dropped (`credential.helper=` empties the list, the user's own, by URL too, then named again
+   in their order), its core.sshCommand and core.askPass set back to the user's (`ssh`, and none, when the user
+   names none). They are environment changes for the child (GIT_CONFIG_COUNT, GIT_CONFIG_KEY_N and
+   GIT_CONFIG_VALUE_N: command scope, as `-c` is), not switches: *vc-process* logs the command line, anyone on the
+   host can read it in /proc, and `-c` cannot name a key holding `=` (a credential.URL.helper's URL may). Refused:
+   a remote's uploadpack or receivepack (run here, by the shell, for a remote that is a path) and a core.gitProxy,
+   for each of which git takes the first one configured, so that no later setting undoes it; a remote's vcs
+   helper that is not a plain name; a core.alternateRefsCommand (run by the shell, when the repository has
+   alternates, to list their refs for a fetch's or a push's negotiation; git documents no value that turns it
+   off); and a remote whose name starts with `-`, or a remote group (remotes.GROUP) holding such a name:
+   `fetch --all`, and a fetch or a push of a group (or of a remote that a group of the same name shadows), start a
+   git per name with no `--end-of-options` before it, which takes the name as a switch (`--upload-pack=CMD`). */
+async function transportOverrides(r: VcRepo): Promise<Record<string, string>> {
+  const out: string[] = [];
+  const p = spawnLogged(r, ['git', ...GIT_BASE, '-c', 'core.hooksPath=/dev/null', 'config', '--show-scope', '--null', '--get-regexp',
+    '^(credential\\.(.+\\.)?helper|core\\.(sshcommand|askpass|gitproxy|alternaterefscommand)|remote\\..+\\.(uploadpack|receivepack|vcs)|remote\\.-.*|remotes\\..+)$'],
+  ENV.git, { maxBytes: 1024 * 1024, onOut: s => { out.push(s); } });
+  p.closeStdin();
+  const x = await p.exit;
+  if (x.code === 1) return {};   // none
+  if (x.code !== 0 || x.truncated) signal('process-error', `git config could not list ${r.root}'s transport programs: see ${LOG}`);
+  const parts = out.join('').split('\0'), helpers: [string, string][] = [], set: [string, string][] = [];
+  const user: Record<string, string> = {}, repoSets = new Set<string>();
+  let repoHelper = false;
+  const own = (what: string): never => signal('user-error', `${r.root}'s own configuration names ${what}: not run here (see ${LOG})`) as never;
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const ofRepo = parts[i] === 'local' || parts[i] === 'worktree', nl = parts[i + 1].indexOf('\n');
+    const key = nl < 0 ? parts[i + 1] : parts[i + 1].slice(0, nl), value = nl < 0 ? '' : parts[i + 1].slice(nl + 1);
+    if (/^credential\./.test(key)) {
+      if (ofRepo) repoHelper = true;
+      else helpers.push([key, value]);
+      continue;
+    }
+    if (key === 'core.sshcommand' || key === 'core.askpass') {
+      if (ofRepo) repoSets.add(key); else user[key] = value;   // the last one is git's
+      continue;
+    }
+    if (!ofRepo) continue;
+    if (key === 'core.gitproxy') own('a core.gitProxy program');
+    if (key === 'core.alternaterefscommand') own('a core.alternateRefsCommand program');
+    if (key.startsWith('remote.-')) own('a remote whose name starts with `-`, which git would take as a switch');
+    if (key.startsWith('remotes.')) {
+      /* git splits a group's value at blanks */
+      if (value.split(/[ \t\n]+/).some(n => n.startsWith('-'))) own(`a name starting with \`-\` in the remote group ${key.slice(8)}, which git would take as a switch`);
+      continue;
+    }
+    const m = /^remote\.(.+)\.(uploadpack|receivepack|vcs)$/s.exec(key)!;
+    if (m[2] === 'vcs') {
+      if (!/^[A-Za-z0-9][A-Za-z0-9+.-]*$/.test(value)) own(`a remote helper that is no plain name as ${m[1]}'s vcs`);
+      continue;
+    }
+    own(`a program as ${m[1]}'s ${m[2]}`);
+  }
+  if (repoHelper) set.push(['credential.helper', ''], ...helpers);
+  if (repoSets.has('core.sshcommand')) set.push(['core.sshCommand', user['core.sshcommand'] ?? 'ssh']);
+  if (repoSets.has('core.askpass')) set.push(['core.askPass', user['core.askpass'] ?? '']);
+  if (!set.length) return {};
+  /* (this replaces any GIT_CONFIG_COUNT Edwin was started with, for this child alone) */
+  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(set.length) };
+  set.forEach(([k, v], n) => { env['GIT_CONFIG_KEY_' + n] = k; env['GIT_CONFIG_VALUE_' + n] = v; });
+  return env;
+}
+
 /* The jj settings a repository brings in its own .jj that jj would adopt as the user's for good (jj moves
    .jj/repo/config.toml and .jj/workspace-config.toml beside the user's config the first time it runs there,
    when no config id is beside them yet), or null. */
@@ -350,7 +460,7 @@ function checkStart(r: VcRepo, args: string[]) {
 async function start(r: VcRepo, args: string[], opts: VcRunOptions = {}): Promise<EdProc> {
   checkStart(r, args);
   args = args.slice();
-  let argv: string[];
+  let argv: string[], env = ENV[r.vcs];
   if (r.vcs === 'jj') {
     const conf = jjAdopts(r);
     if (conf) signal('user-error', `jj not run in ${r.root}: ${conf} is jj settings the repository brings, which jj would take as yours for good (they may run programs). Look at them, then run jj there once in a terminal to take them`);
@@ -366,9 +476,13 @@ async function start(r: VcRepo, args: string[], opts: VcRunOptions = {}): Promis
       pre.splice(1, 0, '--no-lazy-fetch');
       pre.push('-c', 'protocol.allow=never', '-c', 'log.showSignature=false', ...await repoOverrides(r));
     }
+    if (GIT_TRANSPORT.has(sub)) {
+      pre.push('-c', 'protocol.ext.allow=never');
+      env = { ...env, ...await transportOverrides(r) };
+    }
     argv = ['git', ...pre, sub, ...(GIT_AFTER[sub] || []), ...args.slice(1)];
   }
-  return spawnLogged(r, argv, ENV[r.vcs], opts);
+  return spawnLogged(r, argv, env, opts);
 }
 
 /* As start, then the child's whole output, error and exit once it has ended. INPUT goes to its standard input,
