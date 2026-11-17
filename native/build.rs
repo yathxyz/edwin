@@ -23,6 +23,9 @@ mod snapshot;
 #[path = "src/sources.rs"]
 mod sources;
 #[allow(dead_code)]
+#[path = "src/syntax.rs"]
+mod syntax;
+#[allow(dead_code)]
 #[path = "src/sys.rs"]
 mod sys;
 

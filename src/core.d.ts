@@ -2497,6 +2497,17 @@ interface EdNatives {
   /* the desktop's opener (native/src/open.rs): xdg-open TARGET once it passes the checks, not waited for;
      null when it has started, else why not */
   openExternal(target: string, confirmed?: boolean): string | null;
+  /* tree-sitter (native/src/syntax.rs), with the grammars of the package's bundle (nix/grammars.nix), each named
+     as there (rust, python, c_sharp, ...), never by a path. synLoad loads NAME's grammar and gives its query
+     kinds (highlights, injections, locals, tags); synParse parses TEXT with it and gives the tree's number (at
+     most 256 kept until synFree); synQuery runs the grammar's KIND query over the tree between string indices
+     START and END, its captures four numbers each: the index in names, start, end, the pattern. Each throws
+     why it cannot (no such grammar, a library that does not load, an ABI version tree-sitter does not read, a
+     parse or query past 1 s) */
+  synLoad(name: string): string[];
+  synParse(name: string, text: string): number;
+  synQuery(tree: number, kind: string, start?: number, end?: number): { names: string[]; captures: number[] };
+  synFree(tree: number): boolean;
 }
 type EdProcSignal = 'TERM' | 'KILL' | 'INT' | 'HUP' | 'QUIT' | 'STOP' | 'CONT' | 'USR1' | 'USR2';
 interface EdProcSpawnOptions {

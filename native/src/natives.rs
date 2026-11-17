@@ -1,7 +1,7 @@
 //! __n: what the JavaScript host gets from Rust. Files throw JS errors with the system's message; reading a
 //! missing file gives null, as host.files.read promises.
 
-use crate::{bridge, open, proc, sources, sys};
+use crate::{bridge, open, proc, sources, syntax, sys};
 use std::cell::{Cell, OnceCell};
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -735,6 +735,103 @@ fn open_external(
     }
 }
 
+/* ---------- tree-sitter (syntax.rs): the bundle's grammars by name, trees by number ---------- */
+fn str_array<'s>(scope: &mut v8::HandleScope<'s>, items: &[String]) -> v8::Local<'s, v8::Array> {
+    let a = v8::Array::new(scope, items.len() as i32);
+    for (i, s) in items.iter().enumerate() {
+        let v = v8::String::new(scope, s).unwrap().into();
+        a.set_index(scope, i as u32, v);
+    }
+    a
+}
+/// synLoad(name): the query kinds of NAME's grammar, which is loaded on first use; throws when it cannot be.
+fn syn_load(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let name = arg_str(scope, &args, 0);
+    match syntax::grammar(&name) {
+        Ok(g) => rv.set(str_array(scope, g.kinds()).into()),
+        Err(e) => throw(scope, &e),
+    }
+}
+/// synParse(name, text): TEXT parsed with NAME's grammar; the tree's number, for synQuery and synFree.
+fn syn_parse(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let name = arg_str(scope, &args, 0);
+    let Ok(s) = v8::Local::<v8::String>::try_from(args.get(1)) else {
+        return throw(scope, "synParse: the text is not a string");
+    };
+    let mut text = vec![0u16; s.length()];
+    s.write(scope, &mut text, 0, v8::WriteOptions::NO_NULL_TERMINATION);
+    match syntax::parse(&name, text) {
+        Ok(id) => rv.set(v8::Integer::new_from_unsigned(scope, id).into()),
+        Err(e) => throw(scope, &e),
+    }
+}
+/// A string index: a number, finite and not negative (undefined: none).
+fn index(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Result<Option<usize>, String> {
+    if v.is_undefined() {
+        return Ok(None);
+    }
+    v.number_value(scope)
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| Some(n as usize))
+        .ok_or_else(|| "synQuery: start and end are string indices".into())
+}
+/// synQuery(tree, kind, start = 0, end = its length): the captures of the grammar's KIND query that overlap
+/// [start, end), in the order of the text, as {names, captures}: captures holds four numbers per capture (its
+/// index in names, its start and end as indices of the parsed string, the pattern that matched).
+fn syn_query(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let kind = arg_str(scope, &args, 1);
+    let found = index(scope, args.get(2)).and_then(|start| {
+        let end = index(scope, args.get(3))?;
+        syntax::query(id, &kind, start.unwrap_or(0), end)
+    });
+    let (names, caps) = match found {
+        Ok(r) => r,
+        Err(e) => return throw(scope, &e),
+    };
+    let o = v8::Object::new(scope);
+    let v = str_array(scope, &names).into();
+    set(scope, o, "names", v);
+    let flat = v8::Array::new(scope, (caps.len() * 4) as i32);
+    for (i, c) in caps.iter().enumerate() {
+        for (j, n) in [
+            c.capture as f64,
+            c.start as f64,
+            c.end as f64,
+            c.pattern as f64,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let v = v8::Number::new(scope, n).into();
+            flat.set_index(scope, (i * 4 + j) as u32, v);
+        }
+    }
+    set(scope, o, "captures", flat.into());
+    rv.set(o.into());
+}
+/// synFree(tree): the tree forgotten; false when there was none.
+fn syn_free(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    rv.set(v8::Boolean::new(scope, syntax::free(id)).into());
+}
+
 /// A child's event as the arguments of __native.proc: (id, 'out' | 'err', text) or (id, 'exit', {code, signal,
 /// timedOut, truncated, error?}).
 pub fn proc_event<'s>(
@@ -891,7 +988,7 @@ macro_rules! natives {
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
             "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind,
             "procSpawn" proc_spawn, "procWrite" proc_write, "procCloseStdin" proc_close_stdin, "procKill" proc_kill, "procList" proc_list,
-            "openExternal" open_external
+            "openExternal" open_external, "synLoad" syn_load, "synParse" syn_parse, "synQuery" syn_query, "synFree" syn_free
         )
     };
 }
@@ -926,4 +1023,65 @@ pub fn install(scope: &mut v8::HandleScope, context: v8::Local<v8::Context>) {
     let g = context.global(scope);
     set(scope, g, "__n", n.into());
     set(scope, g, "__scm", scm.into());
+}
+
+#[cfg(test)]
+mod tests {
+    /// The tree-sitter natives as JS calls them, on an isolate of its own: the string's indices come back, the
+    /// errors are JS errors.
+    #[test]
+    fn the_syntax_natives_from_javascript() {
+        let dir = crate::syntax::tests::bundle();
+        let result = std::thread::Builder::new()
+            .stack_size(96 << 20)
+            .spawn(move || {
+                crate::snapshot::init_v8(&crate::ICU_DATA.0);
+                crate::syntax::use_dir(&dir);
+                let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+                let scope = &mut v8::HandleScope::new(isolate);
+                let context = v8::Context::new(scope, Default::default());
+                let scope = &mut v8::ContextScope::new(scope, context);
+                super::install(scope, context);
+                let tc = &mut v8::TryCatch::new(scope);
+                let code = v8::String::new(tc, JS).unwrap();
+                match v8::Script::compile(tc, code, None).and_then(|s| s.run(tc)) {
+                    Some(v) => v.to_rust_string_lossy(tc),
+                    None => tc.exception().unwrap().to_rust_string_lossy(tc),
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(result, "ok");
+    }
+
+    const JS: &str = r#"
+      const eq = (a, b, what) => {
+        if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${what}: ${JSON.stringify(a)}, not ${JSON.stringify(b)}`);
+      };
+      const err = f => { try { f(); return 'no error'; } catch (e) { return e instanceof Error ? e.message : 'not an Error'; } };
+      eq(__n.synLoad('rust'), ['highlights', 'injections', 'tags'], 'kinds');
+      const text = 'fn 𝔸() { let é = Foo; }\n';
+      const t = __n.synParse('rust', text);
+      eq(typeof t, 'number', 'tree');
+      const spans = r => {
+        const out = [];
+        for (let i = 0; i < r.captures.length; i += 4) out.push([r.names[r.captures[i]], text.slice(r.captures[i + 1], r.captures[i + 2])]);
+        return out;
+      };
+      const all = spans(__n.synQuery(t, 'highlights'));
+      for (const c of [['keyword', 'fn'], ['function', '𝔸'], ['keyword', 'let'], ['constructor', 'Foo']])
+        if (!all.some(s => s[0] === c[0] && s[1] === c[1])) throw new Error(`no ${c} in ${JSON.stringify(all)}`);
+      const r = __n.synQuery(t, 'highlights', text.indexOf('Foo'), text.indexOf(';'));
+      eq(r.captures.length % 4, 0, 'four numbers a capture');
+      eq(spans(r).filter(s => s[0] === 'constructor'), [['constructor', 'Foo']], 'a range');
+      eq(err(() => __n.synLoad('../rust')), 'no grammar "../rust": a grammar\'s name is letters, digits and _', 'a path');
+      eq(err(() => __n.synLoad('nosuch')), 'no grammar nosuch', 'a missing grammar');
+      eq(err(() => __n.synParse('rust', 5)), 'synParse: the text is not a string', 'not a string');
+      eq(err(() => __n.synQuery(t, 'highlights', -1)), 'synQuery: start and end are string indices', 'a negative start');
+      eq(err(() => __n.synQuery(t, 'folds')), 'rust has no "folds" query', 'a kind the bundle lacks');
+      eq([__n.synFree(t), __n.synFree(t)], [true, false], 'freed once');
+      eq(err(() => __n.synQuery(t, 'highlights')), `no syntax tree ${t}`, 'a freed tree');
+      'ok'
+    "#;
 }

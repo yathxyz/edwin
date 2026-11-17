@@ -4463,6 +4463,68 @@ line of a Scheme buffer on each save, by replacing the whole text, and did nothi
   shadow-stack timing was 26.8% against a 10% limit while ex44's load average was 22; built alone it passed at
   7.5%, and the whole check then passed with `--keep-going`).
 
+## Tree-sitter in the native program (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-native`): tree-sitter 0.26 in the desktop
+program, with natives to load a grammar, parse and query, for the tree-sitter packages after it (incremental
+reparse, highlighting, imenu, expand-region, indentation). Nothing in the core calls them yet.
+
+- **`native/src/syntax.rs`** (new), on the `tree-sitter` crate 0.26.13 (the runtime linked in, its `std` feature
+  for the `#match?` regexes) and `tree-sitter-language`: a grammar of the bundle (`nix/grammars.nix`) loaded by
+  its name, a text parsed into a tree, a query of the bundle's run over it. `build.rs` compiles it too, since it
+  compiles `natives.rs` for the snapshot; nothing of it runs at startup or in the snapshot.
+- **The natives** (`__n`, typed in `src/core.d.ts`): `synLoad(name)` loads NAME's grammar on first use and gives
+  its query kinds (`['highlights', 'injections', 'tags']` for Rust); `synParse(name, text)` parses TEXT and gives
+  the tree's number; `synQuery(tree, kind, start?, end?)` runs the grammar's KIND query over the tree between
+  two string indices and gives `{names, captures}`, `captures` holding four numbers a capture (its index in
+  `names`, its start and end, the pattern that matched), in the order of the text; `synFree(tree)` forgets a tree
+  (false when there was none). Each throws why it cannot: `no grammar NAME`, `NAME's grammar does not load:
+  DLERROR`, `NAME's grammar has no tree_sitter_NAME`, `NAME's grammar has ABI version V; this tree-sitter reads
+  13 to 15`, `NAME has no "KIND" query`, `NAME's KIND.scm, line L column C: ...`, `no syntax tree N`.
+- **Grammars by name only** (lang-grammar-bundle's requirement): a name is lowercase letters, digits and `_`
+  (at most 64), so neither a path nor `..` reaches `dlopen`; the directory is `share/edwin/grammars` beside the
+  program's `bin/`, found from the executable the kernel names (`edwinclient`, a link to `edwin`, finds the
+  same), never from the environment, a buffer or the user's Scheme. Query kinds are names in the same way, files
+  of the grammar's `queries/`. A library is opened with `RTLD_NOW | RTLD_LOCAL` and stays loaded (the language is
+  its static data); one that fails (no entry point, a null language, an ABI version outside tree-sitter's 13 to
+  15) is closed before anything of it is used.
+- **Offsets are JS's string indices:** texts are parsed as UTF-16, as V8 holds them, so a node's extent is half
+  its byte offset; the text predicates (`#eq?`, `#match?`, `#any-of?`) are given each node's text as UTF-8.
+  lang-syntax-incremental's byte-versus-UTF-16 risk is settled this way.
+- **Bounds** (constants in syntax.rs): a parse stops after 1 s (`PARSE_LIMIT`) and a query after 1 s
+  (`QUERY_LIMIT`), each with an error rather than holding the frame (tree-sitter's progress callbacks); a query
+  keeps at most 256 matches in progress (`MATCH_LIMIT`); at most 256 trees are kept (`MAX_TREES`), a parse past
+  that refused until one is freed.
+- **Choices where the plan left one open:** the grammars are loaded with `dlopen` from the bundle and the
+  runtime is linked in, as lang-grammar-bundle settled (decision 8); queries come from the bundle only, compiled
+  once per grammar and kind, so no query text crosses the natives; trees keep the text they were parsed from
+  (the predicates read it); a parse is whole (incremental reparse is lang-syntax-incremental's). Directives
+  (`#set!` and the rest) are not applied: they are the caller's. Nothing in the frame frees a tree for it yet:
+  the first package that keeps trees per buffer frees them.
+- **Not in it:** node navigation, incremental edits, highlighting and faces, the host or `Ed` interface over the
+  natives (the packages after it add what they use), tree-sitter in web frames or edwind. No new check in
+  nix/checks.nix: the tests are the package's cargo tests, which `nix build .#edwin` runs.
+- **Checked by** `nix build .#edwin` on ex44 (the build's check sets `EDWIN_TEST_GRAMMARS` to the bundle): unit
+  tests 29 passed (7 new), `tests/gui.rs` 5 passed and 1 ignored, `tests/terminal.rs` 35 passed. The new ones:
+  `syntax::tests::every_grammar_parses_and_queries_its_fixture` (each of the bundle's 22 grammars has a fixture,
+  which parses to its root kind with no error, every query kind compiles, and the highlights give one named
+  capture, e.g. Rust's `keyword` on `let`, Typst's `markup.heading.1` on `= Title`),
+  `offsets_are_utf16_and_predicates_see_the_text` (with `𝔸` and `é` before it, `Foo` is at index 18;
+  `#match? "^[A-Z]"` takes `Foo` and not `é`; `#eq? "é"` and `#match? "^𝔸$"` match, which they do not when the
+  predicates see the UTF-16 bytes; a range keeps to its captures), `bad_grammars_and_queries_fail_cleanly`
+  (names with a path, `..`, capitals or a space; a missing grammar; a file that is no library; another grammar's
+  library under the name; libraries the test compiles whose language says ABI 99 and 12; a query naming a node
+  the grammar lacks; a kind the bundle lacks), `the_bundle_is_found_beside_the_program`,
+  `trees_are_kept_by_number_until_freed` (the 257th tree refused, room again after a free),
+  `a_parse_past_its_bound_stops` (64 MiB of JSON: the error after 1 s) and
+  `natives::tests::the_syntax_natives_from_javascript` (the natives on an isolate: indices of the JS string,
+  errors as JS errors). First draw, measured (not a test) with `EDWIN_TRACE=1` in a 200×50 pseudo-terminal,
+  10 starts each, twice, on a quiet ex44 (load 2): medians 22.6 and 24.3 ms before, 23.9 and 22.9 ms after (a
+  build before a refactor of how the bundle is found, which runs only at a first synLoad). The committed build,
+  20 starts each alternating with the one before, measured while other builds loaded ex44 (load 8 to 37): medians
+  54.7 ms before and 57.9 after, fastest 23.2 and 21.8. Nothing of tree-sitter runs before the first draw. The
+  program grows by 2.4 MB (66.2 to 68.6). Also passed: `nix flake check` (exit 0).
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

@@ -18,6 +18,7 @@ mod open;
 mod proc;
 mod snapshot;
 mod sources;
+mod syntax;
 mod sys;
 
 use std::path::{Path, PathBuf};

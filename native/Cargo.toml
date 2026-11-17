@@ -30,6 +30,9 @@ serde_json = { version = "1", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }
 pollster = { version = "0.4", optional = true }
 unicode-width = { version = "0.2", optional = true }
+# Tree-sitter (src/syntax.rs): the runtime is linked in; each grammar's library is loaded from the grammar bundle.
+tree-sitter = "0.26"
+tree-sitter-language = "0.1"
 
 [dev-dependencies]
 # The window tests send the window manager's close message (WM_DELETE_WINDOW), as a close button does.
@@ -38,6 +41,9 @@ x11rb = "0.13"
 [build-dependencies]
 v8 = "=130.0.1"
 libc = "0.2"
+# build.rs compiles natives.rs, and with it src/syntax.rs.
+tree-sitter = "0.26"
+tree-sitter-language = "0.1"
 
 [profile.release.build-override]
 opt-level = 1

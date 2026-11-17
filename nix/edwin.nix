@@ -236,6 +236,8 @@ rustPlatform.buildRustPackage {
     export VK_DRIVER_FILES=${mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json
     export LD_LIBRARY_PATH=${lib.makeLibraryPath windowLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     export EDWIN_TEST_REQUIRE_GUI=1
+    # The tree-sitter tests (native/src/syntax.rs) load the grammar bundle; the binary under test has no share/.
+    export EDWIN_TEST_GRAMMARS=${grammars}
   '';
 
   postInstall = ''
