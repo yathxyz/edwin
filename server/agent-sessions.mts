@@ -26,11 +26,32 @@ export interface AgentBackend {
 const modules = new WeakMap<Server, AgentSessions>();
 const fail = (report: string, condition = 'agent-hub-error'): CallResult => ({ error: { condition, report, restarts: [], backtrace: [] } });
 const sidOf = (sid: unknown): string => { if (typeof sid !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(sid)) throw new Error('Invalid agent session id'); return sid; };
-const line = (x: unknown) => String(x ?? '').replace(/[\x00-\x1f\x7f]/g, ' ');
+const line = (x: unknown) => String(x ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 const modelOf = (options: unknown): string => {
   if (!Array.isArray(options)) return '';
   const option = options.find(o => o && (o.category === 'model' || o.id === 'model'));
   return typeof option?.currentValue === 'string' ? option.currentValue : '';
+};
+const modelName = (value: unknown): string => {
+  const name = line(value).replace(/\s+/g, ' ').trim();
+  return name.toLowerCase() === 'unknown' ? '' : name;
+};
+const listColumns = [
+  { key: 'sid', label: 'SESSION', cap: 18 }, { key: 'waiting', label: 'WAIT', cap: 4 },
+  { key: 'state', label: 'STATE', cap: 10 }, { key: 'harness', label: 'HARNESS', cap: 12 },
+  { key: 'model', label: 'MODEL', cap: 20 }, { key: 'host', label: 'HOST', cap: 16 },
+  { key: 'project', label: 'PROJECT', cap: 24 }, { key: 'activity', label: 'ACTIVITY', cap: 48 }
+] as const;
+const cell = (value: unknown, cap: number, charWidth: (cp: number) => number): string => {
+  const text = line(value).replace(/\s+/g, ' ').trim();
+  let width = 0, at = 0, keep = 0;
+  for (const ch of text) {
+    const next = width + charWidth(ch.codePointAt(0)!);
+    if (next > cap) return text.slice(0, keep) + '…';
+    width = next; at += ch.length;
+    if (width < cap) keep = at;
+  }
+  return text;
 };
 const RESPONSE_LIMIT = 32 * 1024 * 1024, SSE_LIMIT = 1024 * 1024, JOURNAL_READS = 4;
 const replaced = () => new Error('Agent session was replaced (stale incarnation); refresh and explicitly select it again');
@@ -74,6 +95,7 @@ export class AgentSessions implements AgentBackend {
   listGeneration = 0;
   listDirty = false;
   listJob?: Promise<void>;
+  exitedExpanded = false;
   publications = new Map<string, Promise<SBuf>>();
   views = new Map<string, number>();
   nextView = 0;
@@ -218,6 +240,7 @@ export class AgentSessions implements AgentBackend {
     this.views.delete(id);
     if (id === 'name:*Agent Sessions*') {
       this.listOpened = false; this.listGeneration++; this.listDirty = false; this.listJob = undefined;
+      this.exitedExpanded = false;
       this.facts.clear(); this.factReads.clear();
       return;
     }
@@ -312,14 +335,18 @@ export class AgentSessions implements AgentBackend {
     for (const o of this.observed.values()) if (o.wbSession) linked.set(JSON.stringify([o.host, o.wbSession]), o);
     for (const s of this.sessions.values()) {
       const o = linked.get(JSON.stringify([s.host, s.sid]));
+      const facts = this.facts.get(s.sid), transcript = this.transcripts.get(s.sid);
       rows.push({ sid: s.sid, epoch: s.createdAt, state: s.state || (s.alive ? 'running' : 'ended'), harness: o?.harness || s.acp?.agent || s.kind,
-        model: o?.model || this.facts.get(s.sid)?.model || modelOf(this.transcripts.get(s.sid)?.controls().configOptions) || 'unknown', host: s.host, project: o?.project || s.cwd,
+        model: modelName(o?.model) || modelName(facts && facts.epoch === s.createdAt ? facts.model : '') ||
+          modelName(transcript && transcript.epoch === s.createdAt ? modelOf(transcript.controls().configOptions) : ''), host: s.host, project: o?.project || s.cwd,
         activity: [s.acp?.title, s.acp?.activity, o?.tool?.name].filter(Boolean).join(' — '),
-        waiting: !!(s.acp?.pending?.length || o?.pending), updated: s.updatedAt || 0 });
+        waiting: !!(s.acp?.pending?.length || o?.pending), exited: s.alive === false, updated: s.updatedAt || 0 });
     }
-    for (const o of this.observed.values()) if (this.sessions.get(o.wbSession)?.host !== o.host) rows.push({ observedId: o.id, state: o.state, harness: o.harness, model: o.model, host: o.host,
-      project: o.project, activity: o.pending?.message || o.tool?.name || o.lastMessage || o.title, waiting: !!o.pending, updated: o.lastAt });
-    return rows.sort((a, b) => Number(b.waiting) - Number(a.waiting) || b.updated - a.updated || String(a.sid || a.observedId).localeCompare(String(b.sid || b.observedId)));
+    for (const o of this.observed.values()) if (this.sessions.get(o.wbSession)?.host !== o.host) rows.push({ observedId: o.id, state: o.state, harness: o.harness, model: modelName(o.model), host: o.host,
+      project: o.project, activity: o.pending?.message || o.tool?.name || o.lastMessage || o.title, waiting: !!o.pending,
+      exited: o.endedAt != null || !!o.endReason || o.state === 'exited', updated: o.lastAt || 0 });
+    const group = (r: Json) => r.waiting ? 0 : r.exited ? 2 : 1;
+    return rows.sort((a, b) => group(a) - group(b) || b.updated - a.updated || String(a.sid || a.observedId).localeCompare(String(b.sid || b.observedId)));
   }
   publish(name: string, mode: string, text: string, locals: Json, valid: () => boolean, patch?: PresentationPatch): Promise<SBuf> {
     const B = this.server.buffers, id = 'name:' + name, previous = this.publications.get(id);
@@ -376,9 +403,33 @@ export class AgentSessions implements AgentBackend {
     this.listJob = work; return work;
   }
   async drawList(valid: () => boolean) {
-    const rows = this.rows();
+    const { charWidth, strWidth } = this.server.buffers.Ed.display;
+    const all = this.rows(), active = all.filter(r => r.waiting || !r.exited), exitedRows = all.filter(r => !r.waiting && r.exited);
+    const shown = this.exitedExpanded ? exitedRows : exitedRows.slice(0, 5);
+    const rows = [...active, ...shown].map(r => ({ ...r, line: 0, cells: listColumns.map(c =>
+      cell(c.key === 'sid' ? r.sid || r.observedId : c.key === 'waiting' ? r.waiting ? 'WAIT' : '' : r[c.key], c.cap, charWidth)) }));
+    const columns = listColumns.map((c, i) => {
+      let width = strWidth(c.label);
+      for (const r of rows) width = Math.max(width, strWidth(r.cells[i]));
+      return { ...c, width };
+    });
+    const format = (cells: string[]) => cells.map((text, i) => text + ' '.repeat(columns[i].width - strWidth(text))).join('  ');
     const status = this.status === 'connected' ? `${this.status} (hub ${this.hubStatus})` : this.status;
-    await this.publish('*Agent Sessions*', 'agent-sessions-mode', `Agent Sessions — ${status}\nSESSION  WAIT  STATE  HARNESS  MODEL  HOST  PROJECT  ACTIVITY\n` + rows.map(r => `${line(r.sid || r.observedId)}  ${r.waiting ? 'WAIT' : '    '}  ${[r.state, r.harness, r.model, r.host, r.project, r.activity].map(line).join('  ')}`).join('\n') + '\n', { agentList: { rows, status } }, valid);
+    const lines = [`Agent Sessions — ${status}`, format(columns.map(c => c.label))];
+    const exited = { expanded: this.exitedExpanded, total: exitedRows.length, hidden: exitedRows.length - shown.length, line: null as number | null };
+    for (const [index, r] of rows.entries()) {
+      if (index === active.length && exitedRows.length) {
+        exited.line = lines.length + 1;
+        lines.push(`Exited sessions — ${shown.length} of ${exitedRows.length} shown [e / TAB: ${this.exitedExpanded ? 'show latest 5' : 'show all'}; agent-sessions-toggle-exited]`);
+      }
+      r.line = lines.length + 1; lines.push(format(r.cells));
+    }
+    await this.publish('*Agent Sessions*', 'agent-sessions-mode', lines.join('\n') + '\n', { agentList: { rows, columns, exited, status } }, valid);
+  }
+  async toggleExited() {
+    if (!this.listOpened) throw new Error('Open the agent session list first');
+    this.exitedExpanded = !this.exitedExpanded;
+    await this.queueList(); return 'name:*Agent Sessions*';
   }
   async list() {
     this.token();
@@ -419,13 +470,14 @@ export class AgentSessions implements AgentBackend {
       state: s ? s.state || (s.alive ? 'running' : 'ended') : observed?.state || (observed ? 'reported' : 'removed'),
       steerable: !!s && s.kind === 'acp' && s.alive !== false && this.status === 'connected',
       connection: this.status, modeId: view?.modeId ?? null, modes: view?.modes ?? null,
-      configOptions: view?.configOptions ?? null, pending
+      configOptions: view?.configOptions ?? null, usage: view?.usage ?? null, sessionInfo: view?.sessionInfo ?? null, pending
     };
   }
   withState(sid: string, locals: Json): Json {
     const state = this.snapshot(sid), session = locals.agentSession;
     return { ...locals, agentState: state, ...(session ? { agentSession: {
       ...session, pending: state.pending, modeId: state.modeId, modes: state.modes, configOptions: state.configOptions,
+      usage: state.usage, sessionInfo: state.sessionInfo,
       ...(session.epoch !== state.epoch ? { resolved: [] } : {})
     } } : {}) };
   }
@@ -570,6 +622,7 @@ export async function install(server: Server) {
     try { return { value: hub.clean(await fn(args)) }; } catch (e) { return fail(hub.clean(String(e.message || e))); }
   });
   cmd('agent-sessions', () => hub.list());
+  cmd('agent-sessions-toggle-exited', () => hub.toggleExited());
   cmd('agent-session-open', a => hub.open(a[0], a[1]));
   cmd('agent-session-info', () => hub.request('GET', 'info'));
   cmd('agent-session-list', async () => (await hub.request('GET', 'sessions')).sessions.filter((s: Json) => s.kind === 'acp'));

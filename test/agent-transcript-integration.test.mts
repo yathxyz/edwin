@@ -6,11 +6,12 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { FakeAgentHub } from './fake-agent-hub.mts';
 import { makeDir, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
+import { transcriptFixture } from './agent-render-fixture.mts';
 const { createHost, loadEdwin } = createRequire(import.meta.url)('../src/host-node.cts');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function until(f: () => unknown) { for (let i = 0; i < 1200; i++) { if (f()) return; await sleep(10); } throw new Error('Journal state did not arrive'); }
 
-test('AS-C3/C4/C9: long journal opens folded, streams off-point without undo, preserves Markdown prompt boundaries and replays on reopen', async t => {
+test('AS-C3/C4/C9: long tool journal folds, assistant stays open, live OT preserves point and prompt boundaries, and replay survives reopen', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
   const tokenFile = path.join(dir.root, 'token'); fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
   dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
@@ -80,4 +81,40 @@ test('AS-C3/C4/C9: long journal opens folded, streams off-point without undo, pr
   assert.equal(Ed.sync.state, 'online'); assert.match(b.text, /EVENT CONTENT TRUNCATED/); assert.ok(!b.text.includes('large-output-end'));
   assert.equal(b.undo.length, undo);
   t.diagnostic(`Journal smoke: initial 1201 events opened in ${elapsed.toFixed(1)} ms; final ${events.length} events, ${Buffer.byteLength(b.text)} bytes, ${b.folds.length} folds; 3 MiB live output visibly bounded without reconnect.`);
+  const fixture = transcriptFixture();
+  hub.truncated = true;
+  hub.add('render-fixture', fixture.events);
+  const fixtureOpened = await c.call('agent-session-open', ['render-fixture']);
+  assert.equal(fixtureOpened.error, undefined);
+  const shared = await Ed.sync.open(fixtureOpened.value);
+  Ed.setWindowBuffer(shared); Ed.E.current = shared;
+  await until(() => shared.meta?.locals?.agentSession?.head === fixture.head);
+  const fixtureState = shared.meta.locals.agentSession;
+  const spanAt = (seq: number) => fixtureState.spans.find((span: { seq: number }) => span.seq === seq);
+  assert.equal(shared.folds.length, 4, 'only the thought, two tools and unknown event start folded');
+  assert.equal(spanAt(28680).folded, false, 'long final assistant text stays open');
+  assert.equal(spanAt(27723).folded, false);
+  assert.equal(spanAt(27729).folded, false);
+  assert.ok(spanAt(27725).start < spanAt(27729).start);
+  assert.equal(fixtureState.spans.some((span: { seq: number }) => span.seq === 27726), false);
+  assert.deepEqual(fixtureState.usage, { size: 4096, used: 768 });
+  assert.deepEqual(fixtureState.sessionInfo, { title: 'Browser frame verified' });
+  assert.match(shared.text.split('\n')[0], /^Earlier history unavailable from hub; transcript starts at event \d+\.$/);
+  assert.equal(shared.text.slice(spanAt(28683).start, spanAt(28683).end), 'Turn ended: end_turn\n\n');
+  const sharedTool = spanAt(27725);
+  shared.pt = sharedTool.start; Ed.feedKey('TAB'); await Ed.whenIdle();
+  assert.equal(shared.folds.length, 3, 'tool content can still be explicitly unfolded');
+  const sharedToolText = shared.text.slice(sharedTool.start, sharedTool.end);
+  assert.match(sharedToolText, /```sh\nnix build \.#edwin -L\n```\nthis derivation will be built:/);
+  assert.ok(sharedToolText.includes('Browser checks passed.\n'));
+  assert.doesNotMatch(sharedToolText, /"sessionUpdate"|### Update #/);
+  const livePlan = hub.append('render-fixture', { e: 'update', update: { sessionUpdate: 'plan', entries: [{ content: 'A newly published plan', status: 'completed' }] } });
+  await until(() => shared.meta.locals.agentSession.head === livePlan.seq);
+  const liveState = shared.meta.locals.agentSession;
+  const livePlanSpan = liveState.spans.find((span: { kind: string }) => span.kind === 'plan');
+  const liveToolSpan = liveState.spans.find((span: { seq: number }) => span.seq === 27725);
+  assert.equal(livePlanSpan.seq, livePlan.seq); assert.equal(livePlanSpan.folded, false);
+  assert.ok(liveToolSpan.start < livePlanSpan.start); assert.equal(liveToolSpan.lastSeq, 27734);
+  assert.ok(shared.text.includes('A newly published plan'));
+  assert.doesNotMatch(shared.text, /\[completed\] Report the result|\[in_progress\] Run the browser frame/);
 });

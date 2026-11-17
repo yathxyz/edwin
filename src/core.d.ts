@@ -732,6 +732,8 @@ interface EdAgentSessionState {
   modeId: unknown;
   modes: unknown;
   configOptions: unknown;
+  usage: unknown;
+  sessionInfo: unknown;
   pending: Record<string, unknown>[];
 }
 

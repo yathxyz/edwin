@@ -3,8 +3,8 @@
 'use strict';
 const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
-type Row = { sid?: string; epoch?: number; observedId?: string; waiting?: boolean };
-type List = { rows: Row[]; status: string };
+type Row = { sid?: string; epoch?: number; observedId?: string; waiting?: boolean; line: number };
+type List = { rows: Row[]; status: string; exited: { expanded: boolean; total: number; hidden: number; line: number | null } };
 /* Presentation commands run in this replica; mutations still go through edwind. */
 const presentationCommands: Record<string, true> = {
   'agent-session-toggle-fold': true, 'agent-session-open-folds': true, 'agent-session-close-folds': true,
@@ -35,7 +35,10 @@ async function show(id: string): Promise<EdBuffer> {
   const b = await Ed.sync.open(id); Ed.setWindowBuffer(b); E.current = b; Ed.scheduleRender(); return b;
 }
 async function open(sid: string, epoch?: number): Promise<EdBuffer> { return show(await rpc('agent-session-open', epoch === undefined ? [sid] : [sid, epoch]) as string); }
-function row(): Row | undefined { const list = E.current.meta?.locals?.agentList as List | undefined; return list?.rows[Ed.lineNoB(E.current, E.current.pt) - 3]; }
+function row(): Row | undefined {
+  const list = E.current.meta?.locals?.agentList as List | undefined, line = Ed.lineNoB(E.current, E.current.pt);
+  return list?.rows.find(r => r.line === line);
+}
 function selected(): string {
   const r = row(), s = E.current.meta?.locals?.agentSession as { sid: string; observed?: boolean } | undefined;
   if (r?.observedId || s?.observed) return signal('user-error', 'Reported session is read-only and cannot be steered') as never;
@@ -63,6 +66,15 @@ CMD('agent-session-open', async () => [await Ed.readMini('Session: ', '', null)]
 });
 CMD('agent-session-open-row', '', '', 'Open the session incarnation on this list row.', async () => { const r = row(); if (!r) signal('user-error', 'No session on this line'); await open((r!.sid || r!.observedId)!, r!.epoch); return false; });
 CMD('agent-sessions-refresh', '', '', 'Refresh the session list or current transcript.', async () => { await refresh(); return false; });
+CMD('agent-sessions-toggle-exited', '', '', 'Show all exited sessions, or only the latest five; callable through agentSessions.rpc without keys.', async () => {
+  if (!E.current.meta?.locals?.agentList) return signal('user-error', 'No agent session list here');
+  await show(await rpc('agent-sessions-toggle-exited') as string); return false;
+});
+CMD('agent-sessions-toggle-exited-row', '', '', 'Toggle exited sessions on the list group line.', async () => {
+  const list = E.current.meta?.locals?.agentList as List | undefined;
+  if (!list || list.exited.line !== Ed.lineNoB(E.current, E.current.pt)) return signal('user-error', 'No exited-session group on this line');
+  await show(await rpc('agent-sessions-toggle-exited') as string); return false;
+});
 CMD('agent-session-start', '', '', 'Start an agent on a configured host, in a directory.', async () => {
   const info = await rpc('agent-session-info') as { host: string; agents: { name: string }[]; hosts: { name: string; agents: { name: string }[] }[] };
   const hosts = [info.host, ...(info.hosts || []).map(h => h.name)];
@@ -81,7 +93,7 @@ H.setup = () => {
   if (previousSetup) previousSetup();
   const map = new Ed.Keymap(); L.set('agent-sessions-mode-map', map); Ed.modeParents.set('agent-sessions-mode', 'special-mode');
   E.aux.set('agent-sessions-mode:motion', map); E.aux.set('agent-sessions-mode:normal', map);
-  for (const [key, cmd] of [['RET', 'agent-session-open-row'], ['r', 'agent-sessions-refresh'], ['g r', 'agent-sessions-refresh'], ['a', 'agent-session-start'], ['c', 'agent-session-cancel'], ['D', 'agent-session-remove'], ['p', 'agent-session-prompt'], ['!', 'agent-session-answer'], ['q', 'quit-window']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
+  for (const [key, cmd] of [['RET', 'agent-session-open-row'], ['TAB', 'agent-sessions-toggle-exited-row'], ['e', 'agent-sessions-toggle-exited'], ['r', 'agent-sessions-refresh'], ['g r', 'agent-sessions-refresh'], ['a', 'agent-session-start'], ['c', 'agent-session-cancel'], ['D', 'agent-session-remove'], ['p', 'agent-session-prompt'], ['!', 'agent-session-answer'], ['q', 'quit-window']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
 };
 const prevMeta = H.bufferMeta;
 H.bufferMeta = (b, locals, ver) => {

@@ -8,6 +8,7 @@ import { FakeAgentHub } from './fake-agent-hub.mts';
 import { makeDir, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
 import type { TestDir } from './edit-client.mts';
 import { AgentSessions } from '../server/agent-sessions.mts';
+import { sessionsFixture } from './agent-render-fixture.mts';
 import type { Server } from '../server/main.mts';
 const require = createRequire(import.meta.url);
 const { createHost, loadEdwin } = require('../src/host-node.cts');
@@ -63,7 +64,89 @@ test('AS-C1/C2: daemon-owned list is live in a served frame; waiting first, both
   hub.sessions.delete('idle'); for (const stream of hub.streams) stream.destroy();
   await until(() => !b.meta.locals.agentList.rows.some((r: { sid: string }) => r.sid === 'idle'));
   t.diagnostic('Model frame displayed the live daemon list; RET opened the waiting session without a spawn.');
+  await t.test('shared list fixture has bounded aligned cells, explicit exited expansion and incarnation-safe row actions',
+    () => checkListRendering(hub, c, Ed));
 });
+async function checkListRendering(hub: FakeAgentHub, c: EditClient, Ed: ReturnType<typeof loadEdwin>) {
+  const fixture = sessionsFixture();
+  hub.sessions.clear(); hub.journals.clear(); hub.observed.clear();
+  for (const session of fixture.sessions) Object.assign(hub.add(session.sid), session);
+  for (const observed of fixture.observed) hub.observed.set(observed.id, observed);
+  for (const stream of hub.streams) stream.destroy();
+  const id = (await c.call('agent-sessions')).value, b = await Ed.sync.open(id);
+  Ed.setWindowBuffer(b); Ed.E.current = b;
+  await until(() => b.meta?.locals?.agentList?.rows?.length === 9 && b.meta.locals.agentList.exited.total === 8);
+  const initial = b.meta.locals.agentList, lines = b.text.split('\n');
+  assert.deepEqual(initial.rows.map((r: { sid?: string; observedId?: string }) => r.sid || r.observedId),
+    ['needs-answer', 'o_reported', 'ready', 'api_14e7_live', 'finished-1', 'finished-2', 'finished-3', 'finished-4', 'finished-5']);
+  assert.deepEqual(initial.exited, { expanded: false, total: 8, hidden: 3, line: 7 });
+  assert.equal(initial.rows.find((r: { observedId?: string }) => r.observedId === 'o_reported').exited, false, 'a reported completed turn is not an ended session');
+  assert.match(lines[initial.exited.line - 1], /Exited sessions.*5 of 8.*agent-sessions-toggle-exited/);
+  assert.deepEqual(initial.columns.map((col: { cap: number }) => col.cap), [18, 4, 10, 12, 20, 16, 24, 48]);
+  for (const [index, column] of initial.columns.entries()) {
+    assert.equal(column.width, Math.max(column.label.length, ...initial.rows.map((r: { cells: string[] }) => r.cells[index].length)));
+    assert.ok(column.width <= column.cap);
+  }
+  const waitOffset = initial.columns[0].width + 2;
+  for (const r of initial.rows) {
+    const rendered = lines[r.line - 1];
+    assert.equal(rendered, r.cells.map((value: string, i: number) => value.padEnd(initial.columns[i].width)).join('  '));
+    assert.equal(rendered.length, lines[1].length);
+    assert.equal(rendered.slice(waitOffset, waitOffset + 4), r.waiting ? 'WAIT' : '    ');
+    assert.ok(r.cells.every((value: string, i: number) => value.length <= initial.columns[i].cap && !/[\r\n\t]|\s{2}/.test(value)));
+    assert.equal(r.cells[4], '', 'absent and reported literal unknown model names are blank');
+  }
+  const activity = initial.rows.find((r: { sid: string }) => r.sid === 'api_14e7_live').cells[7];
+  assert.equal(activity.length, 48); assert.ok(activity.startsWith('A long activity summary') && activity.endsWith('…'));
+  assert.ok(!b.text.includes('unknown') && !b.text.includes('More detail.'));
+  assert.equal(lines.length, initial.rows.length + 4, 'multiline activity cannot create physical session rows');
+  b.pt = Ed.lineStartB(b, initial.exited.line);
+  assert.throws(() => Ed.agentSessions.selected(), /No agent session/);
+  const detailReads = () => hub.calls.filter(call => /^\/v1\/sessions\/[^/?]+$/.test(call.path)).length;
+  const before = detailReads(); Ed.feedKey('RET'); await Ed.whenIdle();
+  assert.equal(Ed.E.current.id, id); assert.equal(detailReads(), before, 'RET on group never opens another session');
+  Ed.feedKey('TAB'); await Ed.whenIdle();
+  await until(() => b.meta.locals.agentList.exited.expanded && b.meta.locals.agentList.rows.length === 12);
+  const expanded = b.meta.locals.agentList, hidden = expanded.rows.find((r: { sid: string }) => r.sid === 'finished-8');
+  assert.equal(expanded.exited.hidden, 0);
+  b.pt = Ed.lineStartB(b, hidden.line);
+  assert.deepEqual(Ed.agentSessions.identity(), { sid: 'finished-8', epoch: 100 });
+  Ed.feedKey('RET'); await Ed.whenIdle();
+  await until(() => Ed.E.current.id === 'name:*Agent: finished-8*');
+  assert.equal(Ed.E.current.meta.locals.agentSession.sid, 'finished-8');
+  assert.equal(Ed.E.current.meta.locals.agentSession.epoch, 100);
+  await Ed.agentSessions.show(id);
+  assert.equal(await Ed.agentSessions.rpc('agent-sessions-toggle-exited'), id, 'phone hosts need no key dispatch to toggle');
+  await until(() => b.meta.locals.agentList.exited.hidden === 3);
+  assert.ok(!b.meta.locals.agentList.rows.some((r: { line: number }) => r.line === hidden.line));
+  b.pt = b.text.length;
+  assert.throws(() => Ed.agentSessions.selected(), /No agent session/, 'a formerly visible hidden-row line cannot target a different session');
+  const longSid = 'alive_done_' + 'x'.repeat(50), live = hub.add(longSid);
+  live.state = 'done'; live.alive = true; live.updatedAt = 1000;
+  live.cwd = '/work/项目😀/' + 'x'.repeat(40); live.acp.title = '运行校验 e\u0301 😀 '.repeat(30);
+  hub.emit('session', live);
+  await until(() => b.meta.locals.agentList.rows.some((r: { sid: string; project: string }) => r.sid === longSid && r.project === live.cwd));
+  const redrawn = b.meta.locals.agentList, liveRow = redrawn.rows.find((r: { sid: string }) => r.sid === longSid);
+  assert.equal(liveRow.exited, false, 'a finished turn is not an exited process');
+  assert.ok(liveRow.line < redrawn.exited.line); assert.ok(liveRow.cells[0].endsWith('…'));
+  const redrawnLines = b.text.split('\n'), headerWidth = Ed.display.strWidth(redrawnLines[1]);
+  for (const row of redrawn.rows) {
+    assert.equal(Ed.display.strWidth(redrawnLines[row.line - 1]), headerWidth, 'wide and combining glyphs retain the same rendered column boundaries');
+    row.cells.forEach((text: string, i: number) => assert.ok(Ed.display.strWidth(text) <= redrawn.columns[i].cap));
+  }
+  b.pt = Ed.lineStartB(b, liveRow.line);
+  assert.deepEqual(Ed.agentSessions.identity(), { sid: longSid, epoch: live.createdAt }, 'display truncation preserves the full action identity');
+  b.pt = Ed.lineStartB(b, redrawn.exited.line);
+  assert.throws(() => Ed.agentSessions.selected(), /No agent session/, 'redraw group lines remain non-actionable');
+  Ed.feedKey('e'); await Ed.whenIdle(); await until(() => b.meta.locals.agentList.exited.expanded);
+  assert.equal(b.meta.locals.agentList.rows.filter((r: { exited: boolean }) => r.exited).length, 8);
+  const observed = fixture.observed[0];
+  hub.observed.set(observed.id, { ...observed, endedAt: 1000, endReason: 'completed' });
+  hub.emit('observed', hub.observed.get(observed.id)!);
+  await until(() => b.meta.locals.agentList.exited.total === 9);
+  assert.ok(b.meta.locals.agentList.rows.find((r: { observedId: string }) => r.observedId === observed.id).line > b.meta.locals.agentList.exited.line);
+}
+
 
 test('AS-C8: token and symlink are refused; API-echoed token is redacted from buffers, results and logs', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
@@ -168,7 +251,10 @@ test('AS-C2/C3: lower-head replacement incarnation wins over in-flight old trans
   t.after(async () => { release.resolve(); c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
   await c.call('agent-sessions');
   const opening = c.call('agent-session-open', ['epoch']); await until(() => held >= 2);
-  const current = hub.add('epoch', [{ seq: 1, e: 'session', configOptions: [{ id: 'model', currentValue: 'current-model' }], note: 'current incarnation' }]);
+  const current = hub.add('epoch', [
+    { seq: 1, e: 'session', configOptions: [{ id: 'model', currentValue: 'current-model' }] },
+    { seq: 2, e: 'update', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'current incarnation' } } }
+  ]);
   current.createdAt = old.createdAt + 1; current.acp.title = 'Replacement'; hub.emit('session', current);
   await untilText(c, 'name:*Agent Sessions*', 'Replacement'); release.resolve();
   const transcript = (await c.open((await opening).value)).text!;
@@ -211,6 +297,9 @@ test('host state exposes redacted journal controls and full requests; summary-on
   const schema = { type: 'object', required: ['count'], properties: { count: { type: 'number' }, labels: { type: 'array', items: { type: 'string' } } } };
   const url = 'https://approval.example.invalid/full/path?request=visible';
   hub.append('host_state', { e: 'session', modes, configOptions });
+  const usage = { size: 4096, used: 512, note: hub.token }, sessionInfo = { title: 'Host control metadata ' + hub.token };
+  hub.append('host_state', { e: 'update', update: { sessionUpdate: 'usage_update', ...usage } });
+  hub.append('host_state', { e: 'update', update: { sessionUpdate: 'session_info_update', ...sessionInfo } });
   const permission = hub.append('host_state', { e: 'permission', toolCall: { title: 'Read source', locations: [{ path: 'source.ts', line: 12 }] }, options: [{ optionId: 'once', name: 'Allow ' + hub.token, kind: 'allow_once' }] });
   const form = hub.append('host_state', { e: 'elicitation', request: { message: 'Supply form', requestedSchema: schema } });
   const linked = hub.append('host_state', { e: 'elicitation', request: { message: 'External approval ' + hub.token, mode: 'url', url, elicitationId: 'approval-1' } });
@@ -221,6 +310,11 @@ test('host state exposes redacted journal controls and full requests; summary-on
   assert.equal(id, 'name:*Agent: host_state*'); assert.equal(state.sid, 'host_state'); assert.equal(state.epoch, session.createdAt);
   assert.equal(state.state, 'idle'); assert.equal(state.modeId, 'ask'); assert.deepEqual(state.modes, modes);
   assert.deepEqual(state.configOptions, [{ ...configOptions[0], description: '[redacted]' }]);
+  assert.deepEqual(state.usage, { ...usage, note: '[redacted]' });
+  assert.deepEqual(state.sessionInfo, { title: 'Host control metadata [redacted]' });
+  assert.deepEqual(opened.meta!.locals.agentSession.usage, state.usage);
+  assert.deepEqual(opened.meta!.locals.agentSession.sessionInfo, state.sessionInfo);
+  assert.ok(!opened.text!.includes('Host control metadata') && !opened.text!.includes('"used"'), 'control updates do not become conversation text');
   assert.equal(state.pending.length, 3);
   const shownPermission = state.pending.find((p: { req: number }) => p.req === permission.seq);
   assert.equal(shownPermission.kind, 'permission'); assert.equal(shownPermission.epoch, session.createdAt);
@@ -242,8 +336,9 @@ test('host state exposes redacted journal controls and full requests; summary-on
   hub.sessions.delete('host_state'); hub.emit('gone', { sid: 'host_state', epoch: session.createdAt });
   const removed = await c.next(m => m.t === 'meta' && m.buf === id && m.locals?.agentState?.state === 'removed' && m.locals.agentState.connection === 'connected');
   assert.equal(removed.ver, opened.ver);
-  assert.deepEqual(removed.locals.agentState, { ...state, epoch: null, state: 'removed', steerable: false, connection: 'connected', modeId: null, modes: null, configOptions: null, pending: [] });
+  assert.deepEqual(removed.locals.agentState, { ...state, epoch: null, state: 'removed', steerable: false, connection: 'connected', modeId: null, modes: null, configOptions: null, usage: null, sessionInfo: null, pending: [] });
   assert.deepEqual(removed.locals.agentSession.pending, []); assert.equal(removed.locals.agentSession.configOptions, null);
+  assert.equal(removed.locals.agentSession.usage, null); assert.equal(removed.locals.agentSession.sessionInfo, null);
   assert.deepEqual((await c.call('agent-session-state', ['host_state'])).value, removed.locals.agentState);
   assert.ok(!c.queue.some(m => m.t === 'edits' && m.buf === id), 'state, connection and removal do not enter the transcript sequencer');
 });
@@ -303,12 +398,15 @@ test('a summary-only incarnation reset immediately clears stale controls while i
   dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   const old = hub.add('host_epoch');
   hub.append('host_epoch', { e: 'session', modes: { currentModeId: 'auto', availableModes: [{ id: 'auto', name: 'Automatic' }] }, configOptions: [{ id: 'model', currentValue: 'old' }] });
+  hub.append('host_epoch', { e: 'update', update: { sessionUpdate: 'usage_update', size: 100, used: 20 } });
+  hub.append('host_epoch', { e: 'update', update: { sessionUpdate: 'session_info_update', title: 'Old title' } });
   const request = hub.append('host_epoch', { e: 'permission', options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }] });
   const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
   const release = Promise.withResolvers<void>();
   t.after(async () => { release.resolve(); c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
   const state = (await c.call('agent-session-state', ['host_epoch'])).value, opened = await c.open(state.bufferId);
   assert.equal(state.pending[0].req, request.seq); assert.equal(state.modeId, 'auto');
+  assert.deepEqual(state.usage, { size: 100, used: 20 }); assert.deepEqual(state.sessionInfo, { title: 'Old title' });
   const replacement = { ...old, createdAt: old.createdAt + 1, acp: { ...old.acp, pending: [], headSeq: 1 } };
   const entered = Promise.withResolvers<void>(), handle = hub.handle.bind(hub);
   hub.handle = async (req, res) => {
@@ -318,13 +416,15 @@ test('a summary-only incarnation reset immediately clears stale controls while i
     await handle(req, res);
   };
   hub.sessions.set('host_epoch', replacement);
-  hub.journals.set('host_epoch', [{ seq: 1, e: 'session', note: 'fresh incarnation without old controls' }]);
+  hub.journals.set('host_epoch', [{ seq: 1, e: 'prompt', prompt: [{ type: 'text', text: 'fresh incarnation without old controls' }] }]);
   hub.emit('session', replacement); await entered.promise;
   const reset = await c.next(m => m.t === 'meta' && m.buf === state.bufferId && m.locals?.agentState?.epoch === replacement.createdAt);
   assert.equal(reset.ver, opened.ver);
   assert.deepEqual(reset.locals.agentState.pending, []); assert.equal(reset.locals.agentState.modeId, null);
   assert.equal(reset.locals.agentState.modes, null); assert.equal(reset.locals.agentState.configOptions, null);
   assert.deepEqual(reset.locals.agentSession.pending, []); assert.equal(reset.locals.agentSession.configOptions, null);
+  assert.equal(reset.locals.agentState.usage, null); assert.equal(reset.locals.agentState.sessionInfo, null);
+  assert.equal(reset.locals.agentSession.usage, null); assert.equal(reset.locals.agentSession.sessionInfo, null);
   assert.ok(!c.queue.some(m => m.t === 'edits' && m.buf === state.bufferId), 'incarnation invalidation is metadata-only before journal replay');
   const stale = await c.call('agent-session-permission', ['host_epoch', { req: request.seq, epoch: old.createdAt, outcome: { outcome: 'selected', optionId: 'once' } }]);
   assert.match(stale.error.report, /stale/i); assert.equal(hub.calls.filter(call => call.method === 'POST').length, 0);
@@ -332,6 +432,7 @@ test('a summary-only incarnation reset immediately clears stale controls while i
   const fresh = (await c.call('agent-session-state', ['host_epoch'])).value;
   assert.equal(fresh.epoch, replacement.createdAt); assert.deepEqual(fresh.pending, []);
   assert.equal(fresh.modes, null); assert.equal(fresh.configOptions, null);
+  assert.equal(fresh.usage, null); assert.equal(fresh.sessionInfo, null);
   assert.match((await c.open(state.bufferId)).text!, /fresh incarnation without old controls/);
 });
 
@@ -371,7 +472,9 @@ test('review 2: oversized HTTP bodies fail visibly, including chunked bodies wit
   assert.equal((await c.call('agent-session-info')).value.host, 'test', 'the daemon remains usable after a bounded refusal');
   hub.add('oversize_facts', [{ seq: 1, e: 'session' }]);
   const id = (await c.call('agent-sessions')).value;
-  assert.match(await untilText(c, id, 'unavailable ('), /unavailable \(.*response exceeds.*32 MiB/);
+  await untilText(c, id, 'unavailable (');
+  const failed = (await c.open(id)).meta!.locals.agentList.rows.find((r: { sid: string }) => r.sid === 'oversize_facts');
+  assert.match(failed.model, /unavailable \(.*response exceeds.*32 MiB/);
 });
 
 test('review 2: an unterminated oversized SSE event closes its connection and reports the limit', async t => {
@@ -451,11 +554,14 @@ test('review 5: split-token response chunks leave subsequent prompt and diff off
   const id = (await c.call('agent-session-open', ['redacted_spans'])).value, view = await c.open(id);
   const meta = view.meta!.locals.agentSession, prompt = meta.spans.find((s: { kind: string }) => s.kind === 'prompt'), tool = meta.spans.find((s: { kind: string }) => s.kind === 'tool');
   assert.ok(!JSON.stringify(view).includes(hub.token)); assert.ok(!child.logs.includes(hub.token));
-  assert.equal(view.text!.slice(prompt.start, prompt.start + '## Prompt #3'.length), '## Prompt #3');
+  assert.equal(prompt.seq, 3); assert.equal(prompt.kind, 'prompt');
+  assert.ok(view.text!.slice(prompt.start, prompt.end).includes('# embedded heading\n```\nnot structure\n```'));
   const diff = tool.diffs[0];
   assert.equal(view.text!.slice(diff.oldStart, diff.oldEnd), 'before\n'); assert.equal(view.text!.slice(diff.newStart, diff.newEnd), 'after\n');
   for (const span of meta.spans) {
-    assert.equal(view.text![span.foldStart], '\n'); assert.equal(view.text![span.foldEnd], '\n');
+    if (span.foldStart < span.foldEnd) {
+      assert.equal(view.text![span.foldStart], '\n'); assert.equal(view.text![span.foldEnd], '\n');
+    }
     assert.ok(span.start < span.end && span.end <= view.text!.length);
   }
   const recalled = (await c.call('agent-session-recall', ['redacted_spans', 5, meta.epoch])).value;
@@ -467,7 +573,8 @@ test('review 5: split-token response chunks leave subsequent prompt and diff off
   hub.append('redacted_spans', { e: 'prompt', prompt: [{ type: 'text', text: 'prompt after streamed redaction' }] });
   await untilText(c, id, 'prompt after streamed redaction');
   const streamed = await c.open(id), last = streamed.meta!.locals.agentSession.spans.at(-1);
-  assert.equal(streamed.text!.slice(last.start, last.start + '## Prompt #8'.length), '## Prompt #8');
+  assert.equal(last.seq, 8); assert.equal(last.kind, 'prompt');
+  assert.ok(streamed.text!.slice(last.start, last.end).includes('prompt after streamed redaction'));
   assert.ok(!child.logs.includes(hub.token)); assert.ok(!JSON.stringify(c.queue).includes(hub.token));
 });
 
@@ -484,9 +591,13 @@ test('review 7: concurrent attached-list replacements keep visible rows and stru
   }
   for (const result of await Promise.all(listings)) assert.equal(result.error, undefined);
   await untilText(c, id, 'FINAL-');
-  const view = await c.open(id), rows = view.meta!.locals.agentList.rows;
-  const expected = rows.map((r: Record<string, unknown>) => `${r.sid}  ${r.waiting ? 'WAIT' : '    '}  ${[r.state, r.harness, r.model, r.host, r.project, r.activity].join('  ')}`).join('\n') + '\n';
-  assert.equal(view.text!.slice(view.text!.indexOf('\n', view.text!.indexOf('\n') + 1) + 1), expected);
+  const view = await c.open(id), { rows, columns } = view.meta!.locals.agentList;
+  const lines = view.text!.split('\n');
+  for (const r of rows) {
+    assert.equal(lines[r.line - 1], r.cells.map((text: string, i: number) => text.padEnd(columns[i].width)).join('  '));
+    assert.ok(r.cells[7].endsWith('…')); assert.ok(r.cells[7].length <= 48);
+    assert.equal(r.epoch, hub.sessions.get(r.sid)!.createdAt);
+  }
   assert.deepEqual(rows.map((r: { sid: string }) => r.sid).sort(), ['row_a', 'row_b', 'row_c']);
 });
 
@@ -532,7 +643,7 @@ test('review 9: a lower same-incarnation head replaces text, structure and disco
   await untilText(c, id, 'replacement prompt'); await untilText(c, 'name:*Agent Sessions*', 'replacement-model');
   const view = await c.open(id);
   assert.ok(!view.text!.includes('obsolete')); assert.equal(view.meta!.locals.agentSession.head, 2);
-  assert.deepEqual(view.meta!.locals.agentSession.spans.map((s: { seq: number }) => s.seq), [1, 2]);
+  assert.deepEqual(view.meta!.locals.agentSession.spans.filter((s: { kind: string }) => s.kind === 'prompt').map((s: { seq: number }) => s.seq), [2]);
   assert.ok(!(await c.open('name:*Agent Sessions*')).text!.includes('obsolete-model'));
 });
 

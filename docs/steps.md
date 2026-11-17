@@ -1046,6 +1046,11 @@ No real credential, external network or existing service was used. Earlier basel
 this review does not claim another full Node run or physical native GUI exercise.
 `tools/agent-live.mts` now provides standalone GET-only live-hub inspection, checked against the stub;
 it is statically typechecked but never run by a suite.
+The owner’s real-hub inspection opened 28,683 events in 493 ms and exposed presentation defects.
+The AS1.21–25 rendering follow-up is complete: messages stay open, bookkeeping lives in control state,
+current plans/tools keep their visible start order, and the list is bounded/aligned with an exited toggle.
+AS-C19/C20 fixtures and a served-frame/CLI smoke cover the real shapes; the directed list suite passes
+24/24 and all three TypeScript projects pass. Evidence and API limitations are recorded below.
 
 ### Requirements
 
@@ -1055,7 +1060,7 @@ it is statically typechecked but never run by a suite.
 | AS1.2 | Read the bearer token only from its configured file, protect that file through the path authority, and never expose it in buffers, diagnostics, errors, logs or argv. Redact remote responses as well as transport errors. Mutations are not retried: a lost reply may already have acted. |
 | AS1.3 | `*Agent Sessions*` lists hub and observed sessions, including state, harness, model, host, project/directory, activity and waiting status. Waiting rows sort first. SSE snapshots replace stale registries; reconnect takes a fresh snapshot, and an outage is visible. Open, start (agent/host/directory), cancel and remove are commands. Only explicit start or revive may run anything. |
 | AS1.4 | `*Agent: SID*` is a read-only Markdown-style transcript, shared as `name:*Agent: SID*`. Observed-only records use `*Agent Observed: ID*` and explicitly cannot be steered. All record fields and available tail are inspectable. Closing a frame/buffer never cancels or removes a session. |
-| AS1.5 | Journal replay uses epoch plus seq, skips duplicates, handles reset and pinned pending requests, and follows changed headSeq through `events?since=N`. Structure is editor metadata, not Markdown parsing. Tool calls (name, location, status), thoughts, long output and diffs start folded; plan updates show current state. Prompt headings have structural next/previous navigation unaffected by headings or fences inside a prompt. |
+| AS1.5 | Journal replay uses epoch plus seq, skips duplicates, handles reset and pinned pending requests, and follows changed headSeq through `events?since=N`. Structure is editor metadata, not Markdown parsing. Prompts and user/assistant messages start open regardless of length; thoughts, tools, their output and diffs start folded to one line. Only current plans are presented, open. Prompt navigation is unaffected by headings or fences inside a prompt. |
 | AS1.6 | Streaming uses sequenced edits without undo groups; point and window positions away from the changed end stay put. Every available event is retained, not summarized or dropped; oversized input/rendering follows the explicit AS1.16 limits. Reopening reconstructs from the hub journal. Measure a long replay and record event count, bytes, open time and folded visible lines. |
 | AS1.7 | Transcript commands unfold, visit a tool's file and line, show its diffs, recall an immutable earlier prompt into a new draft, prompt quickly, cancel, revive, set mode and set a config option (`POST /config {id,value}`). Report 404/405/501 from config as unsupported by this hub. |
 | AS1.8 | Pending permissions and elicitations are announced to frames and reachable globally, not just at point. The picker, authoritative detail request and answer retain the same sid/createdAt/req. Permission details show session, incarnation, request, tool and input before offered outcomes. Form elicitation supports string, number, boolean and string-array values; URLs are shown in full and never auto-opened. Stale/replaced/resolved replies fail, not retarget. |
@@ -1071,6 +1076,11 @@ it is statically typechecked but never run by a suite.
 | AS1.18 | Once a prompt POST is positively acknowledged, remove that `{sid,epoch}` from this draft's in-memory destinations before receipt persistence. A write failure explicitly reports acknowledgement and forbids offering that destination for retry for this daemon's lifetime, including explicit retarget attempts. No automatic mutation retry or reconciliation protocol. |
 | AS1.19 | Retain a failed open transcript's desired journal head and retry GETs at 250 ms exponential backoff, capped at 5 s. A head decrease also reconciles journal and model facts. Only a same-incarnation, same-head authoritative pending snapshot can retire a request missing a resolution: show “no longer pending; resolution unavailable”, with no invented outcome or actionable stale request. A late matching summary must reconcile too. |
 | AS1.20 | Killing a list/transcript/reported buffer disables view-specific following, releases its replay/presentation state and prevents in-flight publications from recreating it. A view generation invalidates queued work; departed-session facts and announcement identities are pruned. Closing a view never steers its agent. Destroy rejected SSE responses/requests immediately; track and destroy every stream attempt at shutdown. |
+| AS1.21 | Bookkeeping is state, not conversation: initialization/session, usage, session-info, mode/config and available-command updates produce no transcript block. Latest main-session usage/session info are exposed beside mode/config through the buffer and host state. Invisible bookkeeping does not split matching message chunks. A turn ends with one quiet line naming its stop reason; turn errors name their code and message. Unknown event/update kinds get one folded line naming the kind, with their JSON inside. |
+| AS1.22 | Generated headings are human Markdown: tool title first, a short status marker and optional location, no journal sequence numbers. Sequence/request/tool identities remain structural metadata. A tool update whose start was not replayed uses its kind or “tool” and says its start was not replayed, never its opaque call ID as a title. |
+| AS1.23 | Tool commands occupy their own fenced line with output below; distinct tool content blocks cannot join a command to its output. Current tool status and all supplied outputs/diffs remain inspectable. Tools keep their original start position across updates; the current plan occupies its latest update’s position, not a superseded plan’s position. |
+| AS1.24 | A hub-truncated replay starts with one plain line saying earlier history is unavailable from the hub and that the transcript starts at event N. Detailed gap/from/head data stays in metadata. No backward-pagination workaround is invented. |
+| AS1.25 | The sessions list collapses whitespace to one line per cell, caps long cells with an ellipsis, and pads each column to its widest capped value/header. Empty WAIT/model cells retain their columns; absent or literal `unknown` models are blank. Waiting sessions sort first, then other live sessions, then exited sessions; show five exited sessions before a named, keyboard/host-callable expansion toggle. Full identities and values remain metadata, and non-session lines cannot target a session action. |
 
 ### Data flow and buffer model
 
@@ -1090,6 +1100,15 @@ separate attached clients choose independently. Markdown is fontification only, 
 source of command targets. An event containing fences or headings cannot manufacture a prompt/tool span.
 Whole transcript buffers are read-only, so partial read-only spans are unnecessary. Existing sequenced edits,
 markers, metadata, folds and Markdown fontification are reused; missing seams are added, not a second renderer.
+Every supplied event remains in the in-memory journal. The text is its human presentation, not a JSON
+dump: bookkeeping is projected into controls; superseded plans remain journal events but do not render.
+Tool/message/request spans carry their identities even though headings omit sequence numbers.
+The current plan is anchored at its latest update, while a tool keeps its original start across updates.
+List metadata maps explicit physical line numbers to full session identities rather than parsing padded
+or clipped text; its exited-session group line is not an actionable session.
+Column caps in frame cells are SESSION 18, WAIT 4, STATE 10, HARNESS 12, MODEL 20,
+HOST 16, PROJECT 24 and ACTIVITY 48. Truncation and padding reuse Edwin's display character widths,
+including wide/combining Unicode; display clipping never changes the full structural identity.
 History-only reconnects now include current structural metadata. Large live changes publish bounded
 sequenced chunks, yielding between them rather than overflowing a frame's outbound queue. A pre-kill
 buffer hook can veto teardown when draft persistence fails, preserving the acknowledged journal.
@@ -1100,7 +1119,8 @@ fragments and recheck at most token-length-minus-one old characters for cross-ch
 computing the suffix patch. Whole-buffer publication is serialized, including explicit list opens; at most
 one superseding list redraw waits behind an active redraw. View generations reject post-kill work.
 
-Measured in the final full run on this shared machine: 8,192 events / 25,141,248 content bytes replayed and
+Measured before this rendering follow-up (with the old long-message folding policy), in the final full run:
+8,192 events / 25,141,248 content bytes replayed and
 rendered in 18.36 ms in the pure journal fold (5 visible folded lines). A real daemon + frame opened
 1,201 events with 1,200 tool folds in 165.3 ms; after live updates including 3 MiB of raw tool output it held
 1,205 events / 9,998,712 rendered bytes without reconnect. Off-tail point stayed put and no undo group
@@ -1123,7 +1143,9 @@ file; embedding reads an explicitly chosen Edwin-side file/buffer/region.
 `agent-prompt-save`, `agent-prompt-load`, `agent-session-recall`.
 
 Sessions list, Motion state: `RET` open, `g r`/`r` refresh, `a` start, `c` cancel, `D` remove (confirm),
-`p` compose, `!` answer pending, `q` quit. Transcript, Motion state: `TAB` fold, `] ]`/`[ [` next/previous
+`p` compose, `!` answer pending, `e` toggle extra exited sessions (`TAB` on its group line), `q` quit.
+Host pages call `await Ed.agentSessions.rpc('agent-sessions-toggle-exited')` and receive the canonical
+list buffer id; this changes presentation only, never a hub session. Transcript, Motion state: `TAB` fold, `] ]`/`[ [` next/previous
 prompt, `RET` visit tool location, `d` diff, `p` compose, `P` quick prompt, `R` recall, `c` cancel,
 `!` answer, `m` mode, `o` config option, `v` revive, `g r` refresh, `q` quit. Prompt minor mode takes
 precedence over Markdown: `C-c C-c` send, `C-c C-k` abandon, `C-c C-p` preview. Other prompt-engineering
@@ -1180,7 +1202,9 @@ resolved requests report `Request is already resolved or no longer pending; refr
 Other hub refusals retain their HTTP status/code in the redacted report.
 
 `Ed.agentSessions.state(buffer)` synchronously reads the latest daemon metadata snapshot:
-`{sid, bufferId, epoch, state, steerable, connection, modeId, modes, configOptions, pending}`.
+`{sid, bufferId, epoch, state, steerable, connection, modeId, modes, configOptions, usage, sessionInfo, pending}`.
+`usage` and `sessionInfo` are the latest main-session update payloads without `sessionUpdate`,
+or `null` when unavailable; they are also under `buffer.meta.locals.agentSession`.
 `pending` contains full permission options or elicitation request/schema/URL plus `req`, `kind` and
 `epoch`, not just the registry's short title. Treat snapshots as read-only. Incarnation changes clear
 obsolete choices; disconnected/removed/observed sessions are not steerable. `connection` is the daemon's
@@ -1228,6 +1252,8 @@ the next journal append resumes tail following if point was at the tail.
 | AS-C16 | Force receipt persistence to fail after an acknowledged early multi-send destination. It is reported as sent, removed immediately in memory and never reposted or offered by explicit retarget during this daemon's lifetime. Other destinations remain available. |
 | AS-C17 | Concurrent attached-list replacements keep displayed rows identical to structural command targets. Fail the final journal GET once without another summary: automatic GET retry catches up. A same-incarnation lower head resets transcript/facts. Truncated/later pending snapshots mark lost resolutions unavailable rather than actionable. |
 | AS-C18 | Kill list, observed and transcript views during in-flight reads: later completions/summaries do not recreate them, and reopening explicitly works. Repeated 503 SSE responses with ongoing bytes close immediately; shutdown closes all outstanding attempts. |
+| AS-C19 | A truncated real-shaped fixture begins mid-tool, includes bookkeeping between messages, interleaves tool/plan updates and ends with a long assistant answer. Assert open prompts/messages/current plans; folded thoughts/tools/unknown JSON; no superseded plan/bookkeeping/sequence headings; safe orphan title; separated command/output; start ordering; quiet end/reasons and one-line truncation. Verify usage/session-info controls and structural offsets/patches. |
+| AS-C20 | A real-shaped list fixture has a multi-paragraph activity, unknown/missing models, waiting/live/exited sessions and more than five exited rows. Assert whitespace/ellipsis/column boundaries/empty WAIT, wide/combining Unicode alignment, sort order, default collapse and named/key expansion, and row actions using the correct full identity after redraws. A finished turn, including a reported `done` record without an end marker, is not an exited session. |
 
 ### Read-only live-hub inspection
 
@@ -1258,6 +1284,19 @@ partial normal output or dumped headers/response bodies. Hub I/O has a 120-secon
 inspection performs only GETs; pending permissions and elicitations are printed, never answered.
 
 ### Verification record
+
+**Real-shaped rendering follow-up (AS-C19/C20):** the directed list suite
+(`node --test --test-concurrency=1 test/agent-sessions.test.mts`) passes 24/24.
+`tsc -p .`, `tsc -p src` and `tsc -p native/js` each exit 0.
+A disposable driver opened the shared fixtures through a real daemon and served model frame,
+captured the first 40 default-folded transcript lines and the aligned/default-collapsed list,
+expanded exited rows through the host RPC and opened the correct hidden row with RET.
+Both actual `tools/agent-live.mts` paths succeeded against the stub without changes to the tool.
+The driver and its private state were removed. Final output:
+
+```text
+render smoke: 40 default transcript lines; exited toggle + RET opened finished-8; 38 HTTP requests, all GET; both live CLI paths succeeded; no token in output/logs
+```
 
 **Read-only live tool (manual stub check):** `tsc -p .` exits 0, including `tools/*.mts`.
 A disposable driver ran the actual CLI against `test/fake-agent-hub.mts`, outside the suite runner:
@@ -1405,12 +1444,14 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
 
 - **Connection:** HTTP in edwind, not `server/hub.mts`. The socket protocol is host-local and deliberately
   process-only; the mesh API provides remote-host reach, observed records and the shared journal authority.
-- **Replay ceiling (DESIGN §3.4.4):** `/events` truncates above ACP_REPLAY_MAX and has no backward cursor
-  or before/limit parameter. Edwin retains supplied events in memory and labels `truncated/from`; a first
-  open cannot recover withheld bytes. Its 32 MiB HTTP ceiling can also refuse an oversized replay response;
-  per-event rendered clipping is visible. No disk-backed store is added. Complete historical recovery and
-  bounded paging need hub support. Reported sessions expose only their bounded tail, not transcriptPath
-  contents over this API. No filesystem or direct-agent workaround invents a second record.
+- **Replay ceiling (DESIGN §3.4.4):** `/events` replays at most 4 MiB and has no backward cursor or
+  before/limit parameter. Edwin retains supplied events in memory and labels `truncated/from`; a first
+  open cannot recover withheld bytes. [Workbench #55](https://github.com/yathxyz/workbench/issues/55)
+  tracks backward paging. When the hub supports it, the plain history-unavailable line is the place to
+  load earlier history; no loader is built before that API exists. Edwin’s 32 MiB HTTP ceiling can also
+  refuse an oversized response; per-event rendered clipping is visible. No disk-backed store is added.
+  Reported sessions expose only their bounded tail, not transcriptPath contents over this API.
+  No filesystem or direct-agent workaround invents a second record.
   These are per-unit bounds, not a total-memory cap: retained history for an open journal still grows
   in memory. Killing its daemon buffer releases that replay/presentation state.
 - **Incarnation precondition:** permission/elicitation APIs already enforce epoch. Draft sends recheck the
@@ -1431,8 +1472,8 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
   must not rebind an existing credential file to an arbitrary HTTP origin. Changing configuration thereafter
   requires the owner's normal daemon restart; the client never restarts it.
 - **Model availability:** summaries do not contain the model. A lightweight journal facts cursor follows
-  advertised model config options for list rows; observed model data wins when supplied. `unknown` means
-  no model was advertised in the available record, not a guessed agent default.
+  advertised model config options for list rows; observed model data wins when supplied. An absent or
+  literal `unknown` model renders as an empty cell, not a guessed agent default.
 - **Folds:** existing buffer-local folds are reused, including sharing between cards/windows inside one
   runtime. Separate terminal/browser runtimes have independent choices. No second daemon transcript.
 

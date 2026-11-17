@@ -5,7 +5,7 @@ export interface TranscriptReply { epoch: number; head: number; from: number; re
 export interface TranscriptPatch { start: number; remove: number; text: string; previousHead: number; previousEpoch: number }
 interface TranscriptControls {
   sid: string; epoch: number; head: number;
-  modes: unknown; modeId: unknown; configOptions: unknown; promptCapabilities: unknown; availableCommands: unknown; usage: unknown;
+  modes: unknown; modeId: unknown; configOptions: unknown; promptCapabilities: unknown; availableCommands: unknown; usage: unknown; sessionInfo: unknown;
   pending: Wire[]; resolved: Wire[];
 }
 interface RenderedTranscript extends TranscriptControls {
@@ -16,17 +16,20 @@ interface RenderedBlock { text: string; span: Wire; bodyEnd: number; append?: { 
 interface Block {
   id: string; kind: string; seq: number; lastSeq: number; events: Wire[];
   role?: string; variant?: string; messageId?: unknown; sessionId?: unknown;
-  tool?: Wire; current?: Wire; rendered?: RenderedBlock; previous?: RenderedBlock;
+  tool?: Wire; startReplayed?: boolean; current?: Wire; rendered?: RenderedBlock; previous?: RenderedBlock;
 }
 interface RequestState extends Wire { req: number; kind: string; status: string }
 const object = (v: unknown): v is Wire => !!v && typeof v === 'object' && !Array.isArray(v);
 const json = (v: unknown) => JSON.stringify(v, null, 2) ?? String(v);
 const line = (v: unknown) => String(v ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
 const own = (v: Wire, k: string) => Object.prototype.hasOwnProperty.call(v, k);
-const LONG_CHARS = 4000, LONG_LINES = 12;
 const EVENT_LIMIT = 1024 * 1024;
 const TRUNCATION = '\n[EVENT CONTENT TRUNCATED: rendered event limit is 1048576 UTF-16 code units]\n';
 const UNAVAILABLE = 'no longer pending; resolution unavailable';
+const REQUEST_LABELS: Record<string, string> = {
+  permission: 'Permission', elicitation: 'Question', permission_resolved: 'Permission resolved',
+  elicitation_resolved: 'Question resolved', elicitation_complete: 'Question complete',
+};
 
 /* A single event shares one budget across its literal content, JSON, heading and current-plan summary.
    The journal itself is unchanged. An incomplete diff is visible as text, not advertised as a full diff. */
@@ -73,11 +76,28 @@ function contentText(blocks: unknown[], out: EventText): void {
     } else out.put('\n' + json(c) + '\n');
   }
 }
-function long(text: string) {
-  if (text.length > LONG_CHARS) return true;
-  let n = 0;
-  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10 && ++n >= LONG_LINES) return true;
-  return false;
+function toolText(u: Wire, out: EventText): void {
+  const contents = Array.isArray(u.content) ? u.content : [];
+  const first = contents[0], firstText = object(first) && first.type === 'content' ? first.content : first;
+  const initialText = object(firstText) && firstText.type === 'text' && typeof firstText.text === 'string' ? firstText.text : null;
+  const command = object(u.rawInput) && typeof u.rawInput.command === 'string' ? u.rawInput.command
+    : initialText?.startsWith('$ ') ? initialText.slice(2).trimEnd() : null;
+  const echoed = command !== null && initialText !== null
+    && (initialText.trimEnd() === command.trimEnd() || initialText.trimEnd() === `$ ${command.trimEnd()}`);
+  if (command !== null) {
+    let width = 3;
+    for (const run of command.matchAll(/`+/g)) width = Math.max(width, run[0].length + 1);
+    const fence = '`'.repeat(width);
+    out.put(`${fence}sh\n${command}\n${fence}\n`);
+  }
+  if (own(u, 'rawInput') && (command === null || u.rawInput != null && (!object(u.rawInput) || Object.keys(u.rawInput).some(key => key !== 'command'))))
+    out.put(`Input:\n${json(u.rawInput)}\n`);
+  for (let i = echoed ? 1 : 0; i < contents.length && !out.truncated; i++) {
+    contentText([contents[i]], out);
+    out.put('\n');
+  }
+  if (typeof u.rawOutput === 'string') { out.put(u.rawOutput); out.put('\n'); }
+  else if (own(u, 'rawOutput')) out.put(json(u.rawOutput) + '\n');
 }
 function shifted(span: Wire, start: number): Wire {
   const result: Wire = { ...span, start, end: span.end + start };
@@ -109,6 +129,7 @@ export class Transcript {
   private promptCapabilities: unknown = null;
   private availableCommands: unknown = null;
   private usage: unknown = null;
+  private sessionInfo: unknown = null;
   private from = 1;
   private truncated = false;
   private gaps: Wire[] = [];
@@ -130,7 +151,7 @@ export class Transcript {
   }
   private clearFold() {
     this.blocks = []; this.tools.clear(); this.requests.clear(); this.requestBlocks.clear(); this.plans.clear(); this.messageBlock = null;
-    this.modes = this.modeId = this.configOptions = this.promptCapabilities = this.availableCommands = this.usage = null;
+    this.modes = this.modeId = this.configOptions = this.promptCapabilities = this.availableCommands = this.usage = this.sessionInfo = null;
   }
   apply(reply: TranscriptReply): void {
     if (reply.reset || reply.epoch !== this.epoch) this.reset(reply.epoch);
@@ -190,10 +211,13 @@ export class Transcript {
     else if (object(v.agentCapabilities) && own(v.agentCapabilities, 'promptCapabilities')) this.promptCapabilities = v.agentCapabilities.promptCapabilities;
     if (own(v, 'availableCommands')) this.availableCommands = v.availableCommands;
     if (own(v, 'usage')) this.usage = v.usage;
+    if (own(v, 'sessionInfo')) this.sessionInfo = v.sessionInfo;
   }
   private fold(e: Wire) {
     const lastMessage = this.messageBlock; this.messageBlock = null;
-    if (e.e === 'session' || e.e === 'initialize' || e.e === 'mode') this.setup(e);
+    if (e.e === 'session' || e.e === 'initialize' || e.e === 'mode') {
+      this.setup(e); this.messageBlock = lastMessage; return;
+    }
     if (e.e === 'prompt') { this.block(e, 'prompt'); return; }
     if (e.e === 'permission' || e.e === 'elicitation') {
       const req: RequestState = { ...e, req: e.seq, kind: e.e, status: this.pendingStatus(e.seq, e.e), event: e, epoch: this.epoch };
@@ -226,7 +250,7 @@ export class Transcript {
       if (variant === 'tool_call' || variant === 'tool_call_update') {
         const key = JSON.stringify([e.sessionId ?? null, u.toolCallId ?? e.seq]);
         let b = this.tools.get(key);
-        if (!b) { b = this.block(e, 'tool'); b.tool = {}; this.tools.set(key, b); }
+        if (!b) { b = this.block(e, 'tool'); b.tool = {}; b.startReplayed = variant === 'tool_call'; this.tools.set(key, b); }
         else b.events.push(e);
         b.rendered = undefined; b.lastSeq = e.seq;
         for (const k of Object.keys(u)) if (u[k] !== null && u[k] !== undefined) b.tool![k] = u[k];
@@ -234,13 +258,23 @@ export class Transcript {
       }
       if (variant === 'plan') {
         const key = e.sessionId || '';
-        let b = this.plans.get(key);
-        if (!b) { b = this.block(e, 'plan'); this.plans.set(key, b); } else b.events.push(e);
-        b.rendered = undefined; b.lastSeq = e.seq; b.current = u; return;
+        const previous = this.plans.get(key);
+        if (previous) this.blocks.splice(this.blocks.indexOf(previous), 1);
+        const b = this.block(e, 'plan');
+        this.plans.set(key, b); b.current = u; return;
       }
-      if (!e.sessionId) {
-        this.setup(u);
-        if (variant === 'current_mode_update' && own(u, 'currentModeId')) this.setup({ modeId: u.currentModeId });
+      if (variant === 'usage_update' || variant === 'session_info_update' || variant === 'current_mode_update'
+        || variant === 'config_option_update' || variant === 'available_commands_update') {
+        if (!e.sessionId) {
+          this.setup(u);
+          if (variant === 'current_mode_update' && own(u, 'currentModeId')) this.setup({ modeId: u.currentModeId });
+          if (variant === 'usage_update' || variant === 'session_info_update') {
+            const { sessionUpdate: _, ...payload } = u;
+            if (variant === 'usage_update') this.usage = payload;
+            else this.sessionInfo = payload;
+          }
+        }
+        this.messageBlock = lastMessage; return;
       }
       this.block(e, typeof variant === 'string' ? variant : 'update'); return;
     }
@@ -252,13 +286,13 @@ export class Transcript {
     const out = new EventText(budget);
     if (kind === 'prompt') contentText(Array.isArray(e.prompt) ? e.prompt : [e.prompt], out);
     else if (kind === 'message' || kind === 'thought') contentText([e.update.content], out);
-    else if (kind === 'tool') {
-      const u = object(e.update) ? e.update : e;
-      out.put(`### Update #${e.seq}\n`);
-      if (Array.isArray(u.content)) { contentText(u.content, out); out.put('\n'); }
-      if (typeof u.rawOutput === 'string') { out.put(u.rawOutput); out.put('\n'); }
-      if (!out.truncated) { out.put(json(e)); out.put('\n\n'); }
-    } else { out.put(json(e)); if (kind === 'plan') out.put('\n'); }
+    else if (kind === 'tool') toolText(object(e.update) ? e.update : e, out);
+    else if (kind === 'plan') {
+      for (const entry of Array.isArray(e.update.entries) ? e.update.entries : []) {
+        if (out.truncated) break;
+        out.put(`- [${line(entry.status || 'pending')}] ${line(entry.content ?? entry.title ?? '')}${entry.priority ? ` (${line(entry.priority)})` : ''}\n`);
+      }
+    } else out.put(json(e));
     const fragment = out.finish();
     if (cache) cache.set(key, fragment); else this.fragments.set(e, new Map([[key, fragment]]));
     return fragment;
@@ -279,43 +313,50 @@ export class Transcript {
       const text = previous.text.slice(0, start) + this.clean(previous.text.slice(start, previous.bodyEnd) + added + newline + '\n');
       const foldEnd = bodyEnd + newline.length - 1;
       const span = { ...previous.span, lastSeq: b.lastSeq, eventCount: b.events.length, end: text.length,
-        foldStart: bodyStart - 1, foldEnd, folded: previous.span.folded || long(text.slice(bodyStart, foldEnd + 1)) };
+        foldStart: bodyStart - 1, foldEnd, folded: previous.span.folded };
       return { text, span, bodyEnd, append: { span: previous.span, start } };
     }
     const span: Wire = { id: b.id, seq: b.seq, lastSeq: b.lastSeq, kind: b.kind, start: 0, end: 0, eventCount: b.events.length };
-    let title: string, folded = false, prefix = '';
-    if (b.kind === 'prompt') { title = `Prompt #${b.seq}`; span.hasBlocks = true; }
+    if (b.kind === 'turn_end' || b.kind === 'turn_error') {
+      const e = b.events[0], error = b.kind === 'turn_error';
+      const reason = e.stopReason ?? e.reason ?? (error ? e.code ?? 'error' : 'unknown');
+      const detail = typeof e.error === 'string' ? e.error : e.error?.message ?? e.message;
+      const out = new EventText(EVENT_LIMIT - 2);
+      out.put(`${error ? 'Turn error' : 'Turn ended'}: ${line(reason)}${detail ? ` — ${line(detail)}` : ''}`);
+      const text = this.clean(out.finish().text + '\n\n');
+      span.end = text.length;
+      return { text, span, bodyEnd: text.length - 2 };
+    }
+    let title: string, folded = false;
+    if (b.kind === 'prompt') { title = 'Prompt'; span.hasBlocks = true; }
     else if (b.variant) {
-      title = `${b.kind === 'thought' ? 'Thought' : b.role === 'user' ? 'User' : 'Assistant'} #${b.seq}`;
+      title = b.kind === 'thought' ? 'Thought' : b.role === 'user' ? 'User' : 'Assistant';
       span.role = b.role; span.messageId = b.messageId ?? null;
+      folded = b.kind === 'thought';
     } else if (b.tool) {
       const t = b.tool, locations = Array.isArray(t.locations) ? t.locations : [];
-      title = `Tool: ${line(t.title || t.name || t.kind || t.toolCallId || 'unknown')} [${line(t.status || 'pending')}] #${b.seq}`;
+      const status = t.status || 'pending', marker = status === 'completed' ? 'done' : status === 'in_progress' ? 'running' : status;
+      const name = b.startReplayed ? t.title || t.name || t.kind || 'tool' : t.kind || 'tool';
+      title = `${line(name)} [${line(marker)}]${b.startReplayed ? '' : ' — start not replayed'}`;
       if (locations.length) title += ' — ' + locations.map((l: Wire) => `${line(l.path)}${typeof l.line === 'number' ? ':' + l.line : ''}`).join(', ');
       folded = true;
-      Object.assign(span, { toolCallId: t.toolCallId, title: t.title, status: t.status || 'pending', toolKind: t.kind, locations, diffs: [] });
-    } else if (b.kind === 'plan' && b.current) { title = `Plan (current) #${b.lastSeq}`; folded = true; }
+      Object.assign(span, { toolCallId: t.toolCallId, title: t.title, status, toolKind: t.kind, locations, diffs: [] });
+    } else if (b.kind === 'plan' && b.current) title = 'Current plan';
     else {
       const req = this.requests.get(b.seq);
-      title = `${line(b.kind)}${req ? ` [${req.status === 'unavailable' ? UNAVAILABLE : req.status}]` : ''} #${b.seq}`;
+      const known = own(REQUEST_LABELS, b.kind);
+      title = `${known ? REQUEST_LABELS[b.kind] : line(b.kind)}${req ? ` [${req.status === 'unavailable' ? UNAVAILABLE : req.status}]` : ''}`;
+      folded = !known;
       if (req) Object.assign(span, { req: req.req, status: req.status, epoch: req.epoch });
     }
     const heading = new EventText(EVENT_LIMIT - TRUNCATION.length - 2);
     heading.put(`## ${title}\n`);
     const header = heading.finish().text;
-    if (b.kind === 'plan' && b.current) {
-      const summary = new EventText(EVENT_LIMIT - header.length - 2 - TRUNCATION.length);
-      for (const e of Array.isArray(b.current.entries) ? b.current.entries : []) {
-        if (summary.truncated) break;
-        summary.put(`- [${line(e.status || 'pending')}] ${line(e.content ?? e.title ?? '')}${e.priority ? ` (${line(e.priority)})` : ''}\n`);
-      }
-      prefix = summary.finish().text;
-    }
     const parts: string[] = [], diffs: Wire[] = [];
     const headingEvent = b.tool || b.current ? b.events.length - 1 : 0;
     let bodyLength = 0;
     for (let i = 0; i < b.events.length; i++) {
-      const overhead = (i === headingEvent ? header.length + 2 : 0) + (i === b.events.length - 1 ? prefix.length : 0);
+      const overhead = i === headingEvent ? header.length + 2 : 0;
       const fragment = this.eventText(b.events[i], b.kind, EVENT_LIMIT - overhead);
       for (const d of fragment.diffs) {
         const diff = { ...d };
@@ -325,11 +366,10 @@ export class Transcript {
       parts.push(fragment.text); bodyLength += fragment.text.length;
     }
     const body = parts.join('');
-    const text = this.clean(header + prefix + body + (body.endsWith('\n') ? '' : '\n') + '\n');
-    const bodyStart = header.length + prefix.length;
+    const text = this.clean(header + body + (body.endsWith('\n') ? '' : '\n') + '\n');
+    const bodyStart = header.length;
     const foldEnd = bodyStart + body.length + (body.endsWith('\n') ? 0 : 1) - 1;
     if (foldEnd > bodyStart - 1) {
-      if (!folded) folded = b.kind === 'thought' || long(text.slice(bodyStart, foldEnd + 1));
       Object.assign(span, { foldStart: bodyStart - 1, foldEnd, folded });
     }
     if (span.diffs) span.diffs = diffs.map(d => {
@@ -350,16 +390,13 @@ export class Transcript {
     return {
       sid: this.sid, epoch: this.epoch, head: this.head,
       modes: this.modes, modeId: this.modeId, configOptions: this.configOptions, promptCapabilities: this.promptCapabilities,
-      availableCommands: this.availableCommands, usage: this.usage, pending, resolved,
+      availableCommands: this.availableCommands, usage: this.usage, sessionInfo: this.sessionInfo, pending, resolved,
     };
   }
   private header() {
-    const text = [`# Agent: ${line(this.sid)}\n\n`];
-    if (this.truncated) {
-      text.push(`> HISTORY TRUNCATED BY HUB: replay starts at/from seq ${this.from}; earlier or intervening events may be unavailable.\n> The API has a bounded replay and no backward pagination. All supplied events are retained here.\n`);
-      for (const g of this.gaps) text.push(`> Truncated replay after #${g.after}: from #${g.from}, head #${g.head}.\n`);
-      text.push('\n');
-    }
+    const text: string[] = [];
+    if (this.truncated) text.push(`Earlier history unavailable from hub; transcript starts at event ${this.from}.\n\n`);
+    text.push(`# Agent: ${line(this.sid)}\n\n`);
     return this.clean(text.join(''));
   }
   private build(): RenderedTranscript {
