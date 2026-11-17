@@ -287,6 +287,15 @@ in
   # remote, sshCommand, askPass and credential helpers running nothing, the user's sshCommand and helper running
   # instead, no prompt waited for; a detached HEAD, a local upstream, a second operation (also while the first
   # readies), a jj workspace and the replay refused.
+  # jj's remotes and bookmarks (test/vc-jj-remote.test.mts), against local bare remotes: f f and f a (jj git fetch),
+  # b c with names that would be switches, b s asking before a backwards or sideways move, p p pushing the
+  # bookmarks at point (a new one tracked) and asking before a sideways or backward move on the remote (n pushes
+  # nothing), p c, b r, b d asking and p d pushing the deletion after naming it, b t and b u; the repository's own
+  # receivepack and
+  # uploadpack refused (receivepack also in a non-colocated workspace, a secondary one and one whose .jj/repo is a
+  # symlink), its sshCommand and ext:: remote running
+  # nothing, the user's sshCommand instead, fetch's reference-transaction hook off, each with plain jj as the
+  # control; a second remote command while a push runs, and the replay, refused.
   # fast-check from the dev dependencies, for this suite alone: the edwind suites keep edwind's own module
   # resolution.
   edwin-vc =
@@ -301,7 +310,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts
+        node --test ${edwin}/edwin/test/vc.test.mts ${edwin}/edwin/test/vc-diff.test.mts ${edwin}/edwin/test/vc-git.test.mts ${edwin}/edwin/test/vc-stage.test.mts ${edwin}/edwin/test/vc-commit.test.mts ${edwin}/edwin/test/vc-log.test.mts ${edwin}/edwin/test/vc-jj.test.mts ${edwin}/edwin/test/vc-jj-ops.test.mts ${edwin}/edwin/test/vc-jj-rewrite.test.mts ${edwin}/edwin/test/vc-history.test.mts ${edwin}/edwin/test/vc-remote.test.mts ${edwin}/edwin/test/vc-jj-remote.test.mts
         touch $out
       '';
 

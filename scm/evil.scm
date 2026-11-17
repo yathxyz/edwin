@@ -1619,6 +1619,26 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
               "u" 'jj-undo
               "C-r" 'jj-redo))
           '(jj-log-mode jj-change-mode))
+;; Remotes and bookmarks, with the prefixes git's buffers use: f (fetch) f
+;; from jj's remotes and a from all, p (push) p the bookmarks on the change
+;; at point, c the change under a new bookmark, d the deletions; b, majutsu's
+;; bookmark transient's suffixes: c create, s set, r rename, d delete, f
+;; forget, t track, u untrack.
+(for-each (lambda (mode)
+            (evil-define-key 'motion mode
+              "f f" 'jj-git-fetch
+              "f a" 'jj-git-fetch-all
+              "p p" 'jj-git-push
+              "p c" 'jj-git-push-change
+              "p d" 'jj-git-push-deleted
+              "b c" 'jj-bookmark-create
+              "b s" 'jj-bookmark-set
+              "b r" 'jj-bookmark-rename
+              "b d" 'jj-bookmark-delete
+              "b f" 'jj-bookmark-forget
+              "b t" 'jj-bookmark-track
+              "b u" 'jj-bookmark-untrack))
+          '(jj-log-mode jj-change-mode))
 ;; S, majutsu's too, splits the file at point off the change the view
 ;; shows, and in Visual state the files selected: bound in Visual state too.
 (evil-define-key '(motion visual) 'jj-change-mode

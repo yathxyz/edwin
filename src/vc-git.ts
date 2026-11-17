@@ -1303,7 +1303,7 @@ CMD('git-tag-delete', '', '', 'Delete a tag (t x), after asking.', () => history
    *vc-process* as it comes. It runs once the command has ended, so the frame takes keys meanwhile; one at a time
    in a repository. */
 const REMOTE = { timeout: 1800000, maxBytes: MAX_BYTES, lossy: true, progress: true };
-const JJ_REMOTE = 'jj fetches and pushes with its own commands; SPC g G\'s status buffer works on its git repository';
+const JJ_REMOTE = 'jj fetches and pushes with its own commands: f f, f a, p p, p c and p d in jj\'s log (SPC g J); SPC g G\'s status buffer works on its git repository';
 /* what runs, by repository root */
 const remoteBusy = new Map<string, string>();
 

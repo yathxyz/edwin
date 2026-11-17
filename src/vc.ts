@@ -159,6 +159,8 @@ const GIT_WRITE = new Set([...GIT_HOOKED, 'add', 'apply', 'bisect', 'branch', 'c
 /* git subcommands that reach a remote: no program the repository's own configuration names for the transport
    runs (transportOverrides), nor the ext:: transport (a command line as a URL), whatever protocol.allow says. */
 const GIT_TRANSPORT = new Set(['fetch', 'pull', 'push', 'ls-remote', 'remote']);
+/* jj git subcommands that reach a remote through a git jj starts: they run with jjTransportEnv. */
+const JJ_TRANSPORT = new Set(['fetch', 'push']);
 /* git subcommands that run a program the repository's configuration names and no setting turns off: difftool's
    and mergetool's tool commands, help's man viewer, the web browser of instaweb and web--browse. Refused. */
 const GIT_REFUSED = new Set(['difftool', 'mergetool', 'help', 'instaweb', 'web--browse']);
@@ -366,14 +368,14 @@ async function repoOverrides(r: VcRepo): Promise<string[]> {
    off); and a remote whose name starts with `-`, or a remote group (remotes.GROUP) holding such a name:
    `fetch --all`, and a fetch or a push of a group (or of a remote that a group of the same name shadows), start a
    git per name with no `--end-of-options` before it, which takes the name as a switch (`--upload-pack=CMD`). */
-async function transportOverrides(r: VcRepo): Promise<Record<string, string>> {
+async function transportOverrides(r: VcRepo, gitDir: string | null = null): Promise<[string, string][]> {
   const out: string[] = [];
-  const p = spawnLogged(r, ['git', ...GIT_BASE, '-c', 'core.hooksPath=/dev/null', 'config', '--show-scope', '--null', '--get-regexp',
+  const p = spawnLogged(r, ['git', ...GIT_BASE, '-c', 'core.hooksPath=/dev/null', ...(gitDir ? ['--git-dir=' + gitDir] : []), 'config', '--show-scope', '--null', '--get-regexp',
     '^(credential\\.(.+\\.)?helper|core\\.(sshcommand|askpass|gitproxy|alternaterefscommand)|remote\\..+\\.(uploadpack|receivepack|vcs)|remote\\.-.*|remotes\\..+)$'],
   ENV.git, { maxBytes: 1024 * 1024, onOut: s => { out.push(s); } });
   p.closeStdin();
   const x = await p.exit;
-  if (x.code === 1) return {};   // none
+  if (x.code === 1) return [];   // none
   if (x.code !== 0 || x.truncated) signal('process-error', `git config could not list ${r.root}'s transport programs: see ${LOG}`);
   const parts = out.join('').split('\0'), helpers: [string, string][] = [], set: [string, string][] = [];
   const user: Record<string, string> = {}, repoSets = new Set<string>();
@@ -410,25 +412,73 @@ async function transportOverrides(r: VcRepo): Promise<Record<string, string>> {
   if (repoHelper) set.push(['credential.helper', ''], ...helpers);
   if (repoSets.has('core.sshcommand')) set.push(['core.sshCommand', user['core.sshcommand'] ?? 'ssh']);
   if (repoSets.has('core.askpass')) set.push(['core.askPass', user['core.askpass'] ?? '']);
+  return set;
+}
+/* SET as a child's environment changes, command scope (GIT_CONFIG_COUNT, GIT_CONFIG_KEY_N, GIT_CONFIG_VALUE_N);
+   none for none. They replace any GIT_CONFIG_COUNT Edwin was started with, for that child alone. */
+function configEnv(set: [string, string][]): Record<string, string> {
   if (!set.length) return {};
-  /* (this replaces any GIT_CONFIG_COUNT Edwin was started with, for this child alone) */
   const env: Record<string, string> = { GIT_CONFIG_COUNT: String(set.length) };
   set.forEach(([k, v], n) => { env['GIT_CONFIG_KEY_' + n] = k; env['GIT_CONFIG_VALUE_' + n] = v; });
   return env;
+}
+
+/* The absolute path P as the file system resolves it, as jj does: each `..` taken from its directory's true
+   name, every symbolic link followed. (The host's names drop `..` as text: with ROOT/.jj a link, the text of
+   ../../w/.jj/repo under it names another directory than the one jj reads.) A host with no files reads
+   nothing there: P as it is. */
+function onDisk(p: string): string {
+  const f = Ed.host.files;
+  if (!f) return p;
+  let at = '/';
+  for (const seg of p.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { at = f.truename(at); at = at.slice(0, at.lastIndexOf('/')) || '/'; }
+    else at = inDir(at, seg);
+  }
+  return f.truename(at);
+}
+/* A jj workspace's repository directory, by its true name: .jj/repo, or the directory .jj/repo names in a
+   secondary workspace. */
+function jjRepoDir(r: VcRepo): string {
+  const jj = inDir(r.root, '.jj'), repo = inDir(jj, 'repo'), e = entryOf(repo);
+  if (e && e.kind === 'file') {
+    const t = jjPathIn(repo, `${r.root}'s .jj/repo names no jj repository Edwin reads as jj does`);
+    return onDisk(t.startsWith('/') ? t : inDir(jj, t));
+  }
+  return onDisk(repo);
+}
+/* The path in FILE (a secondary workspace's .jj/repo, a store's git_target), which jj takes byte for byte, with
+   no trimming. One that is empty, has a control character, or a blank at either end is refused with WHY, never
+   stripped: stripped, it would name another directory than the one jj goes to. */
+function jjPathIn(file: string, why: string): string {
+  const t = Ed.host.files!.read(file) || '';
+  if (!t || /[\u0000-\u001f\u007f�]/.test(t) || /^\s|\s$/.test(t)) signal('user-error', why);
+  return t;
+}
+/* The git repository a jj workspace keeps its commits in, read from the file system as jj reads it, with no
+   process: the store's git_target, a path relative to the store (`../../../.git` when colocated). */
+function jjGitDir(r: VcRepo): string {
+  const store = inDir(jjRepoDir(r), 'store');
+  const t = jjPathIn(inDir(store, 'git_target'), `${r.root}'s jj repository names no git repository it keeps its commits in that Edwin reads as jj does: jj git fetch and push need one`);
+  /* as it is, its `..` left to git to resolve on disk as jj's git does, through any symlink on the way */
+  return t.startsWith('/') ? t : inDir(store, t);
+}
+/* What jj's git fetch and push run with, as environment changes of jj, which passes them on to the git it starts
+   for the transport (jj takes no `-c` for it): no ext:: transport, no submodule fetched or pushed, for a fetch no
+   hook (decision 12: commit, push and the sequencer alone run them), and the transport's programs the user's
+   (transportOverrides, read from the git repository jj uses), the refusals of its programs included. */
+async function jjTransportEnv(r: VcRepo, sub: string): Promise<Record<string, string>> {
+  const set: [string, string][] = [['protocol.ext.allow', 'never'], ['fetch.recurseSubmodules', 'false'], ['push.recurseSubmodules', 'no']];
+  if (sub === 'fetch') set.push(['core.hooksPath', '/dev/null']);
+  return configEnv([...set, ...await transportOverrides(r, jjGitDir(r))]);
 }
 
 /* The jj settings a repository brings in its own .jj that jj would adopt as the user's for good (jj moves
    .jj/repo/config.toml and .jj/workspace-config.toml beside the user's config the first time it runs there,
    when no config id is beside them yet), or null. */
 function jjAdopts(r: VcRepo): string | null {
-  const jj = inDir(r.root, '.jj');
-  let store = inDir(jj, 'repo');
-  const e = entryOf(store);
-  if (e && e.kind === 'file') {
-    /* a secondary workspace: .jj/repo names the repository's store */
-    const t = (Ed.host.files!.read(store) || '').trim();
-    if (t) store = t.startsWith('/') ? t : inDir(jj, t);
-  }
+  const jj = inDir(r.root, '.jj'), store = jjRepoDir(r);
   for (const [conf, id] of [[inDir(store, 'config.toml'), inDir(store, 'config-id')], [inDir(jj, 'workspace-config.toml'), inDir(jj, 'workspace-config-id')]])
     if (entryOf(conf) && !entryOf(id)) return conf;
   return null;
@@ -464,6 +514,7 @@ async function start(r: VcRepo, args: string[], opts: VcRunOptions = {}): Promis
   if (r.vcs === 'jj') {
     const conf = jjAdopts(r);
     if (conf) signal('user-error', `jj not run in ${r.root}: ${conf} is jj settings the repository brings, which jj would take as yours for good (they may run programs). Look at them, then run jj there once in a terminal to take them`);
+    if (args[0] === 'git' && JJ_TRANSPORT.has(args[1])) env = { ...env, ...await jjTransportEnv(r, args[1]) };
     argv = ['jj', ...JJ_BASE, ...args];
   } else {
     /* git runs a builtin by its name; any other name it looks up as alias.NAME, a shell command when it starts
@@ -478,7 +529,7 @@ async function start(r: VcRepo, args: string[], opts: VcRunOptions = {}): Promis
     }
     if (GIT_TRANSPORT.has(sub)) {
       pre.push('-c', 'protocol.ext.allow=never');
-      env = { ...env, ...await transportOverrides(r) };
+      env = { ...env, ...configEnv(await transportOverrides(r)) };
     }
     argv = ['git', ...pre, sub, ...(GIT_AFTER[sub] || []), ...args.slice(1)];
   }

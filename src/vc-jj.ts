@@ -16,7 +16,13 @@
 
    The rewrites (docs/steps.md, "jj rebase, split by file, undo and redo"): r marks the change at point as the
    source and r on another rebases it and its descendants onto that one; S in the change view splits the files at
-   point or selected off into a change of their own; u undoes jj's last operation after saying which, C-r redoes. */
+   point or selected off into a change of their own; u undoes jj's last operation after saying which, C-r redoes.
+
+   Remotes and bookmarks (docs/steps.md, "jj git fetch and push, and bookmarks"): f f and f a fetch, p p pushes the
+   bookmarks on the change at point, p c the change under a new bookmark, p d the deletions, in the background as
+   git's remote commands run; b c, s, r, d, f, t and u create, set, rename, delete, forget, track and untrack a
+   bookmark. A name goes to jj as a string literal (quoted), as `exact:` where jj would take a pattern; the git jj
+   starts for the transport runs with the runner's jjTransportEnv. */
 
 (function () {
 'use strict';
@@ -330,7 +336,10 @@ function jjError(x: EdProcResult): string {
 }
 /* jj ARGS in R (an operation WHAT names), then R's buffers read again and what jj said first said. */
 async function operate(r: VcRepo, args: string[], what: string, input?: string) {
-  const x = await Vc.run(r, args, input === undefined ? OP : { ...OP, input });
+  await settle(r, await Vc.run(r, args, input === undefined ? OP : { ...OP, input }), what);
+}
+/* The end of operation WHAT, X: its failure raised, else R's buffers read again and what jj said first said. */
+async function settle(r: VcRepo, x: EdProcResult, what: string) {
   if (x.code !== 0 || x.error || x.timedOut) signal('process-error', `jj ${what} failed (${x.error || (x.timedOut ? 'it took too long' : `exit ${x.code}`)})${jjError(x)} (see *vc-process*)`);
   await reread(r);
   const said = x.err.split('\n').find(l => l.trim());
@@ -550,6 +559,212 @@ async function jjRedo(): Promise<false> {
   return false;
 }
 
+/* ---------- bookmarks ---------- */
+/* NAME (a bookmark's or a remote's) as a jj string literal, `\` and `"` escaped, so that jj takes it as that name
+   alone: not a switch, not a glob, not a revset. A name with a control character or U+FFFD (read lossily: not
+   UTF-8) is never given to jj. */
+function quoted(name: string): string {
+  if (!name) signal('user-error', 'No name given');
+  if (/[\u0000-\u001f\u007f�]/.test(name)) signal('user-error', `${shown(name)}: Edwin does not give this name to jj; use a terminal`);
+  return `"${name.replace(/[\\"]/g, '\\$&')}"`;
+}
+/* A bookmark as jj's bookmark list gives it: local (remote ''), or a remote's (`NAME@REMOTE`), whether it is
+   there (a deleted local bookmark whose remote one is tracked is listed, not present), tracked, conflicted, and
+   the commit it points to ('' when conflicted). The `git` remote (jj's view of the git repository's own
+   branches) is left out. */
+interface JjBookmark { name: string; remote: string; present: boolean; tracked: boolean; conflict: boolean; commit: string }
+const BOOKMARK_TEMPLATE = record(['name', 'if(remote, remote, "")', 'present', 'tracked', 'conflict', 'if(normal_target, normal_target.commit_id(), "")']);
+async function readBookmarks(r: VcRepo): Promise<JjBookmark[]> {
+  const x = await Vc.run(r, ['bookmark', 'list', '--all-remotes', '-T', BOOKMARK_TEMPLATE], READ);
+  if (x.code !== 0 || x.truncated || x.error || x.timedOut) failed(x, 'jj bookmark list');
+  return x.out.split('\n').filter(l => l).map(l => {
+    const f = fieldsOf(l, 'ssbbbs');
+    if (!f || f[5] !== '' && !COMMIT.test(f[5] as string)) return unreadable('jj bookmark list');
+    const [name, remote, present, tracked, conflict, commit] = f as [string, string, boolean, boolean, boolean, string];
+    return { name, remote, present, tracked, conflict, commit };
+  }).filter(b => b.remote !== 'git');
+}
+const remoteName = (b: JjBookmark) => `${b.name}@${b.remote}`;
+/* A name read at PROMPT, completed from CANDS, DEF first and what RET gives on an empty input; with REQUIRE, one
+   of CANDS. */
+async function askName(prompt: string, cands: string[], def?: string, require = false): Promise<string> {
+  const list = def === undefined ? cands : [def, ...cands.filter(c => c !== def)];
+  const p = def === undefined ? `${prompt}: ` : `${prompt} (${shown(def)}): `;
+  const name = (await Ed.readMini(p, '', list.length ? () => list : null, { def, require, kind: 'jj-bookmark', keepOrder: true, noIndex: true })).trim();
+  if (!name) signal('user-error', 'No bookmark given');
+  if (require && !cands.includes(name)) signal('user-error', `Not one of these: ${shown(name)}`);
+  return name;
+}
+/* The change at point, read, with the bookmarks: those of jj's list, and those on the change. */
+async function atPoint(): Promise<{ r: VcRepo; rev: string; i: JjInfo; all: JjBookmark[]; here: JjBookmark[] }> {
+  const { r, rev } = target();
+  const [i, all] = await Promise.all([readInfo(r, rev), readBookmarks(r)]);
+  return { r, rev, i, all, here: all.filter(b => b.commit === i.commit) };
+}
+const locals = (bs: JjBookmark[]) => bs.filter(b => !b.remote && b.present).map(b => b.name);
+
+/* b c: a new bookmark on the change at point. */
+async function bookmarkCreate(): Promise<false> {
+  const { r, rev, i } = await atPoint();
+  const name = (await Ed.readMini(`Create bookmark at ${named(i)}: `, '', null, { kind: 'jj-bookmark-name' })).trim();
+  await operate(r, ['bookmark', 'create', '-r', rev, '--', quoted(name)], 'bookmark create');
+  return false;
+}
+/* b s: a bookmark, existing or new, set to the change at point; moving one backwards or sideways (off the
+   change's ancestors) only after asking. */
+async function bookmarkSet(): Promise<false> {
+  const { r, rev, i, all, here } = await atPoint();
+  const name = await askName(`Set bookmark to ${named(i)}`, locals(all).filter(n => !here.some(b => !b.remote && b.name === n)));
+  const args = ['bookmark', 'set', '-r', rev, '--', quoted(name)];
+  const x = await Vc.run(r, args, OP);
+  if (x.code !== 0 && /Refusing to move bookmark backwards or sideways/.test(x.err)) {
+    if (!await Ed.yesOrNo(`Move bookmark ${shown(name)} backwards or sideways to ${named(i)}?`)) { Ed.message('Nothing moved'); return false; }
+    await operate(r, ['bookmark', 'set', '-r', rev, '--allow-backwards', '--', quoted(name)], 'bookmark set');
+    return false;
+  }
+  await settle(r, x, 'bookmark set');
+  return false;
+}
+/* b r: a local bookmark renamed, the change at point's by default. */
+async function bookmarkRename(): Promise<false> {
+  const { r, all, here } = await atPoint();
+  const old = await askName('Rename bookmark', locals(all), locals(here)[0], true);
+  const name = (await Ed.readMini(`Rename ${shown(old)} to: `, '', null, { kind: 'jj-bookmark-name' })).trim();
+  await operate(r, ['bookmark', 'rename', '--', quoted(old), quoted(name)], 'bookmark rename');
+  return false;
+}
+/* b d and b f: a local bookmark deleted (its deletion pushed to its tracked remotes by the next push of it), or
+   forgotten (jj stops knowing it; its remotes keep it), after asking. */
+async function bookmarkDelete(forget: boolean): Promise<false> {
+  const { r, all, here } = await atPoint();
+  const cands = forget ? [...new Set(all.filter(b => !b.remote).map(b => b.name))] : locals(all);
+  const name = await askName(forget ? 'Forget bookmark' : 'Delete bookmark', cands, locals(here)[0], true);
+  const q = forget ? `Forget bookmark ${shown(name)} (jj stops knowing it here; its remotes keep it)?`
+    : `Delete bookmark ${shown(name)} (p d then deletes it on its remotes)?`;
+  if (!await Ed.yesOrNo(q)) { Ed.message(forget ? 'Nothing forgotten' : 'Nothing deleted'); return false; }
+  await operate(r, ['bookmark', forget ? 'forget' : 'delete', '--', 'exact:' + quoted(name)], forget ? 'bookmark forget' : 'bookmark delete');
+  return false;
+}
+/* b t and b u: a remote bookmark tracked, so that it is the local bookmark of that name and fetches move it, or
+   no longer tracked; the change at point's by default. */
+async function bookmarkTrack(track: boolean): Promise<false> {
+  const { r, all, here } = await atPoint();
+  const of = (bs: JjBookmark[]) => bs.filter(b => b.remote && b.tracked !== track);
+  const cands = of(all).map(remoteName);
+  if (!cands.length) signal('user-error', track ? 'No remote bookmark is untracked: f f fetches them' : 'No remote bookmark is tracked');
+  const pick = await askName(track ? 'Track remote bookmark' : 'Untrack remote bookmark', cands, of(here).map(remoteName)[0], true);
+  const b = of(all).find(x => remoteName(x) === pick)!;
+  await operate(r, ['bookmark', track ? 'track' : 'untrack', '--', `${quoted(b.name)}@${quoted(b.remote)}`], track ? 'bookmark track' : 'bookmark untrack');
+  return false;
+}
+
+/* ---------- fetch and push ---------- */
+/* Each reaches a remote: so long at most, its error output in *vc-process* as it comes. It runs once the command
+   has ended, so the frame takes keys meanwhile; one at a time in a workspace. */
+const REMOTE = { timeout: 1800000, maxBytes: 1024 * 1024, lossy: true, progress: true };
+/* what runs, by workspace root */
+const remoteBusy = new Map<string, string>();
+
+/* The lines of jj's report X: its changes (`bookmark: main@origin [new] untracked`, `bookmark: main [move forward
+   from A to B]`), its warnings and whether it said `Nothing changed.`. */
+function report(x: EdProcResult): { changes: string[]; warnings: string[]; nothing: boolean } {
+  const ls = x.err.split('\n').map(l => l.trim()).filter(l => l);
+  return {
+    changes: ls.filter(l => /^(bookmark|tag): /.test(l)).map(l => shown(l.replace(/\s+/g, ' '))),
+    warnings: ls.filter(l => l.startsWith('Warning: ') && !/working-copy commit became immutable/.test(l)).map(l => shown(l.slice(9))),
+    nothing: ls.includes('Nothing changed.'),
+  };
+}
+/* jj's failure X to reach a remote, said; when it wanted credentials, where they come from. */
+function unreached(x: EdProcResult, what: string): never {
+  if (x.error || x.timedOut || x.truncated) failed(x, what);
+  const creds = /terminal prompts disabled|Permission denied \(|Host key verification failed|Authentication failed|could not read (Username|Password)/i.test(x.err)
+    ? '; jj asks no credentials here: they come from your credential helper or ssh agent' : '';
+  return signal('process-error', `${what} failed (exit ${x.code})${jjError(x)}${creds} (see *vc-process*)`) as never;
+}
+/* jj's report X of an operation WHAT, when it did nothing: its warnings (`Refusing to create new remote bookmark
+   …`), or that nothing changed. */
+const nothingDone = (x: EdProcResult, what: string) => { const w = report(x).warnings; return `${what}: ${w.length ? w.join('; ') : 'nothing changed'}`; };
+
+/* Run the remote operation PREP readies (asking what it needs) on the current buffer's jj workspace: PREP gives
+   what is starting (`Fetching`) and the operation, or null for nothing. The command ends once it has started; when
+   it ends, the workspace's views are read again and what it did is said. */
+async function remoteOp(prep: (r: VcRepo) => Promise<[string, () => Promise<string>] | null>): Promise<false> {
+  const r = workspace();
+  const running = remoteBusy.get(r.root);
+  if (running) signal('user-error', `${running} still runs in ${shown(r.root)}: see *vc-process*`);
+  /* the slot taken before PREP's reads and questions, so that a second command started meanwhile is refused */
+  remoteBusy.set(r.root, 'A remote command');
+  let op: [string, () => Promise<string>] | null = null;
+  try { op = await prep(r); } finally { if (!op) remoteBusy.delete(r.root); }
+  if (!op) return false;
+  const [what, run] = op;
+  remoteBusy.set(r.root, what);
+  Ed.message(`${what}… (see *vc-process*)`);
+  void (async () => {
+    let msg = '', err: unknown = null;
+    try { msg = await run(); } catch (e) { err = e; }
+    remoteBusy.delete(r.root);
+    await reread(r);
+    if (err) Ed.reportError(err); else Ed.message(msg);
+    Ed.scheduleRender();
+  })();
+  return false;
+}
+
+/* f f and f a: jj git fetch from the remotes jj's configuration names (git.fetch; else origin, or the one
+   remote), or from every remote. */
+async function fetchRun(r: VcRepo, all: boolean): Promise<string> {
+  const x = await Vc.run(r, ['git', 'fetch', ...(all ? ['--all-remotes'] : [])], REMOTE);
+  if (x.code !== 0 || x.error || x.timedOut || x.truncated) unreached(x, 'jj git fetch');
+  const { changes, warnings } = report(x), from = all ? 'Fetched from every remote' : 'Fetched';
+  return `${from}: ${changes.length ? changes.join('; ') : 'nothing new'}${warnings.length ? ` (${warnings.join('; ')})` : ''}`;
+}
+/* p p, p c and p d: jj git push of ARGS (WHAT names it) to the remote jj's configuration names (git.push; else
+   origin, or the one remote). What it would change is read first (--dry-run); when that moves a bookmark
+   backwards or sideways there, or deletes one, it is said and asked. jj's own lease (the remote must be where
+   the last fetch saw it) holds either way. */
+async function pushPrep(r: VcRepo, args: string[], what: string): Promise<[string, () => Promise<string>] | null> {
+  const dry = await Vc.run(r, ['git', 'push', ...args, '--dry-run'], OP);
+  if (dry.code !== 0 || dry.error || dry.timedOut || dry.truncated) unreached(dry, 'jj git push');
+  const plan = report(dry), to = /^Changes to push to (.+):$/m.exec(dry.err), remote = to ? shown(to[1]) : 'the remote';
+  if (!plan.changes.length) { Ed.message(nothingDone(dry, 'Nothing pushed')); return null; }
+  const risky = plan.changes.filter(c => /\[(move sideways|move backward|delete) /.test(c));
+  if (risky.length && !await Ed.yesOrNo(`Push to ${remote}, ${risky.join('; ')}?`)) { Ed.message('Nothing pushed'); return null; }
+  return [`Pushing ${what} to ${remote}`, async () => {
+    const x = await Vc.run(r, ['git', 'push', ...args], REMOTE);
+    if (x.code !== 0 || x.error || x.timedOut || x.truncated) unreached(x, 'jj git push');
+    const done = report(x);
+    return done.changes.length ? `Pushed to ${remote}: ${done.changes.join('; ')}` : nothingDone(x, 'Nothing pushed');
+  }];
+}
+/* p p: the local bookmarks on the change at point, each by its name exactly (a new one is tracked on the
+   remote as it is pushed). */
+async function pushBookmarks(r: VcRepo) {
+  const { i, here } = await atPoint();
+  const names = here.filter(b => !b.remote && b.present && !b.conflict).map(b => b.name);
+  if (!names.length) signal('user-error', `No bookmark on ${named(i)}: b c makes one, p c pushes it under a new one`);
+  return pushPrep(r, names.map(n => '--bookmark=exact:' + quoted(n)), names.map(shown).join(', '));
+}
+/* p c: the change at point under a bookmark jj names for it (templates.git_push_bookmark; push-CHANGE). */
+async function pushChange(r: VcRepo) {
+  const { rev } = target(), i = await readInfo(r, rev);
+  return pushPrep(r, ['--change', rev], named(i));
+}
+
+CMD('jj-git-fetch', '', '', 'Fetch from the remotes jj\'s configuration names (f f): jj git fetch, in the background, jj\'s error output in *vc-process*.', () => remoteOp(async r => ['Fetching', () => fetchRun(r, false)]));
+CMD('jj-git-fetch-all', '', '', 'Fetch from every remote (f a): jj git fetch --all-remotes, in the background.', () => remoteOp(async r => ['Fetching from every remote', () => fetchRun(r, true)]));
+CMD('jj-git-push', '', '', 'Push the bookmarks on the change at point (p p) to the remote jj\'s configuration names, in the background; a bookmark moved backwards or sideways there only after asking.', () => remoteOp(pushBookmarks));
+CMD('jj-git-push-change', '', '', 'Push the change at point under a bookmark jj names for it (p c): jj git push --change.', () => remoteOp(pushChange));
+CMD('jj-git-push-deleted', '', '', 'Push the deletion of the bookmarks deleted here (p d), after naming them: jj git push --deleted.', () => remoteOp(r => pushPrep(r, ['--deleted'], 'the deleted bookmarks')));
+CMD('jj-bookmark-create', '', '', 'Create a bookmark on the change at point (b c), its name asked for.', () => bookmarkCreate());
+CMD('jj-bookmark-set', '', '', 'Set a bookmark, existing or new, to the change at point (b s); one moved backwards or sideways only after asking.', () => bookmarkSet());
+CMD('jj-bookmark-rename', '', '', 'Rename a local bookmark (b r), the one on the change at point by default.', () => bookmarkRename());
+CMD('jj-bookmark-delete', '', '', 'Delete a local bookmark (b d), after asking; p d then deletes it on its remotes.', () => bookmarkDelete(false));
+CMD('jj-bookmark-forget', '', '', 'Forget a local bookmark (b f), after asking: jj stops knowing it here, its remotes keep it.', () => bookmarkDelete(true));
+CMD('jj-bookmark-track', '', '', 'Track a remote bookmark (b t), the one on the change at point by default: it becomes the local bookmark of that name.', () => bookmarkTrack(true));
+CMD('jj-bookmark-untrack', '', '', 'Stop tracking a remote bookmark (b u).', () => bookmarkTrack(false));
+
 CMD('jj-rebase', '', '', 'Rebase in jj\'s log (r): on a change, mark it as the source; on another, after asking, rebase the source and its descendants onto it (jj rebase -s -o); on the source again, unmark it.', () => jjRebase());
 CMD('jj-split', '', '', 'Split the file at point, or the files selected, off the change the change view shows (S): jj split by file, the new change\'s description written in a buffer first.', () => jjSplit());
 CMD('jj-undo', '', '', 'Undo jj\'s last operation, after saying which (u): jj undo.', () => jjUndo());
@@ -564,7 +779,9 @@ CMD('jj-squash', '', '', 'Squash the change at point into its parent (s): jj squ
 CMD('jj-log', '', '','Show the log of the jj workspace the current buffer is in (SPC g J; SPC g g there): a change per line, from an explicit template; RET on one shows it with its diff, + reads more, g r reads it again.', () => log(workspace()));
 CMD('jj-log-more', '', '', 'Read the next changes of the jj log (+).', () => logMore(cur()));
 
-for (const n of ['jj-log', 'jj-log-more', 'jj-new', 'jj-describe', 'jj-edit', 'jj-abandon', 'jj-squash', 'jj-rebase', 'jj-split', 'jj-undo', 'jj-redo']) L.put(intern(n), 'evil-repeat', intern('abort'));
+for (const n of ['jj-log', 'jj-log-more', 'jj-new', 'jj-describe', 'jj-edit', 'jj-abandon', 'jj-squash', 'jj-rebase', 'jj-split', 'jj-undo', 'jj-redo',
+  'jj-git-fetch', 'jj-git-fetch-all', 'jj-git-push', 'jj-git-push-change', 'jj-git-push-deleted', 'jj-bookmark-create', 'jj-bookmark-set',
+  'jj-bookmark-rename', 'jj-bookmark-delete', 'jj-bookmark-forget', 'jj-bookmark-track', 'jj-bookmark-untrack']) L.put(intern(n), 'evil-repeat', intern('abort'));
 Ed.MODE_NAMES['jj-log-mode'] = 'jj Log';
 Ed.MODE_NAMES['jj-change-mode'] = 'jj Change';
 

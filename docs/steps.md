@@ -3079,7 +3079,8 @@ force push that asks and uses `--force-with-lease`.
   and p for magit's push P) and their suffixes: `f u` `git-fetch`, `f a` `git-fetch-all`, `F u` `git-pull`, `p u`
   `git-push`, `p f` `git-push-force` (magit's `-f` switch, `--force-with-lease`, as a key of its own). Each is also
   M-x from any buffer of a git repository; a jj workspace is refused (`ROOT is a jj workspace: jj fetches and
-  pushes with its own commands; SPC g G's status buffer works on its git repository`).
+  pushes with its own commands: f f, f a, p p, p c and p d in jj's log (SPC g J); SPC g G's status buffer works
+  on its git repository`; the keys named since git-jj-remote).
 - **In the background.** Each asks what it needs in the command, says `Fetching origin… (see *vc-process*)` and
   ends; git runs meanwhile (up to 30 minutes), so the frame takes keys. When it ends, the repository's status
   buffers are read again and its log buffers read again from HEAD, then what it did is said. One at a time in a
@@ -3221,6 +3222,149 @@ force push that asks and uses `--force-with-lease`.
     `git-fetch` started before the first has read its upstream (`A remote command still runs …`) and one while
     the first runs, `f u` asking again after its question was quit with C-g, `git-fetch` in a jj workspace with no child started, the five commands under
     `Ed.proc.replay` with no child started.
+
+## jj git fetch and push, and bookmarks (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `git-jj-remote`, on git-jj-rewrite and git-remote): remote
+operations and bookmark handling from jj's log and change view, tested against a bare remote, proved by `edwin-vc`.
+
+- **Keys**, in `jj-log-mode` and `jj-change-mode`, with the prefixes Edwin's git buffers use (f fetch, p push, b
+  branch) and majutsu's suffixes where it has them: `f f` `jj-git-fetch`, `f a` `jj-git-fetch-all`, `p p`
+  `jj-git-push`, `p c` `jj-git-push-change`, `p d` `jj-git-push-deleted`; `b c` `jj-bookmark-create`, `b s`
+  `jj-bookmark-set`, `b r` `jj-bookmark-rename`, `b d` `jj-bookmark-delete`, `b f` `jj-bookmark-forget`, `b t`
+  `jj-bookmark-track`, `b u` `jj-bookmark-untrack`. majutsu's own `G` prefix for its git transient is not taken: in
+  Evil's Motion state G goes to the last line, and majutsu's Evil keys never bind it either. The fetch commands also
+  work from M-x in any buffer of a jj workspace.
+- **Fetch and push in the background**, as git-remote's do: the command says `Fetching… (see *vc-process*)` and
+  ends, jj runs (up to 30 minutes) with its error output logged as it comes, then the log and change view are read
+  again and what jj reported is said. One at a time in a workspace: a second is refused while one runs (`Pushing
+  main to origin still runs in ROOT: see *vc-process*`), and from the moment the first starts reading.
+- **`f f`** runs `jj git fetch`, from the remotes jj's configuration names (git.fetch; else origin, or the one
+  remote); **`f a`** `jj git fetch --all-remotes`. Said: `Fetched: bookmark: main@origin [updated] tracked` (jj's
+  lines, `; ` between them), `Fetched: nothing new`.
+- **`p p`** pushes the local bookmarks on the change at point, each as `--bookmark=exact:"NAME"`, so a new one is
+  created and tracked on the remote (jj's `--revision` would refuse a new one, saying so with exit 0). None there:
+  `No bookmark on ID SUBJECT: b c makes one, p c pushes it under a new one`. **`p c`** is `jj git push --change
+  REV`, the bookmark named by jj (`push-` and the change id, or the user's templates.git_push_bookmark). **`p d`**
+  is `jj git push --deleted`. The remote is jj's (git.push; else origin, or the one remote).
+- **Every push is read first with `--dry-run`.** Nothing to push: `Nothing pushed: WARNING` (jj's warnings, as
+  `Refusing to create new remote bookmark ...`) or `Nothing pushed: nothing changed`, and no push runs. When what
+  it would do moves a bookmark sideways or backwards on the remote, or deletes one, it asks with jj's lines: `Push
+  to origin, bookmark: feat [move sideways from A to B]?`; n: `Nothing pushed`. That is p f's question for git: a
+  sideways move is a forced push. jj's own lease holds either way (the remote must be where the last fetch saw
+  it). Then: `Pushed to origin: bookmark: feat [add to HEX]`. jj's refusals (no description, a conflict, a private
+  commit) are said from its `Error:` line; no `--allow-*` switch is ever given.
+- **Bookmarks** act on the change at point (in the log, its line; in the change view, the change shown), its
+  revset Edwin's own (git-jj-log's revOf). `b c` asks a name (`Create bookmark at ID SUBJECT: `), `bookmark create
+  -r REV -- "NAME"`. `b s` asks a name among the local bookmarks not already there (a new name creates one),
+  `bookmark set -r REV -- "NAME"`; when jj refuses a backwards or sideways move it asks `Move bookmark NAME
+  backwards or sideways to ID SUBJECT?` and on y runs it again with `--allow-backwards` (n: `Nothing moved`). `b r`
+  asks the bookmark (the one at point by default) and the new name, `bookmark rename -- "OLD" "NEW"`. `b d` and `b
+  f` ask the bookmark, then `Delete bookmark NAME (p d then deletes it on its remotes)?` or `Forget bookmark NAME
+  (jj stops knowing it here; its remotes keep it)?`, `bookmark delete -- exact:"NAME"` (or forget; n: `Nothing
+  deleted`, `Nothing forgotten`). `b t` and `b u` ask among the remote bookmarks not tracked, or tracked (the one at
+  point by default), `bookmark track -- "NAME"@"REMOTE"` (or untrack). jj's first line is said (`Created 1
+  bookmarks pointing to ...`).
+- **Nothing typed becomes a switch, a glob or a revset.** Every name goes to jj as a jj string literal, `\` and `"`
+  escaped, after `--`; where jj takes a pattern (glob by default) it is `exact:"NAME"`; a remote bookmark is the
+  symbol `"NAME"@"REMOTE"`. A name with a control character or U+FFFD is never given to jj. The bookmarks offered
+  are read by `jj bookmark list --all-remotes` with a JSON template, the `git` pseudo-remote left out.
+- **The transport's programs (owner decision 12), in the runner.** jj 0.45 fetches and pushes by starting git, and
+  that git reads the configuration of the git repository jj keeps its commits in: plain jj runs a repository's
+  `remote.origin.receivepack` and `uploadpack`, its core.sshCommand and an `ext::` remote it allows (the tests'
+  controls). jj takes no `-c` for it, so `Vc.start` gives `jj git fetch` and `jj git push` their settings in jj's
+  environment, which jj passes on to that git (GIT_CONFIG_COUNT, KEY_N, VALUE_N, command scope): always
+  `protocol.ext.allow=never`, `fetch.recurseSubmodules=false`, `push.recurseSubmodules=no`, and for a fetch
+  `core.hooksPath=/dev/null` (fetch runs git's reference-transaction hook); then git-remote's transportOverrides,
+  read with `git --git-dir=DIR config` from that repository: its credential helpers dropped for the user's, its
+  sshCommand and askPass set back to the user's, and its uploadpack, receivepack, gitProxy, alternateRefsCommand,
+  a vcs helper path, a remote or group name starting with `-` refused before jj starts (`ROOT's own configuration
+  names a program as origin's receivepack: not run here (see *vc-process*)`). DIR is read from the file system, no
+  process run: the store's `git_target` (`../../../.git` when colocated, `git` inside the store when not), the
+  store found through `.jj/repo` as jjAdopts finds it (a secondary workspace's `.jj/repo` names it), resolved on
+  disk as jj resolves it (onDisk: each `..` taken from its directory's true name, every symlink followed, since the
+  native host's names drop `..` as text, so a `.jj` that is a link would otherwise lead to another store), and the
+  `git_target` path given to `--git-dir=` as it is, so that git resolves its `..` on disk, as jj's git does. A workspace
+  whose store names no git repository is refused. jj reads `git_target` and `.jj/repo` byte for byte, with no
+  trimming (`printf 'git ' > store/git_target` sends plain jj's push through a directory `git ` beside `git`), so
+  Edwin trims neither: one that is empty, has a control character, or a blank at either end is refused, never
+  stripped (jjPathIn), and jjAdopts, which finds the store the same way, refuses it too. A failure for want of credentials says where they come from:
+  `jj git fetch failed (exit 1): Git process failed: ...; jj asks no credentials here: they come from your
+  credential helper or ssh agent (see *vc-process*)`. transportOverrides now gives its settings as a list
+  (configEnv makes the environment), shared by both.
+- **Choices**, each reversible:
+  - A push runs the repository's hooks as jj's git runs them: not pre-push (jj 0.45 does not run it: a pre-push
+    hook in a colocated .git/hooks did not run under plain `jj git push`), but the reference-transaction hook, which
+    the git updating the remote-tracking refs runs (checked the same way). Edwin adds none and turns none off for a
+    push (decision 12 keeps hooks for push). Since repository code runs on a push anyway, a push's signature
+    (push.gpgSign, gpg.program) is left as the repository has it, as git-remote leaves it.
+  - Every jj fetch and push replaces a GIT_CONFIG_COUNT Edwin was started with, for that child: the settings above
+    are always set.
+  - The remote is the one jj's configuration picks; no remote is asked for (`--remote`), and no several at once.
+  - A push that only adds or moves forward is not asked; one that moves sideways or backwards, or deletes, is.
+  - `b c` and `b s` are both kept, as majutsu has them: create refuses an existing name, set creates or moves.
+- **Not in it:** pushing tags, `--all`, `--tracked`, `--named`, push options and the `--allow-*` switches; fetching
+  a branch or a tag by pattern, or `--tracked`; `bookmark move --from`, `advance` and `list` as a buffer;
+  `--overwrite-existing` on rename, `--include-remotes` on forget; `jj git remote`, clone, init, import and export;
+  majutsu's transients.
+- **Image replay and edwind.** Each command checks `Ed.proc.refusal()` before anything, and every child goes
+  through `Vc.run`, which refuses under the replay, in a web frame and in edwind.
+- **Checked by**, on ex44, with nixpkgs' jujutsu 0.45.1 and git: `nix build .#checks.x86_64-linux.edwin-vc` (136
+  passed, test/vc-jj-remote.test.mts's 11 among them; the other suites unchanged) and `edwin-typecheck`, both passed, against
+  local bare remotes in throwaway workspaces under a throwaway HOME, nothing reaching the network:
+  - `f f` after another clone pushed to main: `jj git fetch`, `Fetched: bookmark: main@origin [updated] tracked`,
+    main and main@origin at the pushed commit, the log read again; the environment exactly the four settings
+    above; the configuration read with `--git-dir=WS/.jj/repo/store/../../../.git`. Again: `Fetched: nothing new`; `f a`:
+    `--all-remotes`, `Fetched from every remote: nothing new`.
+  - `b c` `feat` on @ (`local work`): the prompt, `bookmark create -r change_id(W) -- "feat"`; `-lead`: `--
+    "-lead"`, a bookmark named `-lead` made; `main`: jj's `Bookmark already exists: main` said; `b f` on `-lead`:
+    the question, `forget -- exact:"-lead"`. `p p`: the dry run, then `git push --bookmark=exact:"feat"`, `Pushed
+    to origin: bookmark: feat [add to HEX]`, the remote's feat at the commit, feat@origin tracked, the push's
+    environment without core.hooksPath. `p p` again: `Nothing pushed: nothing changed`, the dry run alone.
+  - `b s` `feat` on a sibling: the backwards-or-sideways question, n: `Nothing moved`, feat kept; y:
+    `--allow-backwards`, feat on the sibling. `p p`: `Push to origin, bookmark: feat [move sideways from A to B]?`,
+    n: `Nothing pushed`, the dry run alone, the remote kept; y: pushed, the remote at B. `b s` `feat` on main's
+    change (an ancestor): asked, y; `p p` there: `Push to origin, bookmark: feat [move backward from B to M]?`, y:
+    `--bookmark=exact:"feat" --bookmark=exact:"main"`, `Pushed to origin: bookmark: feat [move backward ...]`, the
+    remote at M.
+  - `p p` with no bookmark at point: refused, no jj git run. `p c`: `--change change_id(W)` dry, then pushed,
+    `push-ID` on the remote.
+  - `b r` on `push-ID` to `q"x`: `rename -- "push-ID" "q\"x"`, the bookmark of that name there. `b d`: the
+    question, n: nothing run; y: `delete -- exact:"push-ID"`, the remote still having it; `p d`: `Push to origin,
+    bookmark: push-ID [delete from HEX]?`, y: `--deleted`, the remote branch gone. A branch another clone pushed:
+    `f f` says `topic@origin [new] untracked`; `b t` `topic@origin`: `track -- "topic"@"origin"`, topic local and
+    tracked; `b u`: untracked; a name not among them: the prompt stays, C-g, nothing run.
+  - In the colocated workspace's .git/config, each with plain jj running it first (the control): a receivepack
+    marker script: `p d` refused with no jj git push run, `f f` refused too, no marker; an uploadpack: `f a`
+    refused, no marker; core.sshCommand of the repository and of the user (global), against an `ssh://` remote:
+    `f a` fails with the credentials message, the user's script run, the repository's not, the last setting in the
+    environment `core.sshCommand=USER'S`; `protocol.allow=always`, `protocol.ext.allow=always` and an `ext::`
+    remote that touches a marker: `f a` fails, `transport 'ext' not allowed` in `*vc-process*`, no marker; a
+    reference-transaction hook: `f f` fetches main's new commit, the hook not run.
+  - A workspace made with `jj git init --no-colocate`, a receivepack in its store's git/config (plain jj runs it):
+    `p p` refused, the configuration read with `--git-dir=WS/.jj/repo/store/git`, no jj git push, no marker, the
+    bookmark not on the remote. A secondary workspace of it (`jj workspace add`, its `.jj/repo` a file naming the
+    first's): `p p` refused the same way, the first workspace's store read.
+  - A `.jj/repo` that is a symlink (`../a/b/c/repo`), so that the store's `../../../.git` is `a/b/.git` on disk
+    while the text would say the workspace's own `.git` (a clean repository): a receivepack in `a/b/.git` (plain
+    jj runs it): `p p` refused, no marker. The path is given to `git --git-dir=` as it is, `..` and all, for git
+    to resolve on disk as jj's git does.
+  - A workspace whose `.jj` is a symlink to a secondary workspace's `.jj` (real/w2, its `.jj/repo` the text
+    `../../w/.jj/repo`), beside top/w, a copy of real/w whose store names a clean bare repository: plain jj in
+    top/w2 runs the receivepack of real/w/.git (the control); `p p` refused, the configuration read from real/w/.git
+    alone, no marker. The test's host names files as the native host does (`..` dropped as text, the true name the
+    real path), so the suite covers the native host's names.
+  - A store whose `git_target` is `git ` (with the space), beside a clean `store/git`, `store/git ` a copy naming a
+    receivepack: plain jj pushes through `store/git ` and runs it (the control); `p p` refused (`names no git
+    repository it keeps its commits in that Edwin reads as jj does`), no git config read, no jj git push, no
+    marker; the same for `git\n`, a blank before an absolute path, a tab and a control character, each beside a
+    planted copy. A secondary workspace whose `.jj/repo` has a blank appended, `repo ` beside the clean repo a copy
+    naming a receivepack: plain jj runs it (the control); `SPC g J` refused before any jj (`.jj/repo names no jj
+    repository Edwin reads as jj does`), the same with a newline appended or a blank before. With the trimming
+    reads put back, the first case fails: the push goes through.
+  - `p p` to a bare remote whose pre-receive hook waits for a file: while jj runs, `f f` refused (`Pushing main to
+    origin still runs in ROOT: see *vc-process*`), no child started; the file made, `Pushed to origin: bookmark:
+    main [add to HEX]`. Under `Ed.proc.replay`, the twelve commands: `while the image replays`, no child started.
 
 ## Backends declared in init.scm reach edwind's models (done)
 
