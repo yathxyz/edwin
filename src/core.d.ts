@@ -1660,10 +1660,11 @@ interface EdSyncApi {
   calls: Map<unknown, unknown>;
   spinning: number;
   start(opts?: { transport?: () => EdTransport; device?: string; cid?: string }): void;
-  open(id: string, opts?: { create?: boolean }): Promise<EdBuffer | null>;
+  open(id: string, opts?: { create?: boolean }): Promise<EdBuffer>;
   close(id: string): unknown;
   shutdown(): void;
   call(opts: { cmd?: string; form?: string; args?: unknown[]; buf?: string; ctx?: unknown }): Promise<EdServerReply>;
+  whenSynced(b: EdBuffer): Promise<void>;
   /* FN is called on EV: 'state' with the new state, 'tasks' when a task changed in brain. The result removes it. */
   on(ev: string, fn: (...args: unknown[]) => unknown): () => void;
   save(b: EdBuffer | string): Promise<EdServerReply>;

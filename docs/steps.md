@@ -1035,10 +1035,11 @@ Issue #7: Edwin is the complete text interface to the hub's agents and to the se
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
 Edwin never starts or speaks ACP to an agent itself.
 
-**State of the work.** HTTP/SSE and the live daemon-owned sessions list are implemented in
-`server/agent-sessions.mts` and `src/agent-sessions.ts`; config and init accept only URL/token-file paths.
-The loopback API suite passes (3 checks), including a rendered model frame and RET, reconnect, remote start,
-reported records and token redaction/refusal. Next: journal transcripts, then steering and durable prompt resources.
+**State of the work.** The HTTP/SSE client, shared sessions list and structured journal transcripts are
+implemented (`server/agent-sessions.mts`, `server/agent-transcript.mts`, corresponding `src` modules).
+The 54 affected checks pass, including a rendered 1,201-event transcript, folds, off-point streaming,
+no streaming undo, malicious Markdown prompts and token redaction. Next: durable prompt buffers and steering,
+then resource attachment/named reuse/multiple destinations.
 
 ### Requirements
 
@@ -1071,6 +1072,11 @@ is a per-frame presentation choice keyed by structural identity. Markdown is fon
 source of command targets. An event containing fences or headings cannot manufacture a prompt/tool span.
 Whole transcript buffers are read-only, so partial read-only spans are unnecessary. Existing sequenced edits,
 markers, metadata, folds and Markdown fontification are reused; missing seams are added, not a second renderer.
+
+Measured on this shared machine: 8,192 events / 25,141,248 content bytes replayed and rendered in 83.46 ms
+in the pure journal fold (5 visible folded lines); a real daemon + frame opened a 1,201-event,
+3,706,679-byte transcript with 1,200 tool folds in 490.5 ms. The latter retained its point away from the
+tail as another event arrived. These are observed runs, not latency guarantees.
 
 Drafts are ordinary editable daemon buffers backed by private state files, with an adjacent durable record of
 destinations and content blocks. Sending flushes pending edits and takes the same snapshot as preview. Named

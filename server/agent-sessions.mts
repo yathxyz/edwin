@@ -4,6 +4,9 @@ import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import { randomId } from './journal.mts';
+import { Transcript } from './agent-transcript.mts';
+import type { TranscriptReply } from './agent-transcript.mts';
+import type { SchemeGen } from './threads.mts';
 import type { Server, SchemeValue } from './main.mts';
 import type { SBuf } from './buffers.mts';
 import type { CallResult } from './proto.mts';
@@ -50,6 +53,10 @@ export class AgentSessions implements AgentBackend {
   declare stream: http.ClientRequest | null; declare requests: Set<http.ClientRequest>;
   declare reconnect: NodeJS.Timeout | undefined; declare generation: number;
   declare publishing: Promise<void>; declare listOpened: boolean;
+  transcripts = new Map<string, Transcript>();
+  replaying = new Map<string, Promise<void>>();
+  openedObserved = new Set<string>();
+  announced = new Set<string>();
   #secrets = new Set<string>();
   constructor(server: Server) {
     this.server = server; this.config = server.cfg.agentHub; this.sessions = new Map(); this.observed = new Map();
@@ -132,8 +139,20 @@ export class AgentSessions implements AgentBackend {
   event(name: string, data: Json) {
     if (name === 'hub') { this.sessions.clear(); this.status = `hub ${line(data.status)}`; }
     if (name === 'session' && typeof data.sid === 'string') this.sessions.set(data.sid, data);
+    if (name === 'session') {
+      const t = this.transcripts.get(data.sid);
+      if (t && (t.head < data.acp?.headSeq || t.epoch !== data.createdAt)) void this.replay(data.sid).catch(() => {});
+      for (const p of data.acp?.pending || []) {
+        const key = `${data.sid}/${data.createdAt}/${p.req}`;
+        if (!this.announced.has(key)) {
+          this.announced.add(key);
+          for (const c of this.server.clients) if (c.hello && !c.closed && c.kind !== 'cli') c.send({ t: 'msg', level: 'info', text: `Agent ${line(data.sid)} awaits ${line(p.kind)}: ${line(p.title)} — M-x agent-session-answer` });
+        }
+      }
+    }
     if (name === 'gone' && this.sessions.get(data.sid)?.createdAt === data.epoch) this.sessions.delete(data.sid);
     if (name === 'observed' && typeof data.id === 'string') this.observed.set(data.id, data);
+    if (name === 'observed' && this.openedObserved.has(data.id)) void this.open(data.id).catch(() => {});
     if (name === 'observed_gone') this.observed.delete(data.id);
     if (name === 'ready') this.status = 'connected';
     this.changed();
@@ -186,11 +205,34 @@ export class AgentSessions implements AgentBackend {
   }
   async open(sid: string): Promise<string> {
     sidOf(sid);
-    const observed = sid.startsWith('o_') && !this.sessions.has(sid);
+    const observed = this.observed.has(sid) && !this.sessions.has(sid);
     const s = await this.request('GET', (observed ? 'observed/' : 'sessions/') + sid);
+    if (!observed && s.kind === 'acp') {
+      this.sessions.set(sid, s);
+      if (!this.transcripts.has(sid) || !this.server.buffers.byId.has(`name:*Agent: ${sid}*`)) this.transcripts.set(sid, new Transcript(sid));
+      await this.replay(sid);
+      return `name:*Agent: ${sid}*`;
+    }
     const name = observed ? `*Agent Observed: ${sid}*` : `*Agent: ${sid}*`;
-    await this.publish(name, 'agent-session-mode', `# ${sid}\n\n${observed ? 'Reported session: read-only; this hub cannot steer it. Only the reported record and bounded tail are available.\n\n' : ''}${JSON.stringify(s, null, 2)}\n`, { agentSession: { sid, observed, epoch: s.createdAt, spans: [] } });
+    if (observed) this.openedObserved.add(sid);
+    await this.publish(name, 'agent-session-mode', `# ${sid}\n\n${observed ? 'Reported session: read-only; this hub cannot steer it. Only the reported record and bounded tail are available.\n\n' : 'PTY record: this HTTP API offers no terminal input.\n\n'}${JSON.stringify(s, null, 2)}\n`, { agentSession: { sid, observed: true, epoch: s.createdAt, spans: [] } });
     return 'name:' + name;
+  }
+  replay(sid: string): Promise<void> {
+    const existing = this.replaying.get(sid); if (existing) return existing;
+    const work = (async () => {
+      const t = this.transcripts.get(sid)!;
+      do {
+        const epoch = this.sessions.get(sid)?.createdAt;
+        if (typeof epoch === 'number' && t.epoch !== epoch) t.reset(epoch);
+        const reply = await this.request('GET', `sessions/${sid}/events?since=${t.head}`) as TranscriptReply;
+        t.apply(reply);
+        const view = t.render();
+        await this.publish(`*Agent: ${sid}*`, 'agent-transcript-mode', view.text, { agentSession: { ...view, text: undefined, host: this.sessions.get(sid)?.host } });
+        if ((this.sessions.get(sid)?.acp?.headSeq || 0) <= t.head) break;
+      } while (!this.stopped);
+    })().finally(() => this.replaying.delete(sid));
+    this.replaying.set(sid, work); return work;
   }
   stop() { this.stopped = true; this.generation++; clearTimeout(this.reconnect); this.stream?.destroy(); for (const req of this.requests) req.destroy(); }
 }
@@ -203,10 +245,34 @@ export async function install(server: Server) {
   cmd('agent-sessions', () => hub.list());
   cmd('agent-session-open', a => hub.open(a[0]));
   cmd('agent-session-info', () => hub.request('GET', 'info'));
+  cmd('agent-session-list', async () => (await hub.request('GET', 'sessions')).sessions.filter((s: Json) => s.kind === 'acp'));
+  cmd('agent-session-details', async a => { await hub.open(a[0]); return { ...hub.transcripts.get(a[0])?.render(), text: undefined }; });
+  cmd('agent-session-pending', () => [...hub.sessions.values()].flatMap(s => (s.acp?.pending || []).map((p: Json) => ({ ...p, sid: s.sid, epoch: s.createdAt }))));
+  cmd('agent-session-request', async a => {
+    await hub.open(a[0]);
+    const r = hub.transcripts.get(a[0])?.render().pending.find((p: Json) => p.req === a[1]);
+    if (!r) throw new Error('Request is no longer pending; refresh the session');
+    return { ...r, sid: a[0] };
+  });
+  cmd('agent-session-location', async a => {
+    const { sid, location } = a[0], s = await hub.requireSession(sid);
+    if (s.host !== server.cfg.host) throw new Error(`Tool file is on ${line(s.host)}, not this edwind host; open it there`);
+    if (!location || typeof location.path !== 'string') throw new Error('Tool has no file location');
+    const file = path.resolve(s.cwd, location.path), real = fs.realpathSync(file);
+    server.auth.checkRead(real);
+    const st = fs.statSync(real);
+    if (!st.isFile()) throw new Error('Tool location is not a file');
+    const found = server.buffers.resolve(file, false);
+    if (!('id' in found)) throw new Error('Tool file moved');
+    return found.id;
+  });
   cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
   for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt', 'permission', 'elicitation']) cmd('agent-session-' + action, async a => { const sid = sidOf(a[0]); await hub.requireSession(sid); return hub.request('POST', `sessions/${sid}/${action}`, a[1]); });
   cmd('agent-session-remove', a => hub.request('DELETE', 'sessions/' + sidOf(a[0]) + '?forget=true'));
   server.statusProviders.push(() => ({ agentHub: hub.status, agentSessions: hub.sessions.size, agentObserved: hub.observed.size }));
+  const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });
+  primitive.where = 'server';
+  primitive.gen = function* ([sid]: SchemeValue[]): SchemeGen { return yield new server.L.S.Block(hub.open(sid), 'agent journal'); };
   hub.start();
 }
 export async function shutdown(server: Server) { modules.get(server)?.stop(); }

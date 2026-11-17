@@ -19,6 +19,7 @@
   "src/dired.js",
   "src/brain.js",
   "src/agent-sessions.js",
+  "src/agent-transcript.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

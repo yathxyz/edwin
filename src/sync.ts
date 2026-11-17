@@ -220,6 +220,7 @@ function onLine(text: string) {
   let msg: { t?: unknown } | null; try { msg = JSON.parse(text); } catch (e) { return; }
   if (!msg || typeof msg.t !== 'string') return;
   try { dispatch(msg as SyncServerMsg); } catch (e) { console.error('sync', msg.t, e); }
+  finally { if (['ack', 'opened', 'error', 'killed'].includes(msg.t)) sync.emit('buffer-state', msg); }
 }
 function dispatch(msg: SyncServerMsg) {
   switch (msg.t) {
@@ -301,6 +302,7 @@ function closeBuffer(id: string | SyncBuffer) {
   sync.buffers.delete(b.id); b.shared = false;
   if (b.sync && b.sync.opening) { b.sync.opening = null; settleOpen(b, Object.assign(new Error(`${b.id}: closed`), { code: 'closed' })); }
   if (E.buffers.includes(b)) { try { L.call('kill-buffer', [b]); } catch (e) { Ed.reportError(e); } Ed.scheduleRender(); }
+  sync.emit('buffer-state', { t: 'closed', buf: b.id });
 }
 function onSnap(msg: SyncSnapMsg) {
   const b = bufOf(msg); if (!b) return;
@@ -682,6 +684,25 @@ function ctxNow(buf?: EdBuffer | null) {
   if (E.prefixArg !== null && E.prefixArg !== undefined) ctx.prefix = E.prefixArg;
   return ctx;
 }
+/* A consumer sending a buffer snapshot must wait for the daemon, not merely the local undo group. */
+function whenSynced(buffer: EdBuffer): Promise<void> {
+  const b = buffer as SyncBuffer;
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  let offState = () => {}, offBuffer = () => {};
+  const done = (error?: Error) => { offState(); offBuffer(); error ? reject(error) : resolve(); };
+  const check = (msg?: unknown) => {
+    const m = msg as { t?: string; buf?: string; msg?: string } | undefined;
+    if (m?.t === 'error' && m.buf === b.id) { done(new Error(m.msg || 'edwind refused the buffer edit')); return; }
+    if (sync.state !== 'online' || !b.shared || sync.buffers.get(b.id) !== b) { done(new Error('Buffer is not connected to edwind')); return; }
+    if (!b.sync.opening && !b.inflight && !b.queue.length) { done(); return; }
+    if (b.readOnly && !b.sync.opening) done(new Error('Buffer is read-only'));
+  };
+  offState = sync.on('state', () => check());
+  offBuffer = sync.on('buffer-state', check);
+  check();
+  return promise;
+}
+
 function call({ cmd, form, args, buf, ctx }: SyncCallOpts = {}): Promise<SyncReply> {
   if (sync.state !== 'online') return Promise.resolve({ error: { condition: 'offline', report: 'edwind is not connected' } });
   const rid = newRid();
@@ -972,6 +993,6 @@ function importPending(list: (SyncPending | null)[]) {
   }
 }
 
-Ed.sync = Object.assign(sync, { start, open, close: closeBuffer, shutdown: close, call, save, revert, anchorAdd, anchorRemove, refreshCandidates, exportPending, fromJSON, writerColor, writerLabel });
+Ed.sync = Object.assign(sync, { start, open, close: closeBuffer, shutdown: close, call, save, revert, whenSynced, anchorAdd, anchorRemove, refreshCandidates, exportPending, fromJSON, writerColor, writerLabel });
 Ed.bootServed = bootServed;
 })();
