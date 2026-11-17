@@ -1040,7 +1040,9 @@ structured replay/folds; durable drafts and global permission/elicitation/steeri
 named reuse and multi-session sends. Draft text/resources survive kill and restart, and successful
 destinations are durably removed before partial-failure retry. The affected eight suites passed 108 checks;
 all three TypeScript projects passed. Served-frame smoke exercised folds, file/line, diff, recall, off-point
-and tail streaming, reconnect metadata and a 3 MiB live output without reconnect. Final full-suite gate next.
+and tail streaming, reconnect metadata and a 3 MiB live output without reconnect. Desktop embedded-source
+lookup cold boot and real Chromium console keys/visuals also pass: list RET, tool TAB, draft editing,
+exact preview and send/replay. Both packaged loaders include the three modules. Final full-suite gate next.
 
 ### Requirements
 
@@ -1107,6 +1109,21 @@ precedence over Markdown: `C-c C-c` send, `C-c C-k` abandon, `C-c C-p` preview. 
 commands are available through M-x, with ordinary editing and completion throughout.
 Global `C-c a !` answers pending work and `C-c a p` composes from any buffer (with session completion).
 
+For an already attached page/card, materialise via the shared command, then address a particular frame:
+
+```js
+const id = await Ed.agentSessions.rpc('agent-session-open', ['SID']);
+const buffer = await Ed.sync.open(id); // name:*Agent: SID*
+frame.showBuffer(buffer);             // existing card/frame
+// Or create a new browser frame:
+const newFrame = Ed.makeFrame(rootElement, { buffer });
+```
+
+`Ed.agentSessions.open('SID')` is the selected-frame shortcut. In a terminal, start an ordinary
+`edwinclient -t --socket /path/to/edit.sock` frame and run `M-x agent-session-open RET SID RET`.
+`edwinclient --socket /path/to/edit.sock -e '(agent-session-open "SID")'` materialises and prints the
+canonical name without creating a frame; it does not pretend to be a file argument.
+
 ### Checks
 
 | Check | Observable result |
@@ -1144,3 +1161,7 @@ Global `C-c a !` answers pending work and `C-c a p` composes from any buffer (wi
 - **Folds:** existing buffer-local folds are reused, including sharing between cards/windows inside one
   runtime. Separate terminal/browser runtimes have independent choices. No second daemon transcript.
 
+- **Tool file authority:** file/line jumps work when the agent's host is this edwind host and its path
+  passes Edwin's read authority. The supplied HTTP API has no remote-file endpoint; a remote-host
+  location says to open it on that host rather than treating the same path on this machine as its file.
+  No implicit SSH connection, mount, credential or host-name mapping is invented.
