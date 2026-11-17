@@ -12,17 +12,28 @@ import type { AgentBackend } from './agent-sessions.mts';
 import type { CallResult } from './proto.mts';
 
 interface Block { type: string; [key: string]: unknown }
+interface Target { sid: string; epoch: number | null }
 interface Draft {
-  key: string; targets: string[]; blocks: Block[]; baseText: string;
+  key: string; targets: Target[]; blocks: Block[]; baseText: string;
   name?: string;
 }
-interface Preview { draft: string; targets: string[]; blocks: Block[] }
+interface Preview { draft: string; targets: Target[]; blocks: Block[] }
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v); // any: ACP JSON
 const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 const fail = (message: string): never => { throw new Error(message); };
 const text = (v: unknown, what: string): string => typeof v === 'string' && v.length ? v : fail(`${what} must be a nonempty string`);
 const sidOf = (v: unknown): string => { const s = text(v, 'Session'); if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) fail('Not an ACP session id'); return s; };
-const targetsOf = (v: unknown): string[] => { if (!Array.isArray(v)) fail('Targets must be an array of session ids'); return [...new Set((v as unknown[]).map(sidOf))]; };
+const epochOf = (v: unknown): number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : fail('A captured session incarnation (epoch) is required');
+const targetKey = (v: Target): string => `${v.sid}/${v.epoch}`;
+function targetsOf(v: unknown, retained = false): Target[] {
+  if (!Array.isArray(v)) fail('Targets must be an array of {sid, epoch} destinations');
+  const targets = (v as unknown[]).map(t => {
+    if (retained && typeof t === 'string') return { sid: sidOf(t), epoch: null };
+    if (!object(t)) return fail('Each destination needs its captured session id and epoch');
+    return { sid: sidOf(t.sid), epoch: retained && t.epoch === null ? null : epochOf(t.epoch) };
+  });
+  return [...new Map(targets.map(t => [targetKey(t), t])).values()];
+}
 function blocksOf(v: unknown): Block[] {
   if (!Array.isArray(v) || !v.every(b => object(b) && typeof b.type === 'string')) fail('Blocks must be ACP content blocks');
   return copy(v as Block[]);
@@ -42,6 +53,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
   const drafts = new Map<string, Draft>(), sending = new Set<string>(), owned = new Map<SBuf, Draft>();
+  const acknowledged = new Map<string, Set<string>>();
   const markdown = (d: Draft) => path.join(dir, `${d.key}.md`);
   const record = (d: Draft) => path.join(dir, `${d.key}.json`);
   const persist = (d: Draft) => writeAtomic(record(d), JSON.stringify(d) + '\n');
@@ -58,7 +70,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     const body = fs.readFileSync(markdown(d), 'utf8');
     const sb = buffers.create({ id: idOf(d), jid: randomId(), name: nameOf(d), file: markdown(d), text: body });
     server.Ed.switchMajorMode(sb.ed, 'markdown-mode');
-    meta(sb, d); buffers.startJournal(sb);
+    meta(sb, d); buffers.startJournal(sb); buffers.index.write();
     return sb;
   }
   function durable(sb: SBuf, d: Draft): string {
@@ -84,10 +96,10 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     return { draft: sb.id, targets: [...d.targets], blocks };
   }
   async function create(value: unknown): Promise<string> {
-    const a = object(value) ? value : {}, targets = targetsOf(a.targets ?? (a.sid ? [a.sid] : []));
-    for (const sid of targets) await backend.requireSession(sid);
+    const a = object(value) ? value : {}, targets = targetsOf(a.targets ?? (a.sid ? [{ sid: a.sid, epoch: a.epoch }] : []));
+    for (const target of targets) await backend.requireSession(target.sid, epochOf(target.epoch));
     const blocks = a.blocks === undefined ? [{ type: 'text', text: typeof a.text === 'string' ? a.text : '' }] : blocksOf(a.blocks);
-    const d: Draft = { key: randomId(), targets, blocks, baseText: promptText(blocks) };
+    const d: Draft = { key: randomId(), targets, blocks, baseText: backend.clean(promptText(blocks)) };
     writeAtomic(markdown(d), d.baseText); persist(d); drafts.set(d.key, d); open(d);
     return idOf(d);
   }
@@ -95,7 +107,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json') continue;
     const d = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as Draft;
     if (!object(d) || d.key !== file.slice(0, -5) || typeof d.baseText !== 'string') fail('Invalid persisted agent prompt');
-    d.targets = targetsOf(d.targets); d.blocks = blocksOf(d.blocks); drafts.set(d.key, d);
+    d.targets = targetsOf(d.targets, true); d.blocks = blocksOf(d.blocks); drafts.set(d.key, d);
     const live = buffers.live(idOf(d));
     if (live) { server.Ed.switchMajorMode(live.ed, 'markdown-mode'); meta(live, d); durable(live, d); }
     else open(d);
@@ -142,8 +154,13 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   command('agent-prompt-abandon', async (args, buf) => { const d = selected(args, buf); await snapshot(d); persist(d); return idOf(d); });
   command('agent-prompt-targets', async ([id, targets]) => {
     const d = draft(id); if (targets === undefined) return [...d.targets]; writable(d);
-    const next = targetsOf(targets); for (const sid of next) await backend.requireSession(sid);
+    const next = targetsOf(targets);
+    for (const target of next) {
+      if (acknowledged.get(d.key)?.has(targetKey(target))) fail(`This draft was already acknowledged by ${target.sid} (${target.epoch}); choose another destination or create a new draft`);
+      await backend.requireSession(target.sid, epochOf(target.epoch));
+    }
     writable(d);
+    for (const target of next) if (acknowledged.get(d.key)?.has(targetKey(target))) fail(`This draft was already acknowledged by ${target.sid} (${target.epoch}); choose another destination or create a new draft`);
     const changed = { ...d, targets: next }; persist(changed); d.targets = next; buffers.sendMeta(open(d)); return next;
   });
   command('agent-prompt-send', async (args, buf) => {
@@ -152,18 +169,30 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
       const p = await snapshot(d), sent: string[] = [];
       if (!p.targets.length) fail('This draft has no remaining destinations');
       if (!p.blocks.length || p.blocks.every(b => b.type === 'text' && !b.text)) fail('This prompt is empty');
-      for (const sid of p.targets) {
+      for (const target of p.targets) {
+        const { sid } = target;
+        let accepted = false;
         try {
-          const session = await backend.requireSession(sid);
+          if (target.epoch === null) fail(`${sid} has an unbound legacy destination; explicitly retarget this draft before sending`);
+          if (acknowledged.get(d.key)?.has(targetKey(target))) fail(`This draft was already acknowledged by ${sid} (${target.epoch})`);
+          const epoch = epochOf(target.epoch), session = await backend.requireSession(sid, epoch);
           const caps = session.promptCapabilities ?? session.acp?.promptCapabilities ?? session.session?.promptCapabilities ?? session.info?.promptCapabilities;
           if (object(caps)) for (const b of p.blocks) {
             const capability = b.type === 'resource' ? 'embeddedContext' : b.type === 'image' ? 'image' : b.type === 'audio' ? 'audio' : null;
             if (capability && caps[capability] !== true) fail(`${sid} does not support ${capability} prompt blocks`);
           }
+          await backend.requireSession(sid, epoch);
           await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { blocks: p.blocks });
-          // Never resend a positively acknowledged destination, even if a later destination fails.
-          const targets = d.targets.filter(t => t !== sid); persist({ ...d, targets }); d.targets = targets; sent.push(sid); buffers.sendMeta(open(d));
-        } catch (e) { fail(`${backend.clean(String(e.message || e))}. Sent: ${sent.join(', ') || 'none'}; retained for retry: ${d.targets.join(', ')}. A lost reply may already have sent this prompt.`); }
+          // Acknowledgement is irrevocable in this daemon, even if the durable receipt cannot be written.
+          accepted = true;
+          let destinations = acknowledged.get(d.key);
+          if (!destinations) acknowledged.set(d.key, destinations = new Set());
+          destinations.add(targetKey(target));
+          d.targets = d.targets.filter(t => targetKey(t) !== targetKey(target)); sent.push(sid);
+          try { persist(d); }
+          catch (e) { fail(`Prompt acknowledged by ${sid}, but durable send receipt failed: ${backend.clean(String(e.message || e))}. This daemon will not resend this draft to that destination`); }
+          buffers.sendMeta(open(d));
+        } catch (e) { fail(`${backend.clean(String(e.message || e))}. Sent: ${sent.join(', ') || 'none'}; retained for retry: ${d.targets.map(t => t.sid).join(', ') || 'none'}.${accepted ? '' : ' A lost reply may already have sent this prompt.'}`); }
       }
       return { sent, remaining: [...d.targets], draft: idOf(d) };
     } finally { sending.delete(d.key); }
@@ -208,7 +237,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     const label = text(name, 'Prompt name'); if (!Object.hasOwn(named, label)) fail('No saved prompt by that name');
     return create({ blocks: named[label].blocks, targets: targets ?? [] });
   });
-  command('agent-session-recall', async ([sid, seq]) => create({ sid, blocks: blocksOf(await backend.promptBlocks(sidOf(sid), Number(seq))) }));
+  command('agent-session-recall', async ([sid, seq, epoch]) => create({ sid, epoch: epochOf(epoch), blocks: blocksOf(await backend.promptBlocks(sidOf(sid), Number(seq), epochOf(epoch))) }));
   return { async stop() {
     for (const d of drafts.values()) { const sb = buffers.live(idOf(d)); if (sb) { if (buffers.seq.flushHold) buffers.seq.flushHold(sb); if (sb.journal) await sb.journal.drain(); durable(sb, d); } persist(d); }
     offBatch(); offKill(); if (buffers.save === saveOwned) buffers.save = save;

@@ -1035,16 +1035,15 @@ Issue #7: Edwin is the complete text interface to the hub's agents and to the se
 Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
 Edwin never starts or speaks ACP to an agent itself.
 
-**State of the work.** The four original stages and phone addition (AS1.12–14) are implemented.
-Review hardening is landing in two logical commits. The transcript stage is complete: per-event rendering
-budgets, cached structural blocks, suffix-only active-message appends and authoritative pending
-reconciliation; its pure/replay gate passes 20/20. The remaining integration stage carries displayed
-incarnations through frame actions and retained drafts; adds bounded HTTP/SSE, serialized/coalesced
-publication, four journal read slots, GET catch-up retry and killed-view cleanup; and makes positive prompt
-acknowledgements irrevocable in memory before receipt persistence. Its implementation/regressions are
-in progress; final gates will be recorded below. No real credential, external network or existing service is used.
-Earlier baseline verification remains below: this review does not claim another full Node run or
-physical native GUI exercise.
+**State of the work.** All four original stages, the phone addition and review hardening (AS1.15–20)
+are complete. All twelve findings have fixes and regression coverage: incarnation-bound actions/drafts;
+bounded incremental replay; serialized/coalesced publication; GET retry/reset/pending reconciliation;
+and view/stream teardown. Acknowledged prompt destinations never return to this daemon's retry set.
+Final gates: agent 67/67, all three TypeScript projects, native 31 passed with one existing ignored test.
+A standalone served frame exercised folds, an external prompt, global permission, off-tail/undo preservation,
+cross-publication token redaction and replacement rejection. Measurements and API limitations are below.
+No real credential, external network or existing service was used. Earlier baseline records remain;
+this review does not claim another full Node run or physical native GUI exercise.
 
 ### Requirements
 
@@ -1058,7 +1057,7 @@ physical native GUI exercise.
 | AS1.6 | Streaming uses sequenced edits without undo groups; point and window positions away from the changed end stay put. Every available event is retained, not summarized or dropped; oversized input/rendering follows the explicit AS1.16 limits. Reopening reconstructs from the hub journal. Measure a long replay and record event count, bytes, open time and folded visible lines. |
 | AS1.7 | Transcript commands unfold, visit a tool's file and line, show its diffs, recall an immutable earlier prompt into a new draft, prompt quickly, cancel, revive, set mode and set a config option (`POST /config {id,value}`). Report 404/405/501 from config as unsupported by this hub. |
 | AS1.8 | Pending permissions and elicitations are announced to frames and reachable globally, not just at point. The picker, authoritative detail request and answer retain the same sid/createdAt/req. Permission details show session, incarnation, request, tool and input before offered outcomes. Form elicitation supports string, number, boolean and string-array values; URLs are shown in full and never auto-opened. Stale/replaced/resolved replies fail, not retarget. |
-| AS1.9 | Compose in an ordinary shared Markdown buffer with a prompt minor mode: `C-c C-c` sends, `C-c C-k` abandons the view, retaining the draft. Drafts survive buffer kills and daemon restart; their destinations persist as `{sid,epoch:createdAt}`. Earlier transcript prompts stay read-only. Keep failed/ambiguous destinations, never an acknowledged one, in a multi-send retry set. |
+| AS1.9 | Compose in an ordinary shared Markdown buffer with a prompt minor mode: `C-c C-c` sends, `C-c C-k` abandons the view, retaining the draft. Drafts survive buffer kills and daemon restart; their destinations persist as `{sid,epoch:createdAt}`. Persist a new draft's editor-journal index before exposing it, so acknowledged edits remain discoverable after a crash even if its Markdown write fails. Earlier prompts stay read-only. Keep failed/ambiguous destinations, never an acknowledged one, in a multi-send retry set. |
 | AS1.10 | Attach files as ACP resource links or embedded resources; attach regions and buffers as embedded resources, not pasted text. Preview is the exact JSON blocks and destinations that send uses. Persist attachments with the draft; named prompts can be saved, listed and reused, and one draft can target several sessions. |
 | AS1.11 | Any attached terminal/browser/card may open `name:*Agent: SID*` after `agent-session-open SID`; that command returns its canonical buffer id. Browser `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)` show it; terminal `edwinclient -e '(agent-session-open "SID")'` materialises it and a frame visits its returned name (or runs `M-x agent-session-open`). No second page-side API token. |
 | AS1.12 | A host page needs no Ctrl/Meta keys or Edwin minibuffer. Every transcript presentation action and every session mutation is a named command with explicit buffer/session arguments, through `Ed.agentSessions.rpc`. Presentation stays local; journal reads and mutations stay daemon-owned. Host text-field prompts use the direct text endpoint without creating a draft buffer. |
@@ -1174,7 +1173,7 @@ answers require the exact shown req, kind and epoch; an already resolved/replace
 incarnation is an error, never success or retargeting. The hub still arbitrates an answer racing another
 client after Edwin's check. Observed records cannot be steered. Mutation acknowledgements are the hub's
 JSON, `{}` in the stub; they do not fabricate a new local mode/state before the journal/summary confirms it.
-The local replacement report is `Stale agent session incarnation: session was replaced; refresh the view`;
+The local replacement report is `Agent session was replaced (stale incarnation); refresh and explicitly select it again`;
 resolved requests report `Request is already resolved or no longer pending; refresh the session`.
 Other hub refusals retain their HTTP status/code in the redacted report.
 
@@ -1229,6 +1228,60 @@ the next journal append resumes tail following if point was at the tail.
 | AS-C18 | Kill list, observed and transcript views during in-flight reads: later completions/summaries do not recreate them, and reopening explicitly works. Repeated 503 SSE responses with ongoing bytes close immediately; shutdown closes all outstanding attempts. |
 
 ### Verification record
+
+**Reviewer-hardening gate (after the last runtime/test edit):**
+
+- All twelve static claims held. Eight directed regressions (findings 4, 5 and 7–12) were also run
+  against the unchanged pre-review `0cff9a6` tree: all eight failed. The attached-list race produced
+  `the text at 180225 is not the one the op deletes`. The final gate below passes those checks.
+- Node v24.21.0, Nix-store dependencies, no external network:
+  `NO_COLOR=1 NODE_PATH=tools/node_modules node --test --test-reporter=spec --test-concurrency=1 --test-timeout=30000 test/agent*.test.mts`.
+  Final lines, verbatim:
+
+  ```text
+  ℹ tests 67
+  ℹ suites 0
+  ℹ pass 67
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 37032.907439
+  ```
+
+- `tsc -p .`, `tsc -p src`, `tsc -p native/js`: all exit 0 without diagnostics after the last
+  runtime/test edit.
+- `cargo test --offline --locked --jobs 1 -- --test-threads=1`: 31 passed across three suites,
+  one existing ignored test. Private CARGO_HOME/target, exact Cargo.lock vendor catalogue and local
+  V8 archive/ICU from the Nix store; shell utilities on PATH. Initial environment attempts exposed
+  missing utilities and a read-only copied ICU file, corrected only in the private build environment.
+  The final suite's last lines, verbatim:
+
+  ```text
+  test wq_saves_and_exits_zero ... ok
+  test zz_and_c_x_c_c_save_then_leave ... ok
+
+  test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.33s
+  ```
+
+- Latest long replay: **8,192 events / 25,141,248 content bytes / 49.24 ms / 5 folded visible lines**.
+  A real daemon and served frame opened **1,201 events in 189.1 ms**; its final **1,205 events /
+  4,755,515 rendered bytes / 1,200 folds** included a visibly bounded 3 MiB live event without reconnect.
+  These shared-machine measurements are observations, not latency guarantees.
+- A disposable standalone program ran an actual edwind, loopback stub, served model frame and host RPCs
+  outside the test runner. It displayed tool folds, answered the shown permission while another buffer
+  was current, sent an external-field prompt, streamed off-point with no undo, split a token across
+  separate publications, and rejected a retained action after replacement. Output, verbatim:
+
+  ```text
+  Agent review live smoke: {"openMs":13.7,"surfaceDraws":11,"folds":6,"pointPreserved":true,"undoGroups":0,"stateNotifications":2,"pending":0,"tokenAbsent":true,"replacementRejected":true}
+  ```
+
+- That live scenario exposed a zero-width redaction overlap caused by using a method's arity instead
+  of the validated 64-character token width; a separate-publication regression now covers it.
+  The affected agent gate also exposed the deferred editor-index window on new durable drafts:
+  creation now writes the existing index synchronously before edits can be acknowledged.
+  No browser-touch implementation changed in this review; its earlier DOM/Chromium record remains below.
 
 **Original four-stage feature gate (before the phone addition):**
 
@@ -1316,6 +1369,8 @@ the next journal append resumes tail following if point was at the tail.
   per-event rendered clipping is visible. No disk-backed store is added. Complete historical recovery and
   bounded paging need hub support. Reported sessions expose only their bounded tail, not transcriptPath
   contents over this API. No filesystem or direct-agent workaround invents a second record.
+  These are per-unit bounds, not a total-memory cap: retained history for an open journal still grows
+  in memory. Killing its daemon buffer releases that replay/presentation state.
 - **Incarnation precondition:** permission/elicitation APIs already enforce epoch. Draft sends recheck the
   captured `{sid,createdAt}` immediately before POST, but `/prompt` accepts no expected incarnation:
   a replacement between that GET and the POST cannot be ruled out locally. The hub must accept and

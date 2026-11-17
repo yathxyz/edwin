@@ -57,7 +57,11 @@ export class FakeAgentHub {
     }
     const sid = route[1], s = this.sessions.get(sid);
     if (!s) { reply(404, { error: 'no session', code: 'not_found' }); return; }
-    if (route[2] === 'events') { const since = Number(u.searchParams.get('since') || 0); reply(200, { sid, epoch: s.createdAt, head: s.acp.headSeq, from: since + 1, reset: since > s.acp.headSeq, truncated: this.truncated, events: this.journals.get(sid)!.filter(e => e.seq > since || s.acp.pending.some((p: Json) => p.req === e.seq)) }); return; }
+    if (route[2] === 'events') {
+      const since = Number(u.searchParams.get('since') || 0), reset = since > s.acp.headSeq;
+      const events = this.journals.get(sid)!.filter(e => reset || e.seq > since || s.acp.pending.some((p: Json) => p.req === e.seq));
+      reply(200, { sid, epoch: s.createdAt, head: s.acp.headSeq, from: reset ? events[0]?.seq || 1 : since + 1, reset, truncated: this.truncated, events }); return;
+    }
     if (!route[2] && req.method === 'GET') { reply(200, s); return; }
     if (req.method === 'DELETE') { this.sessions.delete(sid); this.emit('gone', { sid, epoch: s.createdAt }); reply(200, {}); return; }
     if (route[2] === 'config' && !this.configSupported) { reply(404, { error: 'not found' }); return; }

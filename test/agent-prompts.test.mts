@@ -24,11 +24,12 @@ async function connect() {
 async function value(command: string, args: unknown[] = []): Promise<any> { // any: wire result
   const r = await client.call(command, args); assert.equal(r.error, undefined, JSON.stringify(r.error)); return r.value;
 }
-async function pending(sid: string, req: number) {
+const target = (sid: string) => ({ sid, epoch: hub.sessions.get(sid)!.createdAt as number });
+async function pending(sid: string, req: number, total = 1) {
   const start = Date.now();
   for (;;) {
     const rows = await value('agent-session-pending') as Msg[];
-    if (rows.length === 1 && rows[0].sid === sid && rows[0].req === req) return;
+    if (rows.length === total && rows.some(row => row.sid === sid && row.req === req)) return;
     if (Date.now() - start > 8000) throw new Error('pending request did not reach the registry');
     await sleep(10);
   }
@@ -44,6 +45,15 @@ async function mini(text: string) {
   E.minibuf.text = text; E.minibuf.pt = text.length; Ed.feedKey('RET'); await Ed.whenIdle();
 }
 function show(b: Core) { Ed.setWindowBuffer(b); E.current = b; }
+function rejectingPicker(command: string, args: unknown[] = []) {
+  const completion = Promise.withResolvers<unknown>(), rejected = assert.rejects(completion.promise, /session.*replaced/i);
+  L.CMD('agent-review-picker', '', '', 'Run a parameterized picker through the actual editor command loop.', async () => {
+    try { const result = await L.call(command, args); completion.resolve(result); return result; }
+    catch (e) { completion.reject(e); throw e; }
+  });
+  Ed.feedKey('<cmd:agent-review-picker>');
+  return rejected;
+}
 
 before(async () => {
   hub = await new FakeAgentHub().start(); hub.add('alpha'); hub.add('beta');
@@ -58,7 +68,7 @@ after(async () => {
 });
 
 test('basic Markdown draft retains edited text after abandon, buffer kill and daemon restart', async () => {
-  const id = await value('agent-prompt-create', [{ sid: 'alpha' }]), opened = await client.open(id);
+  const id = await value('agent-prompt-create', [target('alpha')]), opened = await client.open(id);
   const body = 'A durable basic prompt\\n';
   assert.equal((await client.edit(id, opened.ver!, [[0, '', body]])).t, 'ack');
   const preview = await value('agent-prompt-preview', [id]);
@@ -90,11 +100,17 @@ test('prompt minor keys outrank Markdown/Evil, drain local edits and send exactl
 test('permission can be answered globally from another buffer and stale/competing outcomes remain errors', async () => {
   await frame();
   const summary = hub.sessions.get('alpha')!;
-  const request = hub.append('alpha', { e: 'permission', toolCall: { title: 'Read source' }, options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'no', name: 'Reject once', kind: 'reject_once' }] });
+  const toolCall = { toolCallId: 'read-source', title: 'Read source', kind: 'read', rawInput: { path: '/project/source.ts', limit: 200 } };
+  const request = hub.append('alpha', { e: 'permission', toolCall, options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }, { optionId: 'no', name: 'Reject once', kind: 'reject_once' }] });
   await pending('alpha', request.seq);
   show(Ed.getBufferCreate('*Other work*')); const other = E.current;
   await until(() => Ed.getBuffer('*Messages*').text.includes('Read source'), 'permission announcement');
-  await keys('C-c a !'); await mini('once: Allow once');
+  await keys('C-c a !');
+  const details = Ed.getBuffer('*Agent Permission Request*'), shown = JSON.parse(details.text);
+  assert.equal(details.readOnly, true); assert.equal(shown.sid, 'alpha'); assert.equal(shown.createdAt, summary.createdAt); assert.equal(shown.req, request.seq);
+  assert.deepEqual(shown.request.toolCall, toolCall); assert.deepEqual(shown.request.options, request.options);
+  assert.ok(E.mini, 'permission details are displayed before the option minibuffer is answered');
+  await mini('once: Allow once');
   const answer = hub.calls.filter(c => c.path.endsWith('/permission')).at(-1)!;
   assert.deepEqual(answer.body, { req: request.seq, epoch: summary.createdAt, outcome: { outcome: 'selected', optionId: 'once' } });
   assert.equal(E.current, other);
@@ -104,6 +120,27 @@ test('permission can be answered globally from another buffer and stale/competin
   await pending('alpha', cancel.seq);
   await keys('C-c a !'); await mini('Cancel request');
   assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/permission')).at(-1)!.body!.outcome, { outcome: 'cancelled' });
+});
+
+test('permission picker cannot rebind the same SID and request number to a replacement session', async () => {
+  await frame();
+  const sid = 'permission-picker-race', alternate = 'permission-picker-other', old = hub.add(sid), other = hub.add(alternate);
+  const options = [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }];
+  const request = hub.append(sid, { e: 'permission', toolCall: { title: 'Original input', rawInput: { path: '/old' } }, options });
+  hub.append(alternate, { e: 'permission', toolCall: { title: 'Unrelated request' }, options });
+  await pending(sid, request.seq, 2);
+  show(Ed.getBufferCreate('*Permission picker elsewhere*'));
+  const rejected = rejectingPicker('agent-session-answer');
+  await until(() => E.mini?.prompt === 'Pending request: ', 'pending request picker');
+  const mark = hub.calls.length, replacement = hub.add(sid);
+  replacement.createdAt = Math.max(replacement.createdAt, old.createdAt + 1); hub.emit('session', replacement);
+  hub.append(sid, { e: 'permission', seq: request.seq, toolCall: { title: 'Different input', rawInput: { path: '/new' } }, options });
+  await mini(`${sid} #${request.seq} permission: Original input`); await rejected;
+  assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST' && c.path.endsWith('/permission')).length, 0);
+  assert.equal(hub.sessions.get(sid)!.acp.pending[0].req, request.seq, 'replacement request remains unanswered');
+  for (const [id, epoch] of [[sid, replacement.createdAt], [alternate, other.createdAt]] as const) {
+    hub.sessions.delete(id); hub.emit('gone', { sid: id, epoch });
+  }
 });
 
 test('form elicitation preserves primitive types and arrays; decline/cancel and URL origin are explicit, never auto-opened', async () => {
@@ -138,8 +175,57 @@ test('offered mode/config values reach the API and an old hub reports config uns
   try { await assert.rejects(L.call('agent-session-config', ['model', 'small', 'alpha']), /unsupported|does not support/i); }
   finally { hub.configSupported = true; }
 });
+
+test('mode and config choices carry the incarnation whose offered options were displayed', async () => {
+  await frame();
+  const modes = { availableModes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Automatic' }] }, configOptions = [{ id: 'model', name: 'Model', currentValue: 'small', options: [{ value: 'small' }, { value: 'large' }] }];
+  for (const action of ['mode', 'config']) {
+    const sid = `options-${action}-race`, old = hub.add(sid, [{ seq: 1, e: 'session', modes, configOptions }]);
+    show(Ed.getBufferCreate('*Option selection elsewhere*'));
+    const rejected = rejectingPicker(`agent-session-${action}`, action === 'mode' ? [undefined, sid] : ['model', undefined, sid]);
+    await until(() => E.mini?.prompt === (action === 'mode' ? 'Mode: ' : 'Model: '), 'offered steering value picker');
+    const mark = hub.calls.length, replacement = hub.add(sid, [{ seq: 1, e: 'session', modes, configOptions }]);
+    replacement.createdAt = Math.max(replacement.createdAt, old.createdAt + 1); hub.emit('session', replacement);
+    await mini(action === 'mode' ? 'auto: Automatic' : 'large'); await rejected;
+    assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST' && c.path.endsWith(`/${action}`)).length, 0);
+  }
+});
+
+test('quick, compose, named reuse and explicit retarget keep the incarnation selected before a frame picker resumes', async () => {
+  await frame();
+  const named = await value('agent-prompt-create', [{ text: 'named picker content' }]);
+  await value('agent-prompt-save', [named, 'picker identity fixture']);
+  for (const action of ['quick', 'compose', 'named', 'targets']) {
+    const sid = `frame-${action}-race`, old = hub.add(sid), draft = action === 'targets' ? await value('agent-prompt-create', [{ text: 'retarget content' }]) : null;
+    show(Ed.getBufferCreate('*Prompt picker elsewhere*'));
+    const rejected = action === 'quick' ? rejectingPicker('agent-session-quick-prompt', [undefined, sid]) : action === 'compose' ? rejectingPicker('agent-session-prompt') : action === 'named' ? rejectingPicker('agent-prompt-load', ['picker identity fixture']) : rejectingPicker('agent-prompt-targets', [undefined, draft]);
+    const prompt = action === 'quick' ? `Prompt ${sid}: ` : action === 'targets' ? 'Targets (comma separated): ' : 'Agent session: ';
+    await until(() => E.mini?.prompt === prompt, 'incarnation-bearing prompt picker');
+    const choice = action === 'quick' ? 'retained quick text' : action === 'targets' ? `${sid}@${old.createdAt}` : `${sid} (${old.createdAt})`;
+    if (action !== 'quick') assert.ok(E.mini.completer('').includes(choice), 'completion shows the captured incarnation');
+    const mark = hub.calls.length, replacement = hub.add(sid);
+    replacement.createdAt = Math.max(replacement.createdAt, old.createdAt + 1); hub.emit('session', replacement);
+    await mini(choice); await rejected;
+    assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST' && c.path.endsWith('/prompt')).length, 0);
+    if (draft) assert.deepEqual((await value('agent-prompt-preview', [draft])).targets, []);
+  }
+});
+
+test('a quick prompt from displayed transcript metadata cannot silently bind to a fresh session with the same SID', async () => {
+  await frame();
+  const sid = 'displayed-prompt-race', old = hub.add(sid), b = await Ed.agentSessions.open(sid), epoch = b.meta.locals.agentSession.epoch;
+  assert.equal(epoch, old.createdAt); show(b);
+  const replacement = { ...old, createdAt: old.createdAt + 1, acp: { ...old.acp, pending: [] } };
+  hub.sessions.set(sid, replacement);
+  try {
+    const mark = hub.calls.length;
+    await assert.rejects(L.call('agent-session-quick-prompt', ['keep displayed identity']), /session.*replaced/i);
+    assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST' && c.path.endsWith('/prompt')).length, 0);
+  } finally { hub.emit('session', replacement); show(Ed.getBufferCreate('*Prompt picker elsewhere*')); }
+});
+
 test('exact blocks, private per-edit persistence, attachments, named reuse, kill/reopen and daemon restart', async () => {
-  const retained = await value('agent-prompt-create', [{ targets: ['alpha', 'beta'] }]);
+  const destinations = [target('alpha'), target('beta')], retained = await value('agent-prompt-create', [{ targets: destinations }]);
   const opened = await client.open(retained); assert.equal(opened.error, null); assert.equal(opened.meta!.readOnly, false); assert.equal(opened.meta!.mode, 'markdown-mode');
   const body = '# A real prompt\n\n```md\n## not a transcript boundary\n```\n';
   assert.equal((await client.edit(retained, opened.ver!, [[0, '', body]])).t, 'ack');
@@ -154,7 +240,7 @@ test('exact blocks, private per-edit persistence, attachments, named reuse, kill
   await value('agent-prompt-attach-buffer', [retained, { uri: 'edwin-buffer:source', text: 'whole buffer', mimeType: 'text/plain' }]);
   await value('agent-prompt-attach-region', [retained, { uri: 'edwin-buffer:source?start=2&end=5', text: 'ole', mimeType: 'text/plain' }]);
   const exact = await value('agent-prompt-preview', [retained]);
-  assert.deepEqual(exact.targets, ['alpha', 'beta']);
+  assert.deepEqual(exact.targets, destinations);
   assert.deepEqual(exact.blocks, [
     { type: 'text', text: body },
     { type: 'resource_link', uri: 'file:///only-on-the-agent-host/source.ts', name: 'source.ts', mimeType: 'text/typescript' },
@@ -164,7 +250,7 @@ test('exact blocks, private per-edit persistence, attachments, named reuse, kill
   ]);
   assert.equal(await value('agent-prompt-save', [retained, 'review carefully']), 'review carefully');
   assert.ok((await value('agent-prompt-list')).includes('review carefully'));
-  const reused = await value('agent-prompt-load', ['review carefully', ['alpha']]);
+  const reused = await value('agent-prompt-load', ['review carefully', [target('alpha')]]);
   assert.deepEqual((await value('agent-prompt-preview', [reused])).blocks, exact.blocks);
   assert.equal((await client.request({ t: 'save', buf: retained })).error, undefined, 'scoped draft save bypasses no general writable root');
   await value('agent-prompt-abandon', [retained]); await value('kill-buffer', [retained]);
@@ -177,7 +263,7 @@ test('exact blocks, private per-edit persistence, attachments, named reuse, kill
 });
 
 test('multi-send snapshots exact blocks, removes successful targets before partial failure, and never retries an ambiguous mutation', async () => {
-  const retained = await value('agent-prompt-create', [{ targets: ['alpha', 'beta'], blocks: [{ type: 'text', text: 'review a resource' }, { type: 'resource_link', uri: 'file:///remote/source', name: 'source' }] }]);
+  const alpha = target('alpha'), beta = target('beta'), retained = await value('agent-prompt-create', [{ targets: [alpha, beta], blocks: [{ type: 'text', text: 'review a resource' }, { type: 'resource_link', uri: 'file:///remote/source', name: 'source' }] }]);
   const exact = await value('agent-prompt-preview', [retained]);
   const original = hub.handle.bind(hub); let refuseBeta = true, lostReply = false;
   hub.handle = async (req, res) => {
@@ -192,20 +278,92 @@ test('multi-send snapshots exact blocks, removes successful targets before parti
   try {
     const before = hub.calls.length, failed = await client.call('agent-prompt-send', [retained]);
     assert.match(failed.error.report, /busy/);
-    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, ['beta']);
+    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, [beta]);
     const sends = hub.calls.slice(before).filter(c => c.path.endsWith('/prompt'));
     assert.equal(sends.length, 2); for (const send of sends) assert.deepEqual(send.body!.blocks, exact.blocks);
     assert.equal(sends.filter(c => c.path.includes('/alpha/')).length, 1);
     client.close(); await stopEdwind(child); child = await startEdwind(dir); client = await connect();
-    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, ['beta'], 'partial success is durable across restart');
+    assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, [beta], 'partial success is durable across restart');
     refuseBeta = false;
     const sent = await value('agent-prompt-send', [retained]); assert.deepEqual(sent.sent, ['beta']);
     assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, []);
     assert.equal(hub.calls.slice(before).filter(c => c.path === '/v1/sessions/alpha/prompt').length, 1, 'successful alpha was not resent');
-    const ambiguous = await value('agent-prompt-create', [{ sid: 'beta', text: 'may already have acted' }]); lostReply = true;
+    const ambiguous = await value('agent-prompt-create', [{ ...beta, text: 'may already have acted' }]); lostReply = true;
     const mark = hub.calls.length, result = await client.call('agent-prompt-send', [ambiguous]); assert.ok(result.error);
     assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 1);
-    assert.deepEqual((await value('agent-prompt-preview', [ambiguous])).targets, ['beta']);
+    assert.deepEqual((await value('agent-prompt-preview', [ambiguous])).targets, [beta]);
+  } finally { hub.handle = original; }
+});
+
+test('an acknowledged prompt stays excluded after receipt persistence fails, save, abandon, kill/reopen and explicit retarget', async () => {
+  const alpha = target('alpha'), beta = target('beta'), blocks = [{ type: 'text', text: 'keep the text and resource' }, { type: 'resource_link', uri: 'file:///remote/kept', name: 'kept' }];
+  const id = await value('agent-prompt-create', [{ targets: [alpha, beta], blocks }]);
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json'), original = fs.readFileSync(file, 'utf8');
+  fs.unlinkSync(file); fs.mkdirSync(file);
+  const mark = hub.calls.length;
+  try {
+    const failed = await client.call('agent-prompt-send', [id]);
+    assert.match(failed.error.report, /acknowledged by alpha.*durable send receipt failed/i);
+    assert.match(failed.error.report, /Sent: alpha; retained for retry: beta/);
+    assert.doesNotMatch(failed.error.report, /lost reply/i);
+    assert.deepEqual((await value('agent-prompt-preview', [id])).targets, [beta]);
+    assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 1);
+  } finally { fs.rmdirSync(file); fs.writeFileSync(file, original, { mode: 0o600 }); }
+  assert.equal((await client.request({ t: 'save', buf: id })).error, undefined);
+  await value('agent-prompt-save', [id, 'receipt failure keeps blocks']);
+  await value('agent-prompt-abandon', [id]); await value('kill-buffer', [id]); await value('agent-prompt-open', [id]);
+  const retarget = await client.call('agent-prompt-targets', [id, [alpha, beta]]);
+  assert.match(retarget.error.report, /already acknowledged/i);
+  const preview = await value('agent-prompt-preview', [id]);
+  assert.deepEqual(preview.targets, [beta]); assert.deepEqual(preview.blocks, blocks);
+  const sent = await value('agent-prompt-send', [id]); assert.deepEqual(sent.sent, ['beta']);
+  const sends = hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt'));
+  assert.equal(sends.filter(c => c.path.includes('/alpha/')).length, 1);
+  assert.equal(sends.filter(c => c.path.includes('/beta/')).length, 1);
+  for (const send of sends) assert.deepEqual(send.body!.blocks, blocks);
+  const again = await client.call('agent-prompt-targets', [id, [alpha]]);
+  assert.match(again.error.report, /already acknowledged/i);
+});
+
+test('restart preserves captured destinations and migrates legacy SID-only drafts to unbound until explicit retarget', async () => {
+  const sid = 'retained-prompt-epoch', old = hub.add(sid), captured = target(sid);
+  const blocks = [{ type: 'text', text: 'retained incarnation-bound text' }, { type: 'resource_link', uri: 'file:///remote/incarnation', name: 'resource' }];
+  const bound = await value('agent-prompt-create', [{ ...captured, blocks }]), legacy = await value('agent-prompt-create', [{ ...captured, blocks }]);
+  client.close(); await stopEdwind(child);
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(legacy)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json'), record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  record.targets = [sid]; fs.writeFileSync(file, JSON.stringify(record) + '\n', { mode: 0o600 });
+  const replacement = hub.add(sid); replacement.createdAt = Math.max(replacement.createdAt, old.createdAt + 1); hub.emit('session', replacement);
+  const selected = target(sid);
+  child = await startEdwind(dir); client = await connect();
+  const mark = hub.calls.length, stale = await client.call('agent-prompt-send', [bound]), unbound = await client.call('agent-prompt-send', [legacy]);
+  assert.match(stale.error.report, /session.*replaced/i); assert.match(unbound.error.report, /unbound.*explicitly retarget/i);
+  assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 0);
+  assert.deepEqual((await value('agent-prompt-preview', [bound])).targets, [captured]);
+  assert.deepEqual((await value('agent-prompt-preview', [legacy])).targets, [{ sid, epoch: null }]);
+  for (const id of [bound, legacy]) {
+    assert.deepEqual((await value('agent-prompt-preview', [id])).blocks, blocks);
+    await value('agent-prompt-targets', [id, [selected]]);
+    assert.deepEqual((await value('agent-prompt-send', [id])).sent, [sid]);
+  }
+  const sends = hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt'));
+  assert.equal(sends.length, 2); for (const send of sends) assert.deepEqual(send.body!.blocks, blocks);
+});
+
+test('prompt send rechecks the captured incarnation after capability validation and immediately before POST', async () => {
+  const sid = 'prompt-prepost-race', old = hub.add(sid), captured = target(sid), id = await value('agent-prompt-create', [{ ...captured, text: 'never send to its replacement' }]);
+  const original = hub.handle.bind(hub); let reads = 0;
+  hub.handle = async (req, res) => {
+    if (req.method === 'GET' && req.url === `/v1/sessions/${sid}` && ++reads === 1) {
+      await original(req, res);
+      const replacement = hub.add(sid); replacement.createdAt = Math.max(replacement.createdAt, old.createdAt + 1); hub.emit('session', replacement); return;
+    }
+    await original(req, res);
+  };
+  try {
+    const mark = hub.calls.length, failed = await client.call('agent-prompt-send', [id]);
+    assert.match(failed.error.report, /session.*replaced/i); assert.ok(reads >= 2);
+    assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST' && c.path.endsWith('/prompt')).length, 0);
+    assert.deepEqual((await value('agent-prompt-preview', [id])).targets, [captured]);
   } finally { hub.handle = original; }
 });
 
@@ -213,16 +371,16 @@ test('recall preserves every immutable content block and named resources without
   const blocks = [{ type: 'text', text: 'first' }, { type: 'resource_link', uri: 'file:///remote/source', name: 'source' }, { type: 'text', text: 'second' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
   const prompt = hub.append('alpha', { e: 'prompt', prompt: blocks });
   const before = JSON.stringify(hub.journals.get('alpha'));
-  const id = await value('agent-session-recall', ['alpha', prompt.seq]);
+  const captured = target('alpha'), id = await value('agent-session-recall', [captured.sid, prompt.seq, captured.epoch]);
   assert.deepEqual((await value('agent-prompt-preview', [id])).blocks, blocks);
   await value('agent-prompt-save', [id, 'immutable recall']);
-  const loaded = await value('agent-prompt-load', ['immutable recall', ['beta']]);
+  const loaded = await value('agent-prompt-load', ['immutable recall', [target('beta')]]);
   assert.deepEqual((await value('agent-prompt-preview', [loaded])).blocks, blocks);
   assert.equal(JSON.stringify(hub.journals.get('alpha')), before, 'recall and reuse do not rewrite earlier prompts');
 });
 test('source buffer and Visual region attach to a draft elsewhere, without pasting text', async () => {
   await frame();
-  const id = await value('agent-prompt-create', [{ sid: 'alpha', text: 'please review' }]);
+  const id = await value('agent-prompt-create', [{ ...target('alpha'), text: 'please review' }]);
   const b = Ed.getBufferCreate('*Attachment source*'); b.text = 'source region text'; b.pt = 12; b.mark = 7; b.visual = 'char'; b.evilState = 'visual'; show(b);
   await L.call('agent-prompt-attach-buffer', [b.name, id]);
   await L.call('agent-prompt-attach-region', [id]);
@@ -235,16 +393,16 @@ test('source buffer and Visual region attach to a draft elsewhere, without pasti
 test('advertised prompt capabilities refuse unsupported resources without making a prompt mutation', async () => {
   const summary = hub.sessions.get('alpha')!;
   summary.acp.promptCapabilities = { embeddedContext: false, image: false, audio: false };
-  const id = await value('agent-prompt-create', [{ sid: 'alpha', blocks: [{ type: 'text', text: 'read' }, { type: 'resource', resource: { uri: 'edwin-buffer:fixture', text: 'content', mimeType: 'text/plain' } }] }]);
+  const captured = target('alpha'), id = await value('agent-prompt-create', [{ ...captured, blocks: [{ type: 'text', text: 'read' }, { type: 'resource', resource: { uri: 'edwin-buffer:fixture', text: 'content', mimeType: 'text/plain' } }] }]);
   const mark = hub.calls.length, reply = await client.call('agent-prompt-send', [id]);
   assert.match(reply.error.report, /embeddedContext/);
   assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 0);
-  assert.deepEqual((await value('agent-prompt-preview', [id])).targets, ['alpha']);
+  assert.deepEqual((await value('agent-prompt-preview', [id])).targets, [captured]);
   delete summary.acp.promptCapabilities;
 });
 
 test('a failed draft-file write cannot let kill discard acknowledged journal edits', async () => {
-  const id = await value('agent-prompt-create', [{ sid: 'alpha', text: 'before' }]), opened = await client.open(id);
+  const id = await value('agent-prompt-create', [{ ...target('alpha'), text: 'before' }]), opened = await client.open(id);
   const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.md');
   fs.unlinkSync(file); fs.mkdirSync(file);
   assert.equal((await client.edit(id, opened.ver!, [[6, '', ' acknowledged']])).t, 'ack');
@@ -272,7 +430,7 @@ test('AS-C10: host RPC addresses a transcript without selecting it: folds, struc
     { seq: 4, e: 'prompt', prompt: [{ type: 'text', text: 'second prompt' }] },
   ]);
   const rpc = Ed.agentSessions.rpc, id = await rpc('agent-session-open', [sid]), b = await Ed.sync.open(id);
-  const spans = b.meta.locals.agentSession.spans, first = spans[0], tool = spans[2], last = spans[3];
+  const epoch = b.meta.locals.agentSession.epoch, spans = b.meta.locals.agentSession.spans, first = spans[0], tool = spans[2], last = spans[3];
   show(Ed.getBufferCreate('*Phone host elsewhere*')); const other = E.current, point = other.pt;
   assert.equal(b.folds.length, 2);
   const toggled = await rpc('agent-session-toggle-fold', [id, tool.start]);
@@ -285,16 +443,16 @@ test('AS-C10: host RPC addresses a transcript without selecting it: folds, struc
   assert.equal((await rpc('agent-session-previous-prompt', [id, last.start])).point, first.start);
   await assert.rejects(rpc('agent-session-previous-prompt', [id, first.start]), /No previous prompt/);
   for (const pos of [-1, 1.5, b.rope.length + 1]) await assert.rejects(rpc('agent-session-toggle-fold', [id, pos]), /zero-based/);
-  const recalled = await rpc('agent-session-recall', [sid, first.seq]);
+  const recalled = await rpc('agent-session-recall', [sid, first.seq, epoch]);
   assert.deepEqual((await rpc('agent-prompt-preview', [recalled])).blocks, [{ type: 'text', text }]);
   const drafts = E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length;
-  await rpc('agent-session-prompt', [sid, { text: 'Sent from an ordinary host text field' }]);
+  await rpc('agent-session-prompt', [sid, { text: 'Sent from an ordinary host text field', epoch }]);
   await until(() => b.text.includes('Sent from an ordinary host text field'), 'host quick prompt replay');
   assert.equal(E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length, drafts, 'host text does not create a draft buffer');
   assert.deepEqual(hub.journals.get(sid)!.at(-1)!.prompt, [{ type: 'text', text: 'Sent from an ordinary host text field' }]);
-  await rpc('agent-session-cancel', [sid]);
-  await rpc('agent-session-mode', [sid, { modeId: 'auto' }]);
-  await rpc('agent-session-config', [sid, { id: 'model', value: 'large' }]);
+  await rpc('agent-session-cancel', [sid, { epoch }]);
+  await rpc('agent-session-mode', [sid, { modeId: 'auto', epoch }]);
+  await rpc('agent-session-config', [sid, { id: 'model', value: 'large', epoch }]);
   assert.deepEqual(hub.calls.filter(c => c.method === 'POST' && c.path.startsWith(`/v1/sessions/${sid}/`)).map(c => [c.path.split('/').at(-1), c.body]), [
     ['prompt', { text: 'Sent from an ordinary host text field' }], ['cancel', undefined], ['mode', { modeId: 'auto' }], ['config', { id: 'model', value: 'large' }],
   ]);

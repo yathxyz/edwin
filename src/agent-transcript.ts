@@ -108,7 +108,7 @@ CMD('agent-session-visit-location', '', '', 'Visit a tool’s structural file lo
     const picked = await Ed.readMini('Tool location: ', labels[0], () => labels, { require: true });
     location = locations[labels.indexOf(picked)];
   }
-  const value = await Ed.agentSessions.rpc('agent-session-location', [{ sid: m.sid, location }]);
+  const value = await Ed.agentSessions.rpc('agent-session-location', [{ sid: m.sid, epoch: m.epoch, seq: s!.seq, location }]);
   const id = typeof value === 'string' ? value : object(value) && typeof value.id === 'string' ? value.id : null;
   if (!id) return signal('user-error', 'edwind returned no file for this tool location');
   const target = await Ed.agentSessions.show(id);
@@ -133,7 +133,7 @@ CMD('agent-session-diff', '', '', 'Show every supplied structural diff for the t
 CMD('agent-session-recall', '', '', 'Recall the immutable journal prompt at or before point into a new durable draft (R), preserving its content blocks.', async () => {
   const b = E.current, m = needMeta(b), s = m.spans.findLast(s => s.kind === 'prompt' && s.start <= b.pt);
   if (!s || !s.hasBlocks) return signal('user-error', 'No earlier prompt to recall');
-  const id = await Ed.agentSessions.rpc('agent-session-recall', [m.sid, s.seq]);
+  const id = await Ed.agentSessions.rpc('agent-session-recall', [m.sid, s.seq, m.epoch]);
   if (typeof id !== 'string') return signal('user-error', 'edwind returned no recalled prompt draft');
   await Ed.agentSessions.show(id); return false;
 });

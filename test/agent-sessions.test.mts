@@ -1,11 +1,14 @@
 // AS-C1/C2/C8: real edwind and served model frame, with an authenticated loopback API.
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { FakeAgentHub } from './fake-agent-hub.mts';
 import { makeDir, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
+import type { TestDir } from './edit-client.mts';
+import { AgentSessions } from '../server/agent-sessions.mts';
+import type { Server } from '../server/main.mts';
 const require = createRequire(import.meta.url);
 const { createHost, loadEdwin } = require('../src/host-node.cts');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -51,7 +54,7 @@ test('AS-C1/C2: daemon-owned list is live in a served frame; waiting first, both
   const reportedState = (await c.call('agent-session-state', ['o_report'])).value;
   assert.equal(reportedState.bufferId, reported.value); assert.equal(reportedState.state, 'running'); assert.equal(reportedState.steerable, false);
   assert.deepEqual(report.meta!.locals.agentState, reportedState);
-  assert.match((await c.call('agent-session-cancel', ['o_report'])).error.report, /read-only|cannot be steered/);
+  assert.match((await c.call('agent-session-cancel', ['o_report', { epoch: reportedState.epoch }])).error.report, /read-only|cannot be steered/);
   const start = await c.call('agent-session-start', [{ agent: 'stub', host: 'remote', cwd: '/work/demo' }]);
   assert.match(start.value, /^name:\*Agent: api_/);
   assert.deepEqual(hub.calls.find(c => c.path === '/v1/sessions' && c.method === 'POST')!.body, { agent: 'stub', host: 'remote', cwd: '/work/demo' });
@@ -78,7 +81,7 @@ test('AS-C8: token and symlink are refused; API-echoed token is redacted from bu
   await c.call('agent-session-info');
   assert.equal((await c.open(rotated)).error?.code, 'refused_path', 'a new symlink target is protected before its token is read');
   hub.refusal = { status: 403, body: { error: 'echo ' + hub.token } };
-  const r = await c.call('agent-session-cancel', ['safe']); assert.ok(!JSON.stringify(r).includes(hub.token)); assert.match(r.error.report, /redacted/);
+  const r = await c.call('agent-session-cancel', ['safe', { epoch: hub.sessions.get('safe')!.createdAt }]); assert.ok(!JSON.stringify(r).includes(hub.token)); assert.match(r.error.report, /redacted/);
   assert.ok(!child.logs.includes(hub.token));
 });
 
@@ -330,4 +333,296 @@ test('a summary-only incarnation reset immediately clears stale controls while i
   assert.equal(fresh.epoch, replacement.createdAt); assert.deepEqual(fresh.pending, []);
   assert.equal(fresh.modes, null); assert.equal(fresh.configOptions, null);
   assert.match((await c.open(state.bufferId)).text!, /fresh incarnation without old controls/);
+});
+
+async function reviewFixture(t: TestContext, setup?: (hub: FakeAgentHub, dir: TestDir) => void) {
+  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
+  fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
+  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  setup?.(hub, dir);
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket, { kind: 'frame' }); await c.connect(); await c.hello();
+  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  return { hub, dir, child, c };
+}
+
+test('review 2: oversized HTTP bodies fail visibly, including chunked bodies without Content-Length', async t => {
+  let oversized = '';
+  const { c, hub } = await reviewFixture(t, hub => {
+    const handle = hub.handle.bind(hub);
+    hub.handle = async (req, res) => {
+      if (req.url === '/v1/info' && oversized) {
+        res.writeHead(200, { 'content-type': 'application/json', ...(oversized === 'length' ? { 'content-length': 33 * 1024 * 1024 } : {}) });
+        if (oversized === 'length') { res.flushHeaders(); return; }
+        const part = Buffer.alloc(1024 * 1024, 120);
+        for (let i = 0; i < 33; i++) res.write(part);
+        res.end(); return;
+      }
+      if (req.url?.startsWith('/v1/sessions/oversize_facts/events?')) {
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': 33 * 1024 * 1024 }); res.flushHeaders(); return;
+      }
+      await handle(req, res);
+    };
+  });
+  for (const kind of ['length', 'chunked']) {
+    oversized = kind;
+    assert.match((await c.call('agent-session-info')).error.report, /response exceeds.*32 MiB/);
+  }
+  oversized = '';
+  assert.equal((await c.call('agent-session-info')).value.host, 'test', 'the daemon remains usable after a bounded refusal');
+  hub.add('oversize_facts', [{ seq: 1, e: 'session' }]);
+  const id = (await c.call('agent-sessions')).value;
+  assert.match(await untilText(c, id, 'unavailable ('), /unavailable \(.*response exceeds.*32 MiB/);
+});
+
+test('review 2: an unterminated oversized SSE event closes its connection and reports the limit', async t => {
+  let closed = 0;
+  const { c } = await reviewFixture(t, hub => {
+    const handle = hub.handle.bind(hub);
+    hub.handle = async (req, res) => {
+      if (req.url === '/v1/stream') {
+        res.on('close', () => closed++);
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('event: session\ndata: ');
+        for (let i = 0; i < 18; i++) res.write('x'.repeat(65536));
+        return;
+      }
+      await handle(req, res);
+    };
+  });
+  await until(() => closed > 0);
+  const id = (await c.call('agent-sessions')).value;
+  assert.match((await c.open(id)).text!, /SSE event exceeds the 1 MiB limit/);
+  assert.equal((await c.call('agent-session-info')).value.host, 'test');
+});
+
+test('review 2: list model discovery and transcript opens share four concurrent journal read slots', async t => {
+  const release = Promise.withResolvers<void>(); let active = 0, maximum = 0;
+  t.after(() => release.resolve());
+  const { hub, c } = await reviewFixture(t, hub => {
+    for (let i = 0; i < 12; i++) hub.add(`bounded_${i}`, [{ seq: 1, e: 'session', configOptions: [{ id: 'model', currentValue: `model-${i}` }] }]);
+    const handle = hub.handle.bind(hub);
+    hub.handle = async (req, res) => {
+      if (req.url?.includes('/events?')) {
+        active++; maximum = Math.max(maximum, active);
+        await release.promise;
+        try { await handle(req, res); } finally { active--; }
+      } else await handle(req, res);
+    };
+  });
+  await c.call('agent-sessions');
+  const opens = [...hub.sessions.keys()].map(sid => c.call('agent-session-open', [sid]));
+  await until(() => active >= 4);
+  assert.equal((await c.call('agent-session-info')).value.host, 'test', 'journal saturation does not block other API reads');
+  release.resolve();
+  for (const result of await Promise.all(opens)) assert.equal(result.error, undefined);
+  await untilText(c, 'name:*Agent Sessions*', 'model-11');
+  assert.equal(maximum, 4, 'facts and open transcripts use one shared concurrency bound');
+});
+
+test('review 4: selected relative tool locations cannot be resolved using a replacement session cwd', async t => {
+  const { hub, dir, c } = await reviewFixture(t);
+  const a = path.join(dir.dirs.notes, 'A'), b = path.join(dir.dirs.notes, 'B');
+  for (const p of [a, b]) { fs.mkdirSync(p); fs.writeFileSync(path.join(p, 'config.ts'), p + '\n'); }
+  const location = { path: 'config.ts', line: 1 }, session = hub.add('location', [
+    { seq: 1, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'read', title: 'Read config', locations: [location] } }
+  ]);
+  session.cwd = a; hub.emit('session', session);
+  await c.call('agent-session-open', ['location']);
+  const shown = { sid: 'location', epoch: session.createdAt, seq: 1, location };
+  assert.equal((await c.call('agent-session-location', [shown])).value, 'A/config.ts');
+  const replacement = hub.add('location', [{ seq: 1, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'read', locations: [location] } }]);
+  replacement.createdAt = session.createdAt + 1; replacement.cwd = b; hub.emit('session', replacement);
+  assert.match((await c.call('agent-session-location', [shown])).error.report, /session was replaced/i);
+  assert.match((await c.call('agent-session-open', ['location', session.createdAt])).error.report, /session was replaced/i);
+  assert.ok(!(await c.call('buffer-list')).value.some((v: { file: string }) => v.file === path.join(b, 'config.ts')));
+  assert.equal(hub.calls.filter(v => v.method !== 'GET').length, 0);
+});
+
+test('review 5: split-token response chunks leave subsequent prompt and diff offsets aligned on every frame', async t => {
+  const { hub, child, c } = await reviewFixture(t);
+  const events = [
+    { seq: 1, e: 'update', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: hub.token.slice(0, 32) } } },
+    { seq: 2, e: 'update', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: hub.token.slice(32) } } },
+    { seq: 3, e: 'prompt', prompt: [{ type: 'text', text: '# embedded heading\n```\nnot structure\n```' }] },
+    { seq: 4, e: 'update', update: { sessionUpdate: 'tool_call', toolCallId: 'edit', title: 'Edit', content: [{ type: 'diff', path: 'a.ts', oldText: 'before\n', newText: 'after\n' }] } },
+    { seq: 5, e: 'prompt', prompt: [{ type: 'text', text: hub.token.slice(0, 32) }, { type: 'text', text: hub.token.slice(32) }] }
+  ];
+  hub.add('redacted_spans', events);
+  const id = (await c.call('agent-session-open', ['redacted_spans'])).value, view = await c.open(id);
+  const meta = view.meta!.locals.agentSession, prompt = meta.spans.find((s: { kind: string }) => s.kind === 'prompt'), tool = meta.spans.find((s: { kind: string }) => s.kind === 'tool');
+  assert.ok(!JSON.stringify(view).includes(hub.token)); assert.ok(!child.logs.includes(hub.token));
+  assert.equal(view.text!.slice(prompt.start, prompt.start + '## Prompt #3'.length), '## Prompt #3');
+  const diff = tool.diffs[0];
+  assert.equal(view.text!.slice(diff.oldStart, diff.oldEnd), 'before\n'); assert.equal(view.text!.slice(diff.newStart, diff.newEnd), 'after\n');
+  for (const span of meta.spans) {
+    assert.equal(view.text![span.foldStart], '\n'); assert.equal(view.text![span.foldEnd], '\n');
+    assert.ok(span.start < span.end && span.end <= view.text!.length);
+  }
+  const recalled = (await c.call('agent-session-recall', ['redacted_spans', 5, meta.epoch])).value;
+  assert.ok(!(await c.open(recalled)).text!.includes(hub.token));
+  hub.append('redacted_spans', { e: 'update', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'cross-publication boundary: ' + hub.token.slice(0, 32) } } });
+  await untilText(c, id, 'cross-publication boundary: ' + hub.token.slice(0, 32));
+  hub.append('redacted_spans', { e: 'update', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: hub.token.slice(32) + '\nafter split token\n' } } });
+  assert.ok(!(await untilText(c, id, 'after split token')).includes(hub.token));
+  hub.append('redacted_spans', { e: 'prompt', prompt: [{ type: 'text', text: 'prompt after streamed redaction' }] });
+  await untilText(c, id, 'prompt after streamed redaction');
+  const streamed = await c.open(id), last = streamed.meta!.locals.agentSession.spans.at(-1);
+  assert.equal(streamed.text!.slice(last.start, last.start + '## Prompt #8'.length), '## Prompt #8');
+  assert.ok(!child.logs.includes(hub.token)); assert.ok(!JSON.stringify(c.queue).includes(hub.token));
+});
+
+test('review 7: concurrent attached-list replacements keep visible rows and structural command targets identical', async t => {
+  const { hub, c } = await reviewFixture(t, hub => {
+    for (const sid of ['row_a', 'row_b', 'row_c']) hub.add(sid).acp.title = sid + 'A'.repeat(90000);
+  });
+  const id = (await c.call('agent-sessions')).value; await c.open(id);
+  const listings = Array.from({ length: 12 }, () => c.call('agent-sessions'));
+  for (let i = 0; i < 40; i++) {
+    const s = hub.sessions.get('row_b')!;
+    s.acp.title = `${i === 39 ? 'FINAL' : i}-` + 'B'.repeat(90000);
+    s.updatedAt++; hub.emit('session', s);
+  }
+  for (const result of await Promise.all(listings)) assert.equal(result.error, undefined);
+  await untilText(c, id, 'FINAL-');
+  const view = await c.open(id), rows = view.meta!.locals.agentList.rows;
+  const expected = rows.map((r: Record<string, unknown>) => `${r.sid}  ${r.waiting ? 'WAIT' : '    '}  ${[r.state, r.harness, r.model, r.host, r.project, r.activity].join('  ')}`).join('\n') + '\n';
+  assert.equal(view.text!.slice(view.text!.indexOf('\n', view.text!.indexOf('\n') + 1) + 1), expected);
+  assert.deepEqual(rows.map((r: { sid: string }) => r.sid).sort(), ['row_a', 'row_b', 'row_c']);
+});
+
+test('review 8: a final failed journal GET catches up without another summary, and killing the view cancels retries', async t => {
+  let refuse = false, failures = 0;
+  const { hub, c } = await reviewFixture(t, hub => {
+    hub.add('retry', [{ seq: 1, e: 'prompt', prompt: [{ type: 'text', text: 'initial' }] }]);
+    const handle = hub.handle.bind(hub);
+    hub.handle = async (req, res) => {
+      if (req.url?.includes('/retry/events?') && refuse) {
+        refuse = false; failures++; res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"transient"}'); return;
+      }
+      await handle(req, res);
+    };
+  });
+  const id = (await c.call('agent-session-open', ['retry'])).value; await c.open(id);
+  refuse = true; hub.append('retry', { e: 'prompt', prompt: [{ type: 'text', text: 'the final event' }] });
+  await untilText(c, id, 'the final event');
+  assert.equal(failures, 1);
+  refuse = true; hub.append('retry', { e: 'prompt', prompt: [{ type: 'text', text: 'closed before retry' }] });
+  await until(() => failures === 2);
+  await c.call('kill-buffer', [id]);
+  const reads = hub.calls.filter(v => v.path.includes('/retry/events?')).length;
+  await sleep(600);
+  assert.equal(hub.calls.filter(v => v.path.includes('/retry/events?')).length, reads);
+  assert.ok(!(await c.call('buffer-list')).value.some((v: { id: string }) => v.id === id));
+});
+
+test('review 9: a lower same-incarnation head replaces text, structure and discovered model together', async t => {
+  const { hub, c } = await reviewFixture(t, hub => hub.add('reset_head', [
+    { seq: 10, e: 'session', configOptions: [{ id: 'model', currentValue: 'obsolete-model' }] },
+    { seq: 20, e: 'prompt', prompt: [{ type: 'text', text: 'obsolete prompt' }] }
+  ]));
+  await c.call('agent-sessions');
+  const id = (await c.call('agent-session-open', ['reset_head'])).value; await c.open(id);
+  await untilText(c, 'name:*Agent Sessions*', 'obsolete-model');
+  const session = hub.sessions.get('reset_head')!;
+  hub.journals.set('reset_head', [
+    { seq: 1, e: 'session', configOptions: [{ id: 'model', currentValue: 'replacement-model' }] },
+    { seq: 2, e: 'prompt', prompt: [{ type: 'text', text: 'replacement prompt' }] }
+  ]);
+  session.acp.headSeq = 2; session.updatedAt++; hub.emit('session', session);
+  await untilText(c, id, 'replacement prompt'); await untilText(c, 'name:*Agent Sessions*', 'replacement-model');
+  const view = await c.open(id);
+  assert.ok(!view.text!.includes('obsolete')); assert.equal(view.meta!.locals.agentSession.head, 2);
+  assert.deepEqual(view.meta!.locals.agentSession.spans.map((s: { seq: number }) => s.seq), [1, 2]);
+  assert.ok(!(await c.open('name:*Agent Sessions*')).text!.includes('obsolete-model'));
+});
+
+test('review 10: a truncated catchup retires requests whose resolution is no longer available', async t => {
+  const { hub, c } = await reviewFixture(t, hub => {
+    hub.add('lost_resolution');
+    hub.append('lost_resolution', { e: 'permission', toolCall: { title: 'Read' }, options: [{ optionId: 'once', name: 'Allow once' }] });
+  });
+  const session = hub.sessions.get('lost_resolution')!, id = (await c.call('agent-session-open', ['lost_resolution'])).value;
+  await c.open(id);
+  hub.truncated = true;
+  hub.journals.set('lost_resolution', [{ seq: 100, e: 'prompt', prompt: [{ type: 'text', text: 'recent retained tail' }] }]);
+  session.acp.pending = []; session.acp.headSeq = 100; session.updatedAt++; hub.emit('session', session);
+  await untilText(c, id, 'no longer pending; resolution unavailable');
+  const view = await c.open(id), meta = view.meta!.locals.agentSession;
+  assert.deepEqual(meta.pending, []); assert.deepEqual(view.meta!.locals.agentState.pending, []);
+  assert.equal(meta.spans.find((s: { seq: number }) => s.seq === 1).status, 'unavailable');
+  assert.equal(meta.resolved[0].seq, undefined); assert.equal(meta.resolved[0].by, undefined);
+  assert.match((await c.call('agent-session-request', ['lost_resolution', 1, session.createdAt])).error.report, /no longer pending/);
+});
+
+test('review 10: an authoritative pending snapshot arriving after its journal head still retires a lost resolution', async t => {
+  const { hub, c } = await reviewFixture(t);
+  const session = hub.add('late_pending');
+  hub.append('late_pending', { e: 'permission', toolCall: { title: 'Old question' }, options: [{ optionId: 'once', name: 'Allow once' }] });
+  const id = (await c.call('agent-session-open', ['late_pending'])).value;
+  const delayed = structuredClone(session);
+  hub.truncated = true;
+  hub.journals.set('late_pending', [{ seq: 100, e: 'prompt', prompt: [{ type: 'text', text: 'tail before summary' }] }]);
+  session.acp.headSeq = 100; session.acp.pending = [];
+  delayed.acp.headSeq = 2; hub.emit('session', delayed);
+  await untilText(c, id, 'tail before summary');
+  assert.equal((await c.open(id)).meta!.locals.agentSession.pending.length, 1, 'an older summary cannot claim a lost resolution');
+  hub.emit('session', session);
+  await untilText(c, id, 'no longer pending; resolution unavailable');
+  assert.deepEqual((await c.open(id)).meta!.locals.agentState.pending, []);
+});
+
+test('review 11: killed transcript/list/reported views stay killed after in-flight reads and later summaries', async t => {
+  const release = Promise.withResolvers<void>(); let hold = false, entered = 0;
+  t.after(() => release.resolve());
+  const { hub, c } = await reviewFixture(t, hub => {
+    hub.add('closed', [{ seq: 1, e: 'prompt', prompt: [{ type: 'text', text: 'first' }] }]);
+    hub.observed.set('reported_closed', { id: 'reported_closed', host: 'remote', state: 'running', title: 'reported', lastAt: 1 });
+    const handle = hub.handle.bind(hub);
+    hub.handle = async (req, res) => {
+      if (hold && req.url?.includes('/closed/events?')) { entered++; await release.promise; }
+      await handle(req, res);
+    };
+  });
+  const list = (await c.call('agent-sessions')).value, id = (await c.call('agent-session-open', ['closed'])).value;
+  const reported = (await c.call('agent-session-open', ['reported_closed'])).value;
+  for (const buffer of [list, id, reported]) await c.open(buffer);
+  hold = true; hub.append('closed', { e: 'prompt', prompt: [{ type: 'text', text: 'held event' }] });
+  await until(() => entered > 0);
+  for (const buffer of [list, id, reported]) await c.call('kill-buffer', [buffer]);
+  release.resolve(); await sleep(100);
+  const reads = hub.calls.filter(v => v.path.includes('/closed/events?') || v.path === '/v1/observed/reported_closed').length;
+  hub.append('closed', { e: 'prompt', prompt: [{ type: 'text', text: 'latest event' }] });
+  const observed = hub.observed.get('reported_closed')!; observed.lastAt++; hub.emit('observed', observed);
+  await c.call('agent-session-info'); await sleep(100);
+  assert.equal(hub.calls.filter(v => v.path.includes('/closed/events?') || v.path === '/v1/observed/reported_closed').length, reads);
+  const buffers = (await c.call('buffer-list')).value;
+  for (const buffer of [list, id, reported]) assert.ok(!buffers.some((v: { id: string }) => v.id === buffer));
+  assert.equal(hub.calls.filter(v => v.method !== 'GET').length, 0, 'view teardown never cancels the underlying agent');
+  const reopened = await c.call('agent-session-open', ['closed']); assert.equal(reopened.error, undefined);
+  assert.match((await c.open(reopened.value)).text!, /latest event/);
+});
+
+test('review 12: rejected streaming responses close immediately and stop destroys every outstanding attempt', async t => {
+  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
+  fs.writeFileSync(tokenFile, hub.token); let active = 0, attempts = 0;
+  const handle = hub.handle.bind(hub);
+  hub.handle = async (req, res) => {
+    if (req.url === '/v1/stream') {
+      active++; attempts++;
+      const heartbeat = setInterval(() => res.write('still refused\n'), 20);
+      res.on('close', () => { active--; clearInterval(heartbeat); });
+      res.writeHead(503, { 'content-type': 'text/plain' }); res.write('refused\n'); return;
+    }
+    await handle(req, res);
+  };
+  // Only construction dependencies are inert; HTTP requests, SSE bodies, sockets and shutdown are real.
+  const server = { cfg: { agentHub: { url: hub.url, tokenFile } }, buffers: { all: () => [], on: () => () => {} },
+    auth: { refuse: [], realRefuse: [] }, log: { debug: () => {} }, clients: [] } as unknown as Server;
+  const backend = new AgentSessions(server);
+  t.after(async () => { backend.stop(); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  backend.start();
+  await until(() => attempts >= 2 && active === 0);
+  assert.equal(active, 0, 'a refusal is not a draining live connection during reconnect');
+  backend.stop(); await until(() => backend.requests.size === 0);
+  assert.equal(active, 0); assert.equal(backend.stream, null);
 });

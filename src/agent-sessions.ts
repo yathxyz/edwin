@@ -3,7 +3,7 @@
 'use strict';
 const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
-type Row = { sid?: string; observedId?: string; waiting?: boolean };
+type Row = { sid?: string; epoch?: number; observedId?: string; waiting?: boolean };
 type List = { rows: Row[]; status: string };
 /* Presentation commands run in this replica; mutations still go through edwind. */
 const presentationCommands: Record<string, true> = {
@@ -34,7 +34,7 @@ async function rpc(cmd: string, args: unknown[] = []): Promise<unknown> {
 async function show(id: string): Promise<EdBuffer> {
   const b = await Ed.sync.open(id); Ed.setWindowBuffer(b); E.current = b; Ed.scheduleRender(); return b;
 }
-async function open(sid: string): Promise<EdBuffer> { return show(await rpc('agent-session-open', [sid]) as string); }
+async function open(sid: string, epoch?: number): Promise<EdBuffer> { return show(await rpc('agent-session-open', epoch === undefined ? [sid] : [sid, epoch]) as string); }
 function row(): Row | undefined { const list = E.current.meta?.locals?.agentList as List | undefined; return list?.rows[Ed.lineNoB(E.current, E.current.pt) - 3]; }
 function selected(): string {
   const r = row(), s = E.current.meta?.locals?.agentSession as { sid: string; observed?: boolean } | undefined;
@@ -42,16 +42,26 @@ function selected(): string {
   const sid = r?.sid || s?.sid;
   return sid || signal('user-error', 'No agent session here') as never;
 }
+function identity(sid = selected()): { sid: string; epoch: number } {
+  // Prefer the selected view's displayed incarnation, not newer control-state metadata.
+  for (const b of [E.current, ...E.buffers.filter(b => b !== E.current)]) {
+    const session = b.meta?.locals?.agentSession as { sid: string; observed?: boolean; epoch?: number } | undefined, list = b.meta?.locals?.agentList as List | undefined;
+    if (session?.sid === sid && !session.observed && typeof session.epoch === 'number') return { sid, epoch: session.epoch };
+    const r = list?.rows.find(r => r.sid === sid);
+    if (typeof r?.epoch === 'number') return { sid, epoch: r.epoch };
+  }
+  return signal('user-error', 'No displayed incarnation for this session; select it explicitly') as never;
+}
 async function refresh() {
   const s = E.current.meta?.locals?.agentSession as { sid: string } | undefined;
   return s ? open(s.sid) : show(await rpc('agent-sessions') as string);
 }
-Ed.agentSessions = { rpc, show, open, selected, refresh, state, onChange };
+Ed.agentSessions = { rpc, show, open, selected, identity, refresh, state, onChange };
 CMD('agent-sessions', '', '', 'List hub-run and reported agent sessions, waiting first.', async () => { await show(await rpc('agent-sessions') as string); return false; });
 CMD('agent-session-open', async () => [await Ed.readMini('Session: ', '', null)], 'SID', 'Show the session journal in its stable shared buffer.', async ([sid]: SchemeValue[]) => {
   const r = row(); await open(typeof sid === 'string' && sid ? sid : r?.sid || r?.observedId || selected()); return false;
 });
-CMD('agent-session-open-row', '', '', 'Open the session on this list row.', async () => { const r = row(); if (!r) signal('user-error', 'No session on this line'); await open((r!.sid || r!.observedId)!); return false; });
+CMD('agent-session-open-row', '', '', 'Open the session incarnation on this list row.', async () => { const r = row(); if (!r) signal('user-error', 'No session on this line'); await open((r!.sid || r!.observedId)!, r!.epoch); return false; });
 CMD('agent-sessions-refresh', '', '', 'Refresh the session list or current transcript.', async () => { await refresh(); return false; });
 CMD('agent-session-start', '', '', 'Start an agent on a configured host, in a directory.', async () => {
   const info = await rpc('agent-session-info') as { host: string; agents: { name: string }[]; hosts: { name: string; agents: { name: string }[] }[] };
@@ -62,9 +72,9 @@ CMD('agent-session-start', '', '', 'Start an agent on a configured host, in a di
   const cwd = await Ed.readMini('Agent directory (on ' + host + '): ', '', null);
   await show(await rpc('agent-session-start', [{ agent, host, cwd }]) as string); return false;
 });
-CMD('agent-session-cancel', '', '', 'Cancel the current turn, without ending the session.', async () => { await rpc('agent-session-cancel', [selected()]); return false; });
+CMD('agent-session-cancel', '', '', 'Cancel the displayed session turn, without ending the session.', async () => { const shown = identity(); await rpc('agent-session-cancel', [shown.sid, { epoch: shown.epoch }]); return false; });
 CMD('agent-session-remove', '', '', 'End and forget the selected hub session, after confirmation.', async () => {
-  const sid = selected(); if (await Ed.readMini(`Remove ${sid}? (yes/no) `, '', null) === 'yes') await rpc('agent-session-remove', [sid]); return false;
+  const shown = identity(); if (await Ed.readMini(`Remove ${shown.sid} (createdAt ${shown.epoch})? (yes/no) `, '', null) === 'yes') await rpc('agent-session-remove', [shown.sid, { epoch: shown.epoch }]); return false;
 });
 const previousSetup = H.setup;
 H.setup = () => {

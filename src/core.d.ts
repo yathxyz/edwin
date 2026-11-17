@@ -1460,8 +1460,9 @@ interface EdApi {
   agentSessions: {
     rpc(cmd: string, args?: unknown[]): Promise<unknown>;
     show(id: string): Promise<EdBuffer>;
-    open(sid: string): Promise<EdBuffer>;
+    open(sid: string, epoch?: number): Promise<EdBuffer>;
     selected(): string;
+    identity(sid?: string): { sid: string; epoch: number };
     refresh(): Promise<unknown>;
     state(buffer: EdBuffer): EdAgentSessionState;
     onChange(buffer: EdBuffer, fn: (state: EdAgentSessionState) => void): () => void;
