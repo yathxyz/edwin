@@ -19,7 +19,14 @@
    server is told of, as the server's textDocumentSync asks: didOpen once it is initialized (again after each
    start again), didChange as one change (a range, or the whole text) after an idle moment or before a request,
    didSave and didClose. eglot-mode is that attachment; visiting a file whose mode has a declared server turns it
-   on. Positions are UTF-16 units, as LSP's default, the only encoding offered. */
+   on. Positions are UTF-16 units, as LSP's default, the only encoding offered.
+
+   Cross references (docs/steps.md, "Definition, references and implementation"): xref-find-definitions (g d,
+   M-.), xref-find-references (g r, M-?), eglot-find-implementation, eglot-find-typeDefinition and
+   eglot-find-declaration ask the buffer's server about point. A single place of a definition's kind is visited
+   at once; references, and several places of any kind, are listed in *xref* (xref-mode: RET visits a row, o
+   shows it, M-g n steps through them). Each visit first records where point was, which xref-go-back (M-, and
+   C-t) returns to, across buffers. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -30,8 +37,9 @@ const cur = () => E.current;
    (together under the 2 s a frame may block on quitting); the first delay before a start again, doubled each
    time, and how many starts again in a row before the session gives up; how long a server must have run for its
    end to count as a first one again; how long a session with no buffer lives; how long after an edit its change
-   is sent (eglot's eglot-send-changes-idle-time). Mutable for the suites. */
-const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500 };
+   is sent (eglot's eglot-send-changes-idle-time); how long a cross-reference command waits for its server to be
+   ready, then for its answer. Mutable for the suites. */
+const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000 };
 /* The tail of a server's error output a session keeps (eglot-stderr-buffer). */
 const STDERR_MAX = 64 * 1024;
 
@@ -176,7 +184,11 @@ function initializeParams(s: Session) {
     capabilities: {
       general: { positionEncodings: ['utf-16'] },
       workspace: { configuration: true, workspaceFolders: true },
-      textDocument: { synchronization: { didSave: true } },
+      textDocument: {
+        synchronization: { didSave: true },
+        definition: { linkSupport: true }, declaration: { linkSupport: true }, typeDefinition: { linkSupport: true },
+        implementation: { linkSupport: true }, references: {},
+      },
       window: { workDoneProgress: false, showMessage: {} },
     },
   };
@@ -492,6 +504,227 @@ async function reconnect(s: Session): Promise<Session | null> {
   idleWhenUnused(fresh);
   return fresh;
 }
+
+/* ---- cross references ---- */
+
+/* At most XREF_MAX places of an answer are kept. A file *xref* shows lines of, when no buffer visits it, is read only
+   when it is a regular file of at most PREVIEW_MAX bytes, and while the files read for one list stay within
+   PREVIEW_TOTAL (else its rows have no text); a row's text is cut at ROW_MAX characters. xref-go-back keeps the last
+   BACK_MAX places. */
+const XREF_MAX = 5000, PREVIEW_MAX = 4 * 1024 * 1024, PREVIEW_TOTAL = 16 * 1024 * 1024, ROW_MAX = 200, BACK_MAX = 50;
+/* A place an answer names: an absolute path, and the LSP position there (from 0, UTF-16 units). */
+interface Xref { path: string; line: number; character: number }
+/* Each request: its method, the capability its server must give, the word for its places, and whether they are
+   listed even when there is one (references). */
+interface XrefKind { method: string; cap: string; what: string; list: boolean }
+const XREF_KINDS: Record<string, XrefKind> = {
+  definition: { method: 'textDocument/definition', cap: 'definitionProvider', what: 'definitions', list: false },
+  references: { method: 'textDocument/references', cap: 'referencesProvider', what: 'references', list: true },
+  implementation: { method: 'textDocument/implementation', cap: 'implementationProvider', what: 'implementations', list: false },
+  typeDefinition: { method: 'textDocument/typeDefinition', cap: 'typeDefinitionProvider', what: 'type definitions', list: false },
+  declaration: { method: 'textDocument/declaration', cap: 'declarationProvider', what: 'declarations', list: false },
+};
+/* The places of *xref*'s rows, by line (from 1). */
+const xrefRows = new WeakMap<EdBuffer, Map<number, Xref>>();
+/* Where point was before each visit, the newest last (xref-go-back). */
+const back: EdMarker[] = [];
+
+/* The absolute path a file: URI names (with no host, or localhost); null for another scheme or a malformed one. */
+function pathOf(u: string): string | null {
+  const m = /^file:\/\/(?:localhost)?(\/[^?#]*)$/i.exec(u);
+  if (!m) return null;
+  let p: string;
+  try { p = decodeURIComponent(m[1]); } catch (e) { return null; }
+  return p.includes('\0') ? null : p;
+}
+/* The offset in T of the LSP position POS, lines ending at \n, \r\n or a lone \r as position counts them: a line
+   past the last is T's end, a character past its line's end that end, one between the halves of a surrogate pair
+   the pair's start. */
+function offsetOf(t: string, pos: { line: number; character: number }) {
+  let i = 0;
+  for (let l = 0; l < pos.line; l++) {
+    while (i < t.length && t.charCodeAt(i) !== 10 && t.charCodeAt(i) !== 13) i++;
+    if (i >= t.length) return t.length;
+    i += t.charCodeAt(i) === 13 && t.charCodeAt(i + 1) === 10 ? 2 : 1;
+  }
+  let end = i;
+  while (end < t.length && t.charCodeAt(end) !== 10 && t.charCodeAt(end) !== 13) end++;
+  let p = Math.min(end, i + pos.character);
+  if (p > i && isHigh(t.charCodeAt(p - 1)) && isLow(t.charCodeAt(p))) p--;
+  return p;
+}
+/* The lines LINES (from 0, ascending) of T, by the same line ends ('' past the last), in one pass over T. */
+function linesOf(t: string, lines: number[]) {
+  const out: string[] = [];
+  let i = 0, l = 0;
+  const eol = (k: number) => { while (k < t.length && t.charCodeAt(k) !== 10 && t.charCodeAt(k) !== 13) k++; return k; };
+  for (const want of lines) {
+    while (l < want && i < t.length) { i = eol(i); i += t.charCodeAt(i) === 13 && t.charCodeAt(i + 1) === 10 ? 2 : 1; l++; }
+    out.push(l === want && i <= t.length ? t.slice(i, eol(i)) : '');
+  }
+  return out;
+}
+const isCount = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
+/* The places of an answer: null, a Location, or a list of Locations or LocationLinks (a link's targetSelectionRange,
+   else its targetRange). Each once, in the answer's order, at most XREF_MAX; FOREIGN counts those in no file (another
+   URI scheme). An item of another shape is left out. */
+function places(res: unknown): { xs: Xref[]; foreign: number } {
+  const xs: Xref[] = [], seen = new Set<string>();
+  let foreign = 0;
+  type Range = { start?: { line?: unknown; character?: unknown } } | undefined;
+  for (const it of res === null || res === undefined ? [] : Array.isArray(res) ? res : [res]) {
+    if (!it || typeof it !== 'object' || xs.length >= XREF_MAX) continue;
+    const o = it as { uri?: unknown; range?: Range; targetUri?: unknown; targetSelectionRange?: Range; targetRange?: Range };
+    const link = o.targetUri !== undefined, u = link ? o.targetUri : o.uri;
+    const r = link ? o.targetSelectionRange || o.targetRange : o.range, start = r && typeof r === 'object' ? r.start : undefined;
+    if (typeof u !== 'string' || !start || !isCount(start.line) || !isCount(start.character)) continue;
+    const path = pathOf(u);
+    if (!path) { foreign++; continue; }
+    const key = `${path}\0${start.line}\0${start.character}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    xs.push({ path, line: start.line, character: start.character });
+  }
+  return { xs, foreign };
+}
+
+/* P, which C-g quits (cancelling it when it can be), as the command loop holds every key while a command waits. */
+const quittable = <T>(p: Promise<T>) => (EdPool.interruptible ? EdPool.interruptible(p) : p);
+/* Ask B's server KIND about point: the places it answers, at least one. Waits for the server to be ready and then
+   for its answer, each at most timing.request; C-g quits either wait, cancelling the request. */
+async function ask(b: EdBuffer, kind: XrefKind): Promise<Xref[]> {
+  const s = ofBuffer.get(b);
+  if (!s) return signal('user-error', 'No language server for this buffer (M-x eglot starts one)');
+  if (s.state !== 'running') {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const bound = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(lspError(`${label(s)}: not ready after ${timing.request / 1000} s`)), timing.request); });
+    try { await quittable(Promise.race([ready(s), bound])); } finally { if (timer) clearTimeout(timer); }
+  }
+  if (!(s.capabilities || {})[kind.cap]) return signal('user-error', `${s.name} gives no ${kind.what}`);
+  flush(b);
+  const conn = s.conn, d = docs.get(b);
+  if (!conn || conn.closed() !== null || s.state !== 'running') return signal('lsp-error', `${label(s)}: not running`);
+  const params: Record<string, unknown> = { textDocument: { uri: d ? d.uri : fileUri(b) }, position: position(b.text, b.pt) };
+  if (kind === XREF_KINDS.references) params.context = { includeDeclaration: true };
+  const { xs, foreign } = places(await quittable(conn.request(kind.method, params, { timeout: timing.request })));
+  if (!xs.length) return signal('user-error', foreign ? `No ${kind.what} in a file: the server names ${foreign} elsewhere` : `No ${kind.what} found`);
+  return xs;
+}
+
+/* Record where point is in B, for xref-go-back. */
+function pushBack(b: EdBuffer) {
+  back.push(b.marker(b.pt));
+  while (back.length > BACK_MAX) back.shift()!.release();
+}
+/* X's file is there, else a user-error says it is not. */
+function need(x: Xref) {
+  const f = Ed.host.files;
+  if (!f || !f.exists(x.path)) signal('user-error', `${abbr(x.path)}: no such file`);
+}
+/* Visit X in the selected window: its file, point at its position (a promise when edwind opens the file). */
+function visitXref(x: Xref): EdBuffer | Promise<EdBuffer> {
+  need(x);
+  const place = (v: unknown) => {
+    if (!(v instanceof Ed.Buffer)) return signal('user-error', `${abbr(x.path)} was not visited`);
+    v.pt = offsetOf(v.text, x);
+    return v;
+  };
+  const r = L.call('find-file', [x.path]) as unknown;
+  return r && typeof (r as Promise<unknown>).then === 'function' ? (r as Promise<unknown>).then(place) : place(r);
+}
+
+/* *xref*, listing XS, shown and selected in another window: for each file (in the answer's order, its name
+   relative to ROOT when under it) a heading, then a row for each place, `LINE: TEXT`, by line. The rows are also the
+   error list (M-g n). Point is on the first row. */
+function list(xs: Xref[], root: string, what: string) {
+  const f = Ed.host.files!, files = new Map<string, Xref[]>(), top = root.replace(/\/+$/, '') + '/';
+  for (const x of xs) { const g = files.get(x.path); if (g) g.push(x); else files.set(x.path, [x]); }
+  const rows = new Map<number, Xref>(), out: string[] = [], errors: SchemeValue[] = [];
+  let budget = PREVIEW_TOTAL;
+  for (const [path, g] of files) {
+    g.sort((a, c) => a.line - c.line || a.character - c.character);
+    const open = E.buffers.find(o => o.file && !o.shared && f.resolve(o.file) === path);
+    let text: string | null = open ? open.text : null;
+    if (!open && budget > 0) try { text = f.read(path, Math.min(PREVIEW_MAX, budget)); } catch (e) { text = null; }
+    if (!open && text !== null) budget -= text.length;
+    const texts = text === null ? null : linesOf(text, g.map(x => x.line));
+    out.push(path.startsWith(top) ? path.slice(top.length) : abbr(path));
+    const w = String(g[g.length - 1].line + 1).length;
+    for (const [k, x] of g.entries()) {
+      let line = texts === null ? '' : texts[k].trim();
+      if (line.length > ROW_MAX) line = line.slice(0, ROW_MAX) + '…';
+      out.push(`${String(x.line + 1).padStart(w + 2)}: ${line}`);
+      rows.set(out.length, x);
+      errors.push(L.list(path, x.line + 1, x.character + 1, line || `${abbr(path)}:${x.line + 1}`, intern('utf-16')));
+    }
+  }
+  const b = Ed.getBufferCreate('*xref*');
+  b.readOnly = false; b.text = out.join('\n') + '\n'; b.readOnly = true; b.modified = false;
+  b.mode = 'xref-mode'; b.evilState = 'motion'; b.undo = []; b.redo = []; Ed.forgetLog(b);
+  xrefRows.set(b, rows);
+  try { L.call('next-error-set-list!', [L.list(...errors), 'xref']); } catch (e) { Ed.reportError(e); }
+  const w = Ed.popToBuffer(b, true);
+  b.pt = Ed.lineStartB(b, 2); w.start = 0;
+  Ed.message(`${xs.length} ${what}`);
+  return b;
+}
+
+/* KIND about point in the current buffer: a single place of a definition's kind visited, else the places listed;
+   point's place recorded first either way (xref-go-back, and C-o in the buffer). */
+async function find(name: string) {
+  const kind = XREF_KINDS[name], b = cur();
+  const xs = await ask(b, kind), s = ofBuffer.get(b);
+  if (!E.buffers.includes(b) || cur() !== b) return false;
+  const one = xs.length === 1 && !kind.list;
+  if (one) need(xs[0]);
+  pushBack(b);
+  EvilCore.pushJump(b, b.pt);
+  if (one) await visitXref(xs[0]);
+  else list(xs, s ? s.root : '/', kind.what);
+  return false;
+}
+/* The *xref* row at point, the window to visit it in (another, not showing *xref*, split from it when there is
+   none) and *xref*'s own. */
+function rowHere() {
+  const b = cur(), rows = xrefRows.get(b), x = rows && rows.get(Ed.lineNoB(b, b.pt));
+  if (!x) return signal('user-error', 'No reference here');
+  const here = E.sel!, others = Ed.windowList().filter(w => w !== here && w.buffer !== b);
+  const there = others.find(w => !w.popup) || others[0] || Ed.splitWindow(here, 'above');
+  return { x, here, there };
+}
+const XREF_DOC = "Asks this buffer's language server; point's place is recorded first, for xref-go-back (M-,). Several places are listed in *xref*.";
+CMD('xref-find-definitions', '', '', `Go to the definition of the identifier at point (g d, M-.). ${XREF_DOC}`, () => find('definition'));
+CMD('xref-find-references', '', '', "List the references to the identifier at point, its declaration among them, in *xref* (g r, M-?), from this buffer's language server: RET visits one, M-g n steps through them, M-, comes back.", () => find('references'));
+CMD('eglot-find-implementation', '', '', `Go to the implementation of the identifier at point. ${XREF_DOC}`, () => find('implementation'));
+CMD('eglot-find-typeDefinition', '', '', `Go to the definition of the type of the identifier at point. ${XREF_DOC}`, () => find('typeDefinition'));
+CMD('eglot-find-declaration', '', '', `Go to the declaration of the identifier at point. ${XREF_DOC}`, () => find('declaration'));
+CMD('xref-goto-xref', '', '', 'Visit the place of the *xref* row at point in another window and select it (RET); xref-go-back (M-,) returns to where the list was asked for.', async () => {
+  const { x, there } = rowHere();
+  Ed.selectWindow(there);
+  await visitXref(x);
+  return false;
+});
+CMD('xref-show-location-at-point', '', '', 'Show the place of the *xref* row at point in another window, staying in *xref* (o).', async () => {
+  const { x, here, there } = rowHere();
+  Ed.selectWindow(there);
+  try { await visitXref(x); } finally { if (Ed.windowList().includes(here)) Ed.selectWindow(here); }
+  return false;
+});
+CMD('xref-go-back', '', '', 'Go back to where point was before the last visit of a definition or reference (M-, and C-t), in its buffer; a killed buffer\'s place is skipped.', () => {
+  for (let m = back.pop(); m; m = back.pop()) {
+    const b = m.buffer, p = m.pos;
+    m.release();
+    if (!b || p === null || !E.buffers.includes(b)) continue;
+    Ed.setWindowBuffer(b);
+    b.pt = Math.min(p, b.rope.length);
+    return false;
+  }
+  return signal('user-error', 'At the start of the xref history');
+});
+Ed.MODE_NAMES['xref-mode'] = 'XREF';
+Ed.modeParents.set('xref-mode', 'special-mode');
+/* xref-mode's own keys, outside Evil and in Emacs state (scm/emacs.scm binds RET and o there). */
+L.set('xref-mode-map', new Ed.Keymap('xref-mode-map'));
 
 /* ---- Scheme and commands ---- */
 

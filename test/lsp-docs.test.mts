@@ -187,7 +187,7 @@ test('visiting a file whose mode has a server turns eglot-mode on; didOpen once 
   assert.equal(f.of('textDocument/didChange').length, 0, 'nothing changed after the didOpen');
   assert.deepEqual(f.errors(), []);
   const init = f.of('initialize')[0] as unknown as { capabilities: { textDocument: unknown } };
-  assert.deepEqual(init.capabilities.textDocument, { synchronization: { didSave: true } });
+  assert.deepEqual((init.capabilities.textDocument as { synchronization: unknown }).synchronization, { didSave: true });
   assert.equal(Ed.lsp.languageId('c++-mode'), 'cpp');
   assert.equal(Ed.lsp.languageId('tsx-mode'), 'typescriptreact');
   assert.equal(Ed.lsp.languageId('nix-mode'), 'nix');
@@ -400,6 +400,7 @@ test('a crash: the new process gets didOpen with the text as it is then, edits m
   b.pt = 0; Ed.insertText(b, 'while down ');
   Ed.lsp.flush(b);   // nothing to send to: dropped, no error
   await until(() => s.state === 'running' && s.proc !== first, 'the start again');
+  await until(() => f.of('textDocument/didOpen').length === 2, 'the new process logged its didOpen');   // its log is written as it reads
   const opens = f.of('textDocument/didOpen');
   assert.equal(opens.length, 2);
   assert.equal(opens[1].textDocument.text, 'while down before\n');

@@ -279,6 +279,7 @@ test('a crash once: started again, initialized again, a new process; a healthy r
   await until(() => s.restarts === 1 && s.state === 'running', 'running again');
   const pids = [...new Set(f.lines().map(l => l.pid))];
   assert.equal(pids.length, 2);
+  await until(() => f.lines().filter(l => l.pid === pids[1]).length >= 2, 'the new process logged initialized');   // its log is written as it reads
   assert.deepEqual(f.lines().filter(l => l.pid === pids[1]).map(l => l.what.split(' ')[0]).slice(0, 2), ['initialize', 'initialized']);
   assert.equal(proc.running().length, 1);
   assert.deepEqual(s.capabilities, { hoverProvider: true, textDocumentSync: 1 });

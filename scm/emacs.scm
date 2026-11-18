@@ -467,6 +467,8 @@ takes the -N lines above the current one, as Emacs's; 0 takes none."
    ("C-x b" . consult-buffer)        ("C-x k" . kill-buffer)
    ("M-s l" . consult-line)          ("M-s i" . consult-imenu)
    ("M-g i" . consult-imenu)         ("M-g r" . consult-recent-file)
+   ("M-." . xref-find-definitions)   ("M-?" . xref-find-references)
+   ("M-," . xref-go-back)
    ("C-x C-b" . list-buffers)
    ("C-x C-f" . find-file)           ("C-x C-s" . save-buffer)
    ("C-x d" . dired)                 ("C-x C-j" . dired-jump)
@@ -533,6 +535,10 @@ C-c C-k aborts the rebase."
 (define-key grep-edit-mode-map "C-c C-c" 'grep-edit-finish)
 (define-key grep-edit-mode-map "C-x C-s" 'grep-edit-finish)
 (define-key grep-edit-mode-map "C-c C-k" 'grep-edit-abort)
+
+;; *xref* (src/lsp.ts), out of Evil and in Emacs state: RET visits the row at point, o shows it
+(define-key xref-mode-map "RET" 'xref-goto-xref)
+(define-key xref-mode-map "o" 'xref-show-location-at-point)
 
 ;; The minibuffer
 (define-key minibuffer-local-map "RET" 'exit-minibuffer)

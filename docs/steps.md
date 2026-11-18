@@ -4437,6 +4437,104 @@ buffer's after random edits. Risk named: UTF-16 positions.
   - The built program's `quitting_shuts_the_language_servers_down` (tests/terminal.rs) is unchanged: its
     stand-in answers no `textDocumentSync`, so its log is still `initialize, initialized, shutdown, exit`.
 
+## Definition, references and implementation (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-xref`, on lsp-frame-docs; owner decision 2: the client in
+the frame, the other LSP details the plan's defaults): gd, gr and friends through the server, with a results
+buffer and jump back; proved by edwin-lsp.
+
+- **`src/lsp.ts`** holds it, beside the sessions and documents (no new file); the keys are in `scm/evil.scm` and
+  `scm/emacs.scm`; `Ed.lsp.timing` gains `request` (10 s).
+- **The commands**, each asking the current buffer's server about point: `xref-find-definitions`
+  (`textDocument/definition`), `xref-find-references` (`textDocument/references`, with `includeDeclaration`),
+  `eglot-find-implementation`, `eglot-find-typeDefinition` and `eglot-find-declaration`. The buffer's pending
+  change is sent first (`flush`), and the position is UTF-16 units of the text the server holds. initialize now
+  says `definition`, `declaration`, `typeDefinition` and `implementation` with `linkSupport`, and `references`.
+- **Keys.** Normal state, while eglot-mode is on (its Evil minor map, so `g r` of dired, git's buffers and
+  `*compilation*` is untouched and a buffer with no server has neither): `g d` definitions, `g r` references.
+  `C-t` in Normal state (Evil's `pop-tag-mark`) and `M-,` go back; `M-.` and `M-?` are global, as in Emacs.
+  `eglot-find-implementation`, `-typeDefinition` and `-declaration` have no key, as in the Emacs config: `M-x`.
+- **The answer** may be null, a Location, or a list of Locations or LocationLinks; a link goes to its
+  `targetSelectionRange`, else its `targetRange`. Only `file:` URIs with no host (or `localhost`) are places; a
+  place of another scheme (`jdt:`, `untitled:`) or a malformed escape is left out, and an answer of only such
+  places says `No definitions in a file: the server names N elsewhere`. An item of another shape, a negative or
+  fractional position and a place given twice are left out; at most 5000 places are kept. None left: `No
+  definitions found` (or references, implementations...). A server whose capabilities lack the method is not
+  asked: `NAME gives no implementations`. No server for the buffer: `No language server for this buffer (M-x
+  eglot starts one)`. An error answer is signalled as lsp-rpc gives it (`lsp-error`).
+- **One place, of a definition's kind** (definition, implementation, type definition, declaration), is visited in
+  the selected window: its file (`find-file`), point at its position, counted as the server counts (lines at `\n`,
+  `\r\n` and a lone `\r`, UTF-16 units, a character past the line's end its end, one between the halves of a pair
+  the pair's start). A file that is not there says `PATH: no such file` and records nothing.
+- **References, and several places of any kind**, go to `*xref*` (`xref-mode`, under special-mode: Motion state,
+  read-only, q and SPC as there), shown and selected in another window: for each file, in the order the server
+  first names it, a heading (its path from the project root, else with `~`), then a row per place by line,
+  `LINE: TEXT`, the text of that line trimmed and cut at 200 characters. The text is a visiting buffer's, else
+  the file's read with a bound (`host.files.read(path, 4 MiB)`: the desktop program reads only a regular file up to
+  it), else none: a FIFO, a device or a large file a server names is never read, and once the files read for one
+  list come to 16 MiB the rest are not read. Each file's rows are found in one pass over its text. The echo area says `N references`.
+  `RET` (`xref-goto-xref`) visits the row's place in another window (one not showing `*xref*`, a split when there
+  is none) and selects it; `o` (`xref-show-location-at-point`) shows it there and stays in `*xref*`; both also in
+  Emacs state (`xref-mode-map`). On a heading: `No reference here`. The rows are the error list too
+  (`next-error-set-list!` with UTF-16 columns), so `M-g n`, `M-g p` and `:cn` step through them.
+- **Jump back.** Each find that found something first records point (a marker, so later edits move it) in one
+  history (src/lsp.ts's, for every window it serves), the newest last, at most 50; `xref-go-back` returns to the newest, in its buffer, and
+  forgets it; a place in a killed buffer is skipped; with none left, `At the start of the xref history`. A visit
+  from `*xref*` records nothing more: back goes to where the list was asked for. The find also records point in
+  the buffer's jump list, so `C-o` comes back within one file as before.
+- **Waiting.** The command loop holds every key while a find waits, so each wait is quittable (`EdPool.interruptible`:
+  C-g quits, cancelling the request, which sends `$/cancelRequest`) and bounded by `timing.request`: a server not
+  yet initialized is waited for that long (then `NAME in ROOT: not ready after 10 s`), and its answer that long
+  (the request's own timeout, which also cancels it). After the wait, nothing moves if the buffer was killed or
+  is no longer current.
+- **Choices**, each reversible:
+  - `g d` and `g r` only where eglot-mode is on, not globally: Vim's own `gd` (the first match in the buffer) is
+    not built, and a buffer with no server has no `g d` (as the owner's Emacs, where it fell to xref's other
+    backends, which Edwin has not). The bindings follow evil (`gd`, `C-t`) and evil-collection's find-usages
+    binding (`gr`) as remembered; evil-collection's source is not on this host to check.
+  - A single reference is listed rather than visited (Emacs's references show the buffer too).
+  - A visit converts the position itself rather than through `visit-location`, which counts lines at `\n` only;
+    `M-g n` from `*xref*` goes through `visit-location`, so in a file with a lone `\r` its line can differ.
+- **Differences from Emacs's xref and eglot:** no identifier prompt (`C-u M-.`), no `xref-go-forward`
+  (`C-M-,`), no `xref-find-apropos`; `*xref*` has no `n`/`p` show-and-move, `C-j`/`C-k`, group motions, `g r`
+  revert or faces, and is not editable (no `xref-query-replace-in-results`). The history is one for all windows, not a
+  window's. `g d` is not bound in Visual state.
+- **Not in it:** hover, signature help (lsp-eldoc); symbols (lsp-symbols); a `jdt:`-style URI's contents.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-lsp` (47 passed, 0 failed:
+  test/lsp-rpc.test.mts 10, test/lsp.test.mts 17, test/lsp-docs.test.mts 10, test/lsp-xref.test.mts 10, nil from
+  nixpkgs run in the sandbox, not skipped), `edwin-typecheck`, `edwin-headless` (21), `edwin-scheme` (38) and `nix build .#edwin` (unit 33 passed and 2 ignored, gui 5 and 1, terminal 37), on the final tree; `edit-lockdown` (6), `edit-security` (21), `edwin-compile` (39), `edwin-prog` (65) and `nix flake check path:$PWD` (all passed) on the tree before the one-pass rows, the 16 MiB total and the added assertions. Two waits added to the
+  earlier suites, which read a stand-in's log right after the session's state changed and failed now and then
+  once four suites ran at once (`a crash once` in test/lsp.test.mts and `a crash:` in test/lsp-docs.test.mts
+  now wait for the line), and test/lsp-docs.test.mts's initialize assertion checks `synchronization` alone.
+  test/lsp-xref.test.mts (10), against a stand-in (node) that answers each request with what the test wrote for
+  its method (a result, an error, or nothing), logs each message and keeps each document's text, so a request's
+  position is checked against the text the server holds:
+  - initialize's capabilities for the five methods.
+  - `g g` and `g U U` still work in a buffer with eglot-mode on; `g d` after an edit not yet sent: the didChange first, the position after `😀` in UTF-16 units, the place in
+    another file on line 3 past `\n` and a lone `\r`, after two astral characters; `C-t` back; again and back by
+    `M-,`; `C-t` once more: the history is empty.
+  - In one buffer: `C-o` comes back; a LocationLink's `targetSelectionRange`, and its `targetRange` without one.
+  - `g r`: `includeDeclaration`; `*xref*`'s text exactly (files in the server's order, rows by line, a place given
+    twice once, a CRLF file's line, a file out of the project with `~`, a `jdt:` place, a malformed item, a
+    negative line and a null left out), `6 references`, the files not open read once each with the bound; `RET`
+    on the third row visits it in the other window, `*xref*` still shown; `o` shows a row, `*xref*` still
+    selected; `RET` on a heading; `M-g n` the first row, `M-g n M-g p` back to it; `RET` in Emacs state visits a row; `C-t` to where
+    `g r` was typed.
+  - A single reference listed; two definitions listed, one in a file over 4 MiB and one in a directory, both rows
+    with no text; `RET` visits the first.
+  - null, `[]`, an `untitled:` place, a malformed escape, an error answer, a file not there and a capability
+    missing (not asked) each say so; nothing moved, nothing recorded; a buffer with no server: `M-.` says so.
+  - implementation, type definition and declaration by `M-x`; a character between the halves of `𝄞` goes to its
+    start; `C-t` twice.
+  - C-g while the server does not answer: `Quit`, `$/cancelRequest` sent, the loop free; `timing.request` at
+    200 ms: the request times out and is cancelled; keys work after; a server that never answers initialize:
+    `slow in ...: not ready after 0.2 s`.
+  - `xref-go-back` skips the place of a killed buffer.
+  - nil from nixpkgs: `g d` on a use behind a comment of `𝄞` goes to the binding (line 2, character 2), `C-t`
+    back, `g r` lists both uses (nil leaves the binding out though asked to include it).
+  - These mutations of src/lsp.ts each fail the suite: `\r\n` counted as two line ends, no move out of a
+    surrogate pair, no `includeDeclaration`, a link's `targetRange` taken over its `targetSelectionRange`.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

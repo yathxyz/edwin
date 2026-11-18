@@ -283,9 +283,13 @@ in
   # stand-in server's own copy (UTF-16 positions, \n, \r\n and a lone \r) equal to the buffer after each run; known
   # ranges; didOpen, didChange, didSave and didClose through eglot-mode, visiting, write-file, a major mode, a kill
   # and a crash; the sync kinds; nil finding a definition after edits. LSP_DOC_RUNS raises the run count.
+  # test/lsp-xref.test.mts, cross references: g d, g r and the other finds against a stand-in answering each shape
+  # (a Location, LocationLinks, lists across files, null, an error, a URI of another scheme or a malformed one),
+  # UTF-16 positions, *xref* (RET, o, M-g n), C-t and M-, back, C-g and the time bound on a server that does not
+  # answer; nil going to a binding and listing its references.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts
     touch $out
   '';
 

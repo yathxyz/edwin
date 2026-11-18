@@ -1779,4 +1779,15 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 ;; region is the raw point and mark, which in linewise Visual stop short of the last line.
 (define-key evil-visual-state-map "M-;" 'evil-comment-operator)
 
+;; A language server's cross references (src/lsp.ts), as Evil and evil-collection bind them: g d and g r
+;; while eglot-mode is on, C-t back (Evil's pop-tag-mark); M-. M-? and M-, are global (scm/emacs.scm). In
+;; *xref*, RET visits the row at point and o shows it; q and SPC come from special-mode.
+(evil-define-key 'normal 'eglot-mode
+  "g d" 'xref-find-definitions
+  "g r" 'xref-find-references)
+(define-key evil-normal-state-map "C-t" 'xref-go-back)
+(evil-define-key 'motion 'xref-mode
+  "RET" 'xref-goto-xref
+  "o" 'xref-show-location-at-point)
+
 ;;; evil.scm ends here
