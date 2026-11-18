@@ -1874,11 +1874,13 @@ interface EdHostProc {
 /* tree-sitter in the desktop program (host-native.ts over native/src/syntax.rs), trees by number: parse TEXT with
    the bundle's GRAMMAR, an edit of a tree's text (DEL code units at POS replaced by INS) and its reparse, the
    captures of the grammar's KIND query between two string indices (as synQuery gives them, MATCHES asking for
-   the match of each), free */
+   the match of each), the nodes holding a range (expreg), free */
 interface EdHostSyntax {
   parse(grammar: string, text: string): number;
   edit(tree: number, pos: number, del: number, ins: string): void;
   query(tree: number, kind: string, start: number, end: number, matches?: boolean): { names: string[]; captures: number[]; matches?: number[] };
+  /* the named nodes holding START..END, innermost first, out to the root, each extent once: [start, end, ...] */
+  nodes(tree: number, start: number, end: number): number[];
   free(tree: number): boolean;
 }
 interface EdSyntaxApi {
@@ -1890,6 +1892,9 @@ interface EdSyntaxApi {
   /* B's definitions from its grammar's tags query, in the order of the text (pos 0-based), for consult-imenu;
      null when there is no tree or no tags query, and the caller lists its own */
   imenu(b: EdBuffer): { name: string; kind: string; pos: number }[] | null;
+  /* the extents of the named nodes of B's tree holding FROM..TO, innermost first, out to the root, as [start, end]
+     pairs (0-based, end exclusive), for expreg; null when there is no tree */
+  nodes(b: EdBuffer, from: number, to: number): [number, number][] | null;
 }
 interface EdHostFiles {
   read(name: string, max?: number): string | null;
@@ -2625,12 +2630,14 @@ interface EdNatives {
      kinds (highlights, injections, locals, tags); synParse parses TEXT with it and gives the tree's number (at
      most 256 kept until synFree); synQuery runs the grammar's KIND query over the tree between string indices
      START and END, its captures four numbers each: the index in names, start, end, the pattern (with MATCHES
-     true also matches, a number per capture its match's captures share). Each throws
+     true also matches, a number per capture its match's captures share); synNodes gives the extents of the
+     named nodes holding START..END, innermost first, two numbers each. Each throws
      why it cannot (no such grammar, a library that does not load, an ABI version tree-sitter does not read, a
      parse or query past 1 s) */
   synLoad(name: string): string[];
   synParse(name: string, text: string): number;
   synQuery(tree: number, kind: string, start?: number, end?: number, matches?: boolean): { names: string[]; captures: number[]; matches?: number[] };
+  synNodes(tree: number, start: number, end?: number): number[];
   synFree(tree: number): boolean;
   /* the tree's text changed, DEL code units at POS replaced by INS, and the tree parsed again from itself (an edit
      beside a surrogate pair's half is widened to the whole character); throws when the edit is not in the tree's

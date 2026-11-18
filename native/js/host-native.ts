@@ -177,6 +177,7 @@ const syntax: EdHostSyntax = {
   parse: (grammar, text) => N.synParse(grammar, text),
   edit: (tree, pos, del, ins) => N.synEdit(tree, pos, del, ins),
   query: (tree, kind, start, end, matches) => N.synQuery(tree, kind, start, end, matches),
+  nodes: (tree, start, end) => N.synNodes(tree, start, end),
   free: tree => N.synFree(tree),
 };
 

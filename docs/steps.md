@@ -5944,6 +5944,75 @@ language's buffer, for jumping to, from its tree-sitter tree.
   check passed except the timing tests of `edwin-prog` (the bracket guard's 2 ms budget, the glob property's
   time) and `edwin-bench`; each passed when rebuilt alone at a load near 4. Check `edwin-typecheck` passed.
 
+## Expand region by the tree (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-syntax-expreg`): the selection grows and shrinks along
+the nodes of a programming buffer's tree-sitter tree.
+
+- **`expreg-expand`** (`SPC v`, `scm/evil.scm`) in a buffer with a tree steps through the named nodes holding
+  the selection, innermost first, out to the root, then the whole buffer: from `1` in `{ a = [ 1 2 ]; }` it
+  selects `1`, then `[ 1 2 ]`, then `a = [ 1 2 ];`, then the attribute set. In Normal state the nodes are those
+  holding the character at point; in Visual state, those holding the selection. The small-word step comes
+  first only where the innermost node holds it (see the choices). In such a buffer the nodes take the place of the WORD, line and paragraph steps (see the choices). `expreg-contract`
+  (`SPC V`) is unchanged: it gives back the selections before each expansion in turn, then leaves Visual state.
+  The keys were already bound (`scm/init.scm`); none is added.
+- **Where there is no tree** the steps are the ones expreg had: a web frame and edwind (no tree-sitter), a mode with
+  no grammar in the bundle, a buffer past highlighting's 4 Mi-character bound (`MAX_CHARS`), a failed parse. The
+  Lisp buffers keep their symbol, string and list steps (se-pair-objects); the bundle has no Lisp grammar.
+- **`Ed.syntax.nodes(b, from, to)`** (`src/syntax.ts`) gives the extents of the nodes holding FROM..TO as
+  `[start, end]` pairs, or null when there is no tree, from the same tree highlighting and imenu use, kept in step
+  by the edit log. A failure gives null and leaves the buffer's highlighting alone. The Scheme primitive
+  `syntax-node-bounds BEG END` (`src/evil-core.ts`) gives them to `expreg--candidates` as 1-based `(BEG END)` lists,
+  or `#f`. It only reads the tree; nothing new reaches a process, a file or the network.
+- **A native, `synNodes(tree, start, end)`** (`native/src/natives.rs`, over `syntax::nodes` and `syntax::holders`
+  in `native/src/syntax.rs`): the bundle's queries cannot ask for every node around a point, so the tree is walked
+  on the native side. It goes from the root down one child at a time, because tree-sitter finds a node's parent by
+  starting again from the root. Anonymous nodes (brackets, keywords, operators) are passed through but not listed,
+  and an extent is listed once (Python's `expression_statement` and the assignment inside it are one step). An empty
+  range is held by the node it is inside, not by one that ends there. `host.syntax.nodes` (`native/js/host-native.ts`)
+  and the types (`src/core.d.ts`) pass it through. This is why the package touches natives.rs, syntax.rs,
+  host-native.ts and evil-core.ts, which the plan's Where did not list. `synQuery`'s argument check now names the
+  native it is in, for synNodes's sake.
+- **Choices where the plan left one open:**
+  - With a tree, the line and paragraph steps are left out. A line cuts across nodes (`  a)` inside
+    `foo(\n  a)`), and a step must hold the one before it, so a line step would hide the nodes larger than it that
+    it is not inside: from `a`, `SPC v SPC v` selects `(\n  a)`, where before it took the line. Emacs's expreg mixes
+    paragraphs and sentences in; Edwin's steps here are the word, the nodes and the buffer.
+  - The WORD step is left out too where there are nodes: the leaf node (an identifier, a number, a string's text)
+    is that step, and a WORD such as `a)` is not a node.
+  - The small word is kept only where the innermost node holds it. A run of punctuation is one word, so from a
+    closing bracket the word is `];` or `]);`, which cuts across nodes; taken first, it would hide every node not
+    holding it: from `]` in `{ a = [ 1 2 ]; }` the list would be skipped for the binding. From a bracket the first
+    step is the bracket's node.
+  - Only named nodes. Emacs's expreg also gives a list's inside without its brackets; here a string's text is a
+    step only where the grammar names it (Python's `string_content`), and a list's or an
+    argument list's inside is not one.
+- **Not in it:** expreg in Lisp buffers by tree (no grammar; their steps are se-pair-objects'), in web frames and
+  edwind; subword and sentence steps; a node step through `i(`-style text objects (se-match-nonlisp's). The
+  headless suites (`edwin-structural`) have no tree-sitter, so a case there such as `expreg-nix-list` sees the
+  old steps (the line); the tree's steps are checked by `edwin-syntax`'s stand-in and the cargo test. No
+  `desktop-only` stub in `scm/init.scm` covered expreg, so none is removed.
+- **Checked by** check `edwin-syntax` (18 passed, 2 new): `Ed.syntax.nodes` with the stand-in's nodes (innermost
+  first, a range over two nodes, a range past the text clamped, an edit crossing as an edit with one parse, null
+  with no host.syntax, with no grammar, past 4 Mi characters with no parse, and from a host that throws, the
+  buffer still highlighted); and, booted, `SPC v`, `SPC V` and `d` driven by keys: the audit's `expreg-nix-list`
+  (`f1 SPC v SPC v d` on `{ a = [ 1 2 ]; }` gives `{ a = ; }`, where the audit's run had taken the line), a third
+  step and a contract, growth from a Visual selection (`f[ v f2` and `f[ v f]`), growth from a closing bracket
+  (`f] SPC v d` gives `{ a = ; }`, the list, not the word `];`; a second step the binding), a call over two lines grown to
+  its arguments and then the call (no line step), and the steps expreg had with no tree (a host that throws, no
+  host.syntax). Check `edwin-structural` (188 passed): the Lisp expreg cases unchanged. `nix build .#edwin`:
+  unit tests 35 passed and 2 ignored, `tests/gui.rs` 5 passed and 1 ignored, `tests/terminal.rs` 37 passed. The
+  unit tests include `syntax::tests::the_nodes_holding_a_range_innermost_first` (Nix's nodes from `1`, a range
+  over two nodes, an empty range, past the end, the empty text, a freed tree), the synNodes lines of
+  `natives::tests::the_syntax_natives_from_javascript` (indices of the JS string past a surrogate pair, an empty
+  range, a negative start, a freed tree), and `natives::tests::expreg_grows_by_the_trees_nodes`, which boots the
+  core and steps `(expreg-expand)` out from a point in Nix, Python (into a string: its text, then the string) and
+  Rust with the real grammars, and from a closing bracket in Nix (`]`: the list) and Rust (`]` in `g(a[i]);`:
+  the index expression, the arguments, the call, the statement), each step's selection compared, then `(expreg-contract)` back to the first and out
+  of Visual state. Checks `edwin-typecheck`, `edwin-headless` (21) and `edwin-scheme` (38) passed. Rebased on `lsp-frame-docs`,
+  `nix flake check` passed except the timing tests of `edwin-prog` (the bracket guard's 2 ms budget), `edwin-bench`
+  and `edit-crash`; each passed when rebuilt alone at a load of 3 to 7.
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

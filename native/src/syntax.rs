@@ -456,6 +456,42 @@ pub fn query(
     })
 }
 
+/// The extents of the named nodes of TREE that hold code units START..END, innermost first, out to the root,
+/// each extent once (a node with its only child's extent is the same selection) and none empty. An empty range
+/// is held by a node it is inside, not by one that ends at it. Found from the root down, a child at a time,
+/// since a node's parent is itself found from the root.
+pub fn holders(tree: &Tree, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let (s, e) = (start * 2, end * 2);
+    let holds = |n: &Node| {
+        n.start_byte() <= s
+            && n.end_byte() >= e
+            && n.end_byte() > n.start_byte()
+            && (s < e || s < n.end_byte())
+    };
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    let mut cursor = tree.walk();
+    let mut node = Some(tree.root_node()).filter(|n| holds(n));
+    while let Some(n) = node {
+        let span = (n.start_byte() / 2, n.end_byte() / 2);
+        if n.is_named() && out.last() != Some(&span) {
+            out.push(span);
+        }
+        node = n.children(&mut cursor).find(|c| holds(c));
+    }
+    out.reverse();
+    out
+}
+
+/// Tree ID's named nodes holding code units START..END (holders), the range taken to the text's end.
+pub fn nodes(id: u32, start: usize, end: usize) -> Result<Vec<(usize, usize)>, String> {
+    STATE.with(|s| {
+        let s = s.borrow();
+        let p = s.trees.get(&id).ok_or(format!("no syntax tree {id}"))?;
+        let end = end.min(p.text.len());
+        Ok(holders(&p.tree, start.min(end), end))
+    })
+}
+
 /// Forget tree ID: false when there was none.
 pub fn free(id: u32) -> bool {
     STATE.with(|s| s.borrow_mut().trees.remove(&id).is_some())
@@ -884,6 +920,42 @@ pub(crate) mod tests {
         for id in kept {
             assert!(free(id));
         }
+    }
+
+    /// The named nodes holding a range, innermost first, each extent once: the steps expreg grows by.
+    #[test]
+    fn the_nodes_holding_a_range_innermost_first() {
+        use_dir(&bundle());
+        let text = "{ a = [ 1 2 ]; }\n";
+        let id = parse("nix", utf16(text)).unwrap();
+        let at = |s: usize, e: usize| -> Vec<&str> {
+            nodes(id, s, e)
+                .unwrap()
+                .into_iter()
+                .map(|(s, e)| &text[s..e])
+                .collect()
+        };
+        let one = text.find('1').unwrap();
+        let steps = at(one, one + 1);
+        assert_eq!(
+            &steps[..4],
+            ["1", "[ 1 2 ]", "a = [ 1 2 ];", "{ a = [ 1 2 ]; }"],
+            "{steps:?}"
+        );
+        // Then the root, whatever it takes of the newline; no extent twice.
+        assert!(steps.len() == 5 && steps[4].starts_with("{ a"), "{steps:?}");
+        // A range over two siblings is held by their parent; an empty one by the node it is inside.
+        assert_eq!(at(one, one + 3)[0], "[ 1 2 ]");
+        assert_eq!(at(one, one)[0], "1");
+        // Past the end is the end; a range in no node (the empty text's) has none.
+        assert_eq!(nodes(id, 1 << 30, 1 << 30).unwrap(), vec![]);
+        let empty = parse("nix", utf16("")).unwrap();
+        assert_eq!(nodes(empty, 0, 0).unwrap(), vec![]);
+        assert!(free(id) && free(empty));
+        assert_eq!(
+            nodes(id, 0, 1).err().unwrap(),
+            format!("no syntax tree {id}")
+        );
     }
 
     /// A text too long to parse within PARSE_LIMIT stops with an error instead of holding the frame.

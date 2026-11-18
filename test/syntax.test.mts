@@ -10,8 +10,10 @@
 // against the bundle's grammars.json (EDWIN_GRAMMARS) and the frame's side of the 2 ms budget.
 // Imenu (Ed.syntax.imenu), with the stand-in's tags query: definitions paired with their names by match, a name
 // two patterns take listed once, references left out, null (the patterns of editor-prims instead) for each
-// reason, and consult-imenu using it. The tree-sitter side (edit, reparse, the incremental tree against a whole
-// parse) is native/src/syntax.rs's cargo tests; the golden runs and imenu lists of each language with the real
+// reason, and consult-imenu using it. Expreg (Ed.syntax.nodes, SPC v and SPC V), with the stand-in's nodes: the
+// nodes holding a range, innermost first, null for each reason, and the selection grown and shrunk by keys. The
+// tree-sitter side (edit, reparse, the incremental tree against a whole parse, the nodes holding a range) is
+// native/src/syntax.rs's cargo tests; the golden runs, imenu lists and expreg steps of each language with the real
 // grammars are natives.rs's (`nix build .#edwin`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,6 +37,9 @@ let hl: { names: string[]; of: (text: string, start: number, end: number) => num
 /* What its tags query gives: the capture names, and for a tree's text the captures and the match of each (what
    synQuery gives with MATCHES true; without it the matches are left out, as the native side leaves them). */
 let tags: { names: string[]; of: (text: string) => { captures: number[]; matches: number[] } } | null = null;
+/* What its nodes give: for a tree's text and a range, the extents of the nodes holding it, innermost first, two
+   numbers each (synNodes); null: a grammar whose tree the test does not describe. */
+let nd: ((text: string, start: number, end: number) => number[]) | null = null;
 const syntax = {
   parse(grammar: string, text: string) { calls.parse++; trees.set(++next, { grammar, text }); return next; },
   edit(id: number, pos: number, del: number, ins: string) {
@@ -57,6 +62,14 @@ const syntax = {
     if (kind !== 'highlights' || !hl) throw new Error(`${t.grammar} has no "${kind}" query`);
     calls.query++;
     return { names: hl.names, captures: hl.of(t.text, start, end) };
+  },
+  nodes(id: number, start: number, end: number) {
+    const t = trees.get(id);
+    if (!t) throw new Error(`no syntax tree ${id}`);
+    if (!(start >= 0 && start <= end && end <= t.text.length)) throw new Error(`nodes asked for ${start}..${end} of ${t.text.length}`);
+    if (!nd) throw new Error('the test describes no tree');
+    calls.query++;
+    return nd(t.text, start, end);
   },
   free(id: number) { return trees.delete(id); },
 };
@@ -414,7 +427,51 @@ test('imenu: no tree, no grammar, no tags query, a failing query or a buffer pas
   tags = hl = null;
 });
 
-/* Last: it boots the image (keymaps, the minibuffer), which the tests above do without. */
+
+/* ---------- expreg: the nodes a selection grows by ---------- */
+/* A tree of the nodes whose texts LIST names, each the first occurrence of its text: the extents holding a
+   range, innermost first, each once, as synNodes gives them. */
+const shaped = (list: string[]) => (text: string, start: number, end: number) => {
+  const spans = list.map(t => { const s = text.indexOf(t); assert.ok(s >= 0, `${JSON.stringify(t)} in the text`); return [s, s + t.length]; });
+  const out: number[] = [];
+  for (const [s, e] of spans.filter(([s, e]) => s <= start && e >= end && (start < end || start < e)).sort((x, y) => (x[1] - x[0]) - (y[1] - y[0])))
+    if (out[out.length - 2] !== s || out[out.length - 1] !== e) out.push(s, e);
+  return out;
+};
+const NIX = '{ a = [ 1 2 ]; }\n';
+const NIX_NODES = shaped(['1', '2', 'a', '[ 1 2 ]', 'a = [ 1 2 ];', '{ a = [ 1 2 ]; }', NIX]);
+const PY2 = 'x = foo(\n  a)\ny = 2\n';
+const PY2_NODES = shaped(['a', 'foo', '(\n  a)', 'foo(\n  a)', 'x = foo(\n  a)', 'y = 2', PY2]);
+const texts = (b: Edwin, ns: [number, number][] | null) => ns && ns.map(([s, e]) => b.rope.slice(s, e));
+
+test('expreg: the nodes holding a range, innermost first; the tree follows an edit; null with no tree, and highlighting is left alone', () => {
+  host.syntax = syntax; reset();
+  nd = NIX_NODES;
+  const b = inMode('nix-mode', NIX), one = NIX.indexOf('1');
+  assert.deepEqual(texts(b, Ed.syntax.nodes(b, one, one + 1)), ['1', '[ 1 2 ]', 'a = [ 1 2 ];', '{ a = [ 1 2 ]; }', NIX]);
+  assert.deepEqual(texts(b, Ed.syntax.nodes(b, one, one + 3)), ['[ 1 2 ]', 'a = [ 1 2 ];', '{ a = [ 1 2 ]; }', NIX], 'a range over two nodes');
+  assert.deepEqual(Ed.syntax.nodes(b, -5, 1e9), [[0, NIX.length]], 'a range past the text is the text');
+  // An edit crosses as an edit, and the nodes are the edited text's.
+  Ed.replaceText(b, 0, 0, '  ');
+  assert.deepEqual(texts(b, Ed.syntax.nodes(b, one + 2, one + 3))!.slice(0, 2), ['1', '[ 1 2 ]']);
+  assert.deepEqual([calls.parse, calls.edit], [1, 1]);
+  // No tree: no host.syntax (a web frame, edwind), no grammar for the mode, a buffer past the bound.
+  host.syntax = undefined;
+  assert.equal(Ed.syntax.nodes(b, 0, 1), null);
+  host.syntax = syntax;
+  assert.equal(Ed.syntax.nodes(inMode('text-mode', NIX), 0, 1), null);
+  const before = calls.parse;
+  assert.equal(Ed.syntax.nodes(inMode('nix-mode', NIX + ' '.repeat(4 * 1024 * 1024)), 0, 1), null);
+  assert.equal(calls.parse, before, 'no parse past the bound');
+  // A host that throws gives null, and the buffer is still highlighted.
+  hl = { names: ['number'], of: (t, s, e) => { const i = t.indexOf('2'); return i >= s && i < e ? [0, i, i + 1, 0] : []; } };
+  nd = null;
+  const c = inMode('nix-mode', NIX);
+  assert.equal(Ed.syntax.nodes(c, 0, 1), null);
+  assert.deepEqual(faces(c), [['nu', '2']]);
+  hl = null;
+});
+/* Near the end: it boots the image (keymaps, the minibuffer), which the tests above do without. */
 test('consult-imenu lists a tree\'s definitions and jumps to the one chosen; without a tags query, its own patterns', async () => {
   host.syntax = syntax; reset();
   Ed.boot({ host });
@@ -438,6 +495,44 @@ test('consult-imenu lists a tree\'s definitions and jumps to the one chosen; wit
   assert.ok(E.mini);
   await type('g\n');
   assert.equal(s.pt, s.rope.indexOf('(define (g'));
+});
+
+/* After the image is booted (the test above). */
+test('expreg: SPC v grows the selection by the tree\'s nodes, not by the line, and SPC V shrinks it; with no tree, the steps it had', async () => {
+  host.syntax = syntax; reset();
+  const feed = async (ks: string[]) => { for (const k of ks) Ed.feedKey(k); await Ed.whenIdle(); };
+  const keys = (s: string) => feed(Ed.kbd(s).split(' '));
+  const EvilCore = (globalThis as unknown as { EvilCore: Edwin }).EvilCore;
+  const run = async (mode: string, text: string, ks: string) => {
+    const b = inMode(mode, text);
+    Ed.setWindowBuffer(b);
+    b.pt = 0;
+    if (EvilCore.stateOf(b) !== 'normal') await keys('ESC');
+    await keys(ks);
+    if (EvilCore.stateOf(b) !== 'normal') await keys('ESC');
+    return b.rope.toString();
+  };
+  nd = NIX_NODES;
+  // The audit's expreg-nix-list: from 1, the number, then the list.
+  assert.equal(await run('nix-mode', NIX, 'f 1 SPC v SPC v d'), '{ a = ; }\n');
+  assert.equal(await run('nix-mode', NIX, 'f 1 SPC v SPC v SPC v d'), '{  }\n');
+  assert.equal(await run('nix-mode', NIX, 'f 1 SPC v SPC v SPC v SPC V d'), '{ a = ; }\n');
+  // From a selection: the nodes holding it, not point's.
+  assert.equal(await run('nix-mode', NIX, 'f [ v f 2 SPC v d'), '{ a = ; }\n');
+  assert.equal(await run('nix-mode', NIX, 'f [ v f ] SPC v d'), '{  }\n');
+  // From a closing bracket: the list, not the word "];" cutting across it and its binding.
+  assert.equal(await run('nix-mode', NIX, 'f ] SPC v d'), '{ a = ; }\n');
+  assert.equal(await run('nix-mode', NIX, 'f ] SPC v SPC v d'), '{  }\n');
+  // Over lines: the arguments, then the call, where the line steps would have taken "  a)" first.
+  nd = PY2_NODES;
+  assert.equal(await run('python-mode', PY2, 'j f a SPC v SPC v d'), 'x = foo\ny = 2\n');
+  assert.equal(await run('python-mode', PY2, 'j f a SPC v SPC v SPC v d'), 'x = \ny = 2\n');
+  // No tree (a web frame, edwind; a host that throws): the word, the WORD, the line.
+  nd = null;
+  assert.equal(await run('nix-mode', NIX, 'f 1 SPC v SPC v d'), '');
+  host.syntax = undefined;
+  assert.equal(await run('python-mode', PY2, 'j f a SPC v SPC v d'), 'x = foo(\n  \ny = 2\n');
+  host.syntax = syntax;
 });
 
 function L() { return (globalThis as unknown as { L: Edwin }).L; }

@@ -9,9 +9,10 @@
    killed buffers are freed before the next whole parse, which is when the native side's bound on trees counts.
 
    Only the desktop program has host.syntax: in a web frame and in edwind (the Node host) Ed.syntax.tree gives
-   null. Nothing here is reachable from Scheme, and nothing here starts a process or reads a file: the grammar is
-   named, and the native side loads it from the program's own bundle. What uses the trees: highlighting (lexSeg)
-   and imenu (consult-imenu's definitions, from the grammar's tags query). */
+   null. Scheme reaches one thing here, the extents of the nodes around a range (syntax-node-bounds, for expreg),
+   which only reads the tree; nothing here starts a process or reads a file: the grammar is
+   named, and the native side loads it from the program's own bundle. What uses the trees: highlighting (lexSeg),
+   imenu (consult-imenu's definitions, from the grammar's tags query) and expreg (the nodes a selection grows by). */
 (function () {
 'use strict';
 const Ed = globalThis.Ed, E = Ed.E;
@@ -191,6 +192,28 @@ function imenu(b: EdBuffer): ImenuItem[] | null {
     .sort((x, y) => x.pos - y.pos);
 }
 
+/* ---------- expreg: the nodes a selection grows by ---------- */
+/* The extents of the named nodes of B's tree that hold FROM..TO, innermost first, out to the root, each extent
+   once: the steps expreg-expand grows a selection by. null where imenu gives null for want of a tree (no
+   host.syntax, no grammar for the mode, a minibuffer, a buffer past MAX_CHARS) and when the parse fails: the
+   caller's own steps then. A failure here leaves the buffer's highlighting alone. */
+function nodes(b: EdBuffer, from: number, to: number): [number, number][] | null {
+  const syn = Ed.host.syntax, grammar = syn && !b.minibuf ? grammarOf(b.mode) : null;
+  if (!syn || !grammar || b.rope.length > MAX_CHARS) return null;
+  const len = b.rope.length, s = Math.max(0, Math.min(from, len)), e = Math.max(s, Math.min(to, len));
+  let flat: number[];
+  try {
+    const id = tree(b, grammar);
+    if (id === null) return null;
+    flat = syn.nodes(id, s, e);
+  } catch (err) {
+    return null;
+  }
+  const out: [number, number][] = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) out.push([flat[i], flat[i + 1]]);
+  return out;
+}
+
 const H = Ed.hooks, prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {
   const grammar = Ed.host.syntax && !b.minibuf ? grammarOf(b.mode) : null;
@@ -203,5 +226,5 @@ H.lexSeg = (b, from, to, seg) => {
   return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
 };
 
-Ed.syntax = { tree, grammarOf, imenu };
+Ed.syntax = { tree, grammarOf, imenu, nodes };
 })();

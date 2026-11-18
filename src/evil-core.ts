@@ -805,6 +805,10 @@ D('symbol-bounds-at-point', '', 'Start and end (exclusive) of the symbol at poin
   while (e < t.length && re.test(t.at(e)!)) e++;
   return s < e ? L.list(s + 1, e + 1) : false;
 });
+D('syntax-node-bounds', 'BEG END', 'Start and end (exclusive) of each node of the buffer\'s syntax tree holding BEG..END, innermost first, as a list of lists; #f when the buffer has no tree (a web frame, edwind, a mode with no grammar).', ([s, e]: SchemeValue[]) => {
+  const ns = Ed.syntax ? Ed.syntax.nodes(cur(), num(s) - 1, num(e) - 1) : null;
+  return ns ? L.listOf(ns.map(([a, z]) => L.list(a + 1, z + 1))) : false;
+});
 D('evil-select-region', 'BEG END', 'Select the text from BEG to END in characterwise Visual state.', ([s, e]: SchemeValue[]) => {
   const b = cur(); const beg = num(s) - 1, end = Math.max(beg, num(e) - 2);
   if (stateOf(b) !== 'visual') { b.mark = beg; b.pt = end; b.markActive = true; b.visual = 'char'; setState(b, 'visual'); }

@@ -1040,12 +1040,23 @@ The rule is comment-toggle-lines's, which M-; uses too."
 
 (define expreg--stack '() "Selections before each expansion, newest first.")
 
-(define (expreg--candidates)
-  "Candidate regions around point, smallest first, as (BEG . END) pairs."
-  (let ((cands '()))
+(define (expreg--candidates sel)
+  "Candidate regions around point, smallest first, as (BEG . END) pairs. Where the buffer has a syntax tree,
+its nodes holding SEL (the selection, or the character at point when it is #f) take the place of the WORD, the
+line and the paragraph, and the word is kept only where the innermost node holds it: a run of punctuation, such
+as a closing bracket and the semicolon after it, is one word cutting across nodes."
+  (let* ((cands '())
+         (ns (and (not (lisp-buffer?))
+                  (syntax-node-bounds (if sel (car sel) (point)) (if sel (cdr sel) (+ (point) 1)))))
+         (nodes (and (pair? ns) ns))
+         (word (evil--word-object 1 #f #f)))
     (define (add! r) (when (and r (< (car r) (cadr r))) (push! (cons (car r) (cadr r)) cands)))
-    (add! (evil--word-object 1 #f #f))
-    (if (lisp-buffer?) (add! (symbol-bounds-at-point)) (add! (evil--word-object 1 #t #f)))
+    (when (or (not nodes)
+              (and word (<= (car (car nodes)) (car word)) (<= (cadr word) (cadr (car nodes)))))
+      (add! word))
+    (cond ((lisp-buffer?) (add! (symbol-bounds-at-point)))
+          (nodes (for-each add! nodes))
+          (else (add! (evil--word-object 1 #t #f))))
     (when (lisp-buffer?)
       ;; the string point is in: its text, then the string with its quotes
       (let ((s (evil--quote-object #\" #f)))
@@ -1056,17 +1067,19 @@ The rule is comment-toggle-lines's, which M-; uses too."
         (when (< n 20)
           (let ((inner (evil--pair-object #\( #\) n #f)) (outer (evil--pair-object #\( #\) n #t)))
             (when inner (add! inner) (add! outer) (loop (+ n 1)))))))
-    (add! (list (line-beginning-position) (min (point-max) (+ 1 (line-end-position)))))
-    (add! (evil--paragraph 1 #f))
+    (unless nodes
+      (add! (list (line-beginning-position) (min (point-max) (+ 1 (line-end-position)))))
+      (add! (evil--paragraph 1 #f)))
     (add! (list (point-min) (point-max)))
     (sort (delete-duplicates cands) (lambda (a b) (< (- (cdr a) (car a)) (- (cdr b) (car b)))))))
 
 (evil-define-command (expreg-expand)
-  "Select the smallest region larger than the current selection: word, sexp, list, line, paragraph, buffer (SPC v)."
+  "Select the smallest region larger than the current selection: word, sexp, list, line, paragraph, buffer, or
+where the buffer has a syntax tree, the nodes of the tree around it (SPC v)."
   #:no-repeat
   (let* ((sel (and (evil-visual-state?) (cons (min (point) (mark)) (+ 1 (max (point) (mark))))))
          (next (find (lambda (c) (or (not sel) (and (<= (car c) (car sel)) (>= (cdr c) (cdr sel)) (not (equal? c sel)))))
-                     (expreg--candidates))))
+                     (expreg--candidates sel))))
     (unless next (user-error "Nothing larger to select"))
     (unless (evil-visual-state?) (set! expreg--stack '()))
     (when sel (push! sel expreg--stack))

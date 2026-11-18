@@ -824,15 +824,19 @@ fn syn_parse(
         Err(e) => throw(scope, &e),
     }
 }
-/// A string index: a number, finite and not negative (undefined: none).
-fn index(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Result<Option<usize>, String> {
+/// A string index: a number, finite and not negative (undefined: none); WHO is the native, for the error.
+fn index(
+    scope: &mut v8::HandleScope,
+    v: v8::Local<v8::Value>,
+    who: &str,
+) -> Result<Option<usize>, String> {
     if v.is_undefined() {
         return Ok(None);
     }
     v.number_value(scope)
         .filter(|n| n.is_finite() && *n >= 0.0)
         .map(|n| Some(n as usize))
-        .ok_or_else(|| "synQuery: start and end are string indices".into())
+        .ok_or_else(|| format!("{who}: start and end are string indices"))
 }
 /// synQuery(tree, kind, start = 0, end = its length, matches = false): the captures of the grammar's KIND query
 /// that overlap [start, end), in the order of the text, as {names, captures}: captures holds four numbers per
@@ -846,8 +850,8 @@ fn syn_query(
 ) {
     let id = args.get(0).uint32_value(scope).unwrap_or(0);
     let kind = arg_str(scope, &args, 1);
-    let found = index(scope, args.get(2)).and_then(|start| {
-        let end = index(scope, args.get(3))?;
+    let found = index(scope, args.get(2), "synQuery").and_then(|start| {
+        let end = index(scope, args.get(3), "synQuery")?;
         syntax::query(id, &kind, start.unwrap_or(0), end)
     });
     let (names, caps) = match found {
@@ -882,6 +886,33 @@ fn syn_query(
         set(scope, o, "matches", ids.into());
     }
     rv.set(o.into());
+}
+/// synNodes(tree, start, end = start): the extents of the tree's named nodes that hold [start, end), innermost
+/// first, out to the root, each once (syntax::nodes), as two numbers each, indices of the parsed string: the
+/// steps expreg grows a selection by.
+fn syn_nodes(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let found = index(scope, args.get(1), "synNodes").and_then(|start| {
+        let start = start.unwrap_or(0);
+        let end = index(scope, args.get(2), "synNodes")?.unwrap_or(start);
+        syntax::nodes(id, start, end.max(start))
+    });
+    let spans = match found {
+        Ok(r) => r,
+        Err(e) => return throw(scope, &e),
+    };
+    let flat = v8::Array::new(scope, (spans.len() * 2) as i32);
+    for (i, (s, e)) in spans.into_iter().enumerate() {
+        for (j, n) in [s, e].into_iter().enumerate() {
+            let v = v8::Number::new(scope, n as f64).into();
+            flat.set_index(scope, (i * 2 + j) as u32, v);
+        }
+    }
+    rv.set(flat.into());
 }
 /// synEdit(tree, pos, del, ins): the tree's text changed, DEL code units at POS replaced by INS, and the tree parsed
 /// again from itself (syntax::edit); throws when the edit is not in its text or the reparse fails, which frees it.
@@ -1078,7 +1109,7 @@ macro_rules! natives {
             "sockOpen" sock_open, "sockSend" sock_send, "sockClose" sock_close, "sockError" sock_error, "guiSize" gui_size,
             "guiDraw" gui_draw, "guiAction" gui_action, "guiClipboard" gui_clipboard, "client" client, "edwind" edwind,
             "procSpawn" proc_spawn, "procWrite" proc_write, "procCloseStdin" proc_close_stdin, "procKill" proc_kill, "procList" proc_list,
-            "openExternal" open_external, "synLoad" syn_load, "synParse" syn_parse, "synQuery" syn_query, "synFree" syn_free, "synEdit" syn_edit
+            "openExternal" open_external, "synLoad" syn_load, "synParse" syn_parse, "synQuery" syn_query, "synFree" syn_free, "synEdit" syn_edit, "synNodes" syn_nodes
         )
     };
 }
@@ -1227,6 +1258,12 @@ mod tests {
       eq(text.slice(tg.captures[4 * first('name') + 1], tg.captures[4 * first('name') + 2]), '𝔸', 'the name');
       eq(tg.matches[first('name')], tg.matches[first('definition.function')], 'one match');
       eq('matches' in __n.synQuery(t, 'tags'), false, 'not asked for');
+      // The named nodes holding a range, innermost first, as pairs of the string's indices: é, its let, the block.
+      const ns = __n.synNodes(t, text.indexOf('é'), text.indexOf('é') + 1), steps = [];
+      for (let i = 0; i < ns.length; i += 2) steps.push(text.slice(ns[i], ns[i + 1]));
+      eq(steps.slice(0, 3), ['é', 'let é = Foo;', '{ let é = Foo; }'], 'the nodes');
+      eq(__n.synNodes(t, text.indexOf('é')).slice(0, 2), ns.slice(0, 2), 'an empty range: the node it is inside');
+      eq(err(() => __n.synNodes(t, -1, 2)), 'synNodes: start and end are string indices', 'a negative start');
       eq(err(() => __n.synLoad('../rust')), 'no grammar "../rust": a grammar\'s name is letters, digits and _', 'a path');
       eq(err(() => __n.synLoad('nosuch')), 'no grammar nosuch', 'a missing grammar');
       eq(err(() => __n.synParse('rust', 5)), 'synParse: the text is not a string', 'not a string');
@@ -1245,6 +1282,7 @@ mod tests {
       eq([__n.synFree(t), __n.synFree(t)], [true, false], 'freed once');
       eq(err(() => __n.synEdit(t, 0, 0, 'x')), `no syntax tree ${t}`, 'editing a freed tree');
       eq(err(() => __n.synQuery(t, 'highlights')), `no syntax tree ${t}`, 'a freed tree');
+      eq(err(() => __n.synNodes(t, 0, 1)), `no syntax tree ${t}`, 'the nodes of a freed tree');
       'ok'
     "#;
 
@@ -1485,5 +1523,50 @@ mod tests {
         if (JSON.stringify(got) !== JSON.stringify(f.want)) errors.push(`${f.mode}: the definitions are\n${got.join('\n')}`);
       }
       errors.length ? errors.join('\n\n') : 'ok'
+    "#;
+
+    /// expreg-expand (SPC v, scm/evil.scm) with the real grammars: from a point, the selections it steps through
+    /// are the named nodes around it, then the buffer, each larger than the one before; expreg-contract (SPC V)
+    /// gives them back in turn.
+    #[test]
+    fn expreg_grows_by_the_trees_nodes() {
+        assert_eq!(with_core(EXPREG_JS.into()), "ok");
+    }
+
+    const EXPREG_JS: &str = r#"
+      const Ed = globalThis.Ed, S = globalThis.Scheme, EvilCore = globalThis.EvilCore;
+      /* [mode, text, the text point starts on, the selections, as texts] */
+      const CASES = [
+        ['nix-mode', '{ a = [ 1 2 ]; }\n', '1', ['1', '[ 1 2 ]', 'a = [ 1 2 ];', '{ a = [ 1 2 ]; }', '{ a = [ 1 2 ]; }\n']],
+        ['python-mode', 'x = foo(\n  a, "b c")\ny = 2\n', 'b', ['b', 'b c', '"b c"', '(\n  a, "b c")', 'foo(\n  a, "b c")', 'x = foo(\n  a, "b c")', 'x = foo(\n  a, "b c")\ny = 2\n']],
+        ['rust-mode', 'fn f() {\n    let x = g(1, 2);\n}\n', '2', ['2', '(1, 2)', 'g(1, 2)', 'let x = g(1, 2);', '{\n    let x = g(1, 2);\n}', 'fn f() {\n    let x = g(1, 2);\n}', 'fn f() {\n    let x = g(1, 2);\n}\n']],
+        /* From a closing bracket: the bracket's node, not the word of punctuation ("];", "]);") cutting across nodes. */
+        ['nix-mode', '{ a = [ 1 2 ]; }\n', ']', ['[ 1 2 ]', 'a = [ 1 2 ];', '{ a = [ 1 2 ]; }', '{ a = [ 1 2 ]; }\n']],
+        ['rust-mode', 'fn f() {\n    g(a[i]);\n}\n', ']', ['a[i]', '(a[i])', 'g(a[i])', 'g(a[i]);', '{\n    g(a[i]);\n}', 'fn f() {\n    g(a[i]);\n}', 'fn f() {\n    g(a[i]);\n}\n']],
+      ];
+      const sel = b => b.rope.slice(Math.min(b.mark, b.pt), Math.max(b.mark, b.pt) + 1);
+      const errors = [];
+      let n = 0;
+      for (const [mode, text, from, want] of CASES) {
+        const b = Ed.getBufferCreate(`expreg-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, mode);
+        Ed.setWindowBuffer(b);
+        b.pt = text.indexOf(from);
+        const got = [];
+        for (let i = 0; i < want.length + 2; i++) {
+          try { S.evalString('(expreg-expand)'); } catch (e) { const m = S.errorMessage(e); if (!/Nothing larger/.test(m)) got.push(m); break; }
+          const s = sel(b);
+          if (got.length && s === got[got.length - 1]) break;
+          got.push(s);
+        }
+        if (JSON.stringify(got) !== JSON.stringify(want)) { errors.push(`${mode}: the steps are ${JSON.stringify(got)}`); continue; }
+        const back = [];
+        for (let i = 1; i < want.length; i++) { S.evalString('(expreg-contract)'); back.push(sel(b)); }
+        if (JSON.stringify(back) !== JSON.stringify(want.slice(0, -1).reverse())) errors.push(`${mode}: contracting gives ${JSON.stringify(back)}`);
+        S.evalString('(expreg-contract)');
+        if (EvilCore.stateOf(b) !== 'normal') errors.push(`${mode}: contracting past the first step leaves ${EvilCore.stateOf(b)} state`);
+      }
+      errors.length ? errors.join('\n') : 'ok'
     "#;
 }
