@@ -2475,7 +2475,7 @@ interface LspSession {
 }
 interface EdLspApi {
   /* the bounds in ms (and restartMax, a count); the suites shorten them */
-  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number };
+  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number };
   /* a file: URI for an absolute path */
   uri(path: string): string;
   /* declare a server; while the image replays it is skipped with a message and null is returned */
@@ -2484,7 +2484,8 @@ interface EdLspApi {
   serverFor(b: EdBuffer): LspServer | null;
   /* where B's server runs: its project, else its file's directory; null when its file is not on this machine */
   rootOf(b: EdBuffer): string | null;
-  /* B's server's session in its root, started when there is none (or it had failed), B attached to it */
+  /* B's server's session in its root, started when there is none (or it had failed), B attached to it (eglot-mode on,
+     its document opened once the server runs) */
   start(b: EdBuffer): LspSession;
   /* settles once the session's server is initialized; rejects when it is shut down or fails */
   ready(s: LspSession): Promise<void>;
@@ -2496,6 +2497,10 @@ interface EdLspApi {
   sessionOf(b: EdBuffer): LspSession | null;
   /* the last of the server's error output */
   stderr(s: LspSession): string;
+  /* send B's edits since its server last heard of them (didChange), at once: before a request about B */
+  flush(b: EdBuffer): void;
+  /* the LSP languageId of a major mode */
+  languageId(mode: string): string;
 }
 
 /* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is

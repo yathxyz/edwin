@@ -279,9 +279,13 @@ in
   # and server, a crash started again with a doubling delay and given up past its bound, the KILL past the
   # shutdown bounds, the idle stop, the refusals (the image's replay, a web frame, a file not on this machine),
   # no child left; against a scripted stand-in server and nil, a real Nix language server (EDWIN_LSP_REAL).
+  # test/lsp-docs.test.mts, the documents: fast-check's random edits under incremental and whole-text sync, the
+  # stand-in server's own copy (UTF-16 positions, \n, \r\n and a lone \r) equal to the buffer after each run; known
+  # ranges; didOpen, didChange, didSave and didClose through eglot-mode, visiting, write-file, a major mode, a kill
+  # and a crash; the sync kinds; nil finding a definition after edits. LSP_DOC_RUNS raises the run count.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts
     touch $out
   '';
 

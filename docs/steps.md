@@ -4313,6 +4313,130 @@ capped, clean shutdown on exit, no child left.
     proj/x.nix` with the server declared in init.scm, `:q`, the server's log `initialize, initialized, shutdown,
     exit` and its process ended.
 
+## Document sync and eglot-mode (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-frame-docs`, on lsp-sessions; owner decision 2: the client
+in the frame, the other LSP details the plan's defaults): didOpen, didChange (incremental), didSave and didClose;
+eglot-mode turns on per language when a server is configured; proved by edwin-lsp: the server's text equals the
+buffer's after random edits. Risk named: UTF-16 positions.
+
+- **`src/lsp.ts`** holds it, beside the sessions (no new file); scm/lsp.scm's comments and
+  `define-language-server`'s docstring say what a declaration now does. `Ed.lsp` gains `flush(b)` and
+  `languageId(mode)`, and `timing.change`.
+- **eglot-mode** (`eglot-enabled`, a buffer's minor mode) is the buffer's attachment to a session: on, the
+  buffer is a document its server is told of; off (`M-x eglot-mode` again, or the session shut down), it is not.
+  `M-x eglot` turns it on in the current buffer, as before starting the server when none runs there.
+  **Per language, by itself:** `find-file-hook` and `after-change-major-mode-hook` run `lsp--ensure`, which
+  turns eglot-mode on in a buffer whose major mode has a declared server, starting the server for the file's
+  project, and off when its new mode has none (or another server, which it then goes to). It does nothing,
+  and says nothing, where no server can start: no server for the mode, no file, a shared buffer or a file of
+  edwind's, a web frame, edwind's Node host, and the image's replay (`Ed.proc.refusal()`); a start that fails
+  (the program missing from PATH) says `eglot: WHY` and the visit goes on. Turning eglot-mode on by hand
+  where no server can start signals as `eglot` does (`lsp-error`, `process-error`) and leaves it off.
+- **What is told follows the server's `textDocumentSync`.** A number is the change kind, with opening,
+  closing and saving told (saves without the text), as VS Code's client takes it; an object says each
+  (`openClose`, `change`, `save` true or `{includeText}`); none, or `openClose` not true, tells nothing about
+  documents. The client says `textDocument.synchronization.didSave` in initialize.
+- **didOpen** is sent once the server is initialized: for every buffer of the session when it becomes ready
+  (so again for each start again after a crash, and after `eglot-reconnect`, the new process knowing nothing),
+  and at once for a buffer attached while it runs. It carries the file's URI (`Ed.lsp.uri`), the languageId (the
+  mode's name less `-mode`, but `cpp`, `javascript`, `typescriptreact` and `shellscript` for c++-, js-, tsx- and
+  sh-mode), the buffer's version (`b.ver`) and its text. Edits made before the server is ready, or while it is
+  down, are in that text: nothing is sent to a server that is not running.
+- **didChange** goes `timing.change` (500 ms, eglot's `eglot-send-changes-idle-time`) after the first edit
+  since the last one sent (`hooks.edited` only starts a timer: no work per key), or at once by
+  `Ed.lsp.flush(b)`, which a save, a close and the requests of later packages call first. Each document keeps
+  the text its server holds; the change is the one range of that text between the common prefix and suffix of
+  it and the buffer's, with the buffer's text there (incremental), or the whole text. So every edit since the
+  last one sent (undo, a whole-text replacement, a reverted file, an edit log trimmed or forgotten) is one
+  change, and it is right by construction rather than by replaying the edit log. The version is `b.ver`, which
+  only grows; edits that come back to the text the server holds send nothing.
+- **Positions** are LSP's default and the only encoding the client offers (lsp-sessions): a line is counted at
+  each `\n`, `\r\n` and lone `\r`, the character in UTF-16 units from the line's start, which is what a
+  JavaScript string counts. A range's end is never put between the halves of a surrogate pair nor between a
+  `\r` and its `\n`: such a point moves out (the start back, the end on), the range growing by that unit.
+- **didSave** after a save (`hooks.wrote`), the pending change sent first, with the text when the server asks
+  for it. **write-file to another name** closes the old URI's document and opens the new one, in the session of
+  the new file's project when that is another (started if none runs there). A file or mode found changed at a
+  flush (set with no hook run) does the same but starts no server, since a flush also runs from a timer after
+  edits that may be the image's: it uses the session kept for the new server and root, else turns eglot-mode off.
+  While no process may start (the image's replay, a web frame, edwind) the hooks change nothing.
+- **didClose** when eglot-mode is turned off, when the buffer is killed (`kill-buffer-hook`), and when its mode
+  changes to one another server serves or none does. A session shut down sends none: the server is told
+  `shutdown` and `exit`, and its buffers' eglot-mode is off.
+- **Choices**, each reversible:
+  - Auto-start (decision 2's "auto-start trust per project", the plan's default, which is the owner's Emacs
+    `eglot-ensure` on his languages): a server starts in any project whose file is visited once a server is
+    declared for the file's mode, with no per-project trust question, as eglot-ensure starts it. A server may run
+    the project's code (rust-analyzer's build scripts and proc macros, nixd's flake evaluation, gopls's `go list`):
+    visiting a file in an untrusted checkout runs it, as it does in Emacs. Not declaring a server for a mode
+    keeps it off there; there is no per-project switch.
+  - One change per didChange computed from the server's copy, not one per logged edit: simpler, and right
+    when the log is trimmed; it costs a copy of the text per document and a linear scan per change sent, off
+    the key path.
+  - Version is the buffer's `ver`, not a counter per document.
+- **Differences from eglot:** `M-x eglot` turns eglot-mode on in the current buffer only, not in every buffer
+  of the project and mode; another buffer turns on when it is visited, or by `M-x eglot` there. eglot-mode's
+  hook is not run when it turns on by itself. There is no `eglot-managed-mode` lighter or mode-line indicator.
+  `willSave` and `willSaveWaitUntil` are not sent. A buffer whose server needs `openClose` false (rare) gets no
+  documents at all, where eglot sends them anyway.
+- **Not in it:** any request about a document (definition, hover, completion: the later packages, which call
+  `Ed.lsp.flush` first); diagnostics; settings; direnv's environment; watched files.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-lsp` (37 passed, 0 failed:
+  test/lsp-rpc.test.mts's 10, test/lsp.test.mts's 17 and test/lsp-docs.test.mts's 10, nil from nixpkgs run in the
+  sandbox, not skipped), `edwin-typecheck`, `edwin-headless` (21), `edwin-native` (31), `edwin-prog` (65),
+  `edwin-compile` (39), `edwin-proc` (13), `edit-lockdown` (6) and `edit-security` (21), since src/lsp.ts also
+  loads in edwind, where every hook here does nothing (no process may start there); `nix build .#edwin` (unit 32
+  and 2 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37); `nix flake check path:$PWD` on the final
+  code: every check passed but edwin-proc (envFor's timeout case) and edit-crash (a SIGKILL round), timing
+  checks on a loaded host, each built again alone and passed (13 of 13, 7 of 7). A run before it (on a load of 15
+  to 30) failed edwin-typecheck, on the suite's own types (fixed), and the timing checks edwin-bench (the shadow
+  stack 14.1% over its 10% limit) and edwin-prog (the bracket guard's 2 ms keystroke budget, a median of 5.2 ms):
+  on the final code both were built alone and passed (4.5%; 65 of 65, that median 0.7 ms), and the flake check
+  took them from the store. test/lsp.test.mts's method logs now hold the didOpen its
+  stand-in (sync 1) is sent. test/lsp-docs.test.mts (10), against a stand-in server (node) that keeps its own copy of each
+  document: it applies the changes with its own code (lines split at `\n`, `\r\n` and a lone `\r`, UTF-16
+  characters, a position past its line's end, a document opened twice, a change or close of one not open and a
+  version not above the last each logged as an error, and none may be), and answers `fake/text` with what it holds:
+  - Visiting `a.fake` in a project `open é #1`: eglot-mode on at once, the server started by the visit; an edit
+    before it is ready is in the didOpen; uri (`/open%20%C3%A9%20%231/a.fake`), languageId `fake`, version,
+    text; no didChange after it; the initialize's `synchronization`; languageIds of c++-, tsx- and nix-mode.
+  - Known answers (incremental): after `a😀` (3 units), the emoji deleted (2 units), `😀` to `😁` (the same high
+    surrogate: the range takes the pair), the lines after a `\r\n` and after a lone `\r`, after a combining mark,
+    a character typed between `\r` and `\n` (the range `\rW\n` from before the `\r` to the next line), the three
+    deleted (the lone `\r` and the `\n` two line ends); two edits within `timing.change` one didChange, sent only
+    once the time has passed. (Each of these mutations of src/lsp.ts fails it, and fails the incremental run
+    below: counting `\n` alone as a line end, no move of a range's start out of a pair or a `\r\n`, no move of
+    its end.)
+  - fast-check, incremental (`{openClose, change: 2, save: {includeText}}`) and whole-text (`1`) sync, 60 runs
+    each (LSP_DOC_RUNS; passed at 400 too, outside the sandbox) of up to 25 operations from a random text: inserts, deletes
+    and replacements at random places of pieces with `é`, a combining mark, `😀`, `𝄞`, CJK, `\n`, `\r\n`, a
+    lone `\r` and a tab, the whole text set, undo and redo (each edit an undo step, as a command makes one; about
+    15 to 25 of them in 60 runs, at least one asserted), the edit log forgotten,
+    flushes and saves, the changes sent by the idle timer in some runs and by a flush in the rest: the
+    server's text is the buffer's after each run; one range (or the whole text) per didChange; saves told, with
+    the text or without as asked; no error from the server.
+  - save-buffer: the pending didChange then didSave (no text for `save: true`); write-file into a subdirectory:
+    didClose of the old URI, didOpen of the new, one session; to another project: its own session, the text
+    held there.
+  - eglot-mode off: didClose, no session; on again: didOpen of the text edited meanwhile, on the same session;
+    a mode another server serves: closed on the first, opened on the second with its languageId; fundamental-mode:
+    closed, off, and `eglot-mode` there an `lsp-error` that leaves it off; the mode set with no hook (as a form
+    of the image's might) to one whose server has no session: the next flush closes it, eglot-mode off, nothing
+    started; a kill: didClose, the session without buffers.
+  - A crash after the first didOpen (started again after 100 ms): an edit while it is down, a flush that sends
+    nothing; the new process's didOpen holds the edit, no didChange to the dead one, later edits held.
+  - No textDocumentSync: nothing about documents (initialize, initialized, shutdown, exit); `{openClose: true}`
+    alone: the didOpen, no change, no save; `eglot-shutdown`: eglot-mode off, no didClose.
+  - Not turned on by itself: a file whose mode has no server, a buffer with no file, a visit while the image
+    replays (no spawn, no error), a web frame, no `host.proc`; a missing program said as `eglot: ...`, the visit
+    done.
+  - nil from nixpkgs: a file visited (eglot-mode on by itself), a comment of astral characters put first, `x`
+    renamed `yy` at both places, its use put behind `/* 😀😀 */`; nil's definition of the use, asked at UTF-16
+    units, is the binding at line 2, character 2.
+  - The built program's `quitting_shuts_the_language_servers_down` (tests/terminal.rs) is unchanged: its
+    stand-in answers no `textDocumentSync`, so its log is still `initialize, initialized, shutdown, exit`.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

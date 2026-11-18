@@ -130,7 +130,7 @@ test('eglot starts the server in the project, initializes it, and answers its qu
   assert.match(E.echo, /: ready$/);
   await until(() => f.lines().some(l => l.what.startsWith('answer')), 'the answer to workspace/configuration');
   const lines = f.lines();
-  assert.deepEqual(methods(lines), ['initialize', 'initialized', 'answer']);
+  assert.deepEqual(methods(lines), ['initialize', 'initialized', 'textDocument/didOpen', 'answer'], 'the buffer opened at once after initialized');
   const params = JSON.parse(lines[0].what.slice('initialize '.length));
   const uri = 'file://' + root.split('/').map(encodeURIComponent).join('/');
   assert.equal(uri.endsWith('/one%20two%20%233%20%2520%20%C3%A9'), true);
@@ -139,7 +139,7 @@ test('eglot starts the server in the project, initializes it, and answers its qu
   assert.deepEqual(params.workspaceFolders, [{ uri, name: 'one two #3 %20 é' }]);
   assert.equal(params.processId, null);
   assert.deepEqual(params.capabilities.general.positionEncodings, ['utf-16']);
-  assert.equal(lines[2].what, 'answer [null,null]', 'every configuration item is null: the server\'s defaults');
+  assert.equal(lines[3].what, 'answer [null,null]', 'every configuration item is null: the server\'s defaults');
   assert.match(Ed.lsp.stderr(s), /^fake: started normal\n$/);
 
   /* the same root: the same process; another root, and another server in the same root: one more each */
@@ -183,7 +183,7 @@ test('shutdown: shutdown, then exit; the child ends with 0, and none is left', a
   assert.equal(x.code, 0, 'it exited on exit, not killed');
   await Ed.lsp.shutdown(s);
   assert.equal(s.state, 'stopped');
-  assert.deepEqual(methods(f.lines()), ['initialize', 'initialized', 'answer', 'shutdown', 'exit']);
+  assert.deepEqual(methods(f.lines()), ['initialize', 'initialized', 'textDocument/didOpen', 'answer', 'shutdown', 'exit']);
   assert.deepEqual(proc.running(), []);
   assert.throws(() => L.call('eglot-shutdown', []), isErr('user-error'), 'no server for the buffer any more');
 
@@ -447,7 +447,7 @@ async function reconnectThenShutdownAll(name: string, all: (b: unknown) => unkno
   assert.equal(Ed.lsp.sessionOf(a), null);
   assert.equal(s.state, 'stopped');
   assert.match(E.echo, /: not started again: every language server was shut down$/);
-  assert.deepEqual(methods(f.lines()), ['initialize', 'initialized', 'answer', 'shutdown', 'exit']);
+  assert.deepEqual(methods(f.lines()), ['initialize', 'initialized', 'textDocument/didOpen', 'answer', 'shutdown', 'exit']);
   run('eglot', a);
   await Ed.lsp.ready(Ed.lsp.sessionOf(a));
   assert.equal(proc.running().length, 1, 'a later eglot starts a server');

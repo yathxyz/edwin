@@ -13,7 +13,13 @@
    Only the desktop program has processes (Ed.proc): in a web frame and on edwind's Node host every start is
    refused, and a buffer whose file is edwind's (a note, a shared buffer) gets no server, its file not being on
    this machine. Nothing here waits on the server while a key is held: a start returns once the child runs, and
-   the session says when it is ready. */
+   the session says when it is ready.
+
+   Documents (docs/steps.md, "Document sync and eglot-mode"): a buffer attached to a session is a document its
+   server is told of, as the server's textDocumentSync asks: didOpen once it is initialized (again after each
+   start again), didChange as one change (a range, or the whole text) after an idle moment or before a request,
+   didSave and didClose. eglot-mode is that attachment; visiting a file whose mode has a declared server turns it
+   on. Positions are UTF-16 units, as LSP's default, the only encoding offered. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -23,8 +29,9 @@ const cur = () => E.current;
 /* The bounds, in ms: initialize's answer; shutdown's answer, then the child's exit after exit, then after KILL
    (together under the 2 s a frame may block on quitting); the first delay before a start again, doubled each
    time, and how many starts again in a row before the session gives up; how long a server must have run for its
-   end to count as a first one again; how long a session with no buffer lives. Mutable for the suites. */
-const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000 };
+   end to count as a first one again; how long a session with no buffer lives; how long after an edit its change
+   is sent (eglot's eglot-send-changes-idle-time). Mutable for the suites. */
+const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500 };
 /* The tail of a server's error output a session keeps (eglot-stderr-buffer). */
 const STDERR_MAX = 64 * 1024;
 
@@ -32,6 +39,10 @@ const servers = new Map<string, LspServer>();
 /* By server name and root. */
 const sessions = new Map<string, Session>();
 const ofBuffer = new WeakMap<EdBuffer, Session>();
+/* The documents the servers were told of, by buffer. */
+const docs = new WeakMap<EdBuffer, Doc>();
+/* eglot-mode's variable: on while the buffer is attached to a session. */
+const MODE_VAR = 'eglot-enabled';
 /* Counts the shutdowns of every server, so a reconnect waiting across one starts nothing. */
 let allDown = 0;
 
@@ -54,6 +65,17 @@ interface Session extends LspSession {
   waiters: { resolve: () => void; reject: (e: unknown) => void }[];
   err: string;
   done: Promise<void> | null;
+}
+
+/* How a server wants documents synced (its textDocumentSync): whether opening and closing are told, changes as
+   none (0), the whole text (1) or a range (2), and whether a save is told and with the text. */
+interface Sync { openClose: boolean; change: number; save: { includeText: boolean } | null }
+/* A buffer's document as its server holds it: the session and connection (the session's gen) it was opened on,
+   the file, mode, URI and language it was opened with, the buffer's version and text the server last got, the
+   pending change's timer. */
+interface Doc {
+  s: Session; gen: number; file: string; mode: string; uri: string; lang: string; ver: number; text: string; sync: Sync;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 const lspError = (msg: string) => new L.S.SchemeError('lsp-error', msg, []);
@@ -154,6 +176,7 @@ function initializeParams(s: Session) {
     capabilities: {
       general: { positionEncodings: ['utf-16'] },
       workspace: { configuration: true, workspaceFolders: true },
+      textDocument: { synchronization: { didSave: true } },
       window: { workDoneProgress: false, showMessage: {} },
     },
   };
@@ -186,6 +209,7 @@ function launch(s: Session) {
     try { conn.notify('initialized', {}); } catch (e) { return; }   // closed: lost has run
     s.state = 'running'; s.why = null;
     Ed.message(`${label(s)}: ready`);
+    for (const b of s.buffers) openDoc(s, b);
     settleWaiters(s);
   }, e => { if (s.gen === gen) lost(s, gen, Ed.errorText(e)); });
 }
@@ -226,7 +250,7 @@ function shutdown(s: Session): Promise<void> {
   if (s.done) return s.done;
   clearTimers(s);
   if (sessions.get(s.key) === s) sessions.delete(s.key);
-  for (const b of s.buffers) if (ofBuffer.get(b) === s) ofBuffer.delete(b);
+  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); setFlag(b, false); }
   s.buffers.clear();
   const wasRunning = s.state === 'running';
   s.state = 'stopping';
@@ -255,18 +279,158 @@ function shutdownAll(): Promise<void> {
 
 /* ---- buffers ---- */
 
+/* B uses S: eglot-mode is on in it, and its document is opened now when S runs, else once S is initialized. */
 function attach(s: Session, b: EdBuffer) {
   const was = ofBuffer.get(b);
   if (was && was !== s) detach(b);
+  setFlag(b, true);
+  if (was === s) return;
   s.buffers.add(b); ofBuffer.set(b, s);
   if (s.idle) { clearTimeout(s.idle); s.idle = null; }
+  if (s.state === 'running') openDoc(s, b);
 }
-/* B no longer uses its session; a session no buffer uses is shut down after timing.idle. */
+/* B no longer uses its session: its document closed, eglot-mode off. A session no buffer uses is shut down after
+   timing.idle. */
 function detach(b: EdBuffer) {
   const s = ofBuffer.get(b);
   if (!s) return;
+  closeDoc(b);
   ofBuffer.delete(b); s.buffers.delete(b);
+  setFlag(b, false);
   idleWhenUnused(s);
+}
+function setFlag(b: EdBuffer, on: boolean) {
+  if (!on && !(b.locals && b.locals.has(MODE_VAR))) return;
+  Ed.makeLocal(b, MODE_VAR); b.locals!.set(MODE_VAR, on);
+}
+
+/* ---- documents ---- */
+
+/* SYNC as the server's capabilities give it. A number is the change kind, with opening, closing and saving told
+   (as VS Code's client takes it); an object says each; none says nothing is told. */
+function syncOf(caps: Record<string, unknown> | null): Sync {
+  const t = caps ? caps.textDocumentSync : undefined;
+  const kind = (k: unknown) => (k === 1 || k === 2 ? k : 0);
+  if (typeof t === 'number') return { openClose: true, change: kind(t), save: { includeText: false } };
+  if (!t || typeof t !== 'object') return { openClose: false, change: 0, save: null };
+  const o = t as { openClose?: unknown; change?: unknown; save?: unknown };
+  const save = o.save === true ? { includeText: false } : o.save && typeof o.save === 'object' ? { includeText: (o.save as { includeText?: unknown }).includeText === true } : null;
+  return { openClose: o.openClose === true, change: kind(o.change), save };
+}
+/* The languageId of MODE: its name less -mode, but for the ids LSP names otherwise. */
+const LANGUAGE_IDS: Record<string, string> = {
+  'c++-mode': 'cpp', 'js-mode': 'javascript', 'tsx-mode': 'typescriptreact', 'sh-mode': 'shellscript',
+};
+const languageId = (mode: string) => (Object.prototype.hasOwnProperty.call(LANGUAGE_IDS, mode) ? LANGUAGE_IDS[mode] : mode.replace(/-mode$/, ''));
+
+/* The LSP position (line, UTF-16 units into it) of offset P in T, lines ending at \n, \r\n or a lone \r. P never
+   falls between a \r and its \n, nor inside a surrogate pair (change keeps both whole). */
+function position(t: string, p: number) {
+  let line = 0, start = 0;
+  for (let i = 0; i < p; i++) {
+    const c = t.charCodeAt(i);
+    if (c === 10 || (c === 13 && t.charCodeAt(i + 1) !== 10)) { line++; start = i + 1; }
+  }
+  return { line, character: p - start };
+}
+const isHigh = (c: number) => (c & 0xfc00) === 0xd800, isLow = (c: number) => (c & 0xfc00) === 0xdc00;
+/* The one change that makes OLD into NEW: the range of OLD between their common prefix and suffix, and NEW's text
+   there. Neither end splits a surrogate pair or a \r\n. */
+function change(old: string, now: string) {
+  const n = Math.min(old.length, now.length);
+  let pre = 0; while (pre < n && old.charCodeAt(pre) === now.charCodeAt(pre)) pre++;
+  let suf = 0; while (suf < n - pre && old.charCodeAt(old.length - 1 - suf) === now.charCodeAt(now.length - 1 - suf)) suf++;
+  /* a point between the halves of a pair, or between a \r and its \n, is moved out: the start back, the end on */
+  const split = (p: number) => { const a = old.charCodeAt(p - 1), b = old.charCodeAt(p); return (isHigh(a) && isLow(b)) || (a === 13 && b === 10); };
+  if (pre > 0 && split(pre)) pre--;
+  if (suf > 0 && split(old.length - suf)) suf--;
+  return { range: { start: position(old, pre), end: position(old, old.length - suf) }, text: now.slice(pre, now.length - suf) };
+}
+
+const fileUri = (b: EdBuffer) => uri(Ed.host.files!.resolve(b.file!));
+const live = (d: Doc) => d.s.state === 'running' && d.s.gen === d.gen && !!d.s.conn && d.s.conn.closed() === null;
+/* Tell S's server of B as it is now (didOpen), when the server wants it. Never throws: a connection that broke
+   has made the session lost, which opens it again on the next start. */
+function openDoc(s: Session, b: EdBuffer) {
+  forgetDoc(b);
+  const sync = syncOf(s.capabilities);
+  if (!sync.openClose || !s.conn || !b.file) return;
+  const text = b.text, d: Doc = { s, gen: s.gen, file: b.file, mode: b.mode, uri: fileUri(b), lang: languageId(b.mode), ver: b.ver, text, sync, timer: null };
+  docs.set(b, d);
+  try { s.conn.notify('textDocument/didOpen', { textDocument: { uri: d.uri, languageId: d.lang, version: d.ver, text } }); }
+  catch (e) { docs.delete(b); }
+}
+function forgetDoc(b: EdBuffer) {
+  const d = docs.get(b);
+  if (!d) return;
+  if (d.timer) clearTimeout(d.timer);
+  docs.delete(b);
+}
+/* didClose for B's document, when its server holds it. */
+function closeDoc(b: EdBuffer) {
+  const d = docs.get(b);
+  forgetDoc(b);
+  if (d && live(d)) try { d.s.conn!.notify('textDocument/didClose', { textDocument: { uri: d.uri } }); } catch (e) { /* lost */ }
+}
+/* Send B's edits since its server last heard (didChange: the one range that changed, or the whole text when the
+   server syncs so). A buffer whose file or mode changed since its document was opened is attached afresh instead
+   (ensure), its old document closed, but no server is started from here: this also runs from a timer, after
+   edits that may have been the image's. The suites and the requests of later packages call this before they ask. */
+function flush(b: EdBuffer) {
+  const d = docs.get(b);
+  if (!d) return;
+  if (d.timer) { clearTimeout(d.timer); d.timer = null; }
+  if (!live(d)) return;
+  if (d.file !== b.file || d.mode !== b.mode) { ensure(b, false); return; }
+  if (d.ver === b.ver) return;
+  const text = b.text;
+  d.ver = b.ver;
+  if (text === d.text || !d.sync.change) { d.text = text; return; }
+  const changes = d.sync.change === 2 ? [change(d.text, text)] : [{ text }];
+  d.text = text;
+  try { d.s.conn!.notify('textDocument/didChange', { textDocument: { uri: d.uri, version: d.ver }, contentChanges: changes }); }
+  catch (e) { /* lost: it is opened again on the next start */ }
+}
+const prevEdited = H.edited;
+H.edited = b => {
+  if (prevEdited) prevEdited(b);
+  const d = docs.get(b);
+  if (d && !d.timer) d.timer = setTimeout(() => { d.timer = null; if (docs.get(b) === d) flush(b); }, timing.change);
+};
+/* didSave once B was written; written to another file, it is attached afresh instead (the old file's document
+   closed, the new one's opened, in its own project's session when that is another). */
+const prevWrote = H.wrote;
+H.wrote = (b, name) => {
+  if (prevWrote) prevWrote(b, name);
+  const d = docs.get(b);
+  if (!d) return;
+  if (d.file !== b.file || d.mode !== b.mode) { ensure(b); return; }
+  flush(b);
+  if (!d.sync.save || docs.get(b) !== d || !live(d)) return;
+  const params: Record<string, unknown> = { textDocument: { uri: d.uri } };
+  if (d.sync.save.includeText) params.text = d.text;
+  try { d.s.conn!.notify('textDocument/didSave', params); } catch (e) { /* lost */ }
+};
+
+/* B on the session its server and root give now: it stays where it is when that is its session (its document
+   opened again when its file or mode changed), else it is detached and attached afresh; with no server for its
+   mode (or no root), detached. Nothing changes where no process may start (the image's replay, a web frame,
+   edwind). A start that fails (the program missing) leaves it detached, said; with MAYSTART false only a
+   session already kept there is used, none started. Visiting a file and changing a major mode call this: eglot-mode turns
+   on per language, once a server is declared for its mode. */
+function ensure(b: EdBuffer, mayStart = true) {
+  if (Ed.proc.refusal()) return;
+  const s = ofBuffer.get(b), server = serverFor(b), root = server ? rootOf(b) : null;
+  if (s && server && root && s.name === server.name && s.root === root) {
+    const d = docs.get(b);
+    if (d && (d.file !== b.file || d.mode !== b.mode)) { closeDoc(b); if (s.state === 'running') openDoc(s, b); }
+    setFlag(b, true);
+    return;
+  }
+  if (s) detach(b);
+  if (!server || !root) return;
+  if (!mayStart) { const there = sessions.get(`${server.name}\0${root}`); if (there && there.state !== 'failed') attach(there, b); return; }
+  try { attach(sessionAt(server, root), b); } catch (e) { Ed.message(`eglot: ${Ed.errorText(e)}`); }
 }
 function idleWhenUnused(s: Session) {
   if (!s.buffers.size && !s.idle && s.state !== 'stopping' && s.state !== 'stopped')
@@ -337,15 +501,25 @@ D('%lsp-declare', 'NAME MODES COMMAND', 'Declare the language server NAME for th
     const modes = L.arr(m).map(x => (x instanceof L.S.Sym ? x.name : x));
     return define(name as string, modes as string[], L.arr(c) as string[]) ? n : false;
   });
-D('lsp--kill-buffer', '', 'kill-buffer-hook: the current buffer no longer uses its language server.', () => { detach(cur()); return false; });
+D('lsp--kill-buffer', '', 'kill-buffer-hook: the current buffer no longer uses its language server (didClose).', () => { detach(cur()); return false; });
 L.addHook('kill-buffer-hook', intern('lsp--kill-buffer'));
+D('lsp--ensure', '', "find-file-hook and after-change-major-mode-hook: turn eglot-mode on in the current buffer when a language server is declared for its mode, starting the server for its project when none runs there; off when none is.", () => { ensure(cur()); return false; });
+L.addHook('find-file-hook', intern('lsp--ensure'));
+L.addHook('after-change-major-mode-hook', intern('lsp--ensure'));
+
+Ed.defineMinorMode({ name: 'eglot-mode', variable: MODE_VAR, pretty: 'Eglot',
+  doc: "Toggle this buffer's use of the language server declared for its mode (define-language-server): on, the server for its project is started when none runs there and is told of the buffer's text and each change, save and close; off, it is told the buffer closed. Visiting a file turns it on when a server is declared for the file's mode. The state is eglot-enabled.",
+  body: (on: boolean, b: EdBuffer) => {
+    if (!on) { detach(b); return; }
+    try { start(b); } catch (e) { setFlag(b, false); throw e; }
+  } });
 
 const sessionHere = () => {
   const s = ofBuffer.get(cur());
   if (!s) signal('user-error', 'No language server for this buffer (M-x eglot starts one)');
   return s!;
 };
-CMD('eglot', '', '', "Start the language server for this buffer's mode in its project (the nearest directory up with a .git or a .jj, else the file's), or use the one already running there.", () => {
+CMD('eglot', '', '', "Start the language server for this buffer's mode in its project (the nearest directory up with a .git or a .jj, else the file's), or use the one already running there, and turn eglot-mode on: the server is told of the buffer.", () => {
   const had = new Map([...sessions.values()].map(s => [s, s.state]));
   const s = start(cur());
   const was = had.get(s);
@@ -364,7 +538,7 @@ CMD('eglot-stderr-buffer', '', '', "Show the last of what this buffer's language
 });
 
 Ed.lsp = {
-  timing, uri, define, serverFor, rootOf, start, ready, shutdown, shutdownAll, reconnect,
+  timing, uri, define, serverFor, rootOf, start, ready, shutdown, shutdownAll, reconnect, flush, languageId,
   servers: () => [...servers.values()],
   sessions: () => [...sessions.values()],
   sessionOf: b => ofBuffer.get(b) || null,
