@@ -1107,31 +1107,86 @@ pub fn install(scope: &mut v8::HandleScope, context: v8::Local<v8::Context>) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    /// F's value, F run on the one thread of the test process that runs V8, which sets V8 up first, as main.rs
+    /// sets it up on the thread that runs the program. V8's platform takes a memory protection key (PKU, where
+    /// the processor has it) for the memory it guards, and only the thread that set it up, and the threads that
+    /// thread starts, may read that memory: an isolate made on another test thread faults (SEGV_PKUERR) as it is
+    /// made. So every isolate of these tests is made there, one at a time. That thread's thread-locals outlive a
+    /// test: syntax::use_dir starts each test's syntax state afresh.
+    fn on_v8<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        type Job = Box<dyn FnOnce() + Send>;
+        static V8: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+        let jobs = V8.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("v8".into())
+                .stack_size(96 << 20)
+                .spawn(move || {
+                    crate::snapshot::init_v8(&crate::ICU_DATA.0);
+                    super::start_clock(Instant::now());
+                    for job in rx {
+                        job();
+                    }
+                })
+                .unwrap();
+            tx
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let job = move || {
+            let _ = tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+        };
+        jobs.send(Box::new(job)).unwrap();
+        match rx.recv().expect("the V8 thread stopped") {
+            Ok(v) => v,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Isolates asked for from test threads of their own, one after another and two at once, each run on the V8
+    /// thread: none faults for want of the memory protection key V8 set up there.
+    #[test]
+    fn isolates_from_any_test_thread() {
+        let run = |n: i32| {
+            on_v8(move || {
+                let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+                let scope = &mut v8::HandleScope::new(isolate);
+                let context = v8::Context::new(scope, Default::default());
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let code = v8::String::new(scope, &format!("{n} * 2")).unwrap();
+                let v = v8::Script::compile(scope, code, None)
+                    .unwrap()
+                    .run(scope)
+                    .unwrap();
+                v.int32_value(scope).unwrap()
+            })
+        };
+        assert_eq!(std::thread::spawn(move || run(1)).join().unwrap(), 2);
+        assert_eq!(std::thread::spawn(move || run(2)).join().unwrap(), 4);
+        let both = [3, 4].map(|n| std::thread::spawn(move || run(n)));
+        assert_eq!(both.map(|t| t.join().unwrap()), [6, 8]);
+    }
+
     /// The tree-sitter natives as JS calls them, on an isolate of its own: the string's indices come back, the
     /// errors are JS errors.
     #[test]
     fn the_syntax_natives_from_javascript() {
         let dir = crate::syntax::tests::bundle();
-        let result = std::thread::Builder::new()
-            .stack_size(96 << 20)
-            .spawn(move || {
-                crate::snapshot::init_v8(&crate::ICU_DATA.0);
-                crate::syntax::use_dir(&dir);
-                let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
-                let scope = &mut v8::HandleScope::new(isolate);
-                let context = v8::Context::new(scope, Default::default());
-                let scope = &mut v8::ContextScope::new(scope, context);
-                super::install(scope, context);
-                let tc = &mut v8::TryCatch::new(scope);
-                let code = v8::String::new(tc, JS).unwrap();
-                match v8::Script::compile(tc, code, None).and_then(|s| s.run(tc)) {
-                    Some(v) => v.to_rust_string_lossy(tc),
-                    None => tc.exception().unwrap().to_rust_string_lossy(tc),
-                }
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        let result = on_v8(move || {
+            crate::syntax::use_dir(&dir);
+            let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+            let scope = &mut v8::HandleScope::new(isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+            super::install(scope, context);
+            let tc = &mut v8::TryCatch::new(scope);
+            let code = v8::String::new(tc, JS).unwrap();
+            match v8::Script::compile(tc, code, None).and_then(|s| s.run(tc)) {
+                Some(v) => v.to_rust_string_lossy(tc),
+                None => tc.exception().unwrap().to_rust_string_lossy(tc),
+            }
+        });
         assert_eq!(result, "ok");
     }
 
@@ -1174,5 +1229,198 @@ mod tests {
       eq(err(() => __n.synEdit(t, 0, 0, 'x')), `no syntax tree ${t}`, 'editing a freed tree');
       eq(err(() => __n.synQuery(t, 'highlights')), `no syntax tree ${t}`, 'a freed tree');
       'ok'
+    "#;
+
+    /// The core booted as the startup snapshot holds it (native/js/boot.ts with the native host and the shipped
+    /// Scheme), with the grammar bundle under test, on an isolate of its own; then CODE, its value as a string
+    /// or what it threw.
+    fn with_core(code: String) -> String {
+        let dir = crate::syntax::tests::bundle();
+        on_v8(move || {
+            crate::syntax::use_dir(&dir);
+            let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+            let scope = &mut v8::HandleScope::new(isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+            super::install(scope, context);
+            for name in [
+                "native/prelude",
+                "native/host-native",
+                "native/term",
+                "native/boot",
+            ] {
+                assert!(super::run_source(scope, name), "{name} failed");
+                scope.perform_microtask_checkpoint();
+            }
+            let tc = &mut v8::TryCatch::new(scope);
+            let code = v8::String::new(tc, &code).unwrap();
+            match v8::Script::compile(tc, code, None).and_then(|s| s.run(tc)) {
+                Some(v) => v.to_rust_string_lossy(tc),
+                None => tc.exception().unwrap().to_rust_string_lossy(tc),
+            }
+        })
+    }
+
+    /// Faces from the grammars' highlights queries (src/syntax.ts) as a frame draws them, for each mode of the
+    /// bundle: the classes of Ed.renderBuffer's runs for each fixture of test/syntax-faces.txt are its golden
+    /// runs; each line drawn alone (a window whose first line is inside a comment or string begun above it) has
+    /// the classes it has in the whole; and after edits, the classes are those of a fresh buffer of the same text
+    /// (the tree kept in step through the edit log). Every mode scm/prog.scm declares has a fixture.
+    #[test]
+    fn the_core_highlights_each_language_as_its_golden_runs() {
+        let golden = include_str!("../../test/syntax-faces.txt");
+        let prog = include_str!("../../scm/prog.scm");
+        let code = format!(
+            "const GOLDEN = {}, PROG = {};\n{}",
+            js_str(golden),
+            js_str(prog),
+            GOLDEN_JS
+        );
+        assert_eq!(with_core(code), "ok");
+    }
+
+    /// The keystroke budget as a frame meets it: in a text of 10,000 lines (syntax.rs's BLOCKS repeated), a
+    /// character typed or taken back in the first, middle or last ten lines, and a window of 60 lines around it
+    /// drawn again with its faces (the edit crossing to the tree, its reparse, the window's highlights query,
+    /// the classes and the runs), within 2 ms, the median of 50 keystrokes, the best of three such runs. Python
+    /// is held to under half of a fresh buffer's first draw instead, as syntax.rs's budget test holds its
+    /// reparse to half a whole parse: its reparse is not within 2 ms on a loaded machine. Ignored as that test
+    /// is, and run on request the same way, with "a_key_in_10000_lines" in place of its name.
+    #[test]
+    #[ignore]
+    fn a_key_in_10000_lines_redraws_its_faces_within_its_budget() {
+        let _alone = crate::syntax::tests::heavy();
+        let blocks: Vec<String> = crate::syntax::tests::BLOCKS
+            .iter()
+            .map(|(name, block, word)| {
+                format!("[{}, {}, {}]", js_str(name), js_str(block), js_str(word))
+            })
+            .collect();
+        let out = with_core(format!(
+            "const BLOCKS = [{}];\n{}",
+            blocks.join(", "),
+            BUDGET_JS
+        ));
+        eprintln!("{out}");
+        assert!(out.ends_with("\nok"), "{out}");
+    }
+
+    const BUDGET_JS: &str = r#"
+      const Ed = globalThis.Ed, report = [];
+      const MODE = { rust: 'rust-mode', c: 'c-mode', javascript: 'js-mode', nix: 'nix-mode', python: 'python-mode' };
+      let n = 0, ok = true;
+      const buffer = (grammar, text) => {
+        const b = Ed.getBufferCreate(`budget-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, MODE[grammar]);
+        return b;
+      };
+      const median = v => v.sort((x, y) => x - y)[v.length >> 1];
+      for (const [grammar, block, word] of BLOCKS) {
+        const text = block.repeat(1000);
+        let first = Infinity;
+        for (let i = 0; i < 3; i++) {
+          const b = buffer(grammar, text), t = performance.now();
+          Ed.renderBuffer(b, { from: text.length >> 1, count: 60, runs: true, html: false });
+          first = Math.min(first, performance.now() - t);
+          globalThis.L.call('kill-buffer', [b]);
+        }
+        const b = buffer(grammar, text);
+        for (const [place, no] of [['first', 0], ['middle', 500], ['last', 999]]) {
+          const at = no * block.length + block.indexOf(word) + word.length;
+          const o = { from: Math.max(0, at - 30 * 40), count: 60, runs: true, html: false };
+          if (!Ed.renderBuffer(b, o).some(l => l.runs.some(r => r.cls === 'kw'))) { ok = false; report.push(`${grammar}: no keyword drawn`); }
+          let key = Infinity;
+          for (let r = 0; r < 3; r++) {
+            const times = [];
+            for (let i = 0; i < 50; i++) {
+              const t = performance.now();
+              if (i % 2 === 0) Ed.replaceText(b, at, at, 'z'); else Ed.replaceText(b, at, at + 1, '');
+              Ed.renderBuffer(b, o);
+              times.push(performance.now() - t);
+            }
+            key = Math.min(key, median(times));
+          }
+          report.push(`${grammar}: a keystroke in the ${place} ten lines of 10,000 and a redraw of 60 lines: ${key.toFixed(3)} ms; a fresh buffer's first draw ${first.toFixed(1)} ms`);
+          if (grammar === 'python' ? key * 2 >= first : key > 2) { ok = false; report.push(`${grammar}: over its budget`); }
+        }
+      }
+      report.join('\n') + (ok ? '\nok' : '\nfailed')
+    "#;
+
+    /// TEXT as a JavaScript string literal.
+    fn js_str(text: &str) -> String {
+        let mut out = String::from("\"");
+        for c in text.encode_utf16() {
+            match c {
+                0x22 => out.push_str("\\\""),
+                0x5c => out.push_str("\\\\"),
+                0x20..=0x7e => out.push(c as u8 as char),
+                _ => out.push_str(&format!("\\u{c:04x}")),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    const GOLDEN_JS: &str = r#"
+      const Ed = globalThis.Ed;
+      if (!Ed.host.syntax) throw new Error('the native host has no syntax');
+      /* The fixtures: "=== MODE", its text, "---", then one "CLASS<tab>TEXT" line a run with a face. */
+      const fixtures = [];
+      for (const part of GOLDEN.split(/^=== /m).slice(1)) {
+        const nl = part.indexOf('\n'), mode = part.slice(0, nl).trim(), rest = part.slice(nl + 1);
+        const sep = rest.indexOf('\n---\n');
+        if (sep < 0) throw new Error(`${mode}: no ---`);
+        const want = rest.slice(sep + 5).split('\n').filter(l => l && !l.startsWith('#'));
+        fixtures.push({ mode, text: rest.slice(0, sep + 1), want });
+      }
+      const modes = [...PROG.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]);
+      const have = fixtures.map(f => f.mode);
+      if (JSON.stringify([...modes].sort()) !== JSON.stringify([...have].sort()))
+        throw new Error(`modes ${modes} but fixtures for ${have}`);
+      let n = 0;
+      const buffer = (mode, text) => {
+        const b = Ed.getBufferCreate(`golden-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, mode);
+        b.pt = b.rope.length;
+        return b;
+      };
+      /* The faced runs of lines FROM (a position) on, COUNT of them: [class, text] each. */
+      const runs = (b, from = 0, count = 100000) => {
+        const out = [];
+        for (const l of Ed.renderBuffer(b, { from, count, runs: true, html: false }))
+          for (const r of l.runs) if (!r.k && r.cls) out.push([r.cls, l.text.slice(r.s, r.e)]);
+        return out;
+      };
+      const lines = b => Ed.renderBuffer(b, { from: 0, count: 100000, runs: true, html: false });
+      const errors = [];
+      for (const f of fixtures) {
+        const b = buffer(f.mode, f.text);
+        if (b.mode !== f.mode) { errors.push(`${f.mode}: the buffer is in ${b.mode}`); continue; }
+        const got = runs(b).map(([c, t]) => `${c}\t${t}`);
+        if (JSON.stringify(got) !== JSON.stringify(f.want))
+          errors.push(`${f.mode}: the runs are\n${got.join('\n')}`);
+        /* Each line drawn as a window's first line. */
+        const whole = lines(b);
+        for (const l of whole) {
+          const alone = Ed.renderBuffer(b, { from: l.o, count: 1, runs: true, html: false })[0];
+          if (JSON.stringify(alone.runs) !== JSON.stringify(l.runs)) errors.push(`${f.mode}: line at ${l.o} drawn alone differs`);
+        }
+        /* Edits: a line typed in the middle a character at a time, a line deleted, an edit undone by hand. */
+        const mid = f.text.indexOf('\n', f.text.length >> 1) + 1;
+        for (const ch of 'x = 1;\n') { Ed.replaceText(b, mid, mid, ch); runs(b, 0, 3); }
+        runs(b);
+        Ed.replaceText(b, mid, mid + 7, '');
+        const first = b.rope.indexOf('\n') + 1;
+        Ed.replaceText(b, 0, first, '');
+        runs(b);
+        Ed.replaceText(b, 0, 0, f.text.slice(0, first));
+        const after = runs(b), fresh = runs(buffer(f.mode, b.rope.toString()));
+        if (b.rope.toString() !== f.text) errors.push(`${f.mode}: the edits did not give the text back`);
+        if (JSON.stringify(after) !== JSON.stringify(fresh)) errors.push(`${f.mode}: after edits the runs differ from a fresh buffer's`);
+      }
+      errors.length ? errors.join('\n\n') : 'ok'
     "#;
 }

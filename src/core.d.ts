@@ -876,6 +876,8 @@ interface EdBuffer extends SchemeForeign {
   _mlx?: unknown;
   _dlx?: unknown;
   _vlx?: unknown;
+  /* the highlighting of the shown segment (syntax.ts) */
+  _sxl?: unknown;
   /* a commit message an opener waits for (vc.ts) */
   vcMessage?: VcPending;
   /* a git status, log or revision buffer, or a jj log or change buffer: its repository, what its last read gave, its folds and its lines (vc-git.ts) */
@@ -1849,16 +1851,20 @@ interface EdHostProc {
   kill(id: number, signal?: EdProcSignal): boolean;
 }
 /* tree-sitter in the desktop program (host-native.ts over native/src/syntax.rs), trees by number: parse TEXT with
-   the bundle's GRAMMAR, an edit of a tree's text (DEL code units at POS replaced by INS) and its reparse, free */
+   the bundle's GRAMMAR, an edit of a tree's text (DEL code units at POS replaced by INS) and its reparse, the
+   captures of the grammar's KIND query between two string indices (as synQuery gives them), free */
 interface EdHostSyntax {
   parse(grammar: string, text: string): number;
   edit(tree: number, pos: number, del: number, ins: string): void;
+  query(tree: number, kind: string, start: number, end: number): { names: string[]; captures: number[] };
   free(tree: number): boolean;
 }
 interface EdSyntaxApi {
   /* B's syntax tree with GRAMMAR, kept in step with its text by its edit log: the tree's number, null when the
      host has no tree-sitter (a web frame, edwind) */
   tree(b: EdBuffer, grammar: string): number | null;
+  /* the grammar of the bundle that highlights MODE, null for none */
+  grammarOf(mode: string): string | null;
 }
 interface EdHostFiles {
   read(name: string, max?: number): string | null;

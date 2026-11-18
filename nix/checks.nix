@@ -279,11 +279,15 @@ in
   # Syntax trees per buffer (src/syntax.ts, Ed.syntax), with the desktop program's host.syntax stood in: fast-check
   # over edits, undo, whole-text replacement and forgotten or trimmed logs, the stand-in's text always the
   # buffer's; a run of edits crossing as one span, a whole parse only when the log cannot say what changed, a new
-  # grammar, a refused edit, a killed buffer's tree freed, no tree without host.syntax. Tree-sitter's side is the
-  # package's cargo tests (nix build .#edwin). lang-syntax-highlight adds its golden face runs here.
+  # grammar, a refused edit, a killed buffer's tree freed, no tree without host.syntax. Highlighting from the
+  # stand-in's captures: capture names to faces, which of one node's captures wins, nested nodes, a segment inside
+  # a node begun above it, the cache, a failure and the size bounds, the mode table against the bundle's
+  # grammars.json, the frame's side of the 2 ms budget. Tree-sitter's side and the golden face runs of each
+  # language with the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
   # SYNTAX_RUNS raises the run count.
   edwin-syntax = pkgs.runCommand "edwin-syntax" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
+    export EDWIN_GRAMMARS=${self.packages.${pkgs.stdenv.hostPlatform.system}.edwin-grammars}
     node --test ${edwin}/edwin/test/syntax.test.mts
     touch $out
   '';

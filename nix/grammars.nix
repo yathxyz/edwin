@@ -4,8 +4,9 @@
 # (highlights, injections, locals, tags). grammars.json maps each NAME to its mode, symbol, query kinds and source.
 #
 # The grammars are nixpkgs' (tree-sitter.builtGrammars) with their own queries, composed as each grammar's
-# tree-sitter.json lists them, in its order: C++ is C's highlights then its own, TypeScript and TSX are their own
-# then JavaScript's. HCL (the Terraform mode) and GDScript ship no queries: both come from Helix, the grammar at
+# tree-sitter.json lists them, the highlights with the language they build on first (C++ is C's highlights then
+# its own; TypeScript is JavaScript's then its own, TSX JavaScript's, JSX's and TypeScript's), since of two
+# patterns capturing one node the later wins (src/syntax.ts) and a language's own patterns are its specific ones. HCL (the Terraform mode) and GDScript ship no queries: both come from Helix, the grammar at
 # the revision Helix's queries are written for and the queries from Helix's runtime. The edwin-grammars check
 # loads every library and compiles every query file against it.
 {
@@ -47,13 +48,13 @@ let
       highlights = [ "${js}/highlights.scm" "${js}/highlights-jsx.scm" "${js}/highlights-params.scm" ];
     }))
     (fromNixpkgs "typescript" "typescript-mode" g.tree-sitter-typescript {
-      highlights = [ "${ts}/highlights.scm" "${js}/highlights.scm" ];
+      highlights = [ "${js}/highlights.scm" "${ts}/highlights.scm" ];
       injections = [ "${js}/injections.scm" ];
       locals = [ "${ts}/locals.scm" "${js}/locals.scm" ];
       tags = [ "${ts}/tags.scm" "${js}/tags.scm" ];
     })
     (fromNixpkgs "tsx" "tsx-mode" g.tree-sitter-tsx {
-      highlights = [ "${ts}/highlights.scm" "${js}/highlights-jsx.scm" "${js}/highlights.scm" ];
+      highlights = [ "${js}/highlights.scm" "${js}/highlights-jsx.scm" "${ts}/highlights.scm" ];
       injections = [ "${js}/injections.scm" ];
       locals = [ "${js}/locals.scm" ];
       tags = [ "${ts}/tags.scm" "${js}/tags.scm" ];

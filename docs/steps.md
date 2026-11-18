@@ -4361,9 +4361,10 @@ Edwin reads the directory yet.
 - **Where the grammars and queries come from (decision 8; the plan states no default, so the simplest):**
   nixpkgs' `tree-sitter.builtGrammars`, with each grammar's own queries, composed in the order its
   `tree-sitter.json` lists them, each file followed by a newline: C++'s highlights are C's then its own;
-  JavaScript's are its highlights, highlights-jsx and highlights-params; TypeScript's and TSX's are their own then
-  JavaScript's (TSX with highlights-jsx between), their injections JavaScript's, as tree-sitter-typescript's
-  `tree-sitter.json` names them from its node_modules. Just's queries are `queries-src`, which its
+  JavaScript's are its highlights, highlights-jsx and highlights-params; TypeScript's and TSX's were their own then
+  JavaScript's (TSX with highlights-jsx between), as tree-sitter-typescript's `tree-sitter.json` names them from
+  its node_modules, and since lang-syntax-highlight are JavaScript's first (TSX's then highlights-jsx), their own
+  last, as the later pattern wins; their injections are JavaScript's. Just's queries are `queries-src`, which its
   `tree-sitter.json` names (`queries/just` is the copy for Neovim); Typst's are `queries/typst`. HCL and GDScript ship
   no queries: both are Helix's (nixpkgs' `helix`), the grammar at the revision Helix pins
   (`helix.passthru.tree-sitter-grammars`) and the queries from its `runtime/queries`, since Helix's GDScript
@@ -5292,6 +5293,122 @@ indentation). Nothing draws from the trees yet: lang-syntax-highlight is the fir
   over `.#edwin`); its 2026-11-17 run passed with the numbers above. And
   `natives::tests::the_syntax_natives_from_javascript` gained `synEdit`: the edit at JS indices after `𝔸` moves
   the capture along, and its refusals.
+
+## Highlighting from queries (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-highlight`): the faces of a programming
+language's buffer from its tree-sitter grammar's highlights query, through the H.lexSeg chain, with faces for
+types, builtins and properties added.
+
+- **`src/syntax.ts` adds a lexSeg** in front of the ones before it: a buffer whose major mode has a grammar of
+  the bundle, in a frame whose host has tree-sitter, gets the classes of its shown lines from the grammar's
+  `highlights` query run over its tree (`Ed.syntax.tree`, kept in step by the edit log) between the first and
+  the last shown character. Only those lines are queried; a capture that overlaps them counts, so a window whose
+  first line is inside a block comment or a string begun above it colours it. The classes are kept on the buffer
+  (`b._sxl`) until its version or the shown lines change, as dired's are. Every other buffer, mode and frame goes
+  to the lexSeg before it.
+- **`host.syntax.query(tree, kind, start, end)`** (`src/core.d.ts`, `native/js/host-native.ts` over the
+  `synQuery` native lang-syntax-native made). `Ed.syntax.grammarOf(mode)` names a mode's grammar.
+- **The mode table** is in `src/syntax.ts` (`GRAMMARS`, the 22 modes scm/prog.scm declares), equal to the
+  bundle's `grammars.json` (a test). A mode is looked up by its own name only: a mode derived from rust-mode is
+  not highlighted unless it is added there.
+- **Capture names to classes** by the longest dotted prefix named in `CLASS` (`function.method.call` is a
+  function): keyword, conditional, repeat, markup.heading and punctuation.special (`${` `}`) `kw`; function and
+  method `fn`; function.builtin, function.macro, function.special, variable.builtin and attribute `bi` (new);
+  string, character and markup.raw `st`; escapes `co`; comment `cm`, comment.documentation `dc`; constant and
+  boolean `co`; number `nu`; type, constructor, module, namespace and tag `ty` (new); property, field, label,
+  variable.other.member and string.special.key `pr` (new); markup.heading.marker `pa`. variable, operator and
+  embedded give no face but take their node (below); punctuation and delimiter (bracket, delimiter) give no face
+  and take their node only when no other capture of it does, so Nix's interpolation `}`, captured
+  `@punctuation.bracket` before `@punctuation.special`, is `kw` as its `${` is, while a brace captured only as
+  punctuation (C#'s interpolation braces, YAML's `|`) still paints no face over the string around it; a name not
+  in the table (spell, markup.bold) and one beginning with `_` (a predicate's) take nothing.
+- **One capture a node.** Captures are sorted outer node first (by start, then the longer), so a node inside
+  another paints over it (an escape in a string, an interpolation's text back to no face); of one node's
+  captures (same extent) one wins, punctuation without a face last. Which one is the queries' own convention,
+  settled by test: tree-sitter
+  0.26's highlighter (`tree-sitter test` on tree-sitter-javascript and on probes for Go, Nix and Rust) lets the
+  later pattern win, and scoring both rules against each grammar's own highlight tests with py-tree-sitter gave
+  the later all of C (23), C++ (23), C# (892), Java (17) and Python (34) and 46 of 55 for JavaScript, against
+  20, 16, 809, 8, 33 and 23 for the earlier, but Nix's own tests pass with the earlier (59 of 63 against 31): its
+  generic `(identifier) @variable` comes last. Go's, JSON's, NASM's and Typst's are written the same way (a
+  generic pattern after the specific ones: Go's every name, JSON's every key and NASM's every word would be a
+  variable or a string), so those five grammars let the earlier pattern win (`EARLIER_WINS`), the rest the
+  later. Two nodes of one extent (a node and its only child) count as one node.
+- **TypeScript's and TSX's highlights** are composed JavaScript's first (TSX's then JSX's), their own last
+  (`nix/grammars.nix`): in their `tree-sitter.json` order JavaScript's generic `(identifier) @variable` came after
+  their own patterns and took JSX's tags.
+- **Faces `ty`, `bi` and `pr`** (`src/display.ts` FACES and PALETTE, index.html's palettes and rules,
+  test/display.test.mts's table): modus-themes' type (cyan-cooler, `#005f5f` and `#6ae4b9` dark), builtin
+  (magenta-warmer, `#8f0075` and `#f78fe7`) and property (cyan, `#005e8b` and `#00d3d0`) colours, plain weight.
+- **Bounds:** a buffer over 4 Mi characters is not highlighted (`MAX_CHARS`: a whole parse of it may reach
+  tree-sitter's 1 s bound, and a redraw must not wait for it); nor are shown lines over 64 Ki characters
+  (`MAX_SHOWN`, the text from the window's first shown character to its last, so in practice a minified file's
+  one long line): the query, the sort of its captures and the fill cost a keystroke time in proportion to the
+  shown text (review measured a 1 Mi-character line in js-mode at 121 ms a keystroke and redraw with a stand-in
+  query against 26 ms without, 4 Mi at 554 against 140). A window whose shown text passes the bound (every
+  window that shows such a line, as frames ask for the window's rows only) draws all its lines with the lexers
+  before this one, its ordinary lines too, much as Emacs's so-long plains the buffer; a window of the same buffer
+  that does not show the long line stays highlighted; a buffer whose tree or query fails (no grammar,
+  256 trees, a parse past its bound) is not highlighted with that grammar again (switching its mode to another
+  grammar's tries again).
+- **The 2 ms budget, measured** (`natives::tests::a_key_in_10000_lines_redraws_its_faces_within_its_budget`):
+  a keystroke in the first, middle or last ten lines of 10,000 and a redraw of the 60 lines around it with their
+  faces, the median of 50, best of three, on ex44 at a load average of 10 to 21 (other builds), three runs: Rust
+  0.77 to 0.91 ms, C 0.45 to 0.50, JavaScript 0.66 to 0.81, Nix 0.30 to 1.13, against a fresh buffer's first draw
+  (its whole parse) of 20 to 36 ms. **Python does not keep it:** 1.2 to 1.4 ms in the first ten lines, 2.0 to
+  2.5 ms in the middle and the last (its reparse, as lang-syntax-incremental found); the test holds Python to half a fresh
+  buffer's first draw. A run at a load near 22 measured everything about twice as slow (Rust 2.5 ms), which is
+  why the test is ignored in the package build. Opening a file draws after its whole parse: a 10,000-line file
+  adds those 20 to 36 ms to the draw that shows it. The program's first draw (no file, or a Scheme or Org one,
+  none of which is highlighted from a tree) was not measured again.
+- **Choices where the plan left one open:**
+  - the golden face runs are a cargo test in the package build (`nix build .#edwin`), not in check
+    `edwin-syntax` as the plan says: only the desktop program has tree-sitter, and a check that built the program
+    again for them would be a second V8 crate build on every flake check; `edwin-syntax` has the rules with a
+    stand-in query and the frame's side of the budget;
+  - the real budget test is `#[ignore]`d, as syntax.rs's and tests/gui.rs's wall-clock tests are;
+  - the unit tests that run V8 (`natives::tests`) make every isolate on one thread of the test process, which
+    sets V8 up first (`on_v8`), as main.rs sets it up and runs it on one thread: V8's platform takes a memory
+    protection key (PKU) on the thread that sets it up, and only that thread and the threads it starts may read
+    the memory the key guards, so an isolate made on another test thread died with SIGSEGV (`SEGV_PKUERR`, in
+    `WasmCodePointerTable::AllocateUninitializedEntry` as the isolate was made) on processors with PKU, as ex44's
+    are; `natives::tests::isolates_from_any_test_thread` asks for isolates from threads of its own, one after
+    another and two at once;
+  - the reparse stays on the keystroke's path (the tree is brought up to date when a window draws): drawing from
+    the last tree and reparsing after the key was not built, Python's 2.0 to 2.5 ms in the middle and the last being the cost;
+  - modes are looked up by their own name, not their parents';
+  - of one node's captures the later pattern wins, the earlier for Go, Nix, JSON, NASM and Typst (above), and
+    TypeScript's and TSX's composition changed in nix/grammars.nix, lang-grammar-bundle's file, to suit it;
+  - a failure turns the highlighting off for the buffer without a message (a message from a redraw would draw
+    again); a buffer over 4 Mi characters is not highlighted (`MAX_CHARS`).
+- **Not in it:** web frames and edwind (no tree-sitter: their lexers as before; a Lisp buffer keeps the Scheme
+  lexer, which comes before any lexSeg); the injections queries (a language inside another, e.g. a Just recipe's
+  shell); the locals queries (a parameter coloured where it is used); `#set!` priorities; markup.bold and
+  markup.italic (no face for them); Org source blocks (lang-src-block-highlight). Where a query's own patterns
+  disagree with Emacs (TSX's `function Hi` is a constructor, `ty`, as any capitalised name; Go's `len` is a
+  function, not a builtin; TOML's pair capture tints the blanks around `=`), the query is kept.
+- **Checked by** check `edwin-syntax` (13 passed, 7 new: capture names to faces, which capture wins and
+  nesting (with punctuation last), a segment inside a node begun above it, the cache, the fallbacks and the size
+  bounds (the buffer's and the shown lines'), the mode table against the bundle's grammars.json, which the check
+  now passes as `EDWIN_GRAMMARS`, and the frame's side of the 2 ms budget with a stand-in query, its median 0.19
+  to 0.71 ms over the runs made, the most with a package build running beside it), check `edwin-display` (20
+  passed: the faces mirror the stylesheet), check `edwin-grammars` (the reordered TypeScript and TSX queries
+  compile; not rebuilt after review, as nothing it builds changed), check `edwin-typecheck`, and
+  `nix build .#edwin` on ex44 of the final tree (3a01a14, run by the reviewer): passed whole, unit tests 32
+  passed and 2 ignored (the two budget tests), `tests/gui.rs` 5 passed and 1 ignored, `tests/terminal.rs` 36
+  passed. The unit test
+  `natives::tests::the_core_highlights_each_language_as_its_golden_runs` boots the core as the startup snapshot
+  holds it, on the real natives and the bundle, and draws each of `test/syntax-faces.txt`'s 22 fixtures with
+  `Ed.renderBuffer`: its runs' classes equal the golden ones, each line drawn alone as in the whole, and after
+  typed, deleted and restored lines the classes are a fresh buffer's of the same text. In a local
+  `cargo test --release` build of the same sources, the unit binary's V8 tests (`natives::`) ran 5 times one test
+  at a time and the whole binary 5 times in parallel without a fault (before the fix, 6 of 6 runs one test at a
+  time died with SIGSEGV). The budget test
+  `natives::tests::a_key_in_10000_lines_redraws_its_faces_within_its_budget` gave the numbers above, run by
+  `cargo test --release -- --ignored` outside the package build (as syntax.rs's numbers were), not as the
+  package build. The golden runs are a cargo test, not `edwin-syntax`'s: only the desktop program has
+  tree-sitter. `nix flake check` on the final tree, rebased on emacs-to-edwin (2026-11-18): exit 0.
 
 ## Comment syntax per mode (done)
 

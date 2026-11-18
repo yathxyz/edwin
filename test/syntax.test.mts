@@ -4,10 +4,15 @@
 // version: whenever the tree is asked for, the stand-in's text is the buffer's, a run of edits crosses as the one
 // span spanOf gives (an edit's inserted text, not the buffer's), and a whole parse happens only when the log
 // cannot say what changed. Also: no host.syntax gives null; a grammar change, a refused edit and a killed buffer.
-// The tree-sitter side (edit, reparse, the incremental tree against a whole parse) is native/src/syntax.rs's
-// cargo tests.
+// Highlighting (the lexSeg syntax.ts adds), with the stand-in's query giving the captures a test sets: capture
+// names to faces, which of one node's captures wins (punctuation last), nodes inside others, a segment inside a
+// node begun above it, the cache, a failure, the size bounds (the buffer's and the shown lines'), the mode table
+// against the bundle's grammars.json (EDWIN_GRAMMARS) and the frame's side of the 2 ms budget. The tree-sitter side (edit, reparse, the incremental tree against a
+// whole parse) is native/src/syntax.rs's cargo tests; the golden runs of each language with the real grammars
+// are natives.rs's (`nix build .#edwin`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createHost, loadEdwin } from './headless.mts';
 import type { Edwin, NodeHost } from './headless.mts';
@@ -20,7 +25,10 @@ const fc = require('fast-check'); // any: fast-check's types are not resolvable 
 type Tree = { grammar: string; text: string };
 const trees = new Map<number, Tree>();
 let next = 0;
-const calls = { parse: 0, edit: 0, inserted: 0, refuse: false };
+const calls = { parse: 0, edit: 0, inserted: 0, query: 0, refuse: false };
+/* What the stand-in's highlights query gives: the capture names and, for a tree's text and a segment, the
+   captures as synQuery gives them (four numbers each: the name's index, start, end, pattern). */
+let hl: { names: string[]; of: (text: string, start: number, end: number) => number[] } | null = null;
 const syntax = {
   parse(grammar: string, text: string) { calls.parse++; trees.set(++next, { grammar, text }); return next; },
   edit(id: number, pos: number, del: number, ins: string) {
@@ -31,13 +39,20 @@ const syntax = {
     calls.edit++; calls.inserted += ins.length;
     t.text = t.text.slice(0, pos) + ins + t.text.slice(pos + del);
   },
+  query(id: number, kind: string, start: number, end: number) {
+    const t = trees.get(id);
+    if (!t) throw new Error(`no syntax tree ${id}`);
+    if (kind !== 'highlights' || !hl) throw new Error(`${t.grammar} has no "${kind}" query`);
+    calls.query++;
+    return { names: hl.names, captures: hl.of(t.text, start, end) };
+  },
   free(id: number) { return trees.delete(id); },
 };
 const host = createHost({ workers: false }) as NodeHost & { syntax?: typeof syntax };
 const Ed: Edwin = loadEdwin(host);
 const E = Ed.E;
 
-const reset = () => { calls.parse = calls.edit = calls.inserted = 0; calls.refuse = false; };
+const reset = () => { calls.parse = calls.edit = calls.inserted = calls.query = 0; calls.refuse = false; };
 const fresh = (name: string, text: string) => {
   const b = Ed.getBufferCreate(name);
   Ed.replaceText(b, 0, b.rope.length, text);
@@ -136,6 +151,169 @@ test('fast-check: edits, undo, whole-text replacement and forgotten logs keep th
     }
     tree(b);
   }), { numRuns: Number(process.env.SYNTAX_RUNS || 300) });
+});
+
+/* ---------- highlighting ---------- */
+/* A buffer in MODE showing TEXT. */
+let nb = 0;
+const inMode = (mode: string, text: string) => {
+  const b = fresh(`hl-${++nb}`, text);
+  Ed.switchMajorMode(b, mode);
+  return b;
+};
+/* The classes of B's FROM..TO, as [class, text] runs with a face. */
+const faces = (b: Edwin, from = 0, to = b.rope.length) => {
+  const lx = Ed.hooks.lexSeg(b, from, to, b.rope.slice(from, to));
+  const out: [string, string][] = [];
+  if (!lx) return null;
+  for (let i = 0; i < lx.cls.length;) {
+    let j = i; while (j < lx.cls.length && lx.cls[j] === lx.cls[i]) j++;
+    if (lx.names[lx.cls[i]]) out.push([lx.names[lx.cls[i]], b.rope.slice(from + i, from + j)]);
+    i = j;
+  }
+  return out;
+};
+/* Captures from a list of [name, text, pattern] found in order in the text (the Nth occurrence after the last). */
+const fixed = (names: string[], list: [string, string, number][]) => (text: string, start: number, end: number) => {
+  const out: number[] = [];
+  let at = 0;
+  for (const [name, t, p] of list) {
+    const s = text.indexOf(t, at); assert.ok(s >= 0, `${t} in the text`);
+    if (s < end && s + t.length > start) out.push(names.indexOf(name), s, s + t.length, p);
+    at = s;
+  }
+  return out;
+};
+
+test('capture names give faces by their longest known prefix; a predicate\'s, an unknown, a variable\'s and punctuation give none', () => {
+  host.syntax = syntax; reset();
+  const names = ['function.method.call', 'keyword', '_helper', 'spell', 'variable', 'type.builtin', 'comment.documentation', 'string.special.key', 'punctuation.bracket'];
+  hl = { names, of: fixed(names, [['keyword', 'def', 0], ['function.method.call', 'run', 0], ['punctuation.bracket', '(', 0], ['_helper', 'x', 0], ['spell', 'x', 1], ['variable', 'y', 0],
+    ['type.builtin', 'int', 0], ['comment.documentation', '# doc', 0], ['string.special.key', 'k', 0]]) };
+  const b = inMode('python-mode', 'def run(x) y int # doc k\n');
+  assert.deepEqual(faces(b), [['kw', 'def'], ['fn', 'run'], ['ty', 'int'], ['dc', '# doc'], ['pr', 'k']]);
+});
+
+test('of one node\'s captures the later pattern wins, or the earlier for the grammars written that way (nix); nodes inside others paint over them', () => {
+  host.syntax = syntax; reset();
+  const names = ['variable', 'function', 'property', 'string', 'escape', 'embedded'];
+  hl = { names, of: fixed(names, [['variable', 'foo', 0], ['function', 'foo', 7], ['string', '"a\\nb ${c}"', 2], ['escape', '\\n', 3], ['embedded', 'c', 4]]) };
+  const text = 'foo = "a\\nb ${c}";\n';
+  assert.deepEqual(faces(inMode('js-mode', text)), [['fn', 'foo'], ['st', '"a'], ['co', '\\n'], ['st', 'b ${'], ['st', '}"']]);
+  assert.deepEqual(faces(inMode('nix-mode', text)), [['st', '"a'], ['co', '\\n'], ['st', 'b ${'], ['st', '}"']], 'nix: the earlier, variable, wins');
+  // The order the captures come in does not matter.
+  const of = hl.of;
+  hl = { names, of: (t, s, e) => { const c = of(t, s, e), out: number[] = []; for (let i = c.length - 4; i >= 0; i -= 4) out.push(...c.slice(i, i + 4)); return out; } };
+  assert.deepEqual(faces(inMode('js-mode', text)), [['fn', 'foo'], ['st', '"a'], ['co', '\\n'], ['st', 'b ${'], ['st', '}"']]);
+  // A bracket captured as punctuation does not take its node: Nix's interpolation braces are both kw, though its
+  // `"}" @punctuation.bracket` comes first.
+  const braces = ['punctuation.bracket', 'punctuation.special', 'punctuation.delimiter', 'variable'];
+  hl = { names: braces, of: fixed(braces, [['punctuation.delimiter', ';', 1], ['punctuation.special', '${', 7], ['variable', 'c', 2], ['punctuation.bracket', '}', 3], ['punctuation.special', '}', 7]]) };
+  assert.deepEqual(faces(inMode('nix-mode', 'a; "${c}"\n')), [['kw', '${'], ['kw', '}']]);
+  // Punctuation alone on its node still paints no face over the node around it (C#'s interpolation braces).
+  const inner = ['string', 'punctuation.bracket'];
+  hl = { names: inner, of: fixed(inner, [['string', '"x{y}"', 0], ['punctuation.bracket', '{', 1], ['punctuation.bracket', '}', 1]]) };
+  assert.deepEqual(faces(inMode('csharp-mode', 's = "x{y}";\n')), [['st', '"x'], ['st', 'y'], ['st', '"']]);
+  hl = null;
+});
+
+test('a segment inside a node begun above it has the node\'s face; only the segment is queried', () => {
+  host.syntax = syntax; reset();
+  const text = 'x = 1\n/* a\nlong\ncomment */\ny = 2\n';
+  const asked: [number, number][] = [];
+  hl = { names: ['comment'], of: (t, s, e) => { asked.push([s, e]); const c = t.indexOf('/*'), d = t.indexOf('*/') + 2; return c < e && d > s ? [0, c, d, 0] : []; } };
+  const b = inMode('c-mode', text), from = text.indexOf('long'), to = text.indexOf('y');
+  assert.deepEqual(faces(b, from, to), [['cm', 'long\ncomment */']]);
+  assert.deepEqual(asked, [[from, to]]);
+  hl = null;
+});
+
+test('the classes of a segment are kept until the buffer or the segment changes; an edit queries again', () => {
+  host.syntax = syntax; reset();
+  hl = { names: ['keyword'], of: (t, s, e) => { const out: number[] = []; for (const m of t.matchAll(/\bif\b/g)) if (m.index! < e && m.index! + 2 > s) out.push(0, m.index!, m.index! + 2, 0); return out; } };
+  const b = inMode('python-mode', 'if x:\n  y\n');
+  faces(b); faces(b); assert.equal(calls.query, 1);
+  faces(b, 0, 6); assert.equal(calls.query, 2);
+  Ed.replaceText(b, 6, 6, 'if ');
+  assert.deepEqual(faces(b), [['kw', 'if'], ['kw', 'if']]);
+  assert.equal(calls.query, 3); assert.equal(calls.parse, 1, 'the edit crossed as an edit');
+  hl = null;
+});
+
+test('without host.syntax, in a mode with no grammar, after a failure and past the size bound the lexers before it answer', () => {
+  reset();
+  const b = inMode('python-mode', 'x = 1\n');
+  host.syntax = undefined;
+  assert.equal(faces(b), null, 'no host.syntax: a web frame, edwind');
+  host.syntax = syntax;
+  assert.equal(faces(inMode('text-mode', 'x\n')), null, 'no grammar for the mode');
+  // A grammar whose query fails: off for that buffer, and not asked again on the next redraw.
+  hl = null;
+  assert.equal(faces(b), null);
+  const q = calls.query, p = calls.parse;
+  Ed.replaceText(b, 0, 0, 'y'); assert.equal(faces(b), null);
+  assert.equal(calls.query + calls.parse, q + p, 'not asked again');
+  // Another buffer in the mode is highlighted.
+  hl = { names: ['number'], of: (t, s, e) => { const i = t.indexOf('1'); return i >= s && i < e ? [0, i, i + 1, 0] : []; } };
+  assert.deepEqual(faces(inMode('python-mode', 'x = 1\n')), [['nu', '1']]);
+  // Past 4 Mi characters no tree is made.
+  const big = inMode('python-mode', 'x = 1\n'.repeat(700000)), before = calls.parse;
+  assert.equal(faces(big, 0, 6), null); assert.equal(calls.parse, before);
+  // Shown lines past 64 Ki characters (a minified file's one line) are not queried; the buffer's other lines are.
+  hl = { names: ['number'], of: (t, s, e) => { const out: number[] = []; for (let i = t.indexOf('1', s); i >= 0 && i < e; i = t.indexOf('1', i + 1)) out.push(0, i, i + 1, 0); return out; } };
+  const long = 'x = 1;'.repeat(11000) + '\nx = 1\n', nl = long.indexOf('\n') + 1;
+  const lb = inMode('python-mode', long), q1 = calls.query;
+  assert.ok(nl > 64 * 1024);
+  assert.equal(faces(lb, 0, nl), null); assert.equal(calls.query, q1, 'the long line is not queried');
+  assert.deepEqual(faces(lb, nl, long.length), [['nu', '1']]);
+  assert.equal(faces(lb, 0, 64 * 1024)!.length, 10922, 'a segment of 64 Ki characters is');
+  // The lexers before it still answer for their modes: Org's.
+  assert.ok(faces(inMode('org-mode', '* A heading\n'))!.length > 0);
+  hl = null;
+});
+
+test('the mode table is the grammar bundle\'s (grammars.json\'s modes)', { skip: !process.env.EDWIN_GRAMMARS && 'EDWIN_GRAMMARS names no bundle' }, () => {
+  const manifest = JSON.parse(readFileSync(`${process.env.EDWIN_GRAMMARS}/grammars.json`, 'utf8')) as Record<string, { mode: string }>;
+  const prog = readFileSync(new URL('../scm/prog.scm', import.meta.url), 'utf8');
+  const modes = [...prog.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]);
+  assert.equal(modes.length, Object.keys(manifest).length);
+  for (const [name, m] of Object.entries(manifest)) assert.equal(Ed.syntax.grammarOf(m.mode), name, m.mode);
+  for (const mode of modes) assert.ok(Ed.syntax.grammarOf(mode), mode);
+  assert.equal(Ed.syntax.grammarOf('text-mode'), null);
+  assert.equal(Ed.syntax.grammarOf('constructor'), null, 'not an Object property');
+});
+
+test('the frame\'s side of the 2 ms budget: a keystroke in 10,000 lines redraws a window\'s faces in 2 ms (median of 50)', () => {
+  host.syntax = syntax; reset();
+  /* The stand-in's query costs little; what is measured is syntax.ts's and the renderer's work: a capture a
+     word of the shown lines, nested in a capture of each line. */
+  const names = ['keyword', 'variable', 'function', 'comment'];
+  hl = { names, of: (t, s, e) => {
+    const out: number[] = [];
+    for (let ls = t.lastIndexOf('\n', s) + 1; ls < e;) {
+      let le = t.indexOf('\n', ls); if (le < 0) le = t.length;
+      out.push(3, ls, le, 0);
+      for (const m of t.slice(ls, le).matchAll(/\w+/g)) out.push(m[0] === 'def' ? 0 : m.index! % 3 ? 1 : 2, ls + m.index!, ls + m.index! + m[0].length, 1);
+      ls = le + 1;
+    }
+    return out;
+  } };
+  const b = inMode('python-mode', 'def f(x, y):\n    return g(x) + h(y) * 2  # note\n'.repeat(5000));
+  const mid = b.rope.indexOf('\n', b.rope.length >> 1) + 1;
+  const o = { from: mid - 1500, count: 60, runs: true, html: false };
+  Ed.renderBuffer(b, o);
+  const times: number[] = [];
+  for (let i = 0; i < 50; i++) {
+    const t0 = performance.now();
+    Ed.replaceText(b, mid + i, mid + i, 'x');
+    Ed.renderBuffer(b, o);
+    times.push(performance.now() - t0);
+  }
+  times.sort((x, y) => x - y);
+  console.log(`syntax faces: median ${times[25].toFixed(3)} ms, max ${times[49].toFixed(3)} ms per keystroke and redraw of 60 lines`);
+  assert.ok(times[25] <= 2, `median ${times[25]} ms`);
+  assert.equal(calls.parse, 1);
+  hl = null;
 });
 
 function L() { return (globalThis as unknown as { L: Edwin }).L; }

@@ -433,7 +433,7 @@ test('FACES mirror the page\'s stylesheets: index.html, markdown-mode, Org, dire
   const at = html.indexOf('\n<style>'), style = html.slice(at, html.indexOf('</style>', at));   // the page's own sheet, after the skeleton's
   /* index.html selectors and the face each one is */
   const SEL: Record<string, string> = {
-    '.kw': 'kw', '.fn': 'fn', '.st': 'st', '.dc': 'dc', '.cm': 'cm', '.co': 'co', '.nu': 'nu', '.qu': 'qu', '.pa': 'pa',
+    '.kw': 'kw', '.fn': 'fn', '.st': 'st', '.dc': 'dc', '.cm': 'cm', '.co': 'co', '.nu': 'nu', '.qu': 'qu', '.pa': 'pa', '.ty': 'ty', '.bi': 'bi', '.pr': 'pr',
     '.pa.d0': 'pa.d0', '.pa.d1': 'pa.d1', '.pa.d2': 'pa.d2', '.pa.d3': 'pa.d3', '.pa.d4': 'pa.d4', '.pa.d5': 'pa.d5',
     '.rg': 'rg', '.lz': 'lz', '.im': 'im', '.pm': 'pm', '.px': 'px', '.avy': 'avy', '#snipe div': 'snipe',
     '.win.selected .ln.cl': 'cl', '.ln.pulse': 'pulse', '.text.numbers .ln::before': 'ln', '.text.numbers .ln.cl::before': 'ln.cl',

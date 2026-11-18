@@ -16,6 +16,7 @@
   --cursor: #000000; --cursor-fg: #fbf7f0; --region: #c2bcb5; --match: #79a8ff; --lazy: #c0efff;
   --paren: #7fdfcf; --mismatch: #ffa0a0; --bell: #a60000; --hl: #f1d5d0; --pulse: #ffdfa0;
   --kw: #531ab6; --fn: #721045; --st: #3548cf; --dc: #2a5045; --cm: #7f0000; --co: #0000b0; --pa: #7f7f7f;
+  --ty: #005f5f; --bi: #8f0075; --pr: #005e8b;
   --rb0: #0000b0; --rb1: #a60000; --rb2: #006800; --rb3: #884900; --rb4: #721045; --rb5: #005e8b;
   --avy-bg: #ffc000; --avy-fg: #000000;
   --s-normal: #3548cf; --s-insert: #006800; --s-visual: #884900; --s-replace: #a60000; --s-operator: #595959;
@@ -33,6 +34,7 @@
     --cursor: #ff66ff; --cursor-fg: #0d0e1c; --region: #555a66; --match: #2f7f9f; --lazy: #1f3f4f;
     --paren: #2f7f9f; --mismatch: #7f1f1f; --bell: #ff5f59; --hl: #303a6f; --pulse: #5f4f2f;
     --kw: #b6a0ff; --fn: #feacd0; --st: #79a8ff; --dc: #9ac8e0; --cm: #ff9f80; --co: #00bcff; --pa: #7e7e7e;
+    --ty: #6ae4b9; --bi: #f78fe7; --pr: #00d3d0;
     --rb0: #00bcff; --rb1: #ff5f59; --rb2: #44bc44; --rb3: #fec43f; --rb4: #feacd0; --rb5: #00d3d0;
     --avy-bg: #d0bc00; --avy-fg: #000000;
     --s-normal: #79a8ff; --s-insert: #44bc44; --s-visual: #d0bc00; --s-replace: #ff5f59; --s-operator: #989898;
@@ -48,6 +50,7 @@
   --cursor: #ff66ff; --cursor-fg: #0d0e1c; --region: #555a66; --match: #2f7f9f; --lazy: #1f3f4f;
   --paren: #2f7f9f; --mismatch: #7f1f1f; --bell: #ff5f59; --hl: #303a6f; --pulse: #5f4f2f;
   --kw: #b6a0ff; --fn: #feacd0; --st: #79a8ff; --dc: #9ac8e0; --cm: #ff9f80; --co: #00bcff; --pa: #7e7e7e;
+  --ty: #6ae4b9; --bi: #f78fe7; --pr: #00d3d0;
   --rb0: #00bcff; --rb1: #ff5f59; --rb2: #44bc44; --rb3: #fec43f; --rb4: #feacd0; --rb5: #00d3d0;
   --avy-bg: #d0bc00; --avy-fg: #000000;
   --s-normal: #79a8ff; --s-insert: #44bc44; --s-visual: #d0bc00; --s-replace: #ff5f59; --s-operator: #989898;
@@ -140,6 +143,9 @@ body {
 .cm { color: var(--cm); font-style: italic; }
 .co, .nu, .qu { color: var(--co); }
 .pa { color: var(--pa); }
+.ty { color: var(--ty); }
+.bi { color: var(--bi); }
+.pr { color: var(--pr); }
 .pa.d0 { color: var(--rb0); } .pa.d1 { color: var(--rb1); } .pa.d2 { color: var(--rb2); } .pa.d3 { color: var(--rb3); } .pa.d4 { color: var(--rb4); } .pa.d5 { color: var(--rb5); }
 .avy { background: var(--avy-bg); color: var(--avy-fg); font-weight: 700; border-radius: 2px; }
 .ln.pulse { animation: pulse 0.45s ease-out; }

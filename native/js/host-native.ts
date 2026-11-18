@@ -176,6 +176,7 @@ const proc: EdHostProc = {
 const syntax: EdHostSyntax = {
   parse: (grammar, text) => N.synParse(grammar, text),
   edit: (tree, pos, del, ins) => N.synEdit(tree, pos, del, ins),
+  query: (tree, kind, start, end) => N.synQuery(tree, kind, start, end),
   free: tree => N.synFree(tree),
 };
 

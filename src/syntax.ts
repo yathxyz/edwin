@@ -49,5 +49,116 @@ function tree(b: EdBuffer, grammar: string): number | null {
   return id;
 }
 
-Ed.syntax = { tree };
+/* ---------- highlighting: the grammar's highlights query, its captures as faces ---------- */
+/* The bundle's grammar of each mode scm/prog.scm declares (nix/grammars.nix; the edwin-syntax check compares the
+   two), and how its highlights query was written: most of the bundle's are written for tree-sitter's own
+   highlighter, where of two patterns capturing one node the later wins; Go's, Nix's, JSON's, NASM's and Typst's are
+   written the other way, the earlier winning (their generic patterns come last). A mode derived from one of these is
+   not highlighted unless it is named here. */
+const GRAMMARS: Record<string, string> = {
+  'rust-mode': 'rust', 'nix-mode': 'nix', 'go-mode': 'go', 'c-mode': 'c', 'c++-mode': 'cpp', 'java-mode': 'java',
+  'csharp-mode': 'c_sharp', 'python-mode': 'python', 'js-mode': 'javascript', 'typescript-mode': 'typescript',
+  'tsx-mode': 'tsx', 'json-mode': 'json', 'yaml-mode': 'yaml', 'toml-mode': 'toml', 'sh-mode': 'bash',
+  'terraform-mode': 'hcl', 'gdscript-mode': 'gdscript', 'just-mode': 'just', 'meson-mode': 'meson',
+  'nasm-mode': 'nasm', 'nginx-mode': 'nginx', 'typst-mode': 'typst',
+};
+const EARLIER_WINS = new Set(['go', 'nix', 'json', 'nasm', 'typst']);
+const grammarOf = (mode: string) => Object.prototype.hasOwnProperty.call(GRAMMARS, mode) ? GRAMMARS[mode] : null;
+
+/* The classes a capture can give (index.html's and display.ts's faces); 0 is none. */
+const NAMES = ['', 'kw', 'fn', 'st', 'dc', 'cm', 'co', 'nu', 'ty', 'bi', 'pr', 'pa'];
+const C = Object.fromEntries(NAMES.map((n, i) => [n || 'none', i])) as Record<string, number>;
+/* A capture's class by its name, or by the longest dotted prefix of it named here (function.method.call is a
+   function). A name here with C.none still takes its node (a variable is not a property in a later pattern);
+   a name not here takes nothing (spell, nested helpers), nor does one beginning with _ (a predicate's).
+   Punctuation and delimiters give no face either, and take a node only when no other pattern captures it: Nix's
+   `"}" @punctuation.bracket` comes before its interpolation's `"}" @punctuation.special`. */
+const CLASS: Record<string, number> = {
+  keyword: C.kw, conditional: C.kw, repeat: C.kw, include: C.kw, exception: C.kw, 'markup.heading': C.kw,
+  'markup.list': C.kw, 'punctuation.special': C.kw,
+  function: C.fn, method: C.fn, 'function.builtin': C.bi, 'function.macro': C.bi, 'function.special': C.bi,
+  string: C.st, character: C.st, 'constant.character': C.st, 'markup.raw': C.st, 'string.special.key': C.pr,
+  'string.escape': C.co, escape: C.co, 'constant.character.escape': C.co,
+  comment: C.cm, 'comment.documentation': C.dc,
+  constant: C.co, boolean: C.co, number: C.nu, float: C.nu, 'constant.numeric': C.nu,
+  type: C.ty, constructor: C.ty, module: C.ty, namespace: C.ty, tag: C.ty,
+  'variable.builtin': C.bi, attribute: C.bi,
+  property: C.pr, field: C.pr, label: C.pr, 'variable.other.member': C.pr,
+  'markup.heading.marker': C.pa,
+  variable: C.none, operator: C.none, punctuation: C.none, delimiter: C.none, embedded: C.none, none: C.none,
+};
+function classOf(name: string) {
+  if (name[0] === '_') return -1;
+  for (let n = name; ; n = n.slice(0, n.lastIndexOf('.'))) {
+    if (Object.prototype.hasOwnProperty.call(CLASS, n)) return CLASS[n];
+    if (n.indexOf('.') < 0) return -1;
+  }
+}
+/* Punctuation with no face of its own (punctuation.special has one). */
+const weakOf = (name: string) => classOf(name) === C.none && /^(punctuation|delimiter)(\.|$)/.test(name) ? 1 : 0;
+/* Each grammar's capture names as classes, and which are punctuation, made again only when the names differ. */
+type Classes = { names: string[]; cc: Int8Array; weak: Uint8Array };
+const classesOf = new Map<string, Classes>();
+function classes(grammar: string, names: string[]) {
+  const k = classesOf.get(grammar);
+  if (k && k.names.length === names.length && k.names.every((n, i) => n === names[i])) return k;
+  const c = { names, cc: Int8Array.from(names, classOf), weak: Uint8Array.from(names, weakOf) };
+  classesOf.set(grammar, c);
+  return c;
+}
+
+/* Buffers past this many characters are not highlighted (tree-sitter's whole parse of one is bounded at 1 s, and
+   a redraw must not wait for it); nor are shown lines past MAX_SHOWN characters (a minified file's one line: its
+   query, sort and fill would cost each keystroke time in proportion to the line); nor is a buffer whose tree or
+   query failed, for that grammar. */
+const MAX_CHARS = 4 * 1024 * 1024, MAX_SHOWN = 64 * 1024;
+const failed = new WeakMap<EdBuffer, string>();
+
+type Lex = { ver: number; from: number; to: number; grammar: string; cls: Uint8Array; names: string[] };
+/* The classes of B's shown segment FROM..TO from its grammar's highlights query: the captures overlapping it
+   (so a comment begun above the window is still a comment), each node given one capture, the earlier or the
+   later pattern's as the grammar's queries are written, and a node inside another painted over it. */
+function highlight(b: EdBuffer, grammar: string, from: number, to: number): Lex | null {
+  const syn = Ed.host.syntax!;
+  let r: { names: string[]; captures: number[] };
+  try {
+    const id = tree(b, grammar);
+    if (id === null) return null;
+    r = syn.query(id, 'highlights', from, to);
+  } catch (e) {
+    failed.set(b, grammar);
+    return null;
+  }
+  const { cc, weak } = classes(grammar, r.names);
+  const caps = r.captures, later = !EARLIER_WINS.has(grammar);
+  const at: number[] = [];
+  for (let i = 0; i < caps.length; i += 4) if (cc[caps[i]] >= 0 && caps[i + 2] > caps[i + 1]) at.push(i);
+  /* Outer nodes first, so the nodes inside them paint over them; one node's captures punctuation last, then by
+     their patterns, the winning one first. */
+  at.sort((x, y) => caps[x + 1] - caps[y + 1] || caps[y + 2] - caps[x + 2] || weak[caps[x]] - weak[caps[y]]
+    || (later ? caps[y + 3] - caps[x + 3] : caps[x + 3] - caps[y + 3]) || x - y);
+  const cls = new Uint8Array(to - from);
+  let ps = -1, pe = -1;
+  for (const i of at) {
+    const s = caps[i + 1], e = caps[i + 2];
+    if (s === ps && e === pe) continue;
+    ps = s; pe = e;
+    cls.fill(cc[caps[i]], Math.max(s, from) - from, Math.min(e, to) - from);
+  }
+  return { ver: b.ver, from, to, grammar, cls, names: NAMES };
+}
+
+const H = Ed.hooks, prevLexSeg = H.lexSeg;
+H.lexSeg = (b, from, to, seg) => {
+  const grammar = Ed.host.syntax && !b.minibuf ? grammarOf(b.mode) : null;
+  if (grammar && failed.get(b) !== grammar && b.rope.length <= MAX_CHARS && to - from <= MAX_SHOWN) {
+    const c = b._sxl as Lex | undefined;
+    if (c && c.ver === b.ver && c.from === from && c.to === to && c.grammar === grammar) return c;
+    const lx = highlight(b, grammar, from, to);
+    if (lx) return b._sxl = lx;
+  }
+  return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
+};
+
+Ed.syntax = { tree, grammarOf };
 })();

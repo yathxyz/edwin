@@ -1,0 +1,511 @@
+=== rust-mode
+/// Adds one.
+fn add_one(x: i32) -> i32 {
+    /* a block
+       comment */
+    let s = "a\n𝔸";
+    let v = Some(x);
+    self.count + MAX + x
+}
+---
+dc	/// Adds one.
+kw	fn
+fn	add_one
+ty	i32
+ty	i32
+cm	/* a block
+cm	       comment */
+kw	let
+st	"a
+co	\n
+st	𝔸"
+kw	let
+fn	Some
+bi	self
+pr	count
+ty	MAX
+=== nix-mode
+{ pkgs, lib, ... }:
+let
+  name = "x-${lib.version}";
+  /* two
+     lines */
+in {
+  a.b = pkgs.hello;
+  c = builtins.map (x: x + 1) [ 1 2 ];
+  d = ./path;
+}
+---
+kw	let
+pr	name
+st	"x-
+kw	${
+pr	version
+kw	}
+st	"
+cm	/* two
+cm	     lines */
+kw	in
+pr	a
+pr	b
+pr	hello
+pr	c
+bi	builtins
+bi	map
+nu	1
+nu	1
+nu	2
+pr	d
+st	./path
+=== go-mode
+package main
+
+/* a block
+   comment */
+func f(y []int) int {
+	x := len(y)
+	return g(x) + 1
+}
+---
+kw	package
+cm	/* a block
+cm	   comment */
+kw	func
+fn	f
+ty	int
+ty	int
+fn	len
+kw	return
+fn	g
+nu	1
+=== c-mode
+#include <stdio.h>
+/* a block
+   comment */
+static int count(const char *s) {
+	struct point p;
+	return p.x + strlen(s) + NULL;
+}
+---
+kw	#include
+st	<stdio.h>
+cm	/* a block
+cm	   comment */
+kw	static
+ty	int
+fn	count
+kw	const
+ty	char
+kw	struct
+ty	point
+kw	return
+pr	x
+fn	strlen
+co	NULL
+=== c++-mode
+#include <vector>
+namespace n {
+class A {
+public:
+	virtual int f() const { return this->x; }
+};
+}
+---
+kw	#include
+st	<vector>
+kw	namespace
+kw	class
+ty	A
+kw	public
+kw	virtual
+ty	int
+fn	f
+kw	const
+kw	return
+bi	this
+pr	x
+=== java-mode
+package a;
+/** Docs
+ * here. */
+public class A extends B {
+	private int x = 1;
+	@Override
+	public String f() { return this.x + "s"; }
+}
+---
+kw	package
+cm	/** Docs
+cm	 * here. */
+kw	public
+kw	class
+ty	A
+kw	extends
+ty	B
+kw	private
+ty	int
+nu	1
+bi	Override
+kw	public
+ty	String
+fn	f
+kw	return
+bi	this
+st	"s"
+=== csharp-mode
+using System;
+namespace N {
+	/* a block
+	   comment */
+	public class A {
+		public int X { get; set; }
+		void F() { var s = $"x{X}"; Console.WriteLine(s); }
+	}
+}
+---
+kw	using
+kw	namespace
+ty	N
+cm	/* a block
+cm		   comment */
+kw	public
+kw	class
+ty	A
+kw	public
+ty	int
+kw	get
+kw	set
+ty	void
+fn	F
+kw	var
+st	$"x
+st	"
+fn	WriteLine
+=== python-mode
+import os
+
+
+def f(x, y=None):
+    """A docstring
+    on two lines."""
+    if x is True:
+        return len(x) + self.y
+    print(f"x {x}")
+---
+kw	import
+kw	def
+fn	f
+co	None
+st	"""A docstring
+st	    on two lines."""
+kw	if
+co	True
+kw	return
+bi	len
+pr	y
+bi	print
+st	f"x 
+kw	{
+kw	}
+st	"
+=== js-mode
+// a comment
+function foo(a) {
+  const b = /* block
+    two */ `t ${a}`;
+  return this.bar(b) + 1;
+}
+const g = () => null;
+---
+cm	// a comment
+kw	function
+fn	foo
+kw	const
+cm	/* block
+cm	    two */
+st	`t 
+kw	${
+kw	}
+st	`
+kw	return
+bi	this
+fn	bar
+nu	1
+kw	const
+fn	g
+co	null
+=== typescript-mode
+interface P { x: number; }
+/* a block
+   comment */
+function f<T>(p: P, t: T): string {
+  return `${p.x}` as string;
+}
+---
+kw	interface
+ty	P
+pr	x
+ty	number
+cm	/* a block
+cm	   comment */
+kw	function
+fn	f
+ty	T
+ty	P
+ty	T
+ty	string
+kw	return
+st	`
+kw	${
+pr	x
+kw	}
+st	`
+kw	as
+ty	string
+=== tsx-mode
+type Props = { name: string };
+/* a block
+   comment */
+export function Hi({ name }: Props) {
+  return <div className="x">{name}</div>;
+}
+---
+kw	type
+ty	Props
+pr	name
+ty	string
+cm	/* a block
+cm	   comment */
+kw	export
+kw	function
+ty	Hi
+ty	Props
+kw	return
+ty	div
+bi	className
+st	"x"
+ty	div
+=== json-mode
+{
+  "a": [1, 2.5, true, null],
+  "b": { "c": "d" }
+}
+---
+pr	"a"
+nu	1
+nu	2.5
+co	true
+co	null
+pr	"b"
+pr	"c"
+st	"d"
+=== yaml-mode
+# a comment
+key: value
+list:
+  - 1
+  - "two"
+text: |
+  a block
+  of lines
+---
+cm	# a comment
+pr	key
+st	value
+pr	list
+nu	1
+st	"two"
+pr	text
+st	  a block
+st	  of lines
+=== toml-mode
+# a comment
+[table]
+key = "value"
+num = 1
+text = """
+two
+lines"""
+---
+cm	# a comment
+ty	table
+ty	key
+pr	 
+pr	 
+st	"value"
+ty	num
+pr	 
+pr	 
+nu	1
+ty	text
+pr	 
+pr	 
+st	"""
+st	two
+st	lines"""
+=== sh-mode
+#!/usr/bin/env bash
+# a comment
+f() {
+	local x="$1"
+	echo "hi $x" | grep -v foo
+}
+cat <<EOT
+a heredoc
+EOT
+---
+cm	#!/usr/bin/env bash
+cm	# a comment
+fn	f
+pr	x
+st	"
+pr	1
+st	"
+fn	echo
+st	"hi 
+pr	x
+st	"
+fn	grep
+co	-v
+fn	cat
+st	EOT
+st	a heredoc
+=== terraform-mode
+# a comment
+resource "aws_instance" "web" {
+  ami   = var.ami
+  count = 2
+  /* a block
+     comment */
+  tags = { Name = "x" }
+}
+---
+cm	# a comment
+ty	resource
+st	"aws_instance"
+st	"web"
+pr	ami
+bi	var
+pr	count
+nu	2
+cm	/* a block
+cm	     comment */
+pr	tags
+pr	Name
+st	"x"
+=== gdscript-mode
+extends Node
+# a comment
+const MAX = 3
+var speed: float = 1.5
+
+func _ready() -> void:
+	print("hi")
+	"""a string
+	on two lines"""
+---
+kw	extends
+ty	Node
+cm	# a comment
+kw	const
+co	MAX
+nu	3
+kw	var
+ty	float
+nu	1.5
+kw	func
+fn	_ready
+ty	void
+fn	print
+st	"hi"
+st	"""a string
+st		on two lines"""
+=== just-mode
+# a comment
+set shell := ["bash", "-c"]
+x := "v"
+
+build target:
+    echo {{target}}
+---
+cm	# a comment
+kw	set
+kw	shell
+st	"bash"
+st	"-c"
+st	"v"
+fn	build
+=== meson-mode
+# a comment
+project('p', 'c', version: '1.0')
+x = '''a string
+on two lines'''
+executable('e', 'main.c', install: true)
+---
+cm	# a comment
+fn	project
+st	'p'
+st	'c'
+pr	version
+st	'1.0'
+st	'''a string
+st	on two lines'''
+fn	executable
+st	'e'
+st	'main.c'
+pr	install
+co	true
+=== nasm-mode
+; a comment
+section .text
+global _start
+_start:
+	mov eax, 1
+	int 0x80
+---
+cm	; a comment
+kw	section 
+kw	global 
+fn	mov
+co	eax
+nu	1
+fn	int
+nu	0x80
+=== nginx-mode
+# a comment
+server {
+	listen 80;
+	server_name example.org;
+	location / {
+		return 200 "ok";
+	}
+}
+---
+cm	# a comment
+kw	server
+kw	listen
+nu	80
+kw	server_name
+kw	location
+st	/ 
+co	return
+nu	200
+=== typst-mode
+= A heading
+Some *bold* text and a #link("https://example.org")[link].
+/* a block
+   comment */
+#let x = 1
+$x + 1$
+---
+pa	=
+kw	 A heading
+fn	link
+st	"https://example.org"
+cm	/* a block
+cm	   comment */
+kw	let
+nu	1
+st	x
+st	+
+nu	1

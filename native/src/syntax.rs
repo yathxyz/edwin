@@ -479,7 +479,7 @@ pub(crate) mod tests {
 
     /// The tests that time a parse, or take a second or more of the machine, run one at a time, so that neither
     /// slows the other past its bound.
-    fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn heavy() -> std::sync::MutexGuard<'static, ()> {
         static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
         HEAVY.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -1162,9 +1162,9 @@ pub(crate) mod tests {
             );
         }
     }
-    /// Per grammar of the budget test, ten lines of source that the test repeats to 10,000, and where in them a
+    /// Per grammar of the budget tests (and natives.rs's), ten lines of source that the test repeats to 10,000, and where in them a
     /// character is typed (inside an identifier, so the text stays without an error).
-    const BLOCKS: &[(&str, &str, &str)] = &[
+    pub(crate) const BLOCKS: &[(&str, &str, &str)] = &[
         (
             "rust",
             "fn f(x: u32) -> u32 {\n    let y = x * 2; // é\n    if y > 3 {\n        return y;\n    }\n    match x {\n        0 => 1,\n        _ => x + g(\"𝔸\").len() as u32,\n    }\n}\n",
