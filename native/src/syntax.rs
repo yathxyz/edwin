@@ -27,7 +27,7 @@ pub const PARSE_LIMIT: Duration = Duration::from_secs(1);
 /// So does a query.
 pub const QUERY_LIMIT: Duration = Duration::from_secs(1);
 /// Matches a query keeps in progress at once (the query cursor's match limit); past it the oldest are dropped.
-pub const MATCH_LIMIT: u32 = 256;
+pub const MATCH_LIMIT: u32 = 1024;
 /// Trees kept at once: a parse past it is refused until one is freed.
 pub const MAX_TREES: usize = 256;
 

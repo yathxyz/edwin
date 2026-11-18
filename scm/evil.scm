@@ -561,10 +561,10 @@ On whole lines the first line and its indentation stay."
   (evil--shift beg end count #f))
 
 (evil-define-operator (evil-indent beg end type)
-  "Reindent the lines from BEG to END (=)."
-  (if (lisp-buffer?)
-      (indent-region beg end)
-      (message "No indentation rules for ~a" (major-mode)))
+  "Reindent the lines from BEG to END (=): as Lisp in Scheme buffers, else by the buffer's tree."
+  (cond ((lisp-buffer?) (indent-region beg end))
+        ((syntax-indent-region beg end))
+        (else (message "No indentation rules for ~a" (major-mode))))
   (goto-char beg)
   (evil--first-non-blank))
 
@@ -735,13 +735,35 @@ The replaced text goes to the unnamed register."
 
 ;;;; Entering Insert state
 
+(define (evil--between-pair?)
+  "#t when point is between an opening bracket and its closing one, with electric-pair-mode on."
+  (and electric-pair-enabled
+       (let ((close (assv (char-before) '((#\( . #\)) (#\[ . #\]) (#\{ . #\})))))
+         (and close (eqv? (char-after) (cdr close))))))
+
 (evil-define-command (evil-newline-and-indent)
-  "Insert a newline, then indent like the line above (RET in Insert state); in Lisp, inside a ; comment, go on with it."
+  "Insert a newline, then indent (RET in Insert state): in Lisp as Lisp, and inside a ; comment go on with it; by
+the buffer's tree where its grammar has indent rules, the blanks before point taken away first, and between two
+brackets of a pair (electric-pair-mode) a line opened between them; elsewhere, and on a line the rules leave alone
+(inside a string or a block comment), like the line above."
   (interactive "*")
   (let ((indent (evil--line-indentation))
-        (prefix (lisp-newline-prefix)))
-    (insert "\n")
-    (if (lisp-buffer?) (begin (insert prefix) (lisp-indent-line)) (insert indent))))
+        (prefix (lisp-newline-prefix))
+        (pair (evil--between-pair?)))
+    (cond ((lisp-buffer?) (insert "\n") (insert prefix) (lisp-indent-line))
+          ((syntax-indent-line)
+           (let ((end (point)))
+             (skip-chars-backward " \t")
+             (delete-region (point) end))
+           (insert "\n")
+           (unless (syntax-indent-line) (insert indent))
+           (when pair
+             (insert "\n")
+             (syntax-indent-line)
+             (forward-line -1)
+             (end-of-line)
+             (syntax-indent-line)))
+          (else (insert "\n") (insert indent)))))
 
 (evil-define-command (evil-insert count)
   "Insert before point; COUNT repeats the text (i)."
@@ -767,10 +789,14 @@ The replaced text goes to the unnamed register."
   (evil-insert-state count))
 
 (evil-define-command (evil-open-below count)
-  "Open a new line below this one and insert there (o)."
+  "Open a new line below this one and insert there (o): the new line indented, this one left as it is."
   (interactive "<c>")
   (evil--end-of-line-or-fold)
-  (evil-newline-and-indent)
+  (if (lisp-buffer?)
+      (evil-newline-and-indent)
+      (let ((indent (evil--line-indentation)))
+        (insert "\n")
+        (unless (syntax-indent-line) (insert indent))))
   (evil-insert-state count #t))
 
 (evil-define-command (evil-open-above count)
@@ -780,7 +806,9 @@ The replaced text goes to the unnamed register."
     (beginning-of-line)
     (insert "\n")
     (backward-char 1)
-    (if (lisp-buffer?) (lisp-indent-line) (insert indent)))
+    (cond ((lisp-buffer?) (lisp-indent-line))
+          ((syntax-indent-line))
+          (else (insert indent))))
   (evil-insert-state count #t))
 
 (evil-define-command (evil-insert-resume count)

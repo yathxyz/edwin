@@ -9,13 +9,15 @@
    killed buffers are freed before the next whole parse, which is when the native side's bound on trees counts.
 
    Only the desktop program has host.syntax: in a web frame and in edwind (the Node host) Ed.syntax.tree gives
-   null. Scheme reaches one thing here, the extents of the nodes around a range (syntax-node-bounds, for expreg),
-   which only reads the tree; nothing here starts a process or reads a file: the grammar is
-   named, and the native side loads it from the program's own bundle. What uses the trees: highlighting (lexSeg),
-   imenu (consult-imenu's definitions, from the grammar's tags query) and expreg (the nodes a selection grows by). */
+   null. Scheme reaches two things here: the extents of the nodes around a range (syntax-node-bounds, for expreg),
+   which only reads the tree, and the indentation of lines (syntax-indent-line, syntax-indent-region), which
+   changes only their leading blanks; nothing here starts a process or reads a file: the grammar is named, and the
+   native side loads it from the program's own bundle. What uses the trees: highlighting (lexSeg), imenu
+   (consult-imenu's definitions, from the grammar's tags query), expreg (the nodes a selection grows by) and
+   indentation (TAB, =, RET, o and O, from the grammar's indents query). */
 (function () {
 'use strict';
-const Ed = globalThis.Ed, E = Ed.E;
+const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E;
 
 type Kept = { grammar: string; tree: number; ver: number; len: number };
 const kept = new Map<EdBuffer, Kept>();
@@ -214,6 +216,316 @@ function nodes(b: EdBuffer, from: number, to: number): [number, number][] | null
   return out;
 }
 
+/* ---------- indentation: the grammar's indents query ---------- */
+/* The leading blanks of a line, from the captures of the grammar's `indents` query (nix/indents/, in the bundle)
+   over B's tree. A node holds a line when it starts before the line's first non-blank character and ends after it
+   (on a blank line: at it or after it); the innermost holder, the one starting last, decides the line:
+     @indent  the line is one level deeper than the base of the node;
+     @align   the line goes under the first character after the node's opening bracket, when that is on the
+              bracket's line (C's argument lists); for a node not begun by a bracket (C's for), after its first
+              `(` while the line begins before the `)` closing it; else the node is an @indent;
+     @align.start  the line goes under the node's first character (clang-format's operands);
+     @keep    the line keeps its blanks (a string or comment begun on a line above);
+     @flat    the line is at the node's base (prettier's operands where it does not indent them), unless the node
+              is also @unflat;
+     @chain   (with @indent) a line of a method chain is at the chain's base while the chain's root, the smallest
+              @chain.root beginning where the chain does, spans lines; a root beginning its line is joined with the
+              next while it is one line no wider than a level (rustfmt's chains);
+     @none    the node is no holder, whatever else captures it (C's switch body: its case labels are at the
+              switch's level);
+   and by the token or node the line begins with:
+     @outdent a token that ends where its holder ends (the holder's closing bracket, or the bracket and a comment
+              after it on its line) leaves the line at the holder's base;
+     @dedent  so does any token or node captured so (an `else`, a Go label);
+     @flush   the line has no blanks (C's preprocessor directives);
+     @brace   a block's `{` beginning the line is at the base of the node captured so (rustfmt's `{` under a
+              multi-line header);
+     @either  the line keeps its blanks when they are a level more than the rules give (gofmt's comments after a
+              case's statements, at their level or the next case's);
+     @continue a line beginning with the same token as the lines above it continues the first of them, a level in;
+   a line no node holds has no blanks. A node's base is the blanks of the line it starts on, unless that line itself
+   begins inside a node that closed before this one began (the line is the tail of a longer one, as C's `    b) {`
+   after `if (a &&`), or inside a @stem node begun on a line above (C's `     i++) {` after `for (i = 0;`): then that
+   node's base, and so on up. A @hang node begun after the first character of its line (prettier's ternary branch
+   after `? `) gives what it holds that begins on that line a level more for their base, @hang.self only itself;
+   @unhang takes that away from a node. A level is a tab under indent-tabs-mode, else evil-shift-width spaces (the
+   language's width, or the .editorconfig's), and a line's base is what that line has (or is given in the same
+   re-indent): indentation is relative, as in Emacs's tree-sitter modes.
+
+   A node captured @open holds on to the next non-blank character after it: a case label's (`case 1:` and the
+   blank line after it, typed before its statements), and while typing, when the tree is often wrong, a node
+   whose closing bracket tree-sitter made up (MISSING), so the line typed after `fn f() {` is inside its block.
+   Inside an ERROR (@error) the brackets the query names (@error.open, @error.close) are paired in order, and each
+   one left open holds as an @indent from itself to the next non-blank character after the ERROR. */
+type INode = { s: number; e: number; indent: boolean; keep: boolean; align: boolean; none: boolean; chain: boolean; brace: boolean; flat: boolean; unflat: boolean; start: boolean; stem: boolean };
+type INodes = { nodes: INode[]; outdent: Map<number, number>; dedent: Set<number>; flush: Set<number>; either: Set<number>; cont: Set<number>; roots: Map<number, number[]>; hangs: Map<string, Hang> };
+/* A @hang node's level: for what it holds and itself, for itself alone (@hang.self), or none (@unhang). */
+type Hang = 'held' | 'self' | 'off';
+const blank = (c: string) => c === ' ' || c === '\t';
+function nonBlank(t: EdText, ls: number) { let i = ls; while (i < t.length && blank(t.charAt(i))) i++; return i; }
+/* The first character at or after E that is no blank or line end; the text's end when there is none. */
+function onward(t: EdText, e: number) { let i = e; while (i < t.length && /[ \t\r\n]/.test(t.charAt(i))) i++; return i; }
+
+/* The open brackets left unpaired in each ERROR of tree ID, by the ERROR's extent (S,E): from one query over the
+   whole ERROR (one over the lines asked for has only the captures inside them), which also gives the ERRORs
+   nested in it; each bracket is paired within the innermost ERROR holding it. ERRORS keeps the answers for one
+   re-indent, so that an ERROR is queried once however many lines inside it are asked about: a query over each
+   line's ERROR again made re-indenting a file with one unclosed bracket cost the square of its length. */
+type Errors = Map<string, number[]>;
+function errorOpens(syn: EdHostSyntax, id: number, s: number, e: number, errors: Errors): number[] {
+  const key = s + ',' + e, known = errors.get(key);
+  if (known) return known;
+  const r = syn.query(id, 'indents', s, e);
+  const extents = new Map<string, [number, number]>([[key, [s, e]]]), brackets: [number, boolean][] = [];
+  for (let i = 0; i < r.captures.length; i += 4) {
+    const name = r.names[r.captures[i]], at = r.captures[i + 1], end = r.captures[i + 2];
+    if (name === 'error') { if (at >= s && end <= e) extents.set(at + ',' + end, [at, end]); }
+    else if ((name === 'error.open' || name === 'error.close') && at >= s && at < e) brackets.push([at, name === 'error.open']);
+  }
+  const errs = [...extents.values()].sort((x, y) => (x[1] - x[0]) - (y[1] - y[0]));
+  const owned = errs.map(() => [] as [number, boolean][]);
+  for (const b of brackets) {
+    const j = errs.findIndex(([es, ee]) => b[0] >= es && b[0] < ee);
+    if (j >= 0) owned[j].push(b);
+  }
+  owned.forEach((list, j) => {
+    const left: number[] = [];
+    for (const [at, opens] of list.sort((x, y) => x[0] - y[0])) if (opens) left.push(at); else left.pop();
+    errors.set(errs[j][0] + ',' + errs[j][1], left);
+  });
+  return errors.get(key)!;
+}
+
+/* The nodes the indents query captures in tree ID between FROM and TO (each with what captures it), by start,
+   the outer of two with one start first; the end of each token captured @outdent by its start; the starts of those
+   captured @dedent, @flush, @either and @continue; the ends of the @chain.root nodes at each start; and the @hang
+   nodes, by extent. ERRORS: the ERRORs' open brackets found so far in this re-indent (errorOpens). */
+function indentNodes(syn: EdHostSyntax, id: number, t: EdText, from: number, to: number, errors: Errors): INodes {
+  const { names, captures: caps } = syn.query(id, 'indents', from, to);
+  const byExtent = new Map<string, INode>(), outdent = new Map<number, number>();
+  const dedent = new Set<number>(), flush = new Set<number>(), either = new Set<number>(), cont = new Set<number>(), roots = new Map<number, number[]>();
+  const hangs = new Map<string, Hang>();
+  const open: string[] = [], errs: [number, number][] = [];
+  const node = (s: number, e: number) => {
+    const k = s + ',' + e;
+    let n = byExtent.get(k);
+    if (!n) byExtent.set(k, n = { s, e, indent: false, keep: false, align: false, none: false, chain: false, brace: false, flat: false, unflat: false, start: false, stem: false });
+    return n;
+  };
+  for (let i = 0; i < caps.length; i += 4) {
+    const s = caps[i + 1], e = caps[i + 2];
+    switch (names[caps[i]]) {
+      case 'indent': node(s, e).indent = true; break;
+      case 'keep': node(s, e).keep = true; break;
+      case 'align': node(s, e).align = true; break;
+      case 'align.start': { const n = node(s, e); n.align = n.start = true; break; }
+      case 'stem': node(s, e).stem = true; break;
+      case 'flush': if (e > s) flush.add(s); break;
+      case 'none': node(s, e).none = true; break;
+      case 'chain': node(s, e).chain = true; break;
+      case 'brace': node(s, e).brace = true; break;
+      case 'flat': node(s, e).flat = true; break;
+      case 'unflat': node(s, e).unflat = true; break;
+      case 'hang': if (!hangs.has(s + ',' + e)) hangs.set(s + ',' + e, 'held'); break;
+      case 'hang.self': if (hangs.get(s + ',' + e) !== 'off') hangs.set(s + ',' + e, 'self'); break;
+      case 'unhang': hangs.set(s + ',' + e, 'off'); break;
+      case 'chain.root': roots.set(s, [...(roots.get(s) ?? []), e]); break;
+      case 'dedent': if (e > s) dedent.add(s); break;
+      case 'either': either.add(s); break;
+      case 'continue': cont.add(s); break;
+      /* A MISSING bracket has no width: it begins no line. */
+      case 'outdent': if (e > s) outdent.set(s, e); break;
+      case 'open': open.push(s + ',' + e); break;
+      case 'error': errs.push([s, e]); break;
+    }
+  }
+  for (const k of open) { const n = byExtent.get(k); if (n) n.e = onward(t, n.e); }
+  for (const [s, e] of errs) for (const at of errorOpens(syn, id, s, e, errors)) node(at, onward(t, e)).indent = true;
+  const nodes = [...byExtent.values()].filter(n => !n.none && (holder(n) || n.brace))
+    .sort((x, y) => x.s - y.s || y.e - x.e);
+  return { nodes, outdent, dedent, flush, either, cont, roots, hangs };
+}
+/* Whether a token ending at E is node N's closing bracket: N ends with it, or with a comment after it on its line
+   (JavaScript's block holds the `// c` of `} // c`). */
+const closes = (t: EdText, n: INode, e: number | undefined) =>
+  e !== undefined && (e === n.e || (n.e > e && /^[ \t]*(\/\/|\/\*)[^\n]*$/.test(t.slice(e, n.e))));
+/* Whether node N decides the lines it holds (a @brace alone does not). */
+const holder = (n: INode) => n.indent || n.keep || n.align || n.flat;
+/* Whether node N holds the line whose first non-blank character is at P (BLANK: the line has none). */
+const holds = (n: INode, p: number, isBlank: boolean) => n.s < p && (p < n.e || (isBlank && p <= n.e));
+/* Where an @align node's lines go: the first non-blank character after its opening bracket, on its line. */
+function alignAt(t: EdText, s: number) {
+  const i = nonBlank(t, s + 1);
+  return i < t.length && t.charAt(i) !== '\n' && t.charAt(i) !== '\r' ? i : null;
+}
+
+type Indents = { starts: number[]; want: (string | null)[] };
+/* The leading blanks each line from the one holding FROM to the one holding TO should have by B's grammar's
+   indents query: STARTS the lines' starts, WANT a string each, null for a line the rules leave alone (@keep). null
+   for all when B has no rules: no host.syntax (a web frame, edwind), a mode with no grammar, a minibuffer, a
+   buffer past MAX_CHARS, a grammar with no indents query, a failed parse or query. One query over the lines and
+   the one before the first that is not blank (where an ERROR's last tokens are while typing); one more a line
+   above them that a base is looked up on, and one each ERROR, once a re-indent (errorOpens). A failure here leaves
+   the highlighting alone. */
+function indents(b: EdBuffer, from: number, to: number): Indents | null {
+  const syn = Ed.host.syntax, grammar = syn && !b.minibuf ? grammarOf(b.mode) : null;
+  if (!syn || !grammar || b.rope.length > MAX_CHARS) return null;
+  const t = b.rope, len = t.length, clamp = (p: number) => Math.max(0, Math.min(len, p));
+  const first = Ed.bol(t, clamp(from)), last = Ed.bol(t, clamp(Math.max(from, to)));
+  let lo = first;
+  for (let k = first; k > 0;) {
+    const ls = Ed.bol(t, k - 1);
+    if (nonBlank(t, ls) < Ed.eol(t, ls)) { lo = ls; break; }
+    k = ls;
+  }
+  const width = Math.max(1, Math.floor(Number(Ed.localValue(b, 'evil-shift-width'))) || 1);
+  const unit = L.truthy(Ed.localValue(b, 'indent-tabs-mode')) ? '\t' : ' '.repeat(width);
+  const errors: Errors = new Map();
+  try {
+    const id = tree(b, grammar);
+    if (id === null) return null;
+    const hi = Math.min(len, Ed.eol(t, last) + 1), all = indentNodes(syn, id, t, lo, hi, errors);
+    const { nodes, outdent, dedent, flush, either, cont } = all;
+    /* What each line asked for is given, or keeps, and the innermost holder of each one's first character. */
+    const made = new Map<number, string>(), inner = new Map<number, INode | null>(), onLine = new Map<number, INodes>();
+    /* The captures over the line beginning at LS, queried once: those of the one query over the lines asked for
+       when LS is one of them (a query over one line inside an ERROR walks the whole ERROR, so one a line made
+       `gg=G` in a file with an unclosed bracket cost many times what it costs in a closed one), else a query over
+       the line. */
+    const inRange = (p: number) => p >= lo && p < hi;
+    const lineNodes = (ls: number) => {
+      let r = onLine.get(ls);
+      if (!r) onLine.set(ls, r = inRange(ls) ? all : indentNodes(syn, id, t, ls, Math.min(len, Ed.eol(t, ls) + 1), errors));
+      return r;
+    };
+    /* The @hang nodes beginning on the line at LS, from the query covering it: indexed once for the lines asked
+       for. */
+    const hangsOn = new Map<number, [number, number, Hang][]>();
+    const hangsOf = (r: INodes, on: (s: number) => boolean) => {
+      for (const [k, level] of r.hangs) {
+        const [s, e] = k.split(',').map(Number), at = Ed.bol(t, s);
+        if (on(at)) hangsOn.set(at, [...(hangsOn.get(at) ?? []), [s, e, level]]);
+      }
+    };
+    hangsOf(all, inRange);
+    const hangsOnLine = (ls: number) => {
+      if (!inRange(ls) && !hangsOn.has(ls)) { hangsOn.set(ls, []); hangsOf(lineNodes(ls), at => at === ls); }
+      return hangsOn.get(ls) ?? [];
+    };
+    const lead = (ls: number) => made.has(ls) ? made.get(ls)! : t.slice(ls, nonBlank(t, ls));
+    const holderOf = (ls: number) => {
+      if (inner.has(ls)) return inner.get(ls)!;
+      const q = nonBlank(t, ls);
+      let h: INode | null = null;
+      for (const n of lineNodes(ls).nodes) {
+        if (n.s >= q) break;
+        if (holder(n) && holds(n, q, false)) h = n;
+      }
+      inner.set(ls, h);
+      return h;
+    };
+    /* The base of a node beginning at S: up through the lines whose holder closed before S. */
+    const baseAt = (s: number, at: number): string => {
+      const ls = Ed.bol(t, s), h = holderOf(ls);
+      return h && (h.e <= at || (h.stem && h.s < ls)) ? baseAt(h.s, at) : lead(ls);
+    };
+    /* A level more when a @hang node (not also @unhang) begun after the first character of N's line holds N or is
+       N (is N, for @hang.self): one level for the line however many begin on it, as prettier's indents begun on one
+       line close together. */
+    const base = (n: INode) => {
+      const ls = Ed.bol(t, n.s), q = nonBlank(t, ls);
+      for (const [s, e, on] of hangsOnLine(ls))
+        if (on !== 'off' && s > q && (on === 'self' ? s === n.s && e === n.e : s <= n.s && e >= n.e))
+          return baseAt(n.s, n.s) + unit;
+      return baseAt(n.s, n.s);
+    };
+    /* Whether the root of the @chain node N, for its line beginning at P, spans lines: the smallest @chain.root
+       beginning where N does; when that begins its line, joined with the next while it is one line no wider than a
+       level (rustfmt's `x.f(|| {` at a line's start is one root). */
+    const rootSpans = (n: INode, p: number) => {
+      const ends = (lineNodes(Ed.bol(t, n.s)).roots.get(n.s) ?? []).filter(e => e <= p).sort((x, y) => x - y);
+      let i = 0;
+      const joins = nonBlank(t, Ed.bol(t, n.s)) === n.s;
+      while (joins && i + 1 < ends.length && ends[i] - n.s <= width && !t.slice(n.s, ends[i]).includes('\n')) i++;
+      return i < ends.length && t.slice(n.s, ends[i]).includes('\n');
+    };
+    /* Where the line beginning at P goes under the @align node N: after N's opening bracket; N's first character
+       (@align.start); for a statement (C's for), after its `(` while P is before the `)` closing it. */
+    const alignOf = (n: INode, p: number) => {
+      if (n.start) return n.s;
+      if ('([{'.includes(t.charAt(n.s))) return alignAt(t, n.s);
+      const o = t.indexOf('(', n.s);
+      if (o < 0 || o > Ed.eol(t, n.s)) return null;
+      for (let i = o, d = 0; i < p; i++) {
+        const c = t.charAt(i);
+        if (c === '(') d++;
+        else if (c === ')' && --d === 0) return null;
+      }
+      return alignAt(t, o);
+    };
+    const starts: number[] = [], want: (string | null)[] = [], stack: INode[] = [];
+    let k = 0;
+    for (let ls = first; ;) {
+      const le = Ed.eol(t, ls), p = nonBlank(t, ls), isBlank = p >= le;
+      while (k < nodes.length && nodes[k].s < p) stack.push(nodes[k++]);
+      while (stack.length && !holds(stack[stack.length - 1], p, isBlank)) stack.pop();
+      let n: INode | null = null, br: INode | null = null;
+      for (let j = stack.length - 1; j >= 0 && !n; j--) {
+        if (!br && stack[j].brace) br = stack[j];
+        if (holder(stack[j])) n = stack[j];
+      }
+      if (!isBlank) inner.set(ls, n);
+      let w: string | null, a: number | null;
+      if (!n) w = '';
+      else if (n.keep) w = null;
+      else if (flush.has(p)) w = '';
+      else if (n.align && (a = alignOf(n, p)) !== null) {
+        const sl = Ed.bol(t, n.s);
+        w = lead(sl) + t.slice(nonBlank(t, sl), a).replace(/[^\t]/g, ' ');
+      } else if (br && t.charAt(p) === '{') w = base(br);
+      else if (cont.has(p)) {
+        /* Up past the lines that begin with the same token, to the one they continue. */
+        let up = ls;
+        while (up > n.s) {
+          up = Ed.bol(t, up - 1);
+          const q = nonBlank(t, up);
+          if (q < Ed.eol(t, up) && t.charAt(q) !== t.charAt(p)) break;
+        }
+        w = lead(up) + unit;
+      } else if ((n.flat && !n.unflat) || closes(t, n, outdent.get(p)) || dedent.has(p) || (n.chain && rootSpans(n, p))) w = base(n);
+      else {
+        w = base(n) + unit;
+        if (either.has(p) && t.slice(ls, p) === w + unit) w += unit;
+      }
+      starts.push(ls); want.push(w);
+      made.set(ls, w ?? t.slice(ls, p));
+      if (ls >= last || le >= len) break;
+      ls = le + 1;
+    }
+    return { starts, want };
+  } catch (e) {
+    return null;
+  }
+}
+
+/* Re-indent the lines from the one holding FROM to the one holding TO by B's indents query, the blank ones too
+   when BLANKS, each changed only where its blanks differ: the number of lines the rules gave blanks to, or null
+   when B has none (indents). Point in a line's blanks goes to its first non-blank character. */
+function indent(b: EdBuffer, from: number, to: number, blanks: boolean): number | null {
+  const r = indents(b, from, to);
+  if (!r) return null;
+  let n = 0;
+  for (let i = r.starts.length - 1; i >= 0; i--) {
+    const w = r.want[i], ls = r.starts[i], t = b.rope, p = nonBlank(t, ls);
+    if (w === null || (!blanks && p >= Ed.eol(t, ls))) continue;
+    n++;
+    const inBlanks = b.pt >= ls && b.pt <= p;
+    if (t.slice(ls, p) !== w) Ed.replaceText(b, ls, p, w);
+    if (inBlanks) b.pt = ls + w.length;
+  }
+  return n;
+}
+
 const H = Ed.hooks, prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {
   const grammar = Ed.host.syntax && !b.minibuf ? grammarOf(b.mode) : null;
@@ -226,5 +538,5 @@ H.lexSeg = (b, from, to, seg) => {
   return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
 };
 
-Ed.syntax = { tree, grammarOf, imenu, nodes };
+Ed.syntax = { tree, grammarOf, imenu, nodes, indents, indent };
 })();

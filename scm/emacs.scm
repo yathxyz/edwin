@@ -149,12 +149,13 @@ With a numeric prefix ARG, kill that many whole lines."
                  (point))))
 
 (define-command (newline #!optional n)
-  "Insert N newlines.  In Scheme buffers, indent the new line, and inside a ; comment go on with it."
+  "Insert N newlines.  In Scheme buffers, indent the new line, and inside a ; comment go on with it; where the
+buffer's grammar has indent rules, indent it by the tree."
   (interactive "*p")
   (let ((prefix (lisp-newline-prefix)))
     (dotimes (_ (or n 1)) (insert "\n"))
     (insert prefix))
-  (when (lisp-buffer?) (lisp-indent-line)))
+  (if (lisp-buffer?) (lisp-indent-line) (syntax-indent-line)))
 
 (define-command (open-line n)
   "Insert N newlines after point without moving point."

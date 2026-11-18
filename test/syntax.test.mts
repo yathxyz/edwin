@@ -11,10 +11,13 @@
 // Imenu (Ed.syntax.imenu), with the stand-in's tags query: definitions paired with their names by match, a name
 // two patterns take listed once, references left out, null (the patterns of editor-prims instead) for each
 // reason, and consult-imenu using it. Expreg (Ed.syntax.nodes, SPC v and SPC V), with the stand-in's nodes: the
-// nodes holding a range, innermost first, null for each reason, and the selection grown and shrunk by keys. The
-// tree-sitter side (edit, reparse, the incremental tree against a whole parse, the nodes holding a range) is
-// native/src/syntax.rs's cargo tests; the golden runs, imenu lists and expreg steps of each language with the real
-// grammars are natives.rs's (`nix build .#edwin`).
+// nodes holding a range, innermost first, null for each reason, and the selection grown and shrunk by keys.
+// Indentation (Ed.syntax.indents, Ed.syntax.indent), with the stand-in's indents query for a grammar of brackets:
+// the innermost holder and its base, @align, @none, @keep, no edit where the blanks are right, the level, an ERROR
+// (queried once a re-indent), null for each reason; and RET, o, O, = and TAB by keys. The tree-sitter side (edit,
+// reparse, the incremental tree against a whole parse, the nodes holding a range) is native/src/syntax.rs's cargo tests; the golden runs,
+// imenu lists, expreg steps and formatted indent fixtures of each language with the real grammars are natives.rs's
+// (`nix build .#edwin`).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -30,7 +33,8 @@ const fc = require('fast-check'); // any: fast-check's types are not resolvable 
 type Tree = { grammar: string; text: string };
 const trees = new Map<number, Tree>();
 let next = 0;
-const calls = { parse: 0, edit: 0, inserted: 0, query: 0, refuse: false };
+/* SPANS: the range of each indents query, in order. */
+const calls = { parse: 0, edit: 0, inserted: 0, query: 0, refuse: false, spans: [] as [number, number][] };
 /* What the stand-in's highlights query gives: the capture names and, for a tree's text and a segment, the
    captures as synQuery gives them (four numbers each: the name's index, start, end, pattern). */
 let hl: { names: string[]; of: (text: string, start: number, end: number) => number[] } | null = null;
@@ -40,6 +44,9 @@ let tags: { names: string[]; of: (text: string) => { captures: number[]; matches
 /* What its nodes give: for a tree's text and a range, the extents of the nodes holding it, innermost first, two
    numbers each (synNodes); null: a grammar whose tree the test does not describe. */
 let nd: ((text: string, start: number, end: number) => number[]) | null = null;
+/* What its indents query gives: for a tree's text and a range, the captures of the nodes meeting the range;
+   null: a grammar with no indents query. */
+let ind: ((text: string, start: number, end: number) => { names: string[]; captures: number[] }) | null = null;
 const syntax = {
   parse(grammar: string, text: string) { calls.parse++; trees.set(++next, { grammar, text }); return next; },
   edit(id: number, pos: number, del: number, ins: string) {
@@ -59,6 +66,7 @@ const syntax = {
       if (start !== 0 || end !== t.text.length) throw new Error('imenu asks for the whole text');
       return matches ? { names: tags.names, ...r } : { names: tags.names, captures: r.captures };
     }
+    if (kind === 'indents' && ind) { calls.query++; calls.spans.push([start, end]); return ind(t.text, start, end); }
     if (kind !== 'highlights' || !hl) throw new Error(`${t.grammar} has no "${kind}" query`);
     calls.query++;
     return { names: hl.names, captures: hl.of(t.text, start, end) };
@@ -77,7 +85,7 @@ const host = createHost({ workers: false }) as NodeHost & { syntax?: typeof synt
 const Ed: Edwin = loadEdwin(host);
 const E = Ed.E;
 
-const reset = () => { calls.parse = calls.edit = calls.inserted = calls.query = 0; calls.refuse = false; };
+const reset = () => { calls.parse = calls.edit = calls.inserted = calls.query = 0; calls.refuse = false; calls.spans = []; };
 const fresh = (name: string, text: string) => {
   const b = Ed.getBufferCreate(name);
   Ed.replaceText(b, 0, b.rope.length, text);
@@ -471,6 +479,144 @@ test('expreg: the nodes holding a range, innermost first; the tree follows an ed
   assert.deepEqual(faces(c), [['nu', '2']]);
   hl = null;
 });
+/* ---------- indentation ---------- */
+/* The stand-in's indents query, for a grammar of brackets: { } an @indent and ( ) an @align, each with its closer
+   an @outdent,
+[ ] an @indent and a @none, "..." a @keep; a { left open makes the whole text an ERROR with it an @error.open.
+   The captures are those of the nodes meeting START..END, as tree-sitter's range gives them. */
+const IND = ['indent', 'outdent', 'keep', 'align', 'none', 'open', 'error', 'error.open', 'error.close'];
+const brackets = (text: string, start: number, end: number) => {
+  const captures: number[] = [], open: number[] = [];
+  const add = (name: string, s: number, e: number) => { if (s < end && e > start) captures.push(IND.indexOf(name), s, e, 0); };
+  for (let i = 0, str = -1; i < text.length; i++) {
+    const c = text[i];
+    if (str >= 0) { if (c === '"') { add('keep', str, i + 1); str = -1; } continue; }
+    if (c === '"') str = i;
+    else if ('{(['.includes(c)) open.push(i);
+    else if ('})]'.includes(c) && open.length) {
+      const o = open.pop()!;
+      if (text[o] === '{') { add('indent', o, i + 1); add('outdent', i, i + 1); }
+      else if (text[o] === '(') { add('align', o, i + 1); add('outdent', i, i + 1); }
+      else { add('indent', o, i + 1); add('none', o, i + 1); }
+    }
+  }
+  if (open.some(o => text[o] === '{')) {
+    add('error', 0, text.length);
+    for (const o of open) if (text[o] === '{') add('error.open', o, o + 1);
+  }
+  return { names: IND, captures };
+};
+const RS = 'fn f(a,\n     b) {\n    if a {\n        g();\n    }\n    [\n    1,\n    ]\n}\n';
+const lines = (t: string) => t.split('\n');
+const stripped = (t: string) => lines(t).map(l => l.trimStart()).join('\n');
+/* B with a level of four spaces (rust-mode's, before the image is booted). */
+const spaced = (b: Edwin) => {
+  for (const [k, v] of [['evil-shift-width', 4], ['indent-tabs-mode', false]] as const) { Ed.makeLocal(b, k); b.locals!.set(k, v); }
+  return b;
+};
+
+test('indent: each line by the innermost node holding it, from the base of the line it starts on; a re-indent of indented text changes nothing', () => {
+  host.syntax = syntax; reset();
+  ind = brackets;
+  const b = spaced(inMode('rust-mode', RS));
+  // The lines after "(a," go under the a; the block's base is "fn f(a,"'s, the line its "(" closed on began
+  // inside; [ ] is a @none, its lines at the block's level; a closing } is at its block's base.
+  assert.deepEqual(Ed.syntax.indents(b, 0, RS.length)!.want, lines(RS).map(l => l.slice(0, l.length - l.trimStart().length)));
+  const ver = b.ver; b.modified = false;
+  assert.equal(Ed.syntax.indent(b, 0, RS.length, false), 9);
+  assert.equal(b.ver, ver, 'no edit when the blanks are already right');
+  assert.equal(b.modified, false);
+  // The same text with no blanks at all comes back.
+  const s = spaced(inMode('rust-mode', stripped(RS)));
+  Ed.syntax.indent(s, 0, s.rope.length, false);
+  assert.equal(s.rope.toString(), RS);
+  // One line, with point in its blanks: point goes to its first non-blank character; past them it stays put.
+  Ed.replaceText(s, s.rope.indexOf('g();') - 8, s.rope.indexOf('g();'), '');
+  s.pt = s.rope.indexOf('g();');
+  assert.equal(Ed.syntax.indent(s, s.pt, s.pt, true), 1);
+  assert.equal(s.rope.toString(), RS); assert.equal(s.pt, RS.indexOf('g();'));
+  Ed.replaceText(s, s.rope.indexOf('g();') - 8, s.rope.indexOf('g();'), '  ');
+  s.pt = s.rope.indexOf('();');
+  Ed.syntax.indent(s, s.pt, s.pt, true);
+  assert.equal(s.pt, RS.indexOf('();'));
+  ind = null;
+});
+
+test('indent: a base goes up through each line whose holder closed before the node began, however many (nested conditions)', () => {
+  host.syntax = syntax; reset();
+  ind = brackets;
+  // The block's line begins inside (b || c), which closed on it; that line began inside (a && …), closed too: the
+  // block's base is the if's line's, and g(); is a level in from it.
+  const T = 'fn f() {\n    if (a &&\n        (b ||\n         c)) {\n        g();\n    }\n}\n';
+  const b = spaced(inMode('rust-mode', T));
+  assert.deepEqual(Ed.syntax.indents(b, 0, T.length)!.want, lines(T).map(l => l.slice(0, l.length - l.trimStart().length)));
+  const s = spaced(inMode('rust-mode', stripped(T)));
+  Ed.syntax.indent(s, 0, s.rope.length, false);
+  assert.equal(s.rope.toString(), T);
+  ind = null;
+});
+
+test('indent: a level is evil-shift-width spaces, or a tab under indent-tabs-mode (what .editorconfig sets); a string begun above keeps its blanks', () => {
+  host.syntax = syntax; reset();
+  ind = brackets;
+  const text = 'fn f() {\ng(x,\ny);\nlet s = "a\n  b";\n}\n';
+  const run = (vars: Record<string, unknown>) => {
+    const b = inMode('rust-mode', text);
+    for (const [k, v] of Object.entries(vars)) { Ed.makeLocal(b, k); b.locals!.set(k, v); }
+    Ed.syntax.indent(b, 0, b.rope.length, false);
+    return b.rope.toString();
+  };
+  assert.equal(run({ 'evil-shift-width': 4, 'indent-tabs-mode': false }), 'fn f() {\n    g(x,\n      y);\n    let s = "a\n  b";\n}\n');
+  assert.equal(run({ 'evil-shift-width': 2, 'indent-tabs-mode': false }), 'fn f() {\n  g(x,\n    y);\n  let s = "a\n  b";\n}\n');
+  // Under a tab the aligned line takes the tab, then spaces to the column.
+  assert.equal(run({ 'evil-shift-width': 4, 'indent-tabs-mode': true }), 'fn f() {\n\tg(x,\n\t  y);\n\tlet s = "a\n  b";\n}\n');
+  const b = inMode('rust-mode', text);
+  assert.equal(Ed.syntax.indents(b, text.indexOf('  b'), text.indexOf('  b'))!.want[0], null, 'the string\'s line is left alone');
+  ind = null;
+});
+
+test('indent: while typing, a { left open (an ERROR) holds the lines after it; null with no rules, and highlighting is left alone', () => {
+  host.syntax = syntax; reset();
+  ind = brackets;
+  const b = spaced(inMode('rust-mode', 'fn f() {\nif x {\ng();\n\n'));
+  Ed.syntax.indent(b, 0, b.rope.length - 1, true);
+  assert.equal(b.rope.toString(), 'fn f() {\n    if x {\n        g();\n        \n');
+  // No rules: no host.syntax (a web frame, edwind), a mode with no grammar, no indents query, a host that throws.
+  host.syntax = undefined;
+  assert.equal(Ed.syntax.indent(b, 0, 1, true), null);
+  host.syntax = syntax;
+  assert.equal(Ed.syntax.indent(inMode('text-mode', 'a {\nb\n'), 0, 5, true), null);
+  ind = null;
+  assert.equal(Ed.syntax.indent(inMode('rust-mode', 'a {\nb\n'), 0, 5, true), null);
+  hl = { names: ['number'], of: (t, s, e) => { const i = t.indexOf('2'); return i >= s && i < e ? [0, i, i + 1, 0] : []; } };
+  ind = () => { throw new Error('query failed'); };
+  const c = inMode('rust-mode', 'a {\n2\n');
+  assert.equal(Ed.syntax.indent(c, 0, 5, true), null);
+  assert.deepEqual(faces(c), [['nu', '2']], 'still highlighted');
+  hl = null; ind = null;
+});
+test('indent: a re-indent queries the lines asked for once and each ERROR once, not each line a base is looked up on (a file with one unclosed bracket costs about what a closed one does)', () => {
+  host.syntax = syntax; reset();
+  ind = brackets;
+  /* An unclosed { at the top makes the whole text one ERROR; each if's { is a holder whose line a base is looked
+     up on. The first engine queried each of those lines on its own and, from each, the whole ERROR again. */
+  const n = 12, text = 'fn g() {\n' + 'if x {\ng();\n}\n'.repeat(n);
+  const b = spaced(inMode('rust-mode', text));
+  Ed.syntax.indent(b, 0, text.length, false);
+  assert.equal(b.rope.toString(), 'fn g() {\n' + '    if x {\n        g();\n    }\n'.repeat(n));
+  assert.deepEqual(calls.spans, [[0, text.length], [0, text.length]], 'the region, then the ERROR');
+  /* One line in the middle: the line and the non-blank line before it (its base is on that one), and the ERROR. */
+  reset();
+  const now = b.rope.toString(), mid = now.indexOf('g();', now.length / 2), ls = Ed.bol(b.rope, mid), above = Ed.bol(b.rope, ls - 1);
+  assert.equal(Ed.syntax.indent(b, mid, mid, true), 1);
+  assert.deepEqual(calls.spans, [[above, Ed.eol(b.rope, ls) + 1], [0, b.rope.length]]);
+  /* A base on a line above those: one query over that line (RS's `if a {` is under `fn f(a,`, two lines up). */
+  reset();
+  const r = spaced(inMode('rust-mode', RS)), at = RS.indexOf('if a {');
+  assert.equal(Ed.syntax.indent(r, at, at, true), 1);
+  assert.deepEqual(calls.spans, [[Ed.bol(RS, Ed.bol(RS, at) - 1), Ed.eol(RS, at) + 1], [0, Ed.eol(RS, 0) + 1]]);
+  ind = null;
+});
 /* Near the end: it boots the image (keymaps, the minibuffer), which the tests above do without. */
 test('consult-imenu lists a tree\'s definitions and jumps to the one chosen; without a tags query, its own patterns', async () => {
   host.syntax = syntax; reset();
@@ -533,6 +679,76 @@ test('expreg: SPC v grows the selection by the tree\'s nodes, not by the line, a
   host.syntax = undefined;
   assert.equal(await run('python-mode', PY2, 'j f a SPC v SPC v d'), 'x = foo(\n  \ny = 2\n');
   host.syntax = syntax;
+});
+
+/* After the image is booted. */
+test('indent: RET, o, O, = and TAB indent by the tree; RET after {, ( and a closing }, between { and the } electric-pair-mode put opening a line between them; in a string, the line above\'s blanks', async () => {
+  host.syntax = syntax; reset();
+  ind = brackets;
+  const feed = async (ks: string[]) => { for (const k of ks) Ed.feedKey(k); await Ed.whenIdle(); };
+  const keys = (s: string) => feed(Ed.kbd(s).split(' ')), type = (s: string) => feed([...s].map(ch => ch === '\n' ? 'RET' : ch === ' ' ? 'SPC' : ch));
+  const EvilCore = (globalThis as unknown as { EvilCore: Edwin }).EvilCore;
+  const start = async (mode: string, text: string, pt: number) => {
+    const b = inMode(mode, text);
+    Ed.setWindowBuffer(b);
+    if (EvilCore.stateOf(b) !== 'normal') await keys('ESC');
+    b.pt = pt;
+    return b;
+  };
+  // Typed: rust-mode's width is 4 (prog.scm); the { puts its }, and RET opens the line between them.
+  let b = await start('rust-mode', 'fn f() \n', 7);
+  await keys('a'); await type('{\nif x {\ng();');
+  assert.equal(b.rope.toString(), 'fn f() {\n    if x {\n        g();\n    }\n}\n');
+  assert.equal(b.pt, b.rope.indexOf('g();') + 4);
+  // RET after a line's last token: the blanks before point go, and the new line is at the line's level.
+  await type('  \n');
+  assert.equal(b.rope.toString(), 'fn f() {\n    if x {\n        g();\n        \n    }\n}\n');
+  await keys('ESC');
+  // RET between ( and its ): the line between them a level in, the ) at the call's line's blanks; after a
+  // closing }, the line at the block's level around it.
+  b = await start('rust-mode', 'fn f() {\n    g()\n}\n', 15);
+  await keys('i'); await type('\nx');
+  assert.equal(b.rope.toString(), 'fn f() {\n    g(\n        x\n    )\n}\n');
+  await keys('ESC');
+  b = await start('rust-mode', 'fn f() {\n    if x {\n        g();\n    }\n}\n', 37);
+  await keys('a'); await type('\nh();');
+  assert.equal(b.rope.toString(), 'fn f() {\n    if x {\n        g();\n    }\n    h();\n}\n');
+  await keys('ESC');
+  // In a string the rules leave the line alone: RET takes the line above's blanks.
+  b = await start('rust-mode', 'fn f() {\n    let s = "ab";\n}\n', 22);
+  await keys('a'); await type('\n');
+  assert.equal(b.rope.toString(), 'fn f() {\n    let s = "a\n    b";\n}\n');
+  await keys('ESC');
+  // With electric-pair-mode off, RET after { gives the next line a level more.
+  L().resetOps(); L().evalText('(electric-pair-mode -1)');
+  b = await start('rust-mode', 'fn f() \n', 7);
+  await keys('a'); await type('{\ng();\n}');
+  assert.equal(b.rope.toString(), 'fn f() {\n    g();\n    }\n');
+  L().resetOps(); L().evalText('(electric-pair-mode 1)');
+  await keys('ESC');
+  // o and O.
+  b = await start('rust-mode', 'fn f() {\n    g();\n}\n', 0);
+  await keys('o'); await type('h();'); await keys('ESC');
+  assert.equal(b.rope.toString(), 'fn f() {\n    h();\n    g();\n}\n');
+  await keys('G O'); await type('i();'); await keys('ESC');
+  assert.equal(b.rope.toString(), 'fn f() {\n    h();\n    g();\n    i();\n}\n');
+  // o leaves the line it opens below alone: a line the rules would move keeps its blanks, and those after its
+  // last token.
+  b = await start('rust-mode', 'fn f() {\n        g();  \n}\n', 12);
+  await keys('o'); await type('h();'); await keys('ESC');
+  assert.equal(b.rope.toString(), 'fn f() {\n        g();  \n    h();\n}\n');
+  // = over the buffer, and TAB on one line.
+  b = await start('rust-mode', stripped(RS), 0);
+  await keys('g g = G');
+  assert.equal(b.rope.toString(), RS);
+  b = await start('rust-mode', 'fn f() {\ng();\n}\n', 10);
+  await keys('a TAB ESC');
+  assert.equal(b.rope.toString(), 'fn f() {\n    g();\n}\n');
+  // No rules (a mode with no grammar): = says so, and RET takes the line above's blanks.
+  b = await start('text-mode', '  a {\n', 5);
+  await keys('A'); await type('\nb'); await keys('ESC');
+  assert.equal(b.rope.toString(), '  a {\n  b\n');
+  ind = null;
 });
 
 function L() { return (globalThis as unknown as { L: Edwin }).L; }

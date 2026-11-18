@@ -1895,6 +1895,12 @@ interface EdSyntaxApi {
   /* the extents of the named nodes of B's tree holding FROM..TO, innermost first, out to the root, as [start, end]
      pairs (0-based, end exclusive), for expreg; null when there is no tree */
   nodes(b: EdBuffer, from: number, to: number): [number, number][] | null;
+  /* the leading blanks each line from the one holding FROM to the one holding TO should have by the grammar's
+     indents query (STARTS the lines' starts, null in WANT for a line the rules leave alone); null when B has no
+     rules (no tree, no grammar, no indents query) */
+  indents(b: EdBuffer, from: number, to: number): { starts: number[]; want: (string | null)[] } | null;
+  /* re-indent those lines (the blank ones too when BLANKS): the number given blanks, null when B has no rules */
+  indent(b: EdBuffer, from: number, to: number, blanks: boolean): number | null;
 }
 interface EdHostFiles {
   read(name: string, max?: number): string | null;

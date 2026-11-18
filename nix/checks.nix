@@ -312,8 +312,14 @@ in
   # with their names by match, a name two patterns take listed once, no references, null for each fallback, and
   # consult-imenu using it. Expreg from the stand-in's nodes: Ed.syntax.nodes innermost first, clamped, after an
   # edit, null for each fallback; SPC v and SPC V by keys, growing by nodes and not lines, from a Visual selection,
-  # and the old steps with no tree. Tree-sitter's side, the golden face runs and imenu lists of each language and
-  # expreg's steps with the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
+  # and the old steps with no tree. Indentation from the stand-in's indents query (a grammar of brackets): each
+  # line by its innermost holder and the base of the line that holder starts on, an aligned list, a @none, a
+  # string kept, a re-indent of indented text making no edit, a base two closed conditions up, the level from
+  # evil-shift-width or a tab, a { left open (an ERROR) queried once a re-indent, null for each fallback with
+  # highlighting left alone;
+  # booted, RET (between { and its }), o (leaving its line alone), O, = and TAB by keys. Tree-sitter's side, the
+  # golden face runs and imenu lists of each language, expreg's steps and each language's formatted fixture
+  # re-indented with the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
   # SYNTAX_RUNS raises the run count.
   edwin-syntax = pkgs.runCommand "edwin-syntax" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules

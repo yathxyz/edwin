@@ -698,17 +698,19 @@ CMD('lisp-indent-line', '*', '', 'Indent the current line as Lisp code.', () => 
 L.defvar('tab-always-indent', intern('complete'), "TAB indents; 'complete also completes the word at point once the line is indented, as corfu does on the desktop.");
 L.defvar('indent-tabs-mode', true, 'Non-#f: TAB in a text buffer inserts a tab character; #f: spaces up to the next tab-width stop.');
 L.defvar('tab-width', 8, 'Columns between tab stops for the spaces TAB inserts when indent-tabs-mode is #f.');
-CMD('indent-for-tab-command', '*', '', 'Expand a snippet key before point; else indent the line in Scheme buffers; when it is already indented, or elsewhere after a word, complete the word (TAB).', () => {
+CMD('indent-for-tab-command', '*', '', 'Expand a snippet key before point; else indent the line in Scheme buffers and in buffers whose grammar has indent rules; when it is already indented, or elsewhere after a word, complete the word (TAB).', () => {
   const b = cur();
   if (b.minibuf) return L.call('minibuffer-complete', []);
   const complete = L.get('tab-always-indent') === intern('complete');
   /* yasnippet binds TAB itself, whatever tab-always-indent says. */
   if (globalThis.Yas && globalThis.Yas.keyAt(b)) return globalThis.Yas.expand(b);
   const ver = b.ver, pt = b.pt;
+  /* A line the tree's rules indent is like a Lisp one: TAB indents it, then completes, and inserts no tab. */
+  const rules = Ed.isLisp(b) || (Ed.syntax?.indent(b, b.pt, b.pt, true) ?? 0) > 0;
   if (Ed.isLisp(b)) Ed.indentLine(b);
   if (!Ed.changedSince(b, ver) && b.pt === pt) {
     if (complete && globalThis.Complete && globalThis.Complete.prefixAt(b) && globalThis.Complete.open(b, false)) { if (E.corfu!.cands.length === 1) globalThis.Complete.accept(); return false; }
-    if (!Ed.isLisp(b)) {
+    if (!rules) {
       /* tab-to-tab-stop: a tab, or with indent-tabs-mode #f spaces to the next tab-width column. */
       const tw = Math.max(1, Math.floor(Number(L.get('tab-width'))) || 8);
       if (truthy(L.get('indent-tabs-mode'))) Ed.insertText(b, '\t');
@@ -717,8 +719,9 @@ CMD('indent-for-tab-command', '*', '', 'Expand a snippet key before point; else 
   }
   return false;
 });
-CMD('indent-region', '*r', 'START END', 'Indent each line in the region.', ([s, e]) => {
+CMD('indent-region', '*r', 'START END', 'Indent each line in the region: as Lisp in Scheme buffers, else by the buffer\'s tree where its grammar has indent rules.', ([s, e]) => {
   const b = cur(), [a, z0] = region(b, s, e); let z = z0;
+  if (!Ed.isLisp(b) && (Ed.syntax?.indent(b, a, Math.max(a, z0 - 1), false) ?? null) !== null) { b.markActive = false; return false; }
   const save = b.pt; b.pt = a;
   for (;;) {
     /* An empty line stays empty, as in Emacs. */

@@ -1,0 +1,22 @@
+{
+  "name": "edwin",
+  "version": "0.1.0",
+  "nested": {
+    "list": [1, 2, 3],
+    "objects": [
+      {
+        "a": true,
+        "b": null
+      },
+      {
+        "c": "a string with { and [",
+        "d": []
+      }
+    ],
+    "empty": {}
+  },
+  "matrix": [
+    [1, 2],
+    [3, 4]
+  ]
+}

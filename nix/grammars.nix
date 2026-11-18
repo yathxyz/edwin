@@ -7,8 +7,10 @@
 # tree-sitter.json lists them, the highlights with the language they build on first (C++ is C's highlights then
 # its own; TypeScript is JavaScript's then its own, TSX JavaScript's, JSX's and TypeScript's), since of two
 # patterns capturing one node the later wins (src/syntax.ts) and a language's own patterns are its specific ones. HCL (the Terraform mode) and GDScript ship no queries: both come from Helix, the grammar at
-# the revision Helix's queries are written for and the queries from Helix's runtime. The edwin-grammars check
-# loads every library and compiles every query file against it.
+# the revision Helix's queries are written for and the queries from Helix's runtime. The indents queries are
+# Edwin's own (nix/indents, the capture names src/syntax.ts reads), for Rust, Go, C, JSON, JavaScript, TypeScript
+# and TSX: JavaScript's then JSX's for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The
+# edwin-grammars check loads every library and compiles every query file against it.
 {
   lib,
   runCommand,
@@ -32,12 +34,14 @@ let
   # A grammar's own query files: KIND from DIR/KIND.scm.
   own = dir: kinds: lib.genAttrs kinds (k: [ "${dir}/${k}.scm" ]);
   queriesOf = grammar: own "${grammar}/queries";
+  # The indents query (src/syntax.ts), Edwin's own, from nix/indents: the files named, in order.
+  indents = files: { indents = map (f: ./indents + "/${f}.scm") files; };
   languages = [
-    (fromNixpkgs "rust" "rust-mode" g.tree-sitter-rust (queriesOf g.tree-sitter-rust [ "highlights" "injections" "tags" ]))
+    (fromNixpkgs "rust" "rust-mode" g.tree-sitter-rust (queriesOf g.tree-sitter-rust [ "highlights" "injections" "tags" ] // indents [ "rust" ]))
     # Its locals.scm is comments only: upstream keeps no locals for Nix.
     (fromNixpkgs "nix" "nix-mode" g.tree-sitter-nix (queriesOf g.tree-sitter-nix [ "highlights" "injections" "tags" ]))
-    (fromNixpkgs "go" "go-mode" g.tree-sitter-go (queriesOf g.tree-sitter-go [ "highlights" "tags" ]))
-    (fromNixpkgs "c" "c-mode" g.tree-sitter-c (queriesOf g.tree-sitter-c [ "highlights" "tags" ]))
+    (fromNixpkgs "go" "go-mode" g.tree-sitter-go (queriesOf g.tree-sitter-go [ "highlights" "tags" ] // indents [ "go" ]))
+    (fromNixpkgs "c" "c-mode" g.tree-sitter-c (queriesOf g.tree-sitter-c [ "highlights" "tags" ] // indents [ "c" ]))
     (fromNixpkgs "cpp" "c++-mode" g.tree-sitter-cpp (queriesOf g.tree-sitter-cpp [ "injections" "tags" ] // {
       highlights = [ "${g.tree-sitter-c}/queries/highlights.scm" "${g.tree-sitter-cpp}/queries/highlights.scm" ];
     }))
@@ -46,20 +50,20 @@ let
     (fromNixpkgs "python" "python-mode" g.tree-sitter-python (queriesOf g.tree-sitter-python [ "highlights" "tags" ]))
     (fromNixpkgs "javascript" "js-mode" g.tree-sitter-javascript (own js [ "injections" "locals" "tags" ] // {
       highlights = [ "${js}/highlights.scm" "${js}/highlights-jsx.scm" "${js}/highlights-params.scm" ];
-    }))
-    (fromNixpkgs "typescript" "typescript-mode" g.tree-sitter-typescript {
+    } // indents [ "javascript" "jsx" ]))
+    (fromNixpkgs "typescript" "typescript-mode" g.tree-sitter-typescript ({
       highlights = [ "${js}/highlights.scm" "${ts}/highlights.scm" ];
       injections = [ "${js}/injections.scm" ];
       locals = [ "${ts}/locals.scm" "${js}/locals.scm" ];
       tags = [ "${ts}/tags.scm" "${js}/tags.scm" ];
-    })
-    (fromNixpkgs "tsx" "tsx-mode" g.tree-sitter-tsx {
+    } // indents [ "javascript" "typescript" ]))
+    (fromNixpkgs "tsx" "tsx-mode" g.tree-sitter-tsx ({
       highlights = [ "${js}/highlights.scm" "${js}/highlights-jsx.scm" "${ts}/highlights.scm" ];
       injections = [ "${js}/injections.scm" ];
       locals = [ "${js}/locals.scm" ];
       tags = [ "${ts}/tags.scm" "${js}/tags.scm" ];
-    })
-    (fromNixpkgs "json" "json-mode" g.tree-sitter-json (queriesOf g.tree-sitter-json [ "highlights" ]))
+    } // indents [ "javascript" "jsx" "typescript" ]))
+    (fromNixpkgs "json" "json-mode" g.tree-sitter-json (queriesOf g.tree-sitter-json [ "highlights" ] // indents [ "json" ]))
     (fromNixpkgs "yaml" "yaml-mode" g.tree-sitter-yaml (queriesOf g.tree-sitter-yaml [ "highlights" ]))
     (fromNixpkgs "toml" "toml-mode" g.tree-sitter-toml (queriesOf g.tree-sitter-toml [ "highlights" ]))
     (fromNixpkgs "bash" "sh-mode" g.tree-sitter-bash (queriesOf g.tree-sitter-bash [ "highlights" ]))

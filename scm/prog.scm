@@ -88,11 +88,12 @@ prog-mode's. The option values are evaluated. Declaring MODE again replaces all 
 ;;;; The languages (from the desktop's init-prog.el, and those the plan's later packages name)
 
 ;; Indent widths follow each language's usual formatter (rustfmt, alejandra, black, prettier, terraform fmt,
-;; just --fmt, the Google Java style init-prog.el formats with). Go and GDScript indent with tabs in their
-;; formatters; here they take spaces, which gofmt turns back into tabs.
+;; just --fmt, the Google Java style init-prog.el formats with). Go indents with tabs, as gofmt does: a level of
+;; its indent rules (src/syntax.ts) is a tab. GDScript's formatter uses tabs too; here it takes spaces.
 (define-language rust-mode "Rust" :files '("\\.rs$") :comment '("//" "/*" "*/") :indent 4)
 (define-language nix-mode "Nix" :files '("\\.nix$") :comment '("#" "/*" "*/") :indent 2)
-(define-language go-mode "Go" :files '("\\.go$") :comment '("//" "/*" "*/") :indent 4)
+(define-language go-mode "Go" :files '("\\.go$") :comment '("//" "/*" "*/") :indent 4
+  (setq-local indent-tabs-mode #t))
 (define-language c-mode "C" :files '("\\.[ch]$") :comment '("//" "/*" "*/") :indent 4)
 (define-language c++-mode "C++" :files '("\\.(cc|cpp|cxx|hh|hpp|hxx)$") :comment '("//" "/*" "*/") :indent 4)
 (define-language java-mode "Java" :files '("\\.java$") :comment '("//" "/*" "*/") :indent 2)

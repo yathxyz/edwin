@@ -5091,7 +5091,7 @@ reparse, highlighting, imenu, expand-region, indentation). Nothing in the core c
   lang-syntax-incremental's byte-versus-UTF-16 risk is settled this way.
 - **Bounds** (constants in syntax.rs): a parse stops after 1 s (`PARSE_LIMIT`) and a query after 1 s
   (`QUERY_LIMIT`), each with an error rather than holding the frame (tree-sitter's progress callbacks); a query
-  keeps at most 256 matches in progress (`MATCH_LIMIT`); at most 256 trees are kept (`MAX_TREES`), a parse past
+  keeps at most 1,024 matches in progress (`MATCH_LIMIT`); at most 256 trees are kept (`MAX_TREES`), a parse past
   that refused until one is freed.
 - **Choices where the plan left one open:** the grammars are loaded with `dlopen` from the bundle and the
   runtime is linked in, as lang-grammar-bundle settled (decision 8); queries come from the bundle only, compiled
@@ -6328,6 +6328,199 @@ the nodes of a programming buffer's tree-sitter tree.
   of Visual state. Checks `edwin-typecheck`, `edwin-headless` (21) and `edwin-scheme` (38) passed. Rebased on `lsp-frame-docs`,
   `nix flake check` passed except the timing tests of `edwin-prog` (the bracket guard's 2 ms budget), `edwin-bench`
   and `edit-crash`; each passed when rebuilt alone at a load of 3 to 7.
+
+## Indentation by the tree (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-syntax-indent-engine`): an indent engine driven by
+indent queries and the editorconfig width, with rules for Rust, TypeScript and TSX, Go, C and JSON.
+
+- **TAB, `=`, `RET`, `o` and `O`** indent by the buffer's tree in Rust, Go, C, JSON, JavaScript, TypeScript and
+  TSX, where before only the Lisp buffers had an indenter. `indent-for-tab-command` (`src/editor-prims.ts`)
+  indents the line as it does in Lisp, then completes, and inserts no tab stop when the rules gave the line its
+  blanks. `indent-region` and `=` (`evil-indent`, `scm/evil.scm`) re-indent the lines and leave the blank ones
+  as they are. `RET` in Insert state (`evil-newline-and-indent`) re-indents the line, takes away the blanks
+  before point, and indents the new line. Between a bracket and the pair electric-pair-mode put after it (`{|}`,
+  `(|)`, `[|]`), it opens a line between them, at a level more, with the closer at the opener's level. `o` and
+  `O` indent the new line the same way and leave the line they open it beside as it is, blanks and all, outside
+  Lisp buffers (there `o` re-indents it, as before); so does `newline` (Emacs state, `scm/emacs.scm`). A line inside a string or a
+  block comment begun above keeps its blanks. A new line opened inside one takes the line above's blanks, as
+  before.
+- **Where there are no rules** each command does what it did before: a web frame and edwind (no tree-sitter), a
+  mode with no grammar or no indents query, a minibuffer, a buffer past highlighting's 4 Mi-character bound, a
+  failed parse or query. `RET` and `O` take the line above's blanks, `=` says "No indentation rules for MODE"
+  and TAB goes to the next tab stop. A failure leaves the buffer's highlighting alone.
+- **The rules** are queries of Edwin's own, `nix/indents/*.scm`, added to the grammar bundle as each grammar's
+  `indents` kind (`nix/grammars.nix`). JavaScript is `javascript.scm` then `jsx.scm`, TypeScript is
+  `javascript.scm` then `typescript.scm`, and TSX is all three. Their captures:
+  - `@indent`: the lines inside the node, after its first, are one level deeper than its base;
+  - `@outdent`: a closing token beginning a line that ends where its node ends (or ends with only a comment after
+    it on its line, JavaScript's `} // c`) puts the line at the base;
+  - `@align`: C's argument, parameter and initializer lists and parentheses, the lines under the first element
+    when it is on the bracket's line; C's `for`, the header's lines after its `(`. `@align.start`: the lines
+    under the node's first character, C's operands;
+  - `@keep`: strings and comments, and C's `#if` conditions continued with `\`;
+  - `@flat`: the node's lines at its base, not a level in (prettier's operands in an `if`'s condition, a
+    declarator's value, an arrow's body), unless also `@unflat` (those of a ternary in a `return` or a call);
+  - `@chain` and `@chain.root`: rustfmt's method chains, at the chain's base while the root spans lines;
+  - `@dedent`: a token or node beginning the line puts it at its holder's base (an `else`, a Go label, a
+    `let ... else`'s `else`, a comment between an if's body and its `else`); `@flush`: at the margin (C's
+    preprocessor directives, inside a function too);
+  - `@brace`: a block's `{` beginning a line is at its item's base (rustfmt's `{` under a multi-line `where` or
+    signature);
+  - `@either`: a line kept when it is a level deeper than the rules give (gofmt keeps a comment after a case's
+    statements at their level or at the next case's);
+  - `@continue`: Rust macro bodies' `.` lines (`assert!(x\n    .a()\n    .b())`);
+  - `@stem`: C's `for`, so a body begun on the header's last line takes the `for`'s base;
+  - `@hang`, `@hang.self` and `@unhang`: prettier's indents begun inside a line (a ternary's branch after `? `, a
+    declarator of several, a union member after `| `, a parenthesized operator) add a level for what begins on
+    that line, one level however many begin there;
+  - `@none`: C's switch body is no level, so its case labels are at the switch's level;
+  - `@open`: a node that holds on to the next non-blank character after it. These are a case label (so `RET`
+    after `case 1:` goes a level in) and a node whose closing bracket tree-sitter made up (MISSING);
+  - `@error`, `@error.open` and `@error.close`: inside an ERROR, the brackets are paired in order, and each one
+    left open indents the lines after it.
+- **`Ed.syntax.indents(b, from, to)` and `Ed.syntax.indent(b, from, to, blanks)`** (`src/syntax.ts`) take the
+  innermost node holding each line's first non-blank character. A line's base is the blanks of the line its
+  node starts on, as given in the same pass. That line may itself begin inside a node that closed before this
+  one began, such as C's `    b) {` after `int f(int a,`, or Rust's `} else {`; then the base is that node's.
+  A level is a tab under `indent-tabs-mode`, else `evil-shift-width` spaces: the language's `:indent`, or the
+  `.editorconfig`'s `indent_size` and `indent_style`, which are applied after the mode. Only lines whose blanks
+  differ are edited, so re-indenting formatted text makes no edit and leaves the buffer unmodified. The Scheme
+  primitives are `syntax-indent-line` and `syntax-indent-region BEG END` (`src/evil-core.ts`). They change only
+  leading blanks; nothing new reaches a process, a file or the network. One query covers the lines and the
+  non-blank line before them; what a base needs on one of those lines (its `@hang` nodes, a chain's roots, its
+  holder) comes from that query. One more query covers each line above them that a base is looked up on, and
+  one each ERROR, once a re-indent (`errorOpens`, keyed by the ERROR's extent, the nested ERRORs it finds kept
+  too). The review's first run queried the ERROR again from each line a base was looked up on, and a one-line
+  query inside an ERROR walks the whole ERROR, so `gg=G` in a file with one unclosed bracket cost about the
+  square of its length (the reviewer measured 196 s for 10,026 lines, 130 ms with the bracket closed). A cargo
+  test bounds the cost on 10,000 lines of the Rust fixture, its tree already parsed: re-indenting them all takes
+  under a second; with an unclosed `fn g() {` and `let x = (` at the top, so that the tree's errors reach to the
+  end, indenting one line in the middle takes under 200 ms and re-indenting them all under a second. Measured in
+  release on the build host at a load average of about 11: 56 ms, 33 ms and 130 ms (with the ERROR queried once
+  but still a query a line, 125 ms, 33 ms and about 1,500 ms; the first engine in a debug build, 2,123 ms,
+  1,677 ms and 534,185 ms). The test asserts the bounds and names the times only when it fails. It calls
+  `Ed.syntax.indent` and does not drive `gg=G`.
+- **Choices where the plan left one open:**
+  - The queries are Edwin's own. nixpkgs' grammars ship no indents queries. nvim-treesitter's and Helix's are
+    written for their own engines' capture semantics. Neither reproduces rustfmt's, gofmt's, clang-format's and
+    prettier's layouts on this engine.
+  - Indentation is relative, as in Emacs's tree-sitter modes (`parent-bol` plus an offset): a line follows the
+    blanks its node's line has, not a count of the nodes around it. A file indented another way keeps that way
+    where its lines are consistent with it.
+  - `go-mode` now indents with tabs, as gofmt does (`indent-tabs-mode` `#t` in its mode body, `scm/prog.scm`).
+    It had taken spaces and left the tabs to gofmt. An `.editorconfig` still overrides it. `>` and `<`
+    (`evil--shift`) still shift by spaces whatever `indent-tabs-mode` is, so in Go they now put spaces before the
+    tabs; TAB, `=` or gofmt put the line back. They are unchanged here.
+  - C's layout is clang-format's LLVM style at the mode's width of 4: case labels at the switch's level, and
+    continued arguments and parameters under the first.
+  - `RET` re-indents the line it leaves, and takes away blanks before point, as Emacs's electric-indent-mode does.
+    `o` and `O` do not: Vim's `o` leaves the line alone, and Emacs's `open-line` does too. A `}` typed at the
+    start of a line is not re-indented as it is typed (see below).
+  - A base goes up through every line that begins inside a node closed before the node began, not one line: C's
+    `if (a &&\n    (b ||\n     c)) {` puts the block's base on the `if`'s line (before, `gg=G` changed 1,266
+    lines of tree-sitter's `query.c` from the third line of one such condition on).
+  - Hangs count once per line, so `((a &&` begins one level, as prettier prints it.
+  - The tests with the real grammars are cargo tests in `native/src/natives.rs`, as imenu's and expreg's are, since
+    `edwin-syntax` has a stand-in for tree-sitter. The plan's Proved by names `edwin-syntax`. It checks the engine
+    and the keys with the stand-in's grammar of brackets. The formatted fixtures and the column after `{`, `(` and
+    a closing brace in each language are checked by `nix build .#edwin`.
+  - The package touches `src/editor-prims.ts`, `src/evil-core.ts`, `src/core.d.ts`, `scm/evil.scm`,
+    `scm/emacs.scm`, `nix/grammars.nix` and `native/src/natives.rs`, which the plan's Where did not list. No new
+    `src/*.ts` or `.scm` file is added, so the touch lists are unchanged.
+- **Not in it:** indenting a line when `}`, `)` or `]` is typed at its start (Emacs's electric-indent chars). The
+  line goes to its column on the next TAB, `=` or `RET`. Rules for the other languages of the bundle (Python, Nix,
+  YAML, TOML, Java, C#, C++ and the rest): their buffers keep the old behaviour. Emacs's c-mode styles and
+  offsets per syntactic symbol. Indentation inside a multi-line string or block comment, which is kept. In web
+  frames and edwind, which have no tree, nothing changes.
+- **Risks:** C. clang-format's alignments the rules do not follow: a ternary's `?` and `:` lines under the
+  condition, a continued operand nested a level inside another operator (+4 from it), a member (`->symbol`,
+  `.actions[...]`) taken on the line after a call, an aligned trailing comment's continuation line, and a braced
+  initializer whose first element is on the brace's line. `gg=G` on clang-format's output of 14 tree-sitter
+  `lib/src` files (14,176 lines) changes 154 lines (`query.c` 38 of 4,806, `lexer.c` 25 of 469, `wasm_store.c`
+  26, `parser.c` 22, `stack.c` 12, `subtree.c` 8, `tree_cursor.c` 7, `get_changed_ranges.c` 6, `node.c` 6,
+  `language.c` 4, the other four none); on the reviewer's copies, `query.c` 35 and `lexer.c` 25 (1,257 and 60 at
+  the first fix). The C fixture keeps clear of these.
+  JavaScript and TypeScript: prettier's layout is matched by enumerated cases (`printBinaryish`'s contexts, the
+  same-precedence operators `&& || ?? + - * / | & ^`, arrow chains two deep in a declarator or an assignment);
+  output outside them can still move. `gg=G` on prettier's output of 37 of Edwin's `src/*.ts` files (63,452
+  lines) changes none. Rust: rustfmt's output of 22 files (13,953 lines: Edwin's `native/src` and crate files)
+  changes none. Go: gofmt's output of 8 standard-library files (12,051 lines) changes none; with its blanks taken
+  away, a comment gofmt left a level deeper after a case's statements (`@either`) comes back a level up (20 such
+  lines, all comments).
+  The indent query keeps at most `MATCH_LIMIT` (1,024) matches in progress; past it tree-sitter drops the
+  oldest with no error, and a line can come out wrong. At 256 prettier's `src/ai.ts` (2,535 lines) lost matches
+  and changed lines; 512 and 1,024 were clean on every corpus file. Nothing bounds a larger or deeper file.
+  A tree with errors while typing. A bracket made up by tree-sitter (MISSING) and the brackets inside
+  an ERROR are covered, and most cases of the cargo test type into an incomplete text. One case is known wrong:
+  with electric-pair-mode off, `RET` after `switch x {` in Go and `switch (x) {` in C gives the new line one level
+  too many (the ERROR's open `{` counts, and the switch body's @none is not yet in the tree). The first `case`
+  typed and a TAB or `=` put it right. With electric-pair-mode on, the default, the `}` is there and the line is
+  right. The cost of one line inside an ERROR grows with the ERROR: its brackets come from one query over all
+  of it, and the query over the line itself walks the ERROR's children. In 10,000 lines with an unclosed `{` at
+  the top, one line in the middle took 33 ms against 56 ms for re-indenting all 10,000 lines of the closed file
+  (release, load average about 11); the cargo test bounds it at 200 ms. The ERROR is queried once a re-indent
+  however many lines are asked for, so re-indenting them all took 130 ms.
+- **Checked by** check `edwin-syntax` (24 passed, 6 new). With the stand-in's indents query, a grammar of
+  brackets:
+  - each line by its innermost holder and that holder's base, after an aligned `(a,\n     b) {`;
+  - a `@none` list's lines at the block's level, and a closing `}` at its block's base;
+  - re-indenting the indented text gives back what it had, with `b.ver` unchanged and the buffer unmodified;
+  - the text with its blanks taken away comes back, and point in a line's blanks goes to its first non-blank;
+  - the level at 4 and at 2 spaces and as a tab, with the aligned line a tab then spaces, and a string's line
+    kept;
+  - an open `{` (an ERROR) holding the lines after it;
+  - a block's base two closed conditions up (`if (a &&\n    (b ||\n     c)) {`), and the same text from bare;
+  - the queries a re-indent makes, by their ranges: a text with an unclosed `{` at the top and twelve blocks
+    (each a line a base is looked up on) re-indented whole queries the region once and the ERROR once; one line
+    inside it, the line with the non-blank line before it, and the ERROR; a line whose base is on a line above
+    those, that line once;
+  - null with no host.syntax, with no grammar, with no indents query and from a query that throws, the buffer
+    still highlighted;
+  - booted, by keys in rust-mode:
+    - `a{RET if x {RET g();` gives `fn f() {\n    if x {\n        g();\n    }\n}`, and the blanks before point
+      are taken away on `RET`;
+    - `RET x` between `(` and `)` gives `    g(\n        x\n    )`;
+    - `RET h();` after a closing `}` lands at the level of the block around it;
+    - `RET` inside a string takes the line above's blanks;
+    - `{RET g(); RET }` with electric-pair-mode off;
+    - `o` and `O`, and `o` on an over-indented line with blanks after its last token leaving that line as it
+      is, `gg=G` on the bare text, and TAB on one line;
+    - a text-mode buffer's `RET` takes the line above's blanks.
+
+  `nix build .#edwin`: unit tests 37 passed (2 new) and 2 ignored, `tests/gui.rs` 5 passed and 1 ignored,
+  `tests/terminal.rs` 37 passed. `natives::tests::the_syntax_natives_from_javascript` now lists the `indents`
+  kind. `natives::tests::the_core_indents_each_language_as_its_formatter` boots the core and checks, for each
+  fixture of `test/fixtures/syntax-indent`:
+  - the fixture is as rustfmt 1.9.0 (the dev shell's; 1.10.0 agrees), gofmt (Go 1.26.10), clang-format 21.1.8
+    (LLVM, IndentWidth 4) and prettier 3.9.10 formatted it; the Rust and TSX fixtures each have a line with non-ASCII text;
+  - re-indenting it makes no edit;
+  - with its blanks taken away (but in the lines the rules keep), it comes back re-indented as a region and line
+    by line.
+  The Rust, Go, C and TypeScript fixtures end with code written for the review's findings and put through the
+  formatter (each formatter is a no-op on the whole fixture): method chains in a `let`, in a condition, on an
+  operator's either side and in a tail with `.await?` (rustfmt), a `let ... else` and an attribute on a match
+  arm; a label and a comment between cases (gofmt); the nested conditions, a long `for` header, a comment before
+  `else` and `#ifdef` in a function (clang-format); braceless `if`/`else`/`while` bodies, a ternary and a member
+  chain in a declarator and in a `return`, and a broken `if` condition (prettier). That code was written for
+  the lines the review found the first engine (91379e7) moving. A gofmt'd switch with a comment a level deeper
+  after a case's statements re-indents to itself.
+
+  Then 36 cases of `(evil-newline-and-indent)` after `{`, `(`, `[`, a closing brace, a case label, a JSX
+  element, a `let ... else {`, a chain's `{` (Rust and TypeScript), the nested C conditions' `{` and a braceless
+  `if (a)`, with the pair after point and without, give the new line, and the closer's line, the formatter's
+  blanks. `natives::tests::the_core_reindents_ten_thousand_lines_in_a_second` re-indents 10,000 lines of Rust
+  with no change, under 1,000 ms; then with an unclosed `fn g() {` and `let x = (` at the top, one line in the
+  middle under 200 ms and all of them under 1,000 ms (the whole-file bound is new: the first engine took
+  534,185 ms there in a debug build). Checks `edwin-grammars` (1,152 query patterns; indents for 7 grammars),
+  `edwin-typecheck`, `edwin-structural`, `edwin-headless` and `edwin-scheme` passed. `nix flake check` passed
+  except `edwin-prog`: its Lisp bracket guard's 2 ms keystroke budget ("inside one large indented form") failed at
+  a load average of about 15. It passed when built alone at a load of 1 (65 passed, that case's median 0.67 ms).
+  After the second review (the ERROR queried once a re-indent), on the final tree: `edwin-syntax` (24),
+  `edwin-grammars`, `edwin-typecheck`, `edwin-structural` (188), `edwin-headless` (21), `edwin-scheme` (38),
+  `edwin-prog` (65: its 2 ms keystroke budget failed once at a load average of about 14 and passed built alone at
+  7) and `nix build .#edwin` (unit 37 and 2 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37)
+  passed. Not rerun: `nix flake check`.
 
 ## Comment syntax per mode (done)
 

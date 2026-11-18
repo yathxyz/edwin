@@ -1236,7 +1236,7 @@ mod tests {
         if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${what}: ${JSON.stringify(a)}, not ${JSON.stringify(b)}`);
       };
       const err = f => { try { f(); return 'no error'; } catch (e) { return e instanceof Error ? e.message : 'not an Error'; } };
-      eq(__n.synLoad('rust'), ['highlights', 'injections', 'tags'], 'kinds');
+      eq(__n.synLoad('rust'), ['highlights', 'indents', 'injections', 'tags'], 'kinds');
       const text = 'fn 𝔸() { let é = Foo; }\n';
       const t = __n.synParse('rust', text);
       eq(typeof t, 'number', 'tree');
@@ -1523,6 +1523,167 @@ mod tests {
         if (JSON.stringify(got) !== JSON.stringify(f.want)) errors.push(`${f.mode}: the definitions are\n${got.join('\n')}`);
       }
       errors.length ? errors.join('\n\n') : 'ok'
+    "#;
+
+    /// The fixtures of test/fixtures/syntax-indent, each as its formatter left it (rustfmt, gofmt, clang-format,
+    /// prettier), as a JavaScript object of mode to text.
+    fn indent_fixtures() -> String {
+        let files = [
+            ("rust-mode", include_str!("../../test/fixtures/syntax-indent/rust.rs")),
+            ("go-mode", include_str!("../../test/fixtures/syntax-indent/go.go")),
+            ("c-mode", include_str!("../../test/fixtures/syntax-indent/c.c")),
+            ("json-mode", include_str!("../../test/fixtures/syntax-indent/json.json")),
+            ("js-mode", include_str!("../../test/fixtures/syntax-indent/javascript.js")),
+            ("typescript-mode", include_str!("../../test/fixtures/syntax-indent/typescript.ts")),
+            ("tsx-mode", include_str!("../../test/fixtures/syntax-indent/tsx.tsx")),
+        ];
+        let body: Vec<String> = files.iter().map(|(m, t)| format!("{}: {}", js_str(m), js_str(t))).collect();
+        format!("{{{}}}", body.join(", "))
+    }
+
+    /// The indent engine (Ed.syntax.indent, src/syntax.ts) with the real grammars and the bundle's indents
+    /// queries: re-indenting each formatted fixture changes nothing (no edit at all); the fixture with its
+    /// blanks taken away (but in the lines the rules keep: strings and comments begun above) comes back,
+    /// re-indented as a region and line by line from the top; and RET (evil-newline-and-indent) after {, ( and
+    /// a closing brace, with the bracket's pair after point (electric-pair-mode) and without, puts the new line
+    /// at the column of the language's formatter.
+    #[test]
+    fn the_core_indents_each_language_as_its_formatter() {
+        let code = format!("const FIXTURES = {};\n{}", indent_fixtures(), INDENT_JS);
+        assert_eq!(with_core(code), "ok");
+    }
+
+    const INDENT_JS: &str = r#"
+      const Ed = globalThis.Ed, S = globalThis.Scheme;
+      const errors = [];
+      let n = 0;
+      const buffer = (mode, text) => {
+        const b = Ed.getBufferCreate(`indent-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, mode);
+        Ed.setWindowBuffer(b);
+        return b;
+      };
+      const firstDiff = (a, b) => {
+        const x = a.split('\n'), y = b.split('\n');
+        const i = x.findIndex((l, k) => l !== y[k]);
+        return `line ${i + 1}: ${JSON.stringify(x[i])}, not ${JSON.stringify(y[i])}`;
+      };
+      for (const [mode, text] of Object.entries(FIXTURES)) {
+        const b = buffer(mode, text), ver = b.ver;
+        b.modified = false;
+        const want = Ed.syntax.indents(b, 0, text.length);
+        if (!want) { errors.push(`${mode}: no indent rules`); continue; }
+        if (Ed.syntax.indent(b, 0, text.length, false) === null) errors.push(`${mode}: no indent rules`);
+        if (b.ver !== ver || b.modified || b.rope.toString() !== text)
+          errors.push(`${mode}: re-indenting the formatted text changed it: ${firstDiff(b.rope.toString(), text)}`);
+        /* Its blanks taken away but where the rules keep them. */
+        const lines = text.split('\n');
+        const bare = lines.map((l, i) => want.want[i] === null ? l : l.replace(/^[ \t]+/, '')).join('\n');
+        const r = buffer(mode, bare);
+        Ed.syntax.indent(r, 0, bare.length, false);
+        if (r.rope.toString() !== text) errors.push(`${mode}: re-indenting the bare text as a region: ${firstDiff(r.rope.toString(), text)}`);
+        const l = buffer(mode, bare);
+        for (let ls = 0; ls < l.rope.length; ls = Ed.eol(l.rope, ls) + 1) Ed.syntax.indent(l, ls, ls, false);
+        if (l.rope.toString() !== text) errors.push(`${mode}: re-indenting the bare text line by line: ${firstDiff(l.rope.toString(), text)}`);
+      }
+      /* gofmt's output the bare text cannot bring back: a comment after a case's statements at their level (gofmt
+         keeps it there or at the case's), which re-indenting leaves where it is. */
+      const KEPT = [
+        ['go-mode', 'package main\n\nfunc f(x int) {\n\tswitch x {\n\tcase 1:\n\t\tg()\n\t\t// still one\n\tcase 2:\n\t\th()\n\t// before the default\n\tdefault:\n\t}\n}\n'],
+      ];
+      for (const [mode, text] of KEPT) {
+        const b = buffer(mode, text);
+        Ed.syntax.indent(b, 0, text.length, false);
+        if (b.rope.toString() !== text) errors.push(`${mode}: re-indenting gofmt's comments changed them: ${firstDiff(b.rope.toString(), text)}`);
+      }
+      /* [mode, text with | for point, the blanks of the line point is on after RET, those of the line after it
+         or null] */
+      const CASES = [
+        ['rust-mode', 'fn main() {|', '    ', null],
+        ['rust-mode', 'fn main() {|}', '    ', ''],
+        ['rust-mode', 'fn main() {\n    let x = foo(|', '        ', null],
+        ['rust-mode', 'fn main() {\n    let x = foo(|)\n}\n', '        ', '    '],
+        ['rust-mode', 'fn main() {\n    if a {\n        b\n    }|', '    ', null],
+        ['rust-mode', 'fn main() {\n    if a {\n        b\n    }|\n}\n', '    ', ''],
+        ['rust-mode', 'fn a() {\n}|\nfn b() {}\n', '', ''],
+        ['rust-mode', 'fn main() {\n    match x {|}\n}\n', '        ', '    '],
+        ['rust-mode', 'impl A {\n    fn f(&self) {|\n}\n', '        ', ''],
+        ['rust-mode', 'fn f() {\n    let Some(y) = x else {|\n}\n', '        ', ''],
+        ['rust-mode', 'fn f() {\n    let n = items\n        .iter()\n        .then(async {|});\n}\n', '            ', '        '],
+        ['go-mode', 'func main() {|', '\t', null],
+        ['go-mode', 'func main() {|}', '\t', ''],
+        ['go-mode', 'func main() {\n\tx := foo(|)\n}\n', '\t\t', '\t'],
+        ['go-mode', 'func main() {\n\tswitch x {|}\n}\n', '\t', '\t'],
+        ['go-mode', 'func main() {\n\tswitch x {\n\tcase 1:|\n\t}\n}\n', '\t\t', '\t'],
+        ['go-mode', 'func main() {\n\tif a {\n\t\tb()\n\t}|', '\t', null],
+        ['c-mode', 'int main(void) {|}', '    ', ''],
+        ['c-mode', 'int main(void) {\n    foo(|', '        ', null],
+        ['c-mode', 'int main(void) {\n    if (a) {\n        b();\n    }|', '    ', null],
+        ['c-mode', 'int main(void) {\n    if (a &&\n        (b +\n         c)) {|}\n}\n', '        ', '    '],
+        ['c-mode', 'int main(void) {\n    switch (x) {|}\n}\n', '    ', '    '],
+        ['c-mode', 'int main(void) {\n    switch (x) {\n    case 1:|\n    }\n}\n', '        ', '    '],
+        ['json-mode', '{|}', '  ', ''],
+        ['json-mode', '{\n  "a": [|', '    ', null],
+        ['json-mode', '{\n  "a": [\n    1\n  ]|', '  ', null],
+        ['typescript-mode', 'function f() {|}', '  ', ''],
+        ['typescript-mode', 'function f() {\n  const x = foo(|', '    ', null],
+        ['typescript-mode', 'function f() {\n  if (a) {\n    b();\n  }|', '  ', null],
+        ['typescript-mode', 'class A {|}', '  ', ''],
+        ['typescript-mode', 'function f() {\n  if (a)|\n}\n', '    ', ''],
+        ['typescript-mode', 'function f() {\n  const x = items\n    .map((y) => {|});\n}\n', '      ', '    '],
+        ['js-mode', 'function f() {\n  return [|]\n}\n', '    ', '  '],
+        ['js-mode', 'switch (x) {\n  case 1:|\n}\n', '    ', ''],
+        ['tsx-mode', 'const a = (\n  <div>|', '    ', null],
+        ['tsx-mode', 'const a = (\n  <div>\n    <p>x</p>|\n  </div>\n);\n', '    ', '  '],
+      ];
+      const blanks = l => l.slice(0, l.length - l.trimStart().length);
+      for (const [mode, src, want, after] of CASES) {
+        const b = buffer(mode, src.replace('|', ''));
+        b.pt = src.indexOf('|');
+        S.evalString('(evil-newline-and-indent)');
+        const t = b.rope, ls = Ed.bol(t, b.pt), le = Ed.eol(t, b.pt);
+        const line = t.slice(ls, le), next = le < t.length ? t.slice(le + 1, Ed.eol(t, le + 1)) : null;
+        const got = [blanks(line), after === null ? null : blanks(next ?? '')];
+        if (b.pt !== ls + got[0].length) errors.push(`${mode} ${JSON.stringify(src)}: point is not after the blanks`);
+        if (got[0] !== want || got[1] !== after) errors.push(`${mode} ${JSON.stringify(src)}: ${JSON.stringify(t.toString())}`);
+      }
+      errors.length ? errors.join('\n') : 'ok'
+    "#;
+
+    /// Ed.syntax.indent over 10,000 lines of Rust (the fixture repeated, its tree parsed first): the whole
+    /// re-indent, with no change to make, within a second; and with an unclosed `fn g() { let x = (` typed at
+    /// the top (the tree's errors reaching to the end), one line in the middle indented within 200 ms and the
+    /// whole re-indent (gg=G in a file with one unclosed bracket) within a second too, so that the cost of an
+    /// ERROR stays about linear in its length (each ERROR's brackets queried once a re-indent, not once a line, and
+    /// no query over one line inside it for the lines asked for).
+    /// The bounds are loose for a loaded build host; a failure names the times.
+    #[test]
+    fn the_core_reindents_ten_thousand_lines_in_a_second() {
+        let code = format!("const FIXTURES = {};\n{}", indent_fixtures(), INDENT_BIG_JS);
+        let got = with_core(code);
+        let ms: Vec<f64> = got.split(' ').map(|m| m.parse().unwrap_or_else(|_| panic!("{got}"))).collect();
+        assert!(ms.len() == 3 && ms[0] < 1000.0 && ms[1] < 200.0 && ms[2] < 1000.0, "{got} ms");
+    }
+
+    const INDENT_BIG_JS: &str = r#"
+      const Ed = globalThis.Ed, one = FIXTURES['rust-mode'];
+      const text = one.repeat(Math.ceil(10000 / one.split('\n').length));
+      const b = Ed.getBufferCreate('indent-big');
+      Ed.replaceText(b, 0, b.rope.length, text);
+      Ed.switchMajorMode(b, 'rust-mode');
+      Ed.syntax.tree(b, 'rust');
+      const ver = b.ver, t0 = Date.now();
+      Ed.syntax.indent(b, 0, text.length, false);
+      const ms = Date.now() - t0, changed = b.ver !== ver;
+      Ed.replaceText(b, 0, 0, 'fn g() {\n    let x = (\n');
+      Ed.syntax.tree(b, 'rust');
+      const mid = Ed.bol(b.rope, Math.floor(b.rope.length / 2)), t1 = Date.now();
+      Ed.syntax.indent(b, mid, mid, true);
+      const line = Date.now() - t1, t2 = Date.now();
+      Ed.syntax.indent(b, 0, b.rope.length, false);
+      const all = Date.now() - t2;
+      changed ? `the re-indent changed the text` : `${ms} ${line} ${all}`
     "#;
 
     /// expreg-expand (SPC v, scm/evil.scm) with the real grammars: from a point, the selections it steps through
