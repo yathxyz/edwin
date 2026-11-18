@@ -36,7 +36,13 @@
    attached to it they are placed as positions that follow its edits until the next publish. The mode line counts
    them, the echo area shows the ones at point, and flymake-show-buffer-diagnostics and
    flymake-show-project-diagnostics list them (RET visits one), the list becoming the error list (M-g n), kept up
-   to date as the server publishes again. */
+   to date as the server publishes again.
+
+   Workspace edits and rename (docs/steps.md, "Workspace edits and rename"): eglot-rename asks the buffer's server
+   to rename the identifier at point and applies the workspace edit it answers to every file it names or to none:
+   each file is checked (in the project, on this machine, writable, the text and version the server made the edit
+   against, ranges that neither overlap nor run past the end) before any is changed. Each buffer's part is one
+   batch and one undo step; a file not open is visited for it without being shown, and nothing is saved. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -199,11 +205,11 @@ function initializeParams(s: Session) {
     workspaceFolders: [{ uri: uri(s.root), name }],
     capabilities: {
       general: { positionEncodings: ['utf-16'] },
-      workspace: { configuration: true, workspaceFolders: true },
+      workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true } },
       textDocument: {
         synchronization: { didSave: true },
         definition: { linkSupport: true }, declaration: { linkSupport: true }, typeDefinition: { linkSupport: true },
-        implementation: { linkSupport: true }, references: {},
+        implementation: { linkSupport: true }, references: {}, rename: {},
         hover: { contentFormat: ['plaintext', 'markdown'] },
         signatureHelp: { signatureInformation: { documentationFormat: ['plaintext', 'markdown'], parameterInformation: { labelOffsets: true }, activeParameterSupport: true } },
         publishDiagnostics: { versionSupport: true },
@@ -619,8 +625,9 @@ function docParams(b: EdBuffer) {
 }
 /* Ask B's server METHOD about point, PARAMS beside the document and position, when its capabilities give CAP
    (else a user-error that it gives no WHAT): its answer. Waits for the server to be ready and then for its answer,
-   each at most timing.request; C-g quits either wait, cancelling the request. The pending change is sent first. */
-async function askAt(b: EdBuffer, method: string, cap: string, what: string, params: Record<string, unknown> = {}): Promise<unknown> {
+   each at most timing.request; C-g quits either wait, cancelling the request. The pending change is sent first,
+   and SENDING (when given) is called with the session just before the request is. */
+async function askAt(b: EdBuffer, method: string, cap: string, what: string, params: Record<string, unknown> = {}, sending?: (s: Session) => void): Promise<unknown> {
   const s = ofBuffer.get(b);
   if (!s) return signal('user-error', 'No language server for this buffer (M-x eglot starts one)');
   if (s.state !== 'running') {
@@ -632,6 +639,7 @@ async function askAt(b: EdBuffer, method: string, cap: string, what: string, par
   flush(b);
   const conn = s.conn;
   if (!conn || conn.closed() !== null || s.state !== 'running') return signal('lsp-error', `${label(s)}: not running`);
+  if (sending) sending(s);
   return quittable(conn.request(method, { ...docParams(b), ...params }, { timeout: timing.request }));
 }
 /* Ask B's server KIND about point: the places it answers, at least one. */
@@ -1151,6 +1159,243 @@ CMD('flymake-show-diagnostic', '', '', 'Show the place of the diagnostic on the 
 Ed.MODE_NAMES['flymake-diagnostics-buffer-mode'] = 'Flymake diagnostics';
 Ed.modeParents.set('flymake-diagnostics-buffer-mode', 'special-mode');
 L.set('flymake-diagnostics-buffer-mode-map', new Ed.Keymap('flymake-diagnostics-buffer-mode-map'));
+
+/* ---- workspace edits and rename ---- */
+
+/* A workspace edit changes at most EDIT_FILES_MAX files and makes at most EDIT_EDITS_MAX text edits. */
+const EDIT_FILES_MAX = 1000, EDIT_EDITS_MAX = 100_000;
+/* One file's part of a workspace edit: its absolute path, the version the server says the edits are of (null:
+   none given), and the edits, each a range of the text it was made against (from 0, UTF-16 units) and its new
+   text, in the server's order. */
+interface FileEdit { path: string; version: number | null; edits: { start: { line: number; character: number }; end: { line: number; character: number }; text: string }[] }
+/* Why an edit is not applied: a refusal says it and nothing has changed. */
+const refuse = (why: string): never => signal('user-error', `The server's edit is not applied: ${why}`) as never;
+
+/* The files of a WorkspaceEdit, as documentChanges (preferred when both are given) or changes give them. A
+   resource operation (creating, renaming or deleting a file: never offered), a document that is no file, one
+   named twice, a malformed edit and an edit past the bounds refuse the whole edit. */
+function fileEdits(edit: unknown, nm: (p: string) => string): FileEdit[] {
+  if (edit === null || edit === undefined) return [];
+  if (typeof edit !== 'object') return refuse('it is not a workspace edit');
+  const o = edit as { documentChanges?: unknown; changes?: unknown };
+  const parts: { uri: unknown; version: unknown; edits: unknown }[] = [];
+  if (Array.isArray(o.documentChanges)) {
+    for (const dc of o.documentChanges) {
+      if (!dc || typeof dc !== 'object') return refuse('a document change is malformed');
+      const c = dc as { kind?: unknown; textDocument?: { uri?: unknown; version?: unknown }; edits?: unknown };
+      if (c.kind !== undefined) return refuse(`it would ${typeof c.kind === 'string' ? clean(c.kind.slice(0, 20)).replace(/\n/g, ' ') : 'change'} a file, which is not done here`);
+      if (!c.textDocument || typeof c.textDocument !== 'object') return refuse('a document change names no document');
+      parts.push({ uri: c.textDocument.uri, version: c.textDocument.version, edits: c.edits });
+    }
+  } else if (o.changes && typeof o.changes === 'object') {
+    for (const [u, es] of Object.entries(o.changes as Record<string, unknown>)) parts.push({ uri: u, version: null, edits: es });
+  }
+  if (parts.length > EDIT_FILES_MAX) return refuse(`it changes ${parts.length} files, more than ${EDIT_FILES_MAX}`);
+  const out: FileEdit[] = [], seen = new Set<string>();
+  let n = 0;
+  for (const p of parts) {
+    const path = typeof p.uri === 'string' ? pathOf(p.uri) : null;
+    if (!path) return refuse(`${typeof p.uri === 'string' ? cut(clean(p.uri), 200) : 'a document'} is not a file`);
+    if (seen.has(path)) return refuse(`it names ${nm(path)} twice`);
+    seen.add(path);
+    if (p.version !== null && p.version !== undefined && !Number.isSafeInteger(p.version)) return refuse(`the version of ${nm(path)} is not a number`);
+    if (!Array.isArray(p.edits)) return refuse(`its edits of ${nm(path)} are not a list`);
+    if ((n += p.edits.length) > EDIT_EDITS_MAX) return refuse(`it makes more than ${EDIT_EDITS_MAX} edits`);
+    const edits: FileEdit['edits'] = [];
+    for (const e of p.edits) {
+      const r = e && typeof e === 'object' ? (e as { range?: { start?: { line?: unknown; character?: unknown }; end?: { line?: unknown; character?: unknown } } }).range : undefined;
+      const text = e && typeof e === 'object' ? (e as { newText?: unknown }).newText : undefined;
+      const st = r && typeof r === 'object' ? r.start : undefined, en = r && typeof r === 'object' ? r.end : undefined;
+      if (!st || !en || !isCount(st.line) || !isCount(st.character) || !isCount(en.line) || !isCount(en.character) || typeof text !== 'string') return refuse(`an edit of ${nm(path)} is malformed`);
+      edits.push({ start: { line: st.line, character: st.character }, end: { line: en.line, character: en.character }, text });
+    }
+    out.push({ path, version: p.version === null || p.version === undefined ? null : p.version as number, edits });
+  }
+  return out;
+}
+
+/* Who visits a path (by name or true name): the open buffers' names and true names worked out once per edit,
+   not once a file and buffer. */
+function visitors(): (path: string) => EdBuffer | null {
+  const f = Ed.host.files!, by = new Map<string, EdBuffer>();
+  for (const o of E.buffers) {
+    if (!o.file) continue;
+    const p = f.resolve(o.file);
+    if (!by.has(p)) by.set(p, o);
+    const t = f.truename ? f.truename(p) : p;
+    if (!by.has(t)) by.set(t, o);
+  }
+  return path => by.get(path) || (f.truename ? by.get(f.truename(path)) : undefined) || null;
+}
+/* PATH visited in a buffer of its own without showing it: the selected window keeps its buffer, point and
+   history. Null when it could not be visited. */
+function visitQuietly(path: string): EdBuffer | null {
+  const w = E.sel, keep = w ? { buffer: w.buffer, pt: w.pt, start: w.start, prev: w.prev.slice() } : null;
+  let v: unknown = null;
+  try { v = Ed.visit(path); } catch (e) { v = null; }
+  finally { if (w && keep) { Ed.setWindowBuffer(keep.buffer, w); w.pt = keep.pt; w.start = keep.start; w.prev = keep.prev; } }
+  return v instanceof Ed.Buffer ? v : null;
+}
+/* The ops (descending, for one applyOps batch) that make FE's edits in T, or why not: a place past T's end (the
+   start of the line after its last is its end, as a whole-document edit names it), a range ending before it starts, two that overlap. Inserts at one place keep the server's order. Each edit is cut
+   to what it changes (the text it keeps at both ends left alone, never splitting a surrogate pair or a \r\n), so
+   point and marks in an unchanged part stay. */
+const pastEnd = (p: { line: number; character: number }, lines: number) => p.line > lines || (p.line === lines && p.character > 0);
+function opsOf(t: string, fe: FileEdit, nm: (p: string) => string): EdEditOp[] | string {
+  const at = offsetsIn(t);
+  let lines = 1;
+  for (let i = 0; i < t.length; i++) { const c = t.charCodeAt(i); if (c === 10 || (c === 13 && t.charCodeAt(i + 1) !== 10)) lines++; }
+  const es: { s: number; e: number; text: string; i: number }[] = [];
+  for (const [i, x] of fe.edits.entries()) {
+    if (pastEnd(x.start, lines) || pastEnd(x.end, lines)) return `an edit of ${nm(fe.path)} is past its last line, ${lines}`;
+    if (byPlace(x.end, x.start) < 0) return `an edit of ${nm(fe.path)} ends before it starts`;
+    es.push({ s: at(x.start.line, x.start.character), e: at(x.end.line, x.end.character), text: x.text, i });
+  }
+  /* by place; at one place an insertion first, then the server's order */
+  es.sort((a, c) => a.s - c.s || (a.e === a.s ? 0 : 1) - (c.e === c.s ? 0 : 1) || a.i - c.i);
+  for (let k = 1; k < es.length; k++) if (es[k].s < es[k - 1].e) return `two edits of ${nm(fe.path)} overlap`;
+  const split = (p: number) => { const a = t.charCodeAt(p - 1), b = t.charCodeAt(p); return (isHigh(a) && isLow(b)) || (a === 13 && b === 10); };
+  const ops: EdEditOp[] = [];
+  for (let k = es.length - 1; k >= 0; k--) {
+    const { s, e, text } = es[k], old = t.slice(s, e), n = Math.min(old.length, text.length);
+    let pre = 0; while (pre < n && old.charCodeAt(pre) === text.charCodeAt(pre)) pre++;
+    let suf = 0; while (suf < n - pre && old.charCodeAt(old.length - 1 - suf) === text.charCodeAt(text.length - 1 - suf)) suf++;
+    if (pre > 0 && split(s + pre)) pre--;
+    if (suf > 0 && split(e - suf)) suf--;
+    if (pre + suf === old.length && pre + suf === text.length) continue;
+    ops.push([s + pre, old.length - pre - suf, text.slice(pre, text.length - suf)]);
+  }
+  return ops;
+}
+
+/* Apply S's server's workspace EDIT, all of it or none: every file is checked before any is changed, and a
+   refusal (a user-error saying why) changes nothing and leaves no buffer it opened. A file must be in S's root and
+   on this machine; an open one must be writable and hold the text the server made the edit against: a version
+   given must be the one it was last told of, and the buffer must have no edit it was not told of (no version:
+   the same, or for a buffer that is not its document, no unsaved change). A file not open is visited (its mode
+   on, so its server is told of it) without being shown. Each buffer's edits are one batch and one undo step;
+   OWN's step is the command's (the command loop records it). The buffers are left unsaved. Gives how many edits
+   were made in how many files, and how many files were visited for it. HELD, for an edit answering a request, is
+   the text the server held of each of its documents when the request was sent, by path (heldBy): a document whose
+   text changed since (a didChange sent while the server worked), opened since, or closed since (its buffer killed,
+   so the file would be visited afresh from the disk) is refused too, a version named or not. */
+function applyEdit(s: Session, edit: unknown, own: EdBuffer | null, held: Map<string, string> | null): { edits: number; files: number; opened: number } {
+  /* Visiting a file asks every open buffer's true name (Ed.visit's same-file check), so a thousand files visited
+     would ask a million: each path's true name is asked of the disk once while the edit is checked and applied,
+     all of it in one turn of the loop. */
+  const f = Ed.host.files, real = f && f.truename;
+  if (!f || !real) return applyEditNow(s, edit, own, held);
+  const known = new Map<string, string>();
+  f.truename = (p: string) => { let t = known.get(p); if (t === undefined) known.set(p, t = real.call(f, p)); return t; };
+  try { return applyEditNow(s, edit, own, held); } finally { f.truename = real; }
+}
+/* The text S's server holds of each of its documents, now, by the document's path and true name: by path, not by
+   buffer, so a document closed before the answer comes is still known to have been the server's. */
+function heldBy(s: Session): Map<string, string> {
+  const m = new Map<string, string>(), f = Ed.host.files!;
+  for (const b of E.buffers) {
+    const d = docs.get(b);
+    if (!d || d.s !== s || !live(d)) continue;
+    const p = f.resolve(d.file);
+    m.set(p, d.text);
+    if (f.truename) m.set(f.truename(p), d.text);
+  }
+  return m;
+}
+function applyEditNow(s: Session, edit: unknown, own: EdBuffer | null, held: Map<string, string> | null): { edits: number; files: number; opened: number } {
+  const f = Ed.host.files;
+  if (!f) return refuse('there are no files here');
+  const root = s.root.replace(/\/+$/, '') || '/', rootTrue = f.truename ? f.truename(root) : root;
+  const inRoot = (p: string) => root === '/' || p === root || p.startsWith(root + '/');
+  /* a file as the messages name it: from the root when under it */
+  const nm = (p: string) => cut(clean(root !== '/' && p.startsWith(root + '/') ? p.slice(root.length + 1) : abbr(p)).replace(/\n/g, ' '), 200);
+  const visiting = visitors();
+  const fes = fileEdits(edit, nm).filter(fe => fe.edits.length);
+  const plan: { fe: FileEdit; b: EdBuffer | null }[] = [];
+  for (const fe of fes) {
+    const shown = nm(fe.path);
+    const t = f.truename ? f.truename(fe.path) : fe.path;
+    if (!inRoot(fe.path) || !(rootTrue === '/' || t === rootTrue || t.startsWith(rootTrue + '/'))) refuse(`${shown} is not in ${nm(root)}`);
+    if (Ed.sync && Ed.sync.started && H.servedPath && H.servedPath(fe.path)) refuse(`${shown} is edwind's: edit it there`);
+    /* the text the server held of this file when the request was sent; undefined when it was not its document then */
+    const was = held ? (held.has(fe.path) ? held.get(fe.path) : held.get(t)) : undefined;
+    const b = visiting(fe.path);
+    if (!b) {
+      if (was !== undefined) refuse(`${shown} was closed while the server worked`);
+      if (!f.exists(fe.path)) refuse(`${shown}: no such file`);
+      if (fe.version !== null) refuse(`${shown} is not open, but the edit is of its version ${fe.version}`);
+      plan.push({ fe, b: null });
+      continue;
+    }
+    if (b.shared) refuse(`${nm(fe.path)} is edwind's: edit it there`);
+    if (b.readOnly) refuse(`${nm(fe.path)} is read-only`);
+    const d = docs.get(b), ours = !!d && d.s === s && live(d);
+    /* held: the file must hold the text the server held of it, and a document of the server not held then was opened since */
+    if (held && (was !== undefined ? was !== b.text : ours)) refuse(`${nm(fe.path)} has changed since the server made the edit`);
+    if (ours && b.text !== d!.text) refuse(`${nm(fe.path)} has changed since the server made the edit`);
+    if (fe.version !== null && (!ours || fe.version !== d!.sent)) refuse(`${nm(fe.path)} is not the version the edit is of (${fe.version}${ours ? `; the server was told of ${d!.sent}` : ''})`);
+    if (!ours && b.modified) refuse(`${nm(fe.path)} has changes its server was not told of`);
+    plan.push({ fe, b });
+  }
+  const opened: EdBuffer[] = [];
+  const give = (why: string): never => {
+    for (const b of opened) if (E.buffers.includes(b)) { b.modified = false; L.call('kill-buffer', [b]); }
+    return refuse(why);
+  };
+  for (const p of plan) {
+    if (p.b) continue;
+    const b = visitQuietly(p.fe.path);
+    if (!b) give(`${nm(p.fe.path)} could not be visited`);
+    if (!opened.includes(b!)) opened.push(b!);
+    if (b!.readOnly) give(`${nm(p.fe.path)} is read-only`);
+    p.b = b;
+  }
+  const batches: { b: EdBuffer; ops: EdEditOp[] }[] = [];
+  for (const p of plan) {
+    if (batches.some(x => x.b === p.b)) give(`it names ${nm(p.fe.path)} twice`);
+    const ops = opsOf(p.b!.text, p.fe, nm);
+    if (typeof ops === 'string') give(ops);
+    batches.push({ b: p.b!, ops: ops as EdEditOp[] });
+  }
+  let edits = 0, files = 0;
+  for (const { b, ops } of batches) {
+    if (!ops.length) continue;
+    if (b !== own) {
+      if (b.pendingUndo) { if (Ed.changedSince(b, b.pendingUndo.ver)) b.undo.push(b.pendingUndo); b.pendingUndo = null; }
+      b.undo.push(Ed.snap(b)); b.redo = [];
+    }
+    Ed.applyOps(b, ops);
+    b.modified = true;
+    edits += ops.length; files++;
+  }
+  return { edits, files, opened: opened.length };
+}
+
+/* The identifier at point in B, offered as the new name's start: letters, digits, _ and $. */
+function identifierAt(b: EdBuffer) {
+  const t = b.rope, re = /[\p{L}\p{N}_$]/u;
+  let s = b.pt, e = b.pt;
+  while (s > 0 && re.test(t.slice(s - 1, s))) s--;
+  while (e < t.length && re.test(t.slice(e, e + 1))) e++;
+  return t.slice(s, e);
+}
+CMD('eglot-rename', async () => {
+  const b = cur(), old = identifierAt(b);
+  return [await Ed.readMini(old ? `Rename ${old} to: ` : 'Rename to: ', old)];
+}, 'NEWNAME', "Rename the identifier at point to NEWNAME everywhere this buffer's language server finds it: its edit is applied to every file it names or to none, each buffer's part one undo step; files not open are visited for it, and nothing is saved.", async ([n]: SchemeValue[]) => {
+  const b = cur(), name = (typeof n === 'string' ? n : '').trim();
+  if (!name) return signal('user-error', 'No new name given');
+  let held: Map<string, string> | null = null;
+  const res = await askAt(b, 'textDocument/rename', 'renameProvider', 'renames', { newName: name }, s => { held = heldBy(s); });
+  const s = ofBuffer.get(b);
+  if (!E.buffers.includes(b)) return false;
+  if (!s || cur() !== b) { Ed.message(`Rename to ${cut(clean(name), 200)} dropped: ${cut(clean(b.name), 200)} ${s ? 'is no longer the current buffer' : 'left its language server'}`); return false; }
+  if (res === null || res === undefined) return signal('user-error', `${s.name} renames nothing here`);
+  const r = applyEdit(s, res, b, held);
+  if (!r.files) { Ed.message(`Nothing to rename: the server's edit changes nothing`); return false; }
+  Ed.message(`Renamed to ${cut(clean(name), 200)}: ${r.edits} edit${r.edits === 1 ? '' : 's'} in ${r.files} file${r.files === 1 ? '' : 's'}${r.opened ? ` (${r.opened} visited for it)` : ''}, not saved`);
+  return false;
+});
 
 /* ---- Scheme and commands ---- */
 

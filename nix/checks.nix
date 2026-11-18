@@ -297,10 +297,21 @@ in
   # characters), placed positions following edits and an edit not yet sent, a stale version dropped, the mode line's
   # counts, the message at point (never over a message or the minibuffer), the buffer and project lists (RET, M-g n,
   # redrawn on a publish with the place kept, another producer's error list left alone), cleared on a shutdown, a
-  # crash and eglot-mode off, the bounds; nil marking an undefined name.
+  # crash and eglot-mode off, the bounds; nil marking an undefined name. test/lsp-rename.test.mts, workspace edits and
+  # rename: eglot-rename against a stand-in answering each shape (documentChanges with versions, changes), across
+  # open files and one not open (visited unshown, told, nothing saved), UTF-16 positions over \r\n and a lone \r,
+  # one undo step a buffer, a whole-document edit ending at the line after the last; refused with nothing changed
+  # and no buffer left open: a stale version, an edit not sent, a change sent while the server worked (changes, no
+  # version), a document closed while the server worked (not visited afresh from the disk), a file opened and edited
+  # while the server worked, the answer to a buffer no
+  # longer current dropped with a message, a buffer the server does not hold with unsaved changes, a file past its end after another was visited, a
+  # resource operation, another scheme, a file out of the project (also through a link), a missing file, a
+  # directory, a backwards range, overlapping edits, a file twice, malformed edits, a read-only buffer, names from
+  # the server shown with control characters blanked; 1000 files at once, each true name asked once; inserts at
+  # one place in the server's order; nil renaming a binding.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts
     touch $out
   '';
 

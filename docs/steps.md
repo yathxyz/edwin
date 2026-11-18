@@ -4753,6 +4753,164 @@ proved by edwin-lsp. Risk named: no in-text underline.
   still there, its file's entries all after it, its file gone; a bad entry, another owner, no owner and another
   producer's list replacing nothing.
 
+## Workspace edits and rename (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-workspace-edit`, on lsp-diagnostics; owner decision 2: the
+client in the frame, the other LSP details the plan's defaults): apply multi-file edits atomically per buffer with
+undo, and rename; proved by edwin-lsp: edits across open and unopened files, a version mismatch refused. Risk
+named: partial application across files.
+
+- **`src/lsp.ts`** holds it, beside the diagnostics (no new file). initialize now also says
+  `workspace.workspaceEdit` with `documentChanges` (no `resourceOperations`, `failureHandling` or
+  `changeAnnotationSupport`) and `textDocument.rename` (no `prepareSupport`). `Ed.lsp` is unchanged: the edit is
+  applied by a function of the file, which lsp-code-actions will call too.
+- **`eglot-rename`** (`M-x`; no key, as in the owner's Emacs) reads the new name in the minibuffer (`Rename NAME
+  to: `, with the identifier at point, letters, digits, `_` and `$`, already in it), then asks
+  `textDocument/rename` at point as the finds ask (the pending change sent first, UTF-16 positions, C-g quits and
+  cancels, `timing.request` bounds the wait for a starting server and for the answer). An empty name: `No new name
+  given`. A server whose capabilities lack `renameProvider` is not asked: `NAME gives no renames`; a null answer:
+  `NAME renames nothing here`; an error answer is signalled as lsp-rpc gives it. Nothing is done if the buffer was
+  killed when the answer comes; if it is open but no longer current, or has left its server, the answer is dropped
+  with a message (`Rename to NEW dropped: BUFFER is no longer the current buffer`), since a silent no-op after a
+  wait would read as the server having found nothing. Done: `Renamed to NEW: N edits in M files (K visited for
+  it), not saved`; an edit that changes nothing: `Nothing to rename: the server's edit changes nothing`.
+- **The workspace edit** is its `documentChanges` when it has them (each a document, its version or null, and its
+  edits), else its `changes` (edits by URI, no version). Each edit needs a range of whole non-negative numbers and a
+  string `newText` (an annotated edit is taken as a plain one). At most 1000 files and 100,000 edits.
+- **All of it or none of it.** Every file is checked before any buffer changes, and a refusal changes nothing: the
+  echo area says `The server's edit is not applied: WHY` (a user-error), the file named from the project's root,
+  with control characters blanked and cut at 200 (a terminal frame draws the echo area; a file name may hold ESC).
+  In this order:
+  - The edit's shape: a resource operation (`create`, `rename`, `delete`: never offered), a URI that is no
+    `file:` path, a file named twice, a version that is not a number, edits that are not a list, a malformed edit,
+    and the bounds.
+  - Each file must be in the session's root, by its path and by its true name (a link out of the project is
+    refused), and on this machine (not edwind's: a shared buffer or a path the served frame sends to edwind).
+  - A file a buffer visits (by name or true name): the buffer must be writable. When it is the server's document
+    there must be no edit the server was not told of (its text is the one the server holds), its text must be the
+    one the server held when the rename was asked (none sent while the server worked, and not opened since: the
+    text of each of the session's documents is kept, by path and true name, as the request goes out), and a
+    version the edit names must be the one the server was last told of (its didOpen or the last didChange sent).
+    When it is no document of this server (eglot-mode off, or another server's), the edit was made against the
+    file, so the buffer must have no unsaved change, and it may name no version; was it the server's document when
+    the rename was asked, its text must still be the one kept.
+  - A file no buffer visits: was it the server's document when the rename was asked (its buffer killed while the
+    server worked, so the disk may hold another text than the positions were computed against), it is refused:
+    `FILE was closed while the server worked`. Else it must exist, and the edit may name no version of it (a
+    server is never told of a file that is not open). It is then visited, only now that the rest has passed, in a buffer of its own without
+    being shown: the selected window keeps its buffer, point, start and history. Visiting runs `find-file-hook`,
+    so eglot-mode turns on and the server is told of the file (didOpen), as when the user visits it.
+  - Then each file's edits against its buffer's text: a place past the end (a line past the last line; the
+    start of the line after the last, as a whole-document edit may end, is taken as the end of the text, as eglot
+    and VS Code clamp it, any later character there refused), a range ending before it starts
+    and two edits that overlap are refused, and a file visited for the edit is killed again (with its didClose),
+    so a refusal leaves no buffer it opened. A file that could not be visited (a directory, unreadable) is refused
+    the same way.
+- **Applied.** Positions are UTF-16 units over `\n`, `\r\n` and a lone `\r`, a character past its line's end that
+  end, one between the halves of a pair the pair's start, as the diagnostics place them. A buffer's edits are one
+  `applyOps` batch, from the last place to the first, so each range is of the text the server saw; edits at one
+  place go insertions first, in the server's order, then the replacement there. Each edit is cut to what it changes
+  (the text it keeps at both ends, never splitting a pair or a `\r\n`), so renaming `thing` to `thingTwo` inserts
+  `Two` and point inside the name stays where it was. Each buffer's part is one undo step: the current buffer's is
+  the command's (as any command's edit), every other buffer gets a step of its own pushed before its batch (as
+  auto-revert does). The buffers are modified and left unsaved; their server is told of the change as of any edit
+  (didChange after `timing.change`).
+- **One turn of the loop.** The check and the apply are synchronous, so nothing changes between them. Visiting a
+  file asks every open buffer's true name (`Ed.visit`'s same-file check), so visiting n files asked n²/2 (502,500
+  for 1000, 2 s on ex44): while an edit is checked and applied each path's true name is asked of the disk once and
+  kept (the host's `truename` wrapped, put back after), so 1000 files visited ask 1001, holding the loop 6 to 119
+  ms on ex44. The bound stays 1000 files.
+- **Choices**, each reversible:
+  - Files not open are visited and left unsaved, as eglot does, rather than written as `*grep*`'s editing writes
+    them: so each has its undo step and nothing reaches the disk until the user saves (`:wa` saves them all).
+  - Files only in the project: a server that names a file elsewhere (a library, another checkout) is refused,
+    the whole edit with it. Visiting a file starts the server its mode has for its project, and a server may run
+    the project's code (lsp-frame-docs), so an edit outside the root could start one in a checkout the user never
+    opened.
+  - No `prepareRename`: the name read is the identifier at point by a pattern of letters, digits, `_` and `$`
+    (Edwin's `thing-at-point` takes Lisp's symbol characters, `.` and `-` among them, which would read `pkgs.foo`
+    whole); a place the server cannot rename is said by its error answer, after the name is read.
+  - A refused edit is refused whole, not applied to the files that pass: the plan's risk is partial application.
+  - A version the edit names must match exactly, and a buffer edited while the server worked is refused even with
+    no version named (nil sends `changes`, which has none): its change not sent yet, or sent while the request was
+    out (an idle timer's flush, auto-revert, a process filter), since positions of another text would land in the
+    wrong place. The text kept as the request goes out is compared, not the version, so a document changed and
+    changed back before a flush is not refused.
+- **Differences from eglot:** no `eglot-confirm-server-edits` prompt or diff preview (the rename is applied, then
+  shown by the buffers, unsaved, and undone by `u` in each); no files created, renamed or deleted (eglot does them
+  when a server sends them); no `prepareRename` placeholder; no change annotations; the name's minibuffer starts
+  with the identifier rather than offering it as the default. The server's own `workspace/applyEdit` request is not
+  answered (lsp-rpc's `-32601`): it is lsp-code-actions', with `workspace/executeCommand`.
+- **Not in it:** code actions and their commands (lsp-code-actions); `workspace/applyEdit`; renaming files;
+  saving the edited buffers; a web frame or edwind (no processes there, so no server).
+- **Checked by**, on ex44 (the build host), on the final tree (on se-match-nonlisp): `edwin-lsp` (75: 11 new; nil
+  from nixpkgs run in it) and `edwin-typecheck`; `nix flake check` (every check passed), among them `edit-lockdown`
+  (6) and `edit-security` (21), since src/lsp.ts loads in edwind, `edwin-prog` (65), and `.#edwin`'s cargo tests
+  (unit 41 and 3 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37 and 1 ignored). Two keystroke
+  budgets failed under the flake check's own parallel builds and passed rebuilt alone: `edwin-structural`'s 2 ms
+  `%` (4.45 ms at load average 11.5) and `edwin-prog`'s 2 ms bracket guard (load average 30); the flake check then
+  passed with `--max-jobs 1`. The race tests were also run against the code with their checks taken
+  out: with the comparison of the text kept at the request gone, `Renamed to thingTwo: 2 edits in 2 files, not
+  saved` where the refusal was expected; with the refusal of a document closed while the server worked gone,
+  `Renamed to thingTwo: 2 edits in 2 files (1 visited for it), not saved`, the file visited afresh and the
+  server's positions applied to text it never held (review finding, second run); with the refusal of a document
+  not held at the request but opened since gone, `Renamed to thingTwo: 2 edits in 2 files, not saved` (review
+  finding, third run).
+  test/lsp-rename.test.mts (11), against a stand-in (node) that answers `textDocument/rename` with what the test
+  wrote (a version of `@` given back as the one it was last told of that document, `@-1` one less, filled when
+  asked; a `delay` sends the answer that much later), logs each message and keeps each document's text and
+  version:
+  - initialize's `workspaceEdit` and `rename`.
+  - Across three files, two open (one current, one not shown) and one not open, as `documentChanges` with versions
+    for the open ones and null for the other: an edit of the current buffer not yet sent goes first; the prompt
+    `Rename thing to: ` holds `thing`, `Two` typed makes `thingTwo`, asked at UTF-16 position 7; every file's text
+    after, the third's with `😀`, `\r\n`, a lone `\r` and `𝄞`; `7 edits in 3 files (1 visited for it), not saved`;
+    point inside the name kept; the visited file not shown and the window's history as it was; all three modified,
+    none written; the visited file attached and told (didOpen of the file's text, then a didChange); `u` in the
+    current buffer undoes the rename and a second `u` the earlier edit; `u` in each other buffer undoes its part,
+    unmodified again, and nothing before it.
+  - Refused with every buffer as it was and no buffer left open: a version one less than the server's, a version
+    never sent, an open buffer with an edit not sent, a buffer the server does not hold (eglot-mode off) with an
+    unsaved change under `changes`, an edit past the last line of the fourth file after the third was visited for
+    it (visited, told, closed again); then the same edit with the versions right applied whole, `4 edits in 4
+    files (2 visited for it)`.
+  - A change sent while the server worked: the stand-in answers 400 ms late with `changes` (no version) for two
+    open files; while it waits the other buffer is edited and flushed (its didChange logged after the request):
+    refused, `b.fake has changed since the server made the edit`, both buffers as they were then and no buffer
+    left; with the edit taken back and sent, the same late answer applied, `2 edits in 2 files`.
+  - A document closed while the server worked: `b.fake` open with `XX` inserted and sent (the server holds
+    `XXthing`, the disk `thing`), the answer 400 ms late with an edit of `b.fake` at the server's positions; while
+    it waits the buffer is killed (its changes thrown away): refused, `b.fake was closed while the server worked`,
+    the other buffer unchanged, `b.fake` not visited for it and the file as it was. Then the buffer killed and the
+    file visited again with the same `XX` inserted and sent before the answer (1500 ms late) comes: applied,
+    `XXthingTwo`.
+  - A file opened since the rename was asked: `a.fake` open, `c.fake` not open, both `thing` on disk, the answer
+    1500 ms late with `changes` editing both; while it waits `c.fake` is visited, `XX` inserted and sent, and
+    `a.fake` made current again: refused, `c.fake has changed since the server made the edit`, `a.fake` unchanged,
+    `c.fake`'s buffer `XXthing` and the file as it was.
+  - The buffer switched while the server worked: the answer dropped, `Rename to thingTwo dropped: NAME is no
+    longer the current buffer`, nothing changed in either buffer.
+  - Refused, each saying why: a create, a rename, an `untitled:` URI, a file outside the project, one inside it
+    through a link to outside, a missing file, a directory, a backwards range, overlapping edits, a file twice
+    (documentChanges taken over changes), an edit with no `newText`, a negative character, edits that are not a list,
+    a version of a file not open, an answer that is not an object, a file name with ESC and BEL and a `kind` with
+    ESC and a newline (shown blanked), a read-only buffer; no control character in any refusal.
+  - Order: three renames on one line given out of order, and on the next line an insert, a replacement and an insert
+    at its start, giving `barbaz(barbaz, barbaz)` and `ABE`, `6 edits in 1 file`, one undo step; an edit that
+    changes nothing leaves the buffer unmodified; a whole-document edit ending at the start of the line after the
+    last applied (and undone), one ending a character later refused; a null answer, an error answer, an empty name, a server with no
+    `renameProvider` (not asked).
+  - nil from nixpkgs: `x` renamed `yy` in a let behind `/* 𝄞 */` (nil answers `changes`, no version), the three
+    places, one undo step.
+  - These mutations of src/lsp.ts each fail the suite: no version check, no check of an edit not sent, no check
+    of a change sent while the server worked (the text kept at the request not compared), no refusal of a document
+    opened since the request (`: ours` made `: false`), the edits applied
+    first to last, no undo step pushed for a buffer other than the current one, the buffers visited for a
+    refused edit left open, the root checked by path only (not by true name), the file names not cleaned, the
+    `kind` not cleaned, the true names not kept (502,500 asked, the loop held 2 s).
+  - At the bound: 1000 files, 999 not open, one edit each: all applied, 999 visited, 1001 true names asked (at most
+    3000), the loop never held 2 s (a 5 ms ticker's longest gap: 6 to 119 ms over runs).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
