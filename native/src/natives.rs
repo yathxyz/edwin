@@ -1526,7 +1526,7 @@ mod tests {
     "#;
 
     /// The fixtures of test/fixtures/syntax-indent, each as its formatter left it (rustfmt, gofmt, clang-format,
-    /// prettier), as a JavaScript object of mode to text.
+    /// prettier, alejandra), as a JavaScript object of mode to text.
     fn indent_fixtures() -> String {
         let files = [
             ("rust-mode", include_str!("../../test/fixtures/syntax-indent/rust.rs")),
@@ -1536,6 +1536,7 @@ mod tests {
             ("js-mode", include_str!("../../test/fixtures/syntax-indent/javascript.js")),
             ("typescript-mode", include_str!("../../test/fixtures/syntax-indent/typescript.ts")),
             ("tsx-mode", include_str!("../../test/fixtures/syntax-indent/tsx.tsx")),
+            ("nix-mode", include_str!("../../test/fixtures/syntax-indent/nix.nix")),
         ];
         let body: Vec<String> = files.iter().map(|(m, t)| format!("{}: {}", js_str(m), js_str(t))).collect();
         format!("{{{}}}", body.join(", "))
@@ -1684,6 +1685,137 @@ mod tests {
       Ed.syntax.indent(b, 0, b.rope.length, false);
       const all = Date.now() - t2;
       changed ? `the re-indent changed the text` : `${ms} ${line} ${all}`
+    "#;
+
+    /// Nix's indentation (nix/indents/nix.scm) with the real grammar, beside the fixture the test above re-indents:
+    /// the content of '' strings is never re-indented (gg=G over text whose other lines lost their blanks gives
+    /// alejandra's layout back with every string as it was, interpolations at odd depths too, and so does a
+    /// re-indent of each line on its own); RET, o and TAB give the new line alejandra's blanks, complete text and
+    /// half-typed; and 10,000 lines of the fixture in a list re-indent within a second, and with an unclosed
+    /// `{ a = (` typed at the top one line within 200 ms and the whole within a second.
+    #[test]
+    fn the_core_indents_nix_as_alejandra() {
+        let code = format!(
+            "const FIXTURE = {};\n{}",
+            js_str(include_str!("../../test/fixtures/syntax-indent/nix.nix")),
+            NIX_JS
+        );
+        assert_eq!(with_core(code), "ok");
+    }
+
+    const NIX_JS: &str = r#"
+      const Ed = globalThis.Ed, S = globalThis.Scheme;
+      const errors = [];
+      let n = 0;
+      const buffer = text => {
+        const b = Ed.getBufferCreate(`nix-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, 'nix-mode');
+        Ed.setWindowBuffer(b);
+        return b;
+      };
+      const firstDiff = (a, b) => {
+        const x = a.split('\n'), y = b.split('\n');
+        const i = x.findIndex((l, k) => l !== y[k]);
+        return `line ${i + 1}: ${JSON.stringify(x[i])}, not ${JSON.stringify(y[i])}`;
+      };
+      /* '' strings whose lines the rules would move if they applied: blanks at no level, an interpolation holding
+         an attribute set and another '' string, each at odd depths. BARE is the text with the blanks of the lines
+         outside the strings taken away (named here, not found by the rules). */
+      const STRINGS = [
+        '{',
+        "  a = ''",
+        '      odd',
+        '    ${',
+        '          {b = 1;}.b',
+        '    }',
+        '     x',
+        "  '';",
+        "  b = ps: ''",
+        '  low',
+        "        ${lib.concatMapStrings (p: ''",
+        '    deep ${p}',
+        "  '') ps}",
+        '   end',
+        "  '';",
+        '}',
+        '',
+      ].join('\n');
+      const OUTSIDE = new Set([0, 1, 8, 15]);
+      const bare = STRINGS.split('\n').map((l, i) => OUTSIDE.has(i) ? l.trimStart() : l).join('\n');
+      const s = buffer(bare);
+      Ed.syntax.indent(s, 0, bare.length, false);
+      if (s.rope.toString() !== STRINGS) errors.push(`gg=G around '' strings: ${firstDiff(s.rope.toString(), STRINGS)}`);
+      const each = buffer(STRINGS);
+      for (let ls = 0; ls < each.rope.length; ls = Ed.eol(each.rope, ls) + 1) Ed.syntax.indent(each, ls, ls, false);
+      if (each.rope.toString() !== STRINGS) errors.push(`= on each line around '' strings: ${firstDiff(each.rope.toString(), STRINGS)}`);
+      /* [text with | for point, the text after the keys with | for point] */
+      const RET = [
+        ['{|}', '{\n  |\n}'],
+        ['{\n  a = {|', '{\n  a = {\n    |'],
+        ['{\n  a = 1;|\n}', '{\n  a = 1;\n  |\n}'],
+        ['{\n  a = {\n    b = 1;|\n}', '{\n  a = {\n    b = 1;\n    |\n}'],
+        ['{\n  imports = [\n    ./a.nix\n  ];|\n}', '{\n  imports = [\n    ./a.nix\n  ];\n  |\n}'],
+        ['{\n  a = [|]', '{\n  a = [\n    |\n  ]'],
+        ['{\n  a = [\n    1|\n  ];\n}', '{\n  a = [\n    1\n    |\n  ];\n}'],
+        ['{\n  a =|\n}', '{\n  a =\n    |\n}'],
+        ['{\n  a = x:|\n}', '{\n  a = x:\n    |\n}'],
+        ['{\n  a = f (x: {|});\n}', '{\n  a = f (x: {\n    |\n  });\n}'],
+        ['{\n  a = with pkgs; [|]\n}', '{\n  a = with pkgs; [\n    |\n  ]\n}'],
+        ['{\n  a =\n    if b\n    then c|\n}', '{\n  a =\n    if b\n    then c\n    |\n}'],
+        ["{\n  a = ''\n    foo|\n  '';\n}", "{\n  a = ''\n    foo\n    |\n  '';\n}"],
+        ['{\n  # c|\n  a = 1;\n}', '{\n  # c\n  |\n  a = 1;\n}'],
+        ['{pkgs, ...}:|', '{pkgs, ...}:\n|'],
+        ['{pkgs, ...}: {|}', '{pkgs, ...}: {\n  |\n}'],
+        ['let|', 'let\n  |'],
+        ['let\n  a = 1;|', 'let\n  a = 1;\n  |'],
+        ['let\n  a = 1;\nin|', 'let\n  a = 1;\nin\n  |'],
+        ['let\n  a = 1;\nin {|}', 'let\n  a = 1;\nin {\n  |\n}'],
+        ['{\n  a = let\n    b = 1;\n  in|\n}', '{\n  a = let\n    b = 1;\n  in\n    |\n}'],
+      ];
+      const run = (src, form) => {
+        const c = buffer(src.replace('|', ''));
+        c.pt = src.indexOf('|');
+        S.evalString(form);
+        return c.rope.slice(0, c.pt) + '|' + c.rope.slice(c.pt, c.rope.length);
+      };
+      for (const [src, want] of RET) {
+        const got = run(src, '(evil-newline-and-indent)');
+        if (got !== want) errors.push(`RET in ${JSON.stringify(src)}: ${JSON.stringify(got)}`);
+      }
+      for (const [src, want] of [
+        ['{\n  a = 1;|\n  b = 2;\n}', '{\n  a = 1;\n  |\n  b = 2;\n}'],
+        ['{\n  a = {|\n    b = 1;\n  };\n}', '{\n  a = {\n    |\n    b = 1;\n  };\n}'],
+      ]) {
+        const got = run(src, '(evil-open-below 1)');
+        if (got !== want) errors.push(`o in ${JSON.stringify(src)}: ${JSON.stringify(got)}`);
+      }
+      for (const [src, want] of [
+        ['{\na = 1;|\n}', '{\n  a = 1;|\n}'],
+        ['{\n  a = [\n1|\n  ];\n}', '{\n  a = [\n    1|\n  ];\n}'],
+      ]) {
+        const got = run(src, '(indent-for-tab-command)');
+        if (got !== want) errors.push(`TAB in ${JSON.stringify(src)}: ${JSON.stringify(got)}`);
+      }
+      /* 10,000 lines: the fixture's expression, many times, each the value of an attribute (laid out by a first
+         re-indent). */
+      const body = FIXTURE.slice(FIXTURE.indexOf('\n') + 1).trimEnd(), count = Math.ceil(10000 / body.split('\n').length);
+      const big = buffer('{\n' + Array.from({ length: count }, (_, i) => `a${i} = ${body};\n`).join('') + '}\n');
+      Ed.syntax.indent(big, 0, big.rope.length, false);
+      const ver = big.ver, t0 = Date.now();
+      Ed.syntax.indent(big, 0, big.rope.length, false);
+      const ms = Date.now() - t0, changed = big.ver !== ver;
+      Ed.replaceText(big, 0, 0, '{\n  a = (\n');
+      Ed.syntax.tree(big, 'nix');
+      const mid = Ed.bol(big.rope, Math.floor(big.rope.length / 2)), t1 = Date.now();
+      Ed.syntax.indent(big, mid, mid, true);
+      const line = Date.now() - t1, t2 = Date.now();
+      Ed.syntax.indent(big, 0, big.rope.length, false);
+      const all = Date.now() - t2;
+      if (changed) errors.push('re-indenting 10,000 laid-out lines changed them');
+      if (big.rope.toString().split('\n').length < 10000) errors.push('fewer than 10,000 lines');
+      if (!(ms < 1000 && line < 200 && all < 1000)) errors.push(`10,000 lines: ${ms} ms, one line with an unclosed { ${line} ms, all ${all} ms`);
+      errors.length ? errors.join('\n') : 'ok'
     "#;
 
     /// Python's indentation (nix/indents/python.scm and the offside rules of src/syntax.ts) with the real grammar:

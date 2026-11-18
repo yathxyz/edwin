@@ -6676,6 +6676,132 @@ openers, dedent keywords, continuation lines, hanging brackets), with TAB cyclin
   `edwin-headless`, `edwin-structural`, `edwin-grammars` and `nix build .#edwin` (the counts above) passed again;
   `edwin-scheme`, `edit-lockdown` and `edit-security` were not re-run. Not run: `nix flake check`.
 
+## Nix indentation (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-syntax-indent-nix`): indent rules for Nix (attribute
+sets, lists, let/in, lambdas, multi-line strings never re-indented inside) matching the formatter the owner uses,
+which is alejandra.
+
+- **TAB, `=`, `RET`, `o`, `O` and `newline` in nix-mode** indent by the tree as in the other languages
+  ("Indentation by the tree"). Before, they took the line above's blanks. The rules are `nix/indents/nix.scm`
+  (the bundle's `indents` kind for `nix`) with a level of `evil-shift-width` (nix-mode's 2).
+- **The layout is alejandra 4.0.0's.**
+  - Lines inside an attribute set (`rec` and `let { }` too), a list, a parenthesis, formals, a binding, an
+    `inherit`, an interpolation, a `let`, an `if`, a `with` or an `assert` go a level in from the line the node
+    begins on.
+  - The closing bracket, `in`, `then`, `else` and the `.` of `}.a` go at that line's level.
+  - An application's arguments over lines stay at its line's level (`@flat`). So do an `assert`'s condition and
+    a `with`'s environment, and the body after `with lib;` or `assert x;` at the first one's level.
+  - A selection's `or` line and the rest go a level in.
+- **A lambda's body** (`@indent.inner`, a new capture) is a level in from the line the lambda begins on
+  (`f = x:` then the body). At the margin it gets no level: a file's `{ pkgs, ... }:` is followed by its body at
+  the margin, as alejandra lays it out. That holds only when the chain of bases up to the margin has no blanks.
+- **Comment lines between a lambda's `:` and its body** go at the lambda's base, as alejandra keeps them
+  (`f = x:`, then `  # c` at the binding's level). A body after them goes at that base too when alejandra would
+  have begun it on the `:` line (an attribute set, a list, a parenthesis, a string, a `let` or another lambda),
+  and a level in otherwise (`    y;`). Both are `@dedent` captures in the query. In a parenthesis (`map (x:`, or
+  `map (x: y:` with the comments after the second lambda's `:`), the comments and the body are a level deeper:
+  such a parenthesis is a `@shift`. A third curried lambda in a parenthesis with comments before its body is not
+  matched, and its comments and body stay a level shallower than alejandra's.
+- **A parenthesis's content** (`@shift`, a new capture, on a parenthesis holding an application, an operation,
+  a selection, a `with` or an `assert`) gets a level more for the lines it holds through a node begun on the
+  parenthesis's line. That applies when the content begins on that line and either has two lines, or would
+  otherwise have a later line at the parenthesis's line's level (a line beginning `}:` or `in` aside). This is
+  alejandra's rule: it indents a parenthesis whose lines from the second to the one before the last are not all
+  indented. An example is `(lib.recursiveUpdate {`, then `    a = 1;`, `  }`, `  b)`.
+  - Deciding re-indents the parenthesis's own lines once, without the shift, from the blanks its line has.
+  - Each parenthesis is decided once a re-indent (`Shifts` in `indents`). The decisions share the re-indent's
+    ERROR answers, so an unclosed bracket is still queried once.
+  - A lambda in a parenthesis is not shifted (alejandra's `(x:` with its body a level in), unless comment
+    lines come before its body (above).
+- **'' strings, "" strings and block comments** keep their later lines' blanks (`@keep.all`, a new capture),
+  including the lines an interpolation inside them holds. Before, a `@keep` node gave way to any holder inside it.
+  `@keep.all` is new and used only by Nix, so the other languages' `@keep` is as it was. A string's content is
+  never re-indented by `=`, TAB or the line `RET` leaves. TAB on such a line, which no rule indents, inserts blanks
+  to the next tab stop, as on any line the rules leave alone (unchanged).
+- **While typing** (an incomplete tree):
+  - a bracket tree-sitter made up holds on to the next line (`@open`), as in the other languages; so does a
+    binding or an `inherit` whose `;` it made up, and a `let` whose body it made up (`let` ... `in` typed, no body
+    yet). So `RET` after `a = 1;` in an unclosed `{`, after `a =`, after `in` and after `let` puts the new line
+    where alejandra would.
+  - In an ERROR, `src/syntax.ts`'s pairing of `@error.open` with `@error.close` changed for every language. A pair
+    now holds the lines between its brackets as an `@indent`, and its closer is an `@outdent`. Before, only the
+    brackets left open held lines, so in `f {` `a {` `b` `}` the `b` was at the `a {` line's level.
+  - Nix's query also captures `let` and `=` as openers and `in` and `;` as closers. `;` pairs only with an `=`
+    just before it. `in` pairs with the nearest `let` that no bracket after it is still open in. A closing bracket
+    pairs with the nearest bracket, closing the `=` and `let` left open after it. These four tokens are known to
+    the engine by their text (`KEYWORD_OPENS`); no other query captures them.
+- **Choices where the plan left one open:**
+  - alejandra, as the owner chose. nixfmt's layout differs from it and is not followed.
+  - The package touches `src/syntax.ts` (the three captures, the ERROR pairs), `nix/grammars.nix`,
+    `native/src/natives.rs`, `nix/checks.nix` and the README, beside the plan's query file and tests. No new
+    `src/*.ts` or `.scm` file, so the touch lists are unchanged.
+- **Not in it, and where Edwin differs from alejandra:**
+  - alejandra keeps a line beginning with `or` (a selection's default) where the input put it (at the binding's
+    level and a level in from the selection, in two tries). The rules put it
+    a level in from the selection's line, so `=` moves an `or` that alejandra left at another depth.
+  - alejandra's selections over lines with `.${` begun on a line of its own (`}` then `.${` then the key on
+    its own line) and a parenthesised selection with an `or` inside `inherit (`: the rules place these lines a level from
+    where alejandra leaves them (3 files of the last nixpkgs sample below).
+  - `RET` after a bare `inherit` gives the binding's level, not a level in; alejandra puts the names a level in
+    once the `;` is typed, and `=` then does too.
+  - Long lines are not broken and short ones not joined: only leading blanks change, as for every language.
+  - In web frames and edwind, which have no tree, nothing changes. Emacs's nix-mode indents by its own rules,
+    not alejandra's; parity with it is not attempted.
+- **Risks:** the `@shift` decision re-indents a parenthesis's lines a second time, so a file of many multi-line
+  parentheses costs more than one without (10,000 lines in a release build, in a scratch run: 68 ms for the whole re-indent, 24 ms
+  for one line with an unclosed `{` at the top, 97 ms for the whole of that). Each `@shift` parenthesis decides
+  by its own nested re-indent, so a whole re-indent grows faster than linearly with nesting depth (in the
+  review's measurements: 100 nested `(f {` 120 ms, 200 698 ms, 300 nested parentheses about 4 s), while one line
+  at depth 200 took 8 ms and a 6,405-line mkIf/mkMerge module 143 ms for the whole re-indent. A half-typed text whose tree is
+  an ERROR is placed by bracket and `let`/`=` pairing only; the cases below are the ones tested.
+- **Checked by** check `edwin-syntax` (27 passed, 1 new). With stand-in captures:
+  - a lambda's body at the margin and a level in inside a binding;
+  - a `@shift` parenthesis over three lines (shifted), with a `}:` line (not), and over two lines;
+  - a `@keep.all` string kept whatever `@indent` inside it holds a line, and a `@keep` not;
+  - an ERROR's pair of `{` `}` holding its lines and the `{` left open holding the rest; `let`/`in` and `=`/`;`
+    pairs; and a `}` closing over an `=` left open in it.
+
+  `nix build .#edwin`: unit tests 39 passed (1 new) and 2 ignored, `tests/gui.rs` 5 passed and 1 ignored,
+  `tests/terminal.rs` 37 passed.
+  - `natives::tests::the_core_indents_each_language_as_its_formatter` now has
+    `test/fixtures/syntax-indent/nix.nix` (177 lines, which alejandra 4.0.0 leaves unchanged, `alejandra
+    --check`). It re-indents with no edit. With its blanks taken away (but in the lines of strings and comments
+    begun above), it comes back as a region and line by line. It has formals with a default and `@ args`,
+    `with lib; let`, a multi-line `inherit (lib)` and `inherit (cfg)`, a block comment, lambdas in bindings, comment lines between
+    a lambda's `:` and its body (in a binding, in a parenthesis and in a curried lambda in one), an
+    `if`/`then`/`else` chain, a '' string with an interpolation holding a lambda and another '' string,
+    `map (name: {`, `++` and `//` chains, an application over lines, shifted parentheses, `}.a`, `or`, an
+    `assert` chain with `with`, `let` ... `in` with its body on its own line, and nested attribute sets and lists.
+  - The new `natives::tests::the_core_indents_nix_as_alejandra` boots the core with the real grammar:
+    - '' strings whose lines sit at no level, with an interpolation holding an attribute set and another
+      holding a lambda's '' string, at odd depths. Re-indented as a region with the blanks of the 4 lines outside
+      the strings taken away, the text comes back byte for byte. Re-indented line by line, nothing changes;
+    - 21 cases of `RET`: between `{` and `}`; after `{` and `[` left open; after a binding in a closed and in an
+      unclosed set; after a list's `];` and an element; after `a =` and `a = x:`; `f (x: {` `});`; `with pkgs; [`;
+      after `then c`; inside a '' string; after a comment; after `{pkgs, ...}:` (the margin) and
+      `{pkgs, ...}: {`; after `let`, a let's binding, `in`, `in {` and a nested `in`;
+    - 2 cases of `o` and 2 of TAB;
+    - 10,000 lines (the fixture's expression as the value of each of 57 attributes, laid out by a first
+      re-indent) re-indented with no change under 1,000 ms; then with `{` and `a = (` typed at the top, one line
+      under 200 ms and the whole under 1,000 ms.
+
+  `gg=G` (`Ed.syntax.indent` over the whole text, in a scratch test not kept), as a region, and on the text with
+  its blanks taken away as a region and line by line:
+  - the 158 `.nix` files of the owner's fleet repository (16,971 lines, all as alejandra 4.0.0 leaves them)
+    change none;
+  - 420 files of nixpkgs (the flake's input, e7439b6), formatted by alejandra 4.0.0 (27,464 lines), change
+    none (before the comment rule above, binutils' 2 comment lines moved);
+  - the 160 files of the review's nixpkgs sample (nixos/modules/services, lib and haskell-modules/lib;
+    31,701 lines), formatted, change none (before the comment rule, `lib/fixed-points.nix`'s `extends` and
+    hylafax's `systemd.nix` moved: their comments and whole lambda body went a level in);
+  - 462 more files of nixpkgs (31,728 lines), formatted, change 4: 3 under the `.${` bullet above and 1
+    under the `or` bullet.
+
+  Checks `edwin-grammars` (1,190 query patterns; indents for 9 grammars, Nix's 27), `edwin-typecheck`,
+  `edwin-structural`, `edwin-headless` (21), `edwin-prog` (65), `edwin-scheme`, `edit-lockdown` and
+  `edit-security` passed on the committed tree. Not run: `nix flake check`.
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

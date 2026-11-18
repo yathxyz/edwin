@@ -318,10 +318,13 @@ in
   # evil-shift-width or a tab, a { left open (an ERROR) queried once a re-indent, null for each fallback with
   # highlighting left alone; Python's statement lines (@offside) by the statement before them, a line's blanks
   # kept where Python takes that level, else, except, finally and case back to what they go with, a line just
-  # opened at the likeliest level and TAB after TAB a level down; booted, RET (between { and its }), o (leaving its
+  # opened at the likeliest level and TAB after TAB a level down; Nix's captures from stand-in ones, a lambda's
+  # body (@indent.inner) at the margin and a level in, a parenthesis's @shift, a @keep.all over an @indent inside it,
+  # an ERROR's pairs of brackets and of let/in and =/;; booted, RET (between { and its }), o (leaving its
   # line alone), O, = and TAB by keys, and in python-mode RET, TAB TAB, o and =. Tree-sitter's side, the
   # golden face runs and imenu lists of each language, expreg's steps and each language's formatted fixture
-  # re-indented with the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
+  # re-indented with the real grammars (Nix's alejandra-formatted, its '' strings kept) are the package's cargo
+  # tests (nix build .#edwin), which boot the core.
   # SYNTAX_RUNS raises the run count.
   edwin-syntax = pkgs.runCommand "edwin-syntax" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules

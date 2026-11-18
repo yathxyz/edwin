@@ -618,6 +618,62 @@ test('indent: a re-indent queries the lines asked for once and each ERROR once, 
   assert.deepEqual(calls.spans, [[Ed.bol(RS, Ed.bol(RS, at) - 1), Ed.eol(RS, at) + 1], [0, Ed.eol(RS, 0) + 1]]);
   ind = null;
 });
+/* A stand-in query of the captures CAPS, each [name, start, end] in the text, for the captures the bracket grammar
+   has no use for (Nix's). */
+const NIXCAPS = ['indent', 'outdent', 'keep', 'keep.all', 'indent.inner', 'shift', 'error', 'error.open', 'error.close'];
+const standIn = (caps: [string, number, number][]) => (_text: string, start: number, end: number) => ({
+  names: NIXCAPS,
+  captures: caps.filter(([, s, e]) => s < end && e > start).flatMap(([name, s, e]) => [NIXCAPS.indexOf(name), s, e, 0]),
+});
+/* T's captures: [name, the text the node starts with at its Nth occurrence, the text it ends with after that]. */
+const capAt = (t: string, name: string, from: string, to: string, nth = 0): [string, number, number] => {
+  let s = -1;
+  for (let i = 0; i <= nth; i++) s = t.indexOf(from, s + 1);
+  return [name, s, t.indexOf(to, s) + to.length];
+};
+const reindented = (t: string, caps: [string, number, number][]) => {
+  ind = standIn(caps);
+  const b = inMode('rust-mode', t);
+  for (const [k, v] of [['evil-shift-width', 2], ['indent-tabs-mode', false]] as const) { Ed.makeLocal(b, k); b.locals!.set(k, v); }
+  Ed.syntax.indent(b, 0, b.rope.length, false);
+  return b.rope.toString();
+};
+test('indent: Nix\'s captures: @indent.inner no level at the margin, @shift a level when a line would sit at its line\'s, @keep.all over an inner holder (a @keep not), an ERROR\'s pairs of brackets and of let/in and =/;', () => {
+  host.syntax = syntax; reset();
+  // A lambda's body (@indent.inner): at the margin no level, inside a holder a level in from its line's base.
+  assert.equal(reindented('x:\ny\n', [['indent.inner', 0, 4]]), 'x:\ny\n');
+  const L = '{\na = x:\ny;\n}\n';
+  assert.equal(reindented(L, [capAt(L, 'indent', '{', '}'), capAt(L, 'outdent', '}', '}'), capAt(L, 'indent.inner', 'x:', 'y')]), '{\n  a = x:\n    y;\n}\n');
+  // A @shift ( ) whose lines would otherwise sit at its line's level (the }) gives the lines a node begun on its
+  // line holds a level more; a } beginning `}:` (a lambda's formals) does not count; nor does one of two lines.
+  const caps = (t: string): [string, number, number][] => [capAt(t, 'indent', '(', ')'), capAt(t, 'shift', '(', ')'),
+    capAt(t, 'indent', '{', '}'), capAt(t, 'outdent', '}', '}')];
+  const P = '(f {\nb\n}\nc)\n';
+  assert.equal(reindented(P, caps(P)), '(f {\n    b\n  }\n  c)\n');
+  const F = '(f {\nb\n}: c\nd)\n';
+  assert.equal(reindented(F, caps(F)), '(f {\n  b\n}: c\n  d)\n');
+  const two = '(f {\nb})\n';
+  assert.equal(reindented(two, caps(two)), '(f {\n    b})\n');
+  // A @keep.all node's lines are kept though an @indent inside it holds them (an interpolation in a '' string); a
+  // @keep's only where it is the innermost holder.
+  const K = 'x = "a\n   {\n b\n }"\n';
+  assert.equal(reindented(K, [['keep.all', K.indexOf('"'), K.lastIndexOf('"') + 1], capAt(K, 'indent', '{', '}'), capAt(K, 'outdent', '}', '}')]), K);
+  assert.equal(reindented(K, [['keep', K.indexOf('"'), K.lastIndexOf('"') + 1], capAt(K, 'indent', '{', '}'), capAt(K, 'outdent', '}', '}')]),
+    'x = "a\n   {\n     b\n   }"\n');
+  // An ERROR: a pair of brackets holds the lines between them, the one left open the lines after it.
+  const E = 'f {\na {\nb\n}\nc\n';
+  assert.equal(reindented(E, [['error', 0, E.length], capAt(E, 'error.open', '{', '{'), capAt(E, 'error.open', '{', '{', 1),
+    capAt(E, 'error.close', '}', '}')]), 'f {\n  a {\n    b\n  }\n  c\n');
+  // let pairs with in and = with ; within one level of brackets; a } closes over the = and let left open in it.
+  const W = 'let\na =\n1;\nb = 2;\nin\nc\n';
+  assert.equal(reindented(W, [['error', 0, W.length], capAt(W, 'error.open', 'let', 'let'), capAt(W, 'error.open', '=', '='),
+    capAt(W, 'error.open', '=', '=', 1), capAt(W, 'error.close', ';', ';'), capAt(W, 'error.close', ';', ';', 1),
+    capAt(W, 'error.close', 'in', 'in')]), 'let\n  a =\n    1;\n  b = 2;\nin\nc\n');
+  const B = 'a = {\nb = 1\n}\nc\n';
+  assert.equal(reindented(B, [['error', 0, B.length], capAt(B, 'error.open', '=', '='), capAt(B, 'error.open', '{', '{'),
+    capAt(B, 'error.open', '=', '=', 1), capAt(B, 'error.close', '}', '}')]), 'a = {\n  b = 1\n}\n  c\n');
+  ind = null;
+});
 /* The stand-in's brackets, and the whole text an @offside node: Python's line rules for the lines no bracket or
    string holds. */
 const offside = (text: string, start: number, end: number) => {

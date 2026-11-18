@@ -9,7 +9,7 @@
 # patterns capturing one node the later wins (src/syntax.ts) and a language's own patterns are its specific ones. HCL (the Terraform mode) and GDScript ship no queries: both come from Helix, the grammar at
 # the revision Helix's queries are written for and the queries from Helix's runtime. The indents queries are
 # Edwin's own (nix/indents, the capture names src/syntax.ts reads), for Rust, Go, C, JSON, JavaScript, TypeScript,
-# TSX and Python: JavaScript's then JSX's for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The
+# TSX, Python and Nix: JavaScript's then JSX's for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The
 # edwin-grammars check loads every library and compiles every query file against it.
 {
   lib,
@@ -39,7 +39,7 @@ let
   languages = [
     (fromNixpkgs "rust" "rust-mode" g.tree-sitter-rust (queriesOf g.tree-sitter-rust [ "highlights" "injections" "tags" ] // indents [ "rust" ]))
     # Its locals.scm is comments only: upstream keeps no locals for Nix.
-    (fromNixpkgs "nix" "nix-mode" g.tree-sitter-nix (queriesOf g.tree-sitter-nix [ "highlights" "injections" "tags" ]))
+    (fromNixpkgs "nix" "nix-mode" g.tree-sitter-nix (queriesOf g.tree-sitter-nix [ "highlights" "injections" "tags" ] // indents [ "nix" ]))
     (fromNixpkgs "go" "go-mode" g.tree-sitter-go (queriesOf g.tree-sitter-go [ "highlights" "tags" ] // indents [ "go" ]))
     (fromNixpkgs "c" "c-mode" g.tree-sitter-c (queriesOf g.tree-sitter-c [ "highlights" "tags" ] // indents [ "c" ]))
     (fromNixpkgs "cpp" "c++-mode" g.tree-sitter-cpp (queriesOf g.tree-sitter-cpp [ "injections" "tags" ] // {
