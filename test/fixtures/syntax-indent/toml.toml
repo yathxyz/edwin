@@ -1,0 +1,51 @@
+# A TOML fixture, as taplo formats it.
+title = "Edwin" # a comment
+description = """
+  A multi-line string,
+    its blanks kept.
+"""
+literal = '''
+    kept too
+'''
+
+[package]
+name = "edwin"
+keywords = [
+  "an editor written in TypeScript and Scheme",
+  "with a native program",
+  "and tree-sitter",
+]
+short = [1, 2, 3]
+nested = [
+  [
+    "a fairly long string to break the line",
+    "another one",
+  ],
+  [
+    "a third string here",
+    "and a fourth one, longer",
+  ],
+]
+inline = { a = 1, b = { c = 2 } }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+long = { version = "1.0.0", features = [
+  "derive",
+  "a feature with a long name",
+  "another-long-feature-name",
+] }
+
+[[bin]]
+name = "edwin"
+path = "src/main.rs"
+
+[a.b."c d"]
+# a comment before a key
+x = 1
+dates = [
+  # a comment in an array
+  1979-05-27T07:32:00Z,
+  1979-05-27,
+]
+"ünïcode" = "ß"

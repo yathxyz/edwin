@@ -225,9 +225,11 @@ function nodes(b: EdBuffer, from: number, to: number): [number, number][] | null
               line above in the re-indent's chain of bases indented either, gives no level (alejandra's body of a
               lambda: a file's `{ pkgs, ... }:` is followed by its body at the margin, a binding's `f = x:` by its
               body a level in);
+     @indent.twice  the line is two levels deeper (google-java-format's continuation lines: +4 at a level of 2);
      @align   the line goes under the first character after the node's opening bracket, when that is on the
-              bracket's line (C's argument lists); for a node not begun by a bracket (C's for), after its first
-              `(` while the line begins before the `)` closing it; else the node is an @indent;
+              bracket's line (C's argument lists), or after its `:` (C++'s constructor initializers); for a
+              node not begun by a bracket (C's for), after its first `(` while the line begins before the `)`
+              closing it; else the node is an @indent;
      @align.start  the line goes under the node's first character (clang-format's operands);
      @keep    the line keeps its blanks (a string or comment begun on a line above); @keep.all whatever node
               inside it holds the line (a Nix string's interpolations);
@@ -246,7 +248,8 @@ function nodes(b: EdBuffer, from: number, to: number): [number, number][] | null
      @brace   a block's `{` beginning the line is at the base of the node captured so (rustfmt's `{` under a
               multi-line header);
      @either  the line keeps its blanks when they are a level more than the rules give (gofmt's comments after a
-              case's statements, at their level or the next case's);
+              case's statements, at their level or the next case's; shfmt's before an `elif`, `else` or `fi`, at
+              the if's level or its body's);
      @continue a line beginning with the same token as the lines above it continues the first of them, a level in;
    a line no node holds has no blanks. A node's base is the blanks of the line it starts on, unless that line itself
    begins inside a node that closed before this one began (the line is the tail of a longer one, as C's `    b) {`
@@ -276,7 +279,7 @@ function nodes(b: EdBuffer, from: number, to: number): [number, number][] | null
    A grammar whose query captures @offside (Python's, on its module) is indented by the offside rule: a line no node
    holds is a statement's, and since its blanks are what the tree is parsed from, it is placed by the statement
    before it, read from the text, not the tree (often wrong while typing): see offside in indents. */
-type INode = { s: number; e: number; indent: boolean; keep: boolean; align: boolean; none: boolean; chain: boolean; brace: boolean; flat: boolean; unflat: boolean; start: boolean; stem: boolean; inner: boolean; shift: boolean; keepAll: boolean };
+type INode = { s: number; e: number; indent: boolean; keep: boolean; align: boolean; none: boolean; chain: boolean; brace: boolean; flat: boolean; unflat: boolean; start: boolean; stem: boolean; inner: boolean; twice: boolean; shift: boolean; keepAll: boolean };
 type INodes = { nodes: INode[]; outdent: Map<number, number>; dedent: Set<number>; flush: Set<number>; either: Set<number>; cont: Set<number>; roots: Map<number, number[]>; hangs: Map<string, Hang>; offside: boolean };
 /* A @hang node's level: for what it holds and itself, for itself alone (@hang.self), or none (@unhang). */
 type Hang = 'held' | 'self' | 'off';
@@ -341,7 +344,7 @@ function indentNodes(syn: EdHostSyntax, id: number, t: EdText, from: number, to:
   const node = (s: number, e: number) => {
     const k = s + ',' + e;
     let n = byExtent.get(k);
-    if (!n) byExtent.set(k, n = { s, e, indent: false, keep: false, align: false, none: false, chain: false, brace: false, flat: false, unflat: false, start: false, stem: false, inner: false, shift: false, keepAll: false });
+    if (!n) byExtent.set(k, n = { s, e, indent: false, keep: false, align: false, none: false, chain: false, brace: false, flat: false, unflat: false, start: false, stem: false, inner: false, twice: false, shift: false, keepAll: false });
     return n;
   };
   for (let i = 0; i < caps.length; i += 4) {
@@ -349,6 +352,7 @@ function indentNodes(syn: EdHostSyntax, id: number, t: EdText, from: number, to:
     switch (names[caps[i]]) {
       case 'indent': node(s, e).indent = true; break;
       case 'indent.inner': { const n = node(s, e); n.indent = n.inner = true; break; }
+      case 'indent.twice': { const n = node(s, e); n.indent = n.twice = true; break; }
       case 'shift': node(s, e).shift = true; break;
       case 'keep': node(s, e).keep = true; break;
       case 'keep.all': { const n = node(s, e); n.keep = n.keepAll = true; break; }
@@ -505,11 +509,11 @@ function indents(b: EdBuffer, from: number, to: number, how?: IndentHow, shifts:
       while (joins && i + 1 < ends.length && ends[i] - n.s <= width && !t.slice(n.s, ends[i]).includes('\n')) i++;
       return i < ends.length && t.slice(n.s, ends[i]).includes('\n');
     };
-    /* Where the line beginning at P goes under the @align node N: after N's opening bracket; N's first character
-       (@align.start); for a statement (C's for), after its `(` while P is before the `)` closing it. */
+    /* Where the line beginning at P goes under the @align node N: after N's opening bracket or `:`; N's first
+       character (@align.start); for a statement (C's for), after its `(` while P is before the `)` closing it. */
     const alignOf = (n: INode, p: number) => {
       if (n.start) return n.s;
-      if ('([{'.includes(t.charAt(n.s))) return alignAt(t, n.s);
+      if ('([{:'.includes(t.charAt(n.s))) return alignAt(t, n.s);
       const o = t.indexOf('(', n.s);
       if (o < 0 || o > Ed.eol(t, n.s)) return null;
       for (let i = o, d = 0; i < p; i++) {
@@ -681,10 +685,8 @@ function indents(b: EdBuffer, from: number, to: number, how?: IndentHow, shifts:
         w = lead(up) + unit;
       } else if ((n.flat && !n.unflat) || closes(t, n, outdent.get(p)) || dedent.has(p) || (n.chain && rootSpans(n, p))) w = base(n);
       else if (n.inner && shifts.margin && base(n) === '') w = '';
-      else {
-        w = base(n) + unit;
-        if (either.has(p) && t.slice(ls, p) === w + unit) w += unit;
-      }
+      else w = base(n) + unit + (n.twice ? unit : '');
+      if (either.has(p) && w !== null && t.slice(ls, p) === w + unit) w += unit;
       /* A level for each @shift node holding the line that gives one, when the line's base is its line's. */
       if (w !== null && n) for (const P of stack)
         if (P.shift && P !== n && holds(P, p, isBlank) && Ed.bol(t, P.s) < ls && baseLine(n.s, n.s) <= Ed.bol(t, P.s) && shifted(P)) w += unit;

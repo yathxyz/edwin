@@ -8,8 +8,10 @@
 # its own; TypeScript is JavaScript's then its own, TSX JavaScript's, JSX's and TypeScript's), since of two
 # patterns capturing one node the later wins (src/syntax.ts) and a language's own patterns are its specific ones. HCL (the Terraform mode) and GDScript ship no queries: both come from Helix, the grammar at
 # the revision Helix's queries are written for and the queries from Helix's runtime. The indents queries are
-# Edwin's own (nix/indents, the capture names src/syntax.ts reads), for Rust, Go, C, JSON, JavaScript, TypeScript,
-# TSX, Python and Nix: JavaScript's then JSX's for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The
+# Edwin's own (nix/indents, the capture names src/syntax.ts reads), for Rust, Go, C, C++ (C's then its own), Java,
+# C#, JSON, JavaScript, TypeScript, TSX, Python, GDScript, Nix, shell, TOML, HCL and Meson: JavaScript's then JSX's
+# for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The other languages have none and keep
+# the line above's blanks. The
 # edwin-grammars check loads every library and compiles every query file against it.
 {
   lib,
@@ -44,9 +46,9 @@ let
     (fromNixpkgs "c" "c-mode" g.tree-sitter-c (queriesOf g.tree-sitter-c [ "highlights" "tags" ] // indents [ "c" ]))
     (fromNixpkgs "cpp" "c++-mode" g.tree-sitter-cpp (queriesOf g.tree-sitter-cpp [ "injections" "tags" ] // {
       highlights = [ "${g.tree-sitter-c}/queries/highlights.scm" "${g.tree-sitter-cpp}/queries/highlights.scm" ];
-    }))
-    (fromNixpkgs "java" "java-mode" g.tree-sitter-java (queriesOf g.tree-sitter-java [ "highlights" "tags" ]))
-    (fromNixpkgs "c_sharp" "csharp-mode" g.tree-sitter-c-sharp (queriesOf g.tree-sitter-c-sharp [ "highlights" "tags" ]))
+    } // indents [ "c" "cpp" ]))
+    (fromNixpkgs "java" "java-mode" g.tree-sitter-java (queriesOf g.tree-sitter-java [ "highlights" "tags" ] // indents [ "java" ]))
+    (fromNixpkgs "c_sharp" "csharp-mode" g.tree-sitter-c-sharp (queriesOf g.tree-sitter-c-sharp [ "highlights" "tags" ] // indents [ "c_sharp" ]))
     (fromNixpkgs "python" "python-mode" g.tree-sitter-python (queriesOf g.tree-sitter-python [ "highlights" "tags" ] // indents [ "python" ]))
     (fromNixpkgs "javascript" "js-mode" g.tree-sitter-javascript (own js [ "injections" "locals" "tags" ] // {
       highlights = [ "${js}/highlights.scm" "${js}/highlights-jsx.scm" "${js}/highlights-params.scm" ];
@@ -65,14 +67,14 @@ let
     } // indents [ "javascript" "jsx" "typescript" ]))
     (fromNixpkgs "json" "json-mode" g.tree-sitter-json (queriesOf g.tree-sitter-json [ "highlights" ] // indents [ "json" ]))
     (fromNixpkgs "yaml" "yaml-mode" g.tree-sitter-yaml (queriesOf g.tree-sitter-yaml [ "highlights" ]))
-    (fromNixpkgs "toml" "toml-mode" g.tree-sitter-toml (queriesOf g.tree-sitter-toml [ "highlights" ]))
-    (fromNixpkgs "bash" "sh-mode" g.tree-sitter-bash (queriesOf g.tree-sitter-bash [ "highlights" ]))
-    (fromHelix "hcl" "terraform-mode" hx.tree-sitter-hcl (own "${hxQueries}/hcl" [ "highlights" "injections" ]))
+    (fromNixpkgs "toml" "toml-mode" g.tree-sitter-toml (queriesOf g.tree-sitter-toml [ "highlights" ] // indents [ "toml" ]))
+    (fromNixpkgs "bash" "sh-mode" g.tree-sitter-bash (queriesOf g.tree-sitter-bash [ "highlights" ] // indents [ "bash" ]))
+    (fromHelix "hcl" "terraform-mode" hx.tree-sitter-hcl (own "${hxQueries}/hcl" [ "highlights" "injections" ] // indents [ "hcl" ]))
     # Helix's gdscript tags.scm names nodes its grammar lacks (it compiles against neither revision): left out.
-    (fromHelix "gdscript" "gdscript-mode" hx.tree-sitter-gdscript (own "${hxQueries}/gdscript" [ "highlights" "injections" ]))
+    (fromHelix "gdscript" "gdscript-mode" hx.tree-sitter-gdscript (own "${hxQueries}/gdscript" [ "highlights" "injections" ] // indents [ "gdscript" ]))
     # just's tree-sitter.json names queries-src; queries/just is the copy for Neovim.
     (fromNixpkgs "just" "just-mode" g.tree-sitter-just (own "${g.tree-sitter-just.src}/queries-src" [ "highlights" "injections" "locals" ]))
-    (fromNixpkgs "meson" "meson-mode" g.tree-sitter-meson (queriesOf g.tree-sitter-meson [ "highlights" ]))
+    (fromNixpkgs "meson" "meson-mode" g.tree-sitter-meson (queriesOf g.tree-sitter-meson [ "highlights" ] // indents [ "meson" ]))
     (fromNixpkgs "nasm" "nasm-mode" g.tree-sitter-nasm (queriesOf g.tree-sitter-nasm [ "highlights" "injections" ]))
     (fromNixpkgs "nginx" "nginx-mode" g.tree-sitter-nginx (queriesOf g.tree-sitter-nginx [ "highlights" "injections" ]))
     (fromNixpkgs "typst" "typst-mode" g.tree-sitter-typst (own "${g.tree-sitter-typst}/queries/typst" [ "highlights" "injections" ]))

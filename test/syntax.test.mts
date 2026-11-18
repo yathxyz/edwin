@@ -620,7 +620,7 @@ test('indent: a re-indent queries the lines asked for once and each ERROR once, 
 });
 /* A stand-in query of the captures CAPS, each [name, start, end] in the text, for the captures the bracket grammar
    has no use for (Nix's). */
-const NIXCAPS = ['indent', 'outdent', 'keep', 'keep.all', 'indent.inner', 'shift', 'error', 'error.open', 'error.close'];
+const NIXCAPS = ['indent', 'outdent', 'keep', 'keep.all', 'indent.inner', 'indent.twice', 'shift', 'error', 'error.open', 'error.close', 'dedent', 'either', 'align'];
 const standIn = (caps: [string, number, number][]) => (_text: string, start: number, end: number) => ({
   names: NIXCAPS,
   captures: caps.filter(([, s, e]) => s < end && e > start).flatMap(([name, s, e]) => [NIXCAPS.indexOf(name), s, e, 0]),
@@ -672,6 +672,33 @@ test('indent: Nix\'s captures: @indent.inner no level at the margin, @shift a le
   const B = 'a = {\nb = 1\n}\nc\n';
   assert.equal(reindented(B, [['error', 0, B.length], capAt(B, 'error.open', '=', '='), capAt(B, 'error.open', '{', '{'),
     capAt(B, 'error.open', '=', '=', 1), capAt(B, 'error.close', '}', '}')]), 'a = {\n  b = 1\n}\n  c\n');
+  ind = null;
+});
+test('indent: @indent.twice two levels in (google-java-format\'s continuation lines), its closer at its base, a block inside it a level in from its own line', () => {
+  host.syntax = syntax; reset();
+  const J = '{\nx =\ny(\na,\nb);\n}\n';
+  const caps = (t: string): [string, number, number][] => [capAt(t, 'indent', '{', '}'), capAt(t, 'outdent', '}', '}'),
+    capAt(t, 'indent.twice', 'x =', ';'), capAt(t, 'indent.twice', '(', ')')];
+  assert.equal(reindented(J, caps(J)), '{\n  x =\n      y(\n          a,\n          b);\n}\n');
+  const C = '{\nf(\nb\n);\n}\n';
+  assert.equal(reindented(C, [capAt(C, 'indent', '{', '}', 0), capAt(C, 'outdent', '}', '}'), capAt(C, 'indent.twice', '(', ')'),
+    capAt(C, 'outdent', ')', ')')]), '{\n  f(\n      b\n  );\n}\n');
+  ind = null;
+});
+test('indent: @either keeps a @dedent line a level in as well as at its base (shfmt\'s comment before an elif); @align after a node\'s `:` (C++\'s constructor initializers)', () => {
+  host.syntax = syntax; reset();
+  // The comment at the block's base or a level in is kept; two levels in it goes to the base.
+  const caps = (t: string): [string, number, number][] => [capAt(t, 'indent', '{', '}'), capAt(t, 'outdent', '}', '}'),
+    capAt(t, 'dedent', '# c', '# c'), capAt(t, 'either', '# c', '# c'), capAt(t, 'dedent', 'else', 'else')];
+  for (const [t, want] of [
+    ['{\na\n# c\nelse\n}\n', '{\n  a\n# c\nelse\n}\n'],
+    ['{\na\n  # c\nelse\n}\n', '{\n  a\n  # c\nelse\n}\n'],
+    ['{\na\n    # c\nelse\n}\n', '{\n  a\n# c\nelse\n}\n'],
+  ]) assert.equal(reindented(t, caps(t)), want);
+  const I = '{\n: a(0),\nb(1) {}\n}\n';
+  const end = I.lastIndexOf('}');
+  assert.equal(reindented(I, [['indent', 0, end + 1], ['outdent', end, end + 1], capAt(I, 'align', ':', 'b(1)')]),
+    '{\n  : a(0),\n    b(1) {}\n}\n');
   ind = null;
 });
 /* The stand-in's brackets, and the whole text an @offside node: Python's line rules for the lines no bracket or

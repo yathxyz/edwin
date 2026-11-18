@@ -6802,6 +6802,152 @@ which is alejandra.
   `edwin-structural`, `edwin-headless` (21), `edwin-prog` (65), `edwin-scheme`, `edit-lockdown` and
   `edit-security` passed on the committed tree. Not run: `nix flake check`.
 
+## Indentation for the remaining languages (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-syntax-indent-rest`): indent rules for the rest of the
+owner's languages (shell, YAML, TOML, HCL and the others the bundle has), one query file and one fixture each;
+a language with no rule keeps the previous line's indent. The owner left the list to the plan's default: the
+bundle's language set.
+
+- **TAB, `=`, `RET`, `o`, `O` and `newline`** indent by the tree ("Indentation by the tree") in eight more
+  modes. Each has its own query in `nix/indents/` (the bundle's `indents` kind) and a level of the mode's
+  `:indent` (`evil-shift-width`). Each follows one formatter's layout:
+  - **C++** (`cpp.scm`, after C's `c.scm`): clang-format's LLVM style at the mode's width of 4. A namespace's
+    body and an `extern "C"` block are no level. An access label (`public:`) is a level out from the members
+    (`@dedent`). A constructor's initializer list (`: a(x), b(y)` after the parameters) is a level in from the
+    function's first line, its initializers continued on later lines under the first after the `:`, and the body
+    at the function's level (`@align` on a node begun by `:`, `@stem`). A raw string's lines are kept.
+  - **Java** (`java.scm`): google-java-format. Blocks, class, interface, enum and switch bodies and a `case`'s
+    statements are a level (2) in. A continuation line (arguments, parameters, an assignment's or a
+    declaration's value, a chain of calls, a binary or ternary operation, a return value over lines) is two
+    levels (+4) in, by a new capture `@indent.twice`; so is a `throws` beginning a line, with the method's or
+    constructor's body at its level. A field's, a local variable's or such a method's annotations on lines of
+    their own, and the type after them, are at the declaration's level.
+  - **C#** (`c_sharp.scm`): CSharpier. Braces on their own lines (`@brace`, as in C), `else`, `catch` and
+    `finally` at the statement's level, switch sections and arms, initializers, and arguments over lines a level
+    in. Verbatim, raw and interpolated strings are kept.
+  - **Shell** (`bash.scm`, sh-mode): shfmt with `-i 2`. Function bodies, `if`/`then`/`elif`/`else`/`fi`,
+    loops' `do`/`done`, `case` items (their bodies until `;;`), subshells, command substitutions and arrays are
+    a level in. A command continued with `\`, and a pipeline or list continued after `|`, `&&` or `||`, are a
+    level in from its first line, every continued line at that one level however tree-sitter-bash nests the parts
+    (it reads `a | b | c || d` as `a | (b | c || d)`: a pipeline, list or redirected statement inside another is
+    no level, `@none`). A `for`'s words continued with `\` are a level in, its `do` ... `done` at the `for`'s
+    level (`@stem`). The comments just before an `elif`, `else` or `fi` stay at the `if`'s level or a level in,
+    as shfmt keeps both (`@dedent` and `@either`); other comments in the body are at its level. Here-documents'
+    lines are never re-indented (`@keep.all`), nor are strings.
+    tree-sitter-bash 0.25.1 parses a here-document piped onward (`cat <<EOF |`, then the command after its
+    `EOF`) as piping into the body's first line, the command after `EOF` a statement of its own; that line is
+    kept where it is a level in (`@either` on the statement after such a redirect).
+  - **TOML** (`toml.scm`): taplo. Arrays and inline tables over lines a level in, their closers at the line's
+    level; multi-line strings kept.
+  - **HCL** (`hcl.scm`, terraform-mode): `tofu fmt` (hclfmt lays the fixture out the same). Blocks, objects,
+    tuples, `for` expressions, function calls and an attribute's value over lines a level in. Heredocs are
+    never re-indented.
+  - **Meson** (`meson.scm`): `meson format`. `if`/`elif`/`else`/`endif` and `foreach`/`endforeach` bodies,
+    calls' arguments, lists and dictionaries a level in.
+  - **GDScript** (`gdscript.scm`): gdformat with `--use-spaces=4` (the mode's 4 spaces; gdformat's default is
+    tabs). Statement lines are placed by the offside rule as Python's are (`@offside`: a level in after a `:`,
+    out after `return`/`pass`/`break`/`continue`, `elif` and `else` at their `if`'s level), and a bracket's lines
+    as Python's (`@align`).
+- **While typing** (an incomplete tree), each query marks the brackets and block ends tree-sitter made up
+  (`@open`), and pairs an ERROR's brackets, as the earlier languages do. So `RET` after `then`, `do`, `else`, an
+  unclosed `{`, `(` or `[`, a `case` item's pattern (`a)`), `&&`, a Java or C# `if (a)` without its statement,
+  a `case 1:`, Meson's `if a` or `foreach x : y` or GDScript's `func f():` puts the new line a level in; after
+  `fi`, `done`, `;;`, `endif` or a closing brace at the block's level.
+- **YAML, nginx, Typst, NASM and Just keep the line above's blanks**, as every language did before: `RET`, `o`
+  and `O` copy them, `=` says the buffer has no indentation rules and changes nothing, and TAB inserts blanks to
+  the next tab stop (unchanged).
+  - YAML: indentation is its structure, so it is only kept, never computed (the plan's risk).
+  - nginx: the bundled grammar (tree-sitter-nginx 1.0.1, 2026-01-02) parses ordinary blocks (`upstream app {`
+    and `server 127.0.0.1:8080;` inside it) as ERRORs, so rules would misplace the lines in them.
+  - Just: a recipe's body must keep one indentation per recipe or just refuses the file, and the grammar gives
+    no complete-recipe node to hang a safe rule on; left as typed.
+  - Typst: not attempted. Its code brackets (`{ }`, `( )`, `[ ]`) are nodes the captures could hold, but its
+    markup nests by blanks (a list item under another), which would need a rule of its own; that is left open.
+  - NASM: labels and instructions sit where the author puts them, with no block structure to follow; not
+    attempted.
+- **`@indent.twice`** (new in `src/syntax.ts`): like `@indent` but the lines it holds go two levels in from the
+  node's line. Only Java uses it. Closers in it go at its base, as with `@indent`.
+- **Two engine changes in `src/syntax.ts`**: `@either` (a line kept when it is a level deeper than the rules
+  give) now holds wherever the rules place the line, not only where they put it a level in, so a `@dedent` line
+  can be kept a level in (shell's comments before an `elif`); Go's `@either` comments are placed as before. An
+  `@align` node begun by `:` aligns its lines after the `:` as after an opening bracket (C++'s initializer
+  lists); no earlier query has an `@align` node begun by `:`.
+- **Choices where the plan left one open:**
+  - Each language's formatter is the one most used with it, at the bundle mode's width: shfmt `-i 2`
+    (sh-mode's 2), taplo, `tofu fmt`, clang-format LLVM at 4, google-java-format, CSharpier, `meson format`,
+    gdformat `--use-spaces=4`. Each fixture says at its top how it was formatted (`sh.sh` after its shebang), and
+    each is that formatter's fixed point (checked with each formatter, below).
+  - C++'s access labels: LLVM puts them at `AccessModifierOffset: -2` whatever the width, which a level of 4
+    cannot give, so the C++ fixture is formatted with `-4` (a level out). Under plain LLVM `=` moves `public:`
+    two columns left.
+  - The package touches `src/syntax.ts` (`@indent.twice`, `@either` wherever the rules place a line, `@align`
+    after a `:`), `nix/grammars.nix`, `native/src/natives.rs`, `test/syntax.test.mts`, `nix/checks.nix` and the
+    README, beside the plan's query files and tests. No new `src/*.ts` or `.scm` file, so the touch lists are
+    unchanged.
+- **Not in it, and where Edwin differs from the formatters:**
+  - Shell: `RET` after a trailing `\` or after `&&` or `|`, inside a function whose `}` is not typed yet (the
+    tree an ERROR), gives the line's level, not a level in; once the `}` is typed `=` places it.
+  - Java: `RET` after a dangling `int x =` in an unclosed block gives the statement's level, not +4.
+  - A here-document's new line (`RET` inside one) takes the line above's blanks.
+  - Shell, `=` on the command after a here-document piped onward: kept where shfmt puts it (a level in), but
+    not put there from elsewhere; at the statement's level it stays too (above).
+  - Shell, `=` where tree-sitter-bash 0.25.1 cannot parse valid text: the region is an ERROR, placed by bracket
+    pairing only. `[[ $x =~ ^"declare -a" ]]` (a quoted string in a `=~` pattern) makes the rest of nixpkgs'
+    fetchurl `builder.sh` one ERROR, and `=` moves 25 of its 221 lines (shfmt-formatted). In one context, a draft
+    of the fixture, it read `wc -l`, a blank line and the `find ... |` after it as one command, and `=` put the
+    `find` line a level in; the fixture no longer has that text.
+  - nginxfmt's continuation lines (a `log_format` over lines) and anything else nginx: no rules (above).
+  - Long lines are not broken and short ones not joined: only leading blanks change, as for every language.
+  - In web frames and edwind, which have no tree, nothing changes. Emacs's sh-mode, java-mode and the others
+    indent by their own rules (cc-mode's, smie); parity with them is not attempted.
+- **Risks:** a half-typed text whose tree is an ERROR is placed by bracket pairing only; the cases below are the
+  ones tested. YAML is only kept.
+- **Checked by** check `edwin-syntax` (29 passed, 2 new): with stand-in captures, `@indent.twice` lines two
+  levels in, a closer at its base and a nested `@indent.twice` from its own line; and `@either` keeping a
+  `@dedent` line at its base or a level in (two levels in, it goes to the base), and `@align` after a node's `:`.
+
+  `nix build .#edwin` passed: unit tests 39 passed and 2 ignored (none new: the new checks are in the existing
+  fixture test), `tests/gui.rs` 5 passed and 1 ignored, `tests/terminal.rs` 37 passed.
+  The real-grammar tests were also run on their own (`cargo test --release --bin edwin the_core_`, the bundle
+  from `nix build .#edwin-grammars`, a throwaway HOME and XDG_RUNTIME_DIR): 6 passed.
+  - `natives::tests::the_core_indents_each_language_as_its_formatter` has eight more fixtures in
+    `test/fixtures/syntax-indent` (each with a non-ASCII line): `cpp.cpp` (95 lines), `java.java` (190),
+    `csharp.cs` (114), `sh.sh` (102), `toml.toml` (51), `hcl.tf` (63), `meson.build` (46) and `gdscript.gd` (57).
+    Each re-indents with no edit, and with its blanks taken away (but where the rules keep them; in GDScript
+    only in the lines inside a bracket, its other blanks being its blocks) comes back as a region and line by
+    line. The review's cases are in them: C++ constructor initializer lists (continued after the `:`, and after
+    parameters continued over lines); Java `throws` lines after parameters over lines, in a method and a
+    constructor, and annotations on lines of their own over a field, a method and a local variable; shell
+    pipelines ending in `|| d`, one with a comment line and a redirect (nixpkgs `strip.sh`'s), a `for`'s words
+    continued with `\`, and a comment before `elif` at the if's level. With the queries before the fix the test
+    fails on the C++, Java and shell fixtures.
+  - Its layouts a formatter also leaves, besides the fixture's, gained three: shell comments before `elif`,
+    `else` and `fi` a level in, the command after a here-document piped onward, and google-java-format 2.0's
+    lambda argument begun on its call's line.
+  - Its `RET` cases gained 65: TOML 5, shell 23, HCL 8, C++ 4, Java 8, C# 5, Meson 7, GDScript 5.
+  - It checks that every bundle mode with an indents query has a fixture there (Python's is
+    `the_core_indents_python_as_black`'s) and none without, and that each bundle mode without one (YAML, nginx,
+    Typst, NASM, Just) has no indents, `=` returns #f and changes nothing, and `RET` copies the line above's
+    blanks.
+
+  Each fixture is its formatter's fixed point: `clang-format --style='{BasedOnStyle: LLVM, IndentWidth: 4,
+  AccessModifierOffset: -4}'` (21.1.8), `shfmt -i 2 -d` (3.14.1), `taplo fmt` (0.10.0), `tofu fmt -check`
+  (OpenTofu 1.13.1) and `hclfmt` (2.25.0), `meson format` (1.12.1), `gdformat --use-spaces=4 --check` (gdtoolkit
+  4.5.0) and `csharpier format` (1.3.0) leave them unchanged. `java.java` was laid out by `google-java-format`
+  1.37.0; the lines the review's fix added were checked with nixpkgs' 2.0.0 only, which leaves them unchanged but
+  joins the fixture's `items.forEach(` lambda to its call's line (that layout is one of the kept ones above).
+
+  In a scratch harness not on the branch, re-indenting 94 nixpkgs shell scripts (`pkgs/build-support/setup-hooks`,
+  `pkgs/stdenv/generic` and `pkgs/build-support/*/`, each after `shfmt -i 2`, `setup.sh`'s 1,806 lines among
+  them) changes none but fetchurl's `builder.sh` (its ERROR, above), and gjf 2.0.0 and clang-format samples of
+  the review's cases are unchanged.
+
+  Checks `edwin-grammars` (1,317 query patterns; indents for 17 grammars, 8 of them new), `edwin-typecheck`,
+  `edwin-structural` (188), `edit-lockdown` (6) and `edit-security` (21) passed. On landing, `nix flake check`
+  passed (`edwin-prog` failed a keystroke budget once at load 19 and passed rebuilt alone). Not run: `gg=G` over
+  the owner's own shell, TOML or Terraform files.
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

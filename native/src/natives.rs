@@ -1526,7 +1526,8 @@ mod tests {
     "#;
 
     /// The fixtures of test/fixtures/syntax-indent, each as its formatter left it (rustfmt, gofmt, clang-format,
-    /// prettier, alejandra), as a JavaScript object of mode to text.
+    /// prettier, alejandra, shfmt -i 2, taplo, tofu fmt, google-java-format, CSharpier, meson format, gdformat
+    /// --use-spaces=4), as a JavaScript object of mode to text.
     fn indent_fixtures() -> String {
         let files = [
             ("rust-mode", include_str!("../../test/fixtures/syntax-indent/rust.rs")),
@@ -1537,6 +1538,14 @@ mod tests {
             ("typescript-mode", include_str!("../../test/fixtures/syntax-indent/typescript.ts")),
             ("tsx-mode", include_str!("../../test/fixtures/syntax-indent/tsx.tsx")),
             ("nix-mode", include_str!("../../test/fixtures/syntax-indent/nix.nix")),
+            ("c++-mode", include_str!("../../test/fixtures/syntax-indent/cpp.cpp")),
+            ("java-mode", include_str!("../../test/fixtures/syntax-indent/java.java")),
+            ("csharp-mode", include_str!("../../test/fixtures/syntax-indent/csharp.cs")),
+            ("sh-mode", include_str!("../../test/fixtures/syntax-indent/sh.sh")),
+            ("toml-mode", include_str!("../../test/fixtures/syntax-indent/toml.toml")),
+            ("terraform-mode", include_str!("../../test/fixtures/syntax-indent/hcl.tf")),
+            ("meson-mode", include_str!("../../test/fixtures/syntax-indent/meson.build")),
+            ("gdscript-mode", include_str!("../../test/fixtures/syntax-indent/gdscript.gd")),
         ];
         let body: Vec<String> = files.iter().map(|(m, t)| format!("{}: {}", js_str(m), js_str(t))).collect();
         format!("{{{}}}", body.join(", "))
@@ -1544,13 +1553,20 @@ mod tests {
 
     /// The indent engine (Ed.syntax.indent, src/syntax.ts) with the real grammars and the bundle's indents
     /// queries: re-indenting each formatted fixture changes nothing (no edit at all); the fixture with its
-    /// blanks taken away (but in the lines the rules keep: strings and comments begun above) comes back,
-    /// re-indented as a region and line by line from the top; and RET (evil-newline-and-indent) after {, ( and
-    /// a closing brace, with the bracket's pair after point (electric-pair-mode) and without, puts the new line
-    /// at the column of the language's formatter.
+    /// blanks taken away (but in the lines the rules keep: strings and comments begun above; in GDScript only
+    /// the lines inside a bracket) comes back, re-indented as a region and line by line from the top; RET
+    /// (evil-newline-and-indent) after {, ( and a closing brace, with the bracket's pair after point
+    /// (electric-pair-mode) and without, and after each language's block openers and closers, puts the new line at
+    /// the column of the language's formatter; every bundle mode with an indents query has a fixture; and each
+    /// bundle mode without one (YAML, nginx, Typst, NASM, Just, ...) keeps the line above's blanks.
     #[test]
     fn the_core_indents_each_language_as_its_formatter() {
-        let code = format!("const FIXTURES = {};\n{}", indent_fixtures(), INDENT_JS);
+        let code = format!(
+            "const FIXTURES = {}, PROG = {};\n{}",
+            indent_fixtures(),
+            js_str(include_str!("../../scm/prog.scm")),
+            INDENT_JS
+        );
         assert_eq!(with_core(code), "ok");
     }
 
@@ -1570,6 +1586,40 @@ mod tests {
         const i = x.findIndex((l, k) => l !== y[k]);
         return `line ${i + 1}: ${JSON.stringify(x[i])}, not ${JSON.stringify(y[i])}`;
       };
+      /* GDScript's statement lines are placed by the offside rule, as Python's are: their blanks are its blocks. */
+      const OFFSIDE = new Set(['gdscript-mode']);
+      /* Whether each line of TEXT begins inside a bracket, outside strings and # comments. */
+      const bracketed = text => {
+        const inside = [];
+        for (let i = 0, depth = 0, q = null; i < text.length; i++) {
+          if (i === 0 || text[i - 1] === '\n') inside.push(depth > 0 && q === null);
+          const c = text[i];
+          if (q !== null) { if (text.startsWith(q, i)) { i += q.length - 1; q = null; } else if (c === '\\') i++; continue; }
+          if (c === '#') { while (i + 1 < text.length && text[i + 1] !== '\n') i++; continue; }
+          if (c === '"' || c === "'") { q = text.startsWith(c.repeat(3), i) ? c.repeat(3) : c; i += q.length - 1; continue; }
+          if ('([{'.includes(c)) depth++;
+          else if (')]}'.includes(c)) depth--;
+        }
+        return inside;
+      };
+      /* Every mode of the bundle with an indents query has a fixture (Python's is the_core_indents_python_as_black's),
+         and no other mode does. */
+      const modes = [...PROG.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]);
+      const ruled = modes.filter(m => Ed.syntax.grammarOf(m) && globalThis.__n.synLoad(Ed.syntax.grammarOf(m)).includes('indents'));
+      const have = [...Object.keys(FIXTURES), 'python-mode'];
+      if (JSON.stringify([...ruled].sort()) !== JSON.stringify([...have].sort()))
+        errors.push(`modes with indents ${ruled} but fixtures for ${have}`);
+      /* The modes left without rules keep each line's blanks: no indents, = (syntax-indent-region) says it has none
+         and changes nothing, and RET takes the line above's blanks. */
+      for (const mode of modes.filter(m => Ed.syntax.grammarOf(m) && !ruled.includes(m))) {
+        const text = 'a:\n   b: 1\n', b = buffer(mode, text);
+        if (Ed.syntax.indents(b, 0, text.length) !== null) errors.push(`${mode}: indents without rules`);
+        if (S.evalString('(syntax-indent-region 1 (point-max))') !== false || b.rope.toString() !== text)
+          errors.push(`${mode}: = without rules: ${JSON.stringify(b.rope.toString())}`);
+        b.pt = text.indexOf('1') + 1;
+        S.evalString('(evil-newline-and-indent)');
+        if (b.rope.toString() !== 'a:\n   b: 1\n   \n') errors.push(`${mode}: RET without rules: ${JSON.stringify(b.rope.toString())}`);
+      }
       for (const [mode, text] of Object.entries(FIXTURES)) {
         const b = buffer(mode, text), ver = b.ver;
         b.modified = false;
@@ -1578,9 +1628,10 @@ mod tests {
         if (Ed.syntax.indent(b, 0, text.length, false) === null) errors.push(`${mode}: no indent rules`);
         if (b.ver !== ver || b.modified || b.rope.toString() !== text)
           errors.push(`${mode}: re-indenting the formatted text changed it: ${firstDiff(b.rope.toString(), text)}`);
-        /* Its blanks taken away but where the rules keep them. */
-        const lines = text.split('\n');
-        const bare = lines.map((l, i) => want.want[i] === null ? l : l.replace(/^[ \t]+/, '')).join('\n');
+        /* Its blanks taken away but where the rules keep them; in an offside language only in the lines that begin
+           inside a bracket. */
+        const lines = text.split('\n'), inside = OFFSIDE.has(mode) ? bracketed(text) : null;
+        const bare = lines.map((l, i) => want.want[i] === null || (inside && !inside[i]) ? l : l.replace(/^[ \t]+/, '')).join('\n');
         const r = buffer(mode, bare);
         Ed.syntax.indent(r, 0, bare.length, false);
         if (r.rope.toString() !== text) errors.push(`${mode}: re-indenting the bare text as a region: ${firstDiff(r.rope.toString(), text)}`);
@@ -1588,10 +1639,17 @@ mod tests {
         for (let ls = 0; ls < l.rope.length; ls = Ed.eol(l.rope, ls) + 1) Ed.syntax.indent(l, ls, ls, false);
         if (l.rope.toString() !== text) errors.push(`${mode}: re-indenting the bare text line by line: ${firstDiff(l.rope.toString(), text)}`);
       }
-      /* gofmt's output the bare text cannot bring back: a comment after a case's statements at their level (gofmt
-         keeps it there or at the case's), which re-indenting leaves where it is. */
+      /* Layouts a formatter also leaves, besides its fixture's, which re-indenting leaves where they are: a comment
+         after a case's statements at their level (gofmt keeps it there or at the case's); the comments before an
+         elif, an else or a fi at the body's level (shfmt keeps them there or at the if's); the command after a
+         here-document piped onward a level in (tree-sitter-bash parses it as a statement of its own); a lambda
+         argument begun on its call's line (google-java-format 2.0 lays it out so, the fixture's 1.37 on a line of
+         its own). */
       const KEPT = [
         ['go-mode', 'package main\n\nfunc f(x int) {\n\tswitch x {\n\tcase 1:\n\t\tg()\n\t\t// still one\n\tcase 2:\n\t\th()\n\t// before the default\n\tdefault:\n\t}\n}\n'],
+        ['sh-mode', 'if a; then\n  b\n  # c\nelif d; then\n  e\n  # f\n  # g\nelse\n  h\n  # i\nfi\n'],
+        ['sh-mode', 'f() {\n  cat <<EOF |\nx\nEOF\n    grep x\n  y\n}\n'],
+        ['java-mode', 'class A {\n  void f() {\n    items.forEach(item -> {\n      process(item);\n    });\n  }\n}\n'],
       ];
       for (const [mode, text] of KEPT) {
         const b = buffer(mode, text);
@@ -1637,6 +1695,71 @@ mod tests {
         ['js-mode', 'switch (x) {\n  case 1:|\n}\n', '    ', ''],
         ['tsx-mode', 'const a = (\n  <div>|', '    ', null],
         ['tsx-mode', 'const a = (\n  <div>\n    <p>x</p>|\n  </div>\n);\n', '    ', '  '],
+        ['toml-mode', 'a = [|', '  ', null],
+        ['toml-mode', 'a = [|]', '  ', ''],
+        ['toml-mode', 'a = [\n  1,|\n]\n', '  ', ''],
+        ['toml-mode', '[t]\na = 1|', '', null],
+        ['toml-mode', 'a = { b = [|] }', '  ', ''],
+        ['sh-mode', 'f() {|', '  ', null],
+        ['sh-mode', 'f() {|}', '  ', ''],
+        ['sh-mode', 'if true; then|', '  ', null],
+        ['sh-mode', 'if true; then|\nfi\n', '  ', ''],
+        ['sh-mode', 'if true; then\n  a|', '  ', null],
+        ['sh-mode', 'if true; then\n  a\nelse|', '  ', null],
+        ['sh-mode', 'if true; then\n  a\n  else|\nfi\n', '  ', ''],
+        ['sh-mode', 'if true; then\n  a\n  fi|', '', null],
+        ['sh-mode', 'for x in a b; do|', '  ', null],
+        ['sh-mode', 'for x in a b; do|\ndone\n', '  ', ''],
+        ['sh-mode', 'while true; do\n  a\n  done|', '', null],
+        ['sh-mode', 'case $x in\na)|', '  ', null],
+        ['sh-mode', 'case $x in\na)|\nesac\n', '  ', ''],
+        ['sh-mode', 'case $x in\na)\n  b\n  ;;|\nesac\n', '', ''],
+        ['sh-mode', 'case $x in|\nesac\n', '', ''],
+        ['sh-mode', 'f() {\n  cmd --a \\\n    --b|', '  ', null],
+        ['sh-mode', 'x=$(|)', '  ', ''],
+        ['sh-mode', 'arr=(|', '  ', null],
+        ['sh-mode', 'f() {\n  cat <<EOF|\nEOF\n}\n', '  ', ''],
+        ['sh-mode', 'f() {\n  if a; then\n    b\n  fi|\n}\n', '  ', ''],
+        ['sh-mode', 'case $x in\na)\n  b|\nesac\n', '  ', ''],
+        ['sh-mode', 'f() {\n  case $x in\n  a)|\n  esac\n}\n', '    ', '  '],
+        ['sh-mode', 'a &&|', '  ', null],
+        ['terraform-mode', 'resource "a" "b" {|', '  ', null],
+        ['terraform-mode', 'resource "a" "b" {|}', '  ', ''],
+        ['terraform-mode', 'locals {\n  a = {|', '    ', null],
+        ['terraform-mode', 'locals {\n  a = [|]\n}\n', '    ', '  '],
+        ['terraform-mode', 'locals {\n  a = f(|)\n}\n', '    ', '  '],
+        ['terraform-mode', 'locals {\n  a = 1|\n}\n', '  ', ''],
+        ['terraform-mode', 'a {\n  b {\n    c = 1\n  }|\n}\n', '  ', ''],
+        ['terraform-mode', 'locals {\n  a = <<EOT|\nEOT\n}\n', '  ', ''],
+        ['c++-mode', 'namespace a {|}', '', ''],
+        ['c++-mode', 'class A {|};', '    ', ''],
+        ['c++-mode', 'class A {\npublic:|\n};\n', '    ', ''],
+        ['c++-mode', 'void f() {\n    auto g = [](int a) {|};\n}\n', '        ', '    '],
+        ['java-mode', 'class A {|}', '  ', ''],
+        ['java-mode', 'class A {\n  void f() {|\n}\n', '    ', ''],
+        ['java-mode', 'class A {\n  void f() {\n    g(|);\n  }\n}\n', '        ', '    '],
+        ['java-mode', 'class A {\n  void f() {\n    switch (x) {|}\n  }\n}\n', '      ', '    '],
+        ['java-mode', 'class A {\n  void f() {\n    switch (x) {\n      case 1:|\n    }\n  }\n}\n', '        ', '    '],
+        ['java-mode', 'class A {\n  void f() {\n    if (a)|\n  }\n}\n', '      ', '  '],
+        ['java-mode', 'class A {\n  void f() {\n    x.forEach(y -> {|});\n  }\n}\n', '      ', '    '],
+        ['java-mode', 'class A {\n  void f() {\n    int x =\n        1;|\n  }\n}\n', '    ', '  '],
+        ['csharp-mode', 'class A\n{|}', '    ', ''],
+        ['csharp-mode', 'class A\n{\n    void F()\n    {\n        if (a)|\n    }\n}\n', '            ', '    '],
+        ['csharp-mode', 'class A\n{\n    void F()\n    {\n        if (a)\n            {|}\n    }\n}\n', '            ', '        '],
+        ['csharp-mode', 'class A\n{\n    void F()\n    {\n        switch (x)\n        {\n            case 1:|\n        }\n    }\n}\n', '                ', '        '],
+        ['csharp-mode', 'class A\n{\n    void F()\n    {\n        G(|);\n    }\n}\n', '            ', '        '],
+        ['meson-mode', 'if a|', '    ', null],
+        ['meson-mode', 'if a\n    b()|\nendif\n', '    ', ''],
+        ['meson-mode', 'if a\n    b()\n    else|\nendif\n', '    ', ''],
+        ['meson-mode', 'if a\n    b()\n    endif|', '', null],
+        ['meson-mode', 'foreach x : y|', '    ', null],
+        ['meson-mode', 'project(|)', '    ', ''],
+        ['meson-mode', 'a = [|', '    ', null],
+        ['gdscript-mode', 'func f():|', '    ', null],
+        ['gdscript-mode', 'func f():\n    return 1|', '', null],
+        ['gdscript-mode', 'func f():\n    if a:\n        b()\n        else:|', '        ', null],
+        ['gdscript-mode', 'func f():\n    g(|)', '        ', '    '],
+        ['gdscript-mode', 'func f():\n    match x:\n        0:|', '            ', null],
       ];
       const blanks = l => l.slice(0, l.length - l.trimStart().length);
       for (const [mode, src, want, after] of CASES) {
