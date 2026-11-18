@@ -4,8 +4,11 @@
    it for a while, and shuts it down (shutdown, exit, then KILL past a short bound) when asked and when the
    program ends.
 
-   The servers are declared by name, the major modes they serve and their argv (define-language-server, in
-   scm/lsp.scm). A declaration made while the image replays is skipped, with a message: an argv the image set would
+   The servers are declared by name, the major modes they serve, their argv and their settings
+   (define-language-server, in scm/lsp.scm, which also holds the table of the owner's servers; docs/steps.md, "The
+   server table"). The settings, JSON or worked out from the root when a session is made, answer the server's
+   workspace/configuration by section and are sent once it is initialized (workspace/didChangeConfiguration).
+   A declaration made while the image replays is skipped, with a message: an argv the image set would
    otherwise run when the user next starts a server (R16.15). It is no error, so the forms after it in the same
    file (edwind's init.scm, which a served frame evaluates as the image) still run. A session copies its server's argv when it is made, so a later
    declaration never changes what a running session starts again.
@@ -97,6 +100,8 @@ interface Session extends LspSession {
   key: string;
   state: State;
   argv: string[];
+  /* the server's settings for this root (null: none), worked out when the session was made */
+  settings: unknown;
   proc: EdProc | null;
   conn: LspRpcConnection | null;
   capabilities: Record<string, unknown> | null;
@@ -143,7 +148,7 @@ function uri(p: string) {
 
 /* ---- the servers ---- */
 
-function define(name: string, modes: string[], argv: string[]): LspServer | null {
+function define(name: string, modes: string[], argv: string[], settings: LspServer['settings'] = null): LspServer | null {
   if (Ed.proc.replaying()) {
     Ed.message(`define-language-server: ${typeof name === 'string' ? name : 'a server'} is not declared while the image replays`);
     return null;
@@ -151,7 +156,7 @@ function define(name: string, modes: string[], argv: string[]): LspServer | null
   if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9+._-]*$/i.test(name)) signal('lsp-error', 'define-language-server: the name is not a plain symbol:', name);
   if (!Array.isArray(modes) || !modes.length || modes.some(m => typeof m !== 'string' || !m)) signal('lsp-error', `define-language-server: :modes needs a non-empty list of modes for ${name}`);
   if (!Array.isArray(argv) || !argv.length || argv.some(a => typeof a !== 'string') || !argv[0]) signal('lsp-error', `define-language-server: :command needs a non-empty list of strings, the program first, for ${name}`);
-  const s = { name, modes: modes.slice(), argv: argv.slice() };
+  const s = { name, modes: modes.slice(), argv: argv.slice(), settings };
   servers.delete(name);
   servers.set(name, s);
   return s;
@@ -187,13 +192,28 @@ function clearTimers(s: Session) {
   if (s.idle) { clearTimeout(s.idle); s.idle = null; }
 }
 
-/* What the server asks of the client. Settings are lsp-servers'; until then every item is null (the server's
-   defaults). */
+/* The settings of SERVER in ROOT: its procedure's answer, or its settings as declared. */
+function settingsIn(server: LspServer, root: string): unknown {
+  return typeof server.settings === 'function' ? (server.settings as (root: string) => unknown)(root) : server.settings;
+}
+/* The part of SETTINGS a workspace/configuration item asks for: its section, a dotted path (`python.analysis`),
+   or all of them with none; null where there is nothing. */
+function section(settings: unknown, item: unknown): unknown {
+  const sec = item && typeof item === 'object' ? (item as { section?: unknown }).section : undefined;
+  if (typeof sec !== 'string' || !sec) return settings;
+  let v = settings;
+  for (const k of sec.split('.')) {
+    if (!v || typeof v !== 'object' || Array.isArray(v) || !Object.prototype.hasOwnProperty.call(v, k)) return null;
+    v = (v as Record<string, unknown>)[k];
+  }
+  return v;
+}
+/* What the server asks of the client. */
 function serverRequests(s: Session): Record<string, (params: unknown) => unknown> {
   return {
     'workspace/configuration': (p: unknown) => {
       const items = p && typeof p === 'object' && Array.isArray((p as { items?: unknown }).items) ? (p as { items: unknown[] }).items : [];
-      return items.map(() => null);
+      return items.map(item => section(s.settings, item));
     },
     'workspace/workspaceFolders': () => [{ uri: uri(s.root), name: s.root.split('/').pop() || s.root }],
     'workspace/applyEdit': (p: unknown) => serverEdit(s, p),
@@ -267,7 +287,10 @@ function launch(s: Session) {
     if (s.gen !== gen) return;
     const caps = res && typeof res === 'object' ? (res as { capabilities?: unknown }).capabilities : null;
     s.capabilities = caps && typeof caps === 'object' ? caps as Record<string, unknown> : {};
-    try { conn.notify('initialized', {}); } catch (e) { return; }   // closed: lost has run
+    try {
+      conn.notify('initialized', {});
+      if (s.settings !== null) conn.notify('workspace/didChangeConfiguration', { settings: s.settings });
+    } catch (e) { return; }   // closed: lost has run
     s.state = 'running'; s.why = null;
     Ed.message(`${label(s)}: ready`);
     for (const b of s.buffers) openDoc(s, b);
@@ -522,10 +545,12 @@ function sessionAt(server: LspServer, root: string): Session {
   if (s.state === 'failed') { s.restarts = 0; launch(s); Ed.message(`${label(s)}: starting`); }
   return s;
 }
-/* A new session of SERVER in ROOT, its child started (a refusal throws before the session is kept). */
+/* A new session of SERVER in ROOT, its child started (a refusal, or settings that fail, throw before the session is
+   kept). */
 function open(server: LspServer, root: string): Session {
+  const settings = settingsIn(server, root);
   const s: Session = {
-    key: `${server.name}\0${root}`, name: server.name, root, argv: server.argv.slice(), state: 'starting', proc: null,
+    key: `${server.name}\0${root}`, name: server.name, root, argv: server.argv.slice(), settings, state: 'starting', proc: null,
     conn: null, capabilities: null, buffers: new Set(), restarts: 0, started: 0, why: null, gen: 0, timer: null,
     idle: null, waiters: [], err: '', done: null, diags: new Map(),
   };
@@ -551,7 +576,7 @@ async function reconnect(s: Session): Promise<Session | null> {
   const bs = [...s.buffers], down = allDown;
   await shutdown(s);
   if (allDown !== down) { Ed.message(`${label(s)}: not started again: every language server was shut down`); return null; }
-  const fresh = sessionAt(servers.get(s.name) || { name: s.name, modes: [], argv: s.argv }, s.root);
+  const fresh = sessionAt(servers.get(s.name)!, s.root);   // a declared name is only ever replaced, never removed
   for (const b of bs) if (E.buffers.includes(b)) attach(fresh, b);
   idleWhenUnused(fresh);
   return fresh;
@@ -2082,11 +2107,75 @@ H.postCommand = (def, b0, failed) => {
 
 /* ---- Scheme and commands ---- */
 
-D('%lsp-declare', 'NAME MODES COMMAND', 'Declare the language server NAME for the major modes MODES, run as the argv COMMAND (define-language-server, scm/lsp.scm).',
-  ([n, m, c]: SchemeValue[]) => {
+/* The elements of V when it is a proper list, else null: an improper list, a circular one (two pointers, the slow
+   one a step for the fast one's two, so a cycle in the cdrs ends the walk) and a non-list alike. */
+function listItems(v: SchemeValue): SchemeValue[] | null {
+  const r = listWalk(v);
+  return typeof r === 'string' ? null : r;
+}
+/* listItems's walk: the elements, or why V is no proper list. */
+function listWalk(v: SchemeValue): SchemeValue[] | 'improper' | 'circular' {
+  const out: SchemeValue[] = [];
+  let slow = v;
+  for (let x = v; ; ) {
+    if (!(x instanceof L.S.Pair)) return x === L.S.NIL ? out : 'improper';
+    out.push(x.car); x = x.cdr;
+    if (!(x instanceof L.S.Pair)) return x === L.S.NIL ? out : 'improper';
+    out.push(x.car); x = x.cdr;
+    slow = (slow as SchemePair).cdr;
+    if (x === slow) return 'circular';
+  }
+}
+/* Whether the improper list V holds atoms only (no pair or vector in a car or at its end): one that is safe to
+   write out. */
+function flat(v: SchemePair): boolean {
+  const atom = (x: SchemeValue) => !(x instanceof L.S.Pair) && !Array.isArray(x);
+  let x: SchemeValue = v;
+  for (; x instanceof L.S.Pair; x = x.cdr) if (!atom(x.car)) return false;
+  return atom(x);
+}
+/* JSON of the Scheme value V, a server's settings: an alist with symbol keys an object (of a key given twice the
+   first, as assq finds it), a vector or another proper list an array, a string, a finite number, #t or #f. Anything
+   else (a symbol, a character, a procedure, '() as neither object nor array, an improper or circular list, an exact
+   integer past 2^53, which is a BigInt, a nesting past 32) signals lsp-error. */
+function settingsJson(name: string, v: SchemeValue, depth = 0): unknown {
+  const bad = (why: string) => signal('lsp-error', `define-language-server: the settings of ${name} ${why}`);
+  if (depth > 32) bad('nest past 32 levels');
+  if (typeof v === 'string' || typeof v === 'boolean') return v;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : bad(`hold ${L.S.write(v)}, which is no JSON number`);
+  if (typeof v === 'bigint') bad(`hold ${v}, past a safe integer`);   // an exact integer within 2^53 is a number
+  if (Array.isArray(v)) return v.map(x => settingsJson(name, x, depth + 1));
+  const items = v instanceof L.S.Pair ? listWalk(v) : null;
+  if (Array.isArray(items)) {
+    if (items.every(x => x instanceof L.S.Pair && x.car instanceof L.S.Sym)) {
+      const o: Record<string, unknown> = {};
+      for (const x of items as SchemePair[]) {
+        const key = (x.car as SchemeSym).name, value = settingsJson(name, x.cdr, depth + 1);
+        /* of a key given twice the first, as assq finds it: a later one is shadowed (though refused like any other
+           when it is no JSON); defined, not assigned: a key __proto__ is a key like any other */
+        if (!Object.prototype.hasOwnProperty.call(o, key)) Object.defineProperty(o, key, { value, enumerable: true, writable: true, configurable: true });
+      }
+      return o;
+    }
+    return items.map(x => settingsJson(name, x, depth + 1));
+  }
+  /* a circular list is not written out: it has no end to write. An improper one is when it is flat (the writer
+     follows cars with no guard against a cycle through them), with the likeliest cause named: an object's entry
+     whose key is no symbol (a string, say) is a pair, not an alist */
+  if (items === 'circular') bad('hold a circular list, which is no JSON');
+  if (items === 'improper') bad(`hold ${flat(v as SchemePair) ? L.S.write(v).slice(0, 80) + ', ' : ''}an improper list, which is no JSON (an object's keys are symbols)`);
+  return bad(`hold ${L.S.write(v).slice(0, 80)}, which is no JSON`);
+}
+D('%lsp-declare', 'NAME MODES COMMAND [SETTINGS]', 'Declare the language server NAME for the major modes MODES, run as the argv COMMAND, with SETTINGS (a value, or a procedure of the root) when given (define-language-server, scm/lsp.scm).',
+  ([n, m, c, st]: SchemeValue[]) => {
     const name = n instanceof L.S.Sym ? n.name : n;
-    const modes = L.arr(m).map(x => (x instanceof L.S.Sym ? x.name : x));
-    return define(name as string, modes as string[], L.arr(c) as string[]) ? n : false;
+    /* a :modes or :command that is no proper list (a circular one too) is an empty one, which define refuses */
+    const modes = (listItems(m) || []).map(x => (x instanceof L.S.Sym ? x.name : x));
+    /* nothing of the settings is looked at while the image replays: the declaration is skipped */
+    const settings = st === undefined || Ed.proc.replaying() ? null
+      : typeof st === 'function' ? (root: string) => settingsJson(String(name), L.apply(st, [root]))
+      : settingsJson(String(name), st);
+    return define(name as string, modes as string[], (listItems(c) || []) as string[], settings) ? n : false;
   });
 D('lsp--kill-buffer', '', 'kill-buffer-hook: the current buffer no longer uses its language server (didClose).', () => { detach(cur()); return false; });
 L.addHook('kill-buffer-hook', intern('lsp--kill-buffer'));

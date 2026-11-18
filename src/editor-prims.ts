@@ -946,7 +946,8 @@ CMD('write-file', 'FWrite file: ', 'FILENAME', 'Save the current buffer to FILEN
   const m = Ed.modeFor(n as string); if (m !== 'fundamental-mode' && m !== b.mode) { b.mode = m; turnOnVisitedMode(b); }
   return false;
 });
-D('file-exists-p', 'FILENAME', 'Non-nil if FILENAME is saved in this browser.', ([n]) => bool(Ed.Store.get(str(n)) !== null));
+/* With a file system, anything there (a directory too, as in Emacs); in a page, a saved file. */
+D('file-exists-p', 'FILENAME', 'Non-nil if FILENAME exists: a file or a directory in the desktop program, a saved file in a page.', ([n]) => bool(host.files ? host.files.exists(str(n)) : Ed.Store.get(str(n)) !== null));
 D('delete-file', 'FILENAME', 'Remove FILENAME from this browser’s storage.', ([n]) => { Ed.Store.del(str(n)); return false; });
 D('directory-files', '&rest IGNORED', 'Names of all saved files.', () => listOf(Ed.Store.list()));
 /* The lines a save would change in the visited file (Rope.changedLines of the file's text and the buffer's),

@@ -5291,6 +5291,188 @@ desktop-only stub; proved by edwin-lsp.
   workspace answer that its request was still the current one (a request is cancelled whenever the input changes,
   so an answer that arrives is for the input shown).
 
+## The server table (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-servers`, on lsp-symbols; owner decision 2: the client in
+the frame, the other LSP details the plan's defaults, pyright the Python server among them): the servers from the
+owner's init-prog.el with their settings (nixd, rust-analyzer, gopls, pyright, terraform-ls, clangd, a TypeScript
+server, and harper-ls for Markdown buffers, init-prog.el:217-218), tested against real servers; proved by
+edwin-lsp: definition and diagnostics from nixd and one more real server in the sandbox, harper-ls's diagnostics on
+a Markdown fixture. lsp-sessions left the table to this package, to be where standalone edwin and edwinclient both
+see it.
+
+- **The table is in `scm/lsp.scm`**, after `define-language-server`, so every runtime evaluates it as it boots,
+  before the user's init.scm: standalone edwin, and each edwinclient frame, which evaluates its own copy of the
+  shipped files (`host.config`, the program's `__scm`) in `Ed.boot`, outside the image's replay; edwind's image
+  is not involved, so no declaration is skipped there and the server runs on the frame's machine. edwind and the
+  web pages evaluate it too, where no process may start, so it only declares. Each server is found on PATH when it
+  starts, by its bare name:
+
+  | Server | Modes | Argv |
+  |---|---|---|
+  | `nixd` | nix-mode | `nixd`, with settings (below) |
+  | `rust-analyzer` | rust-mode | `rust-analyzer` |
+  | `gopls` | go-mode | `gopls` |
+  | `pyright` | python-mode | `pyright-langserver --stdio` |
+  | `terraform-ls` | terraform-mode | `terraform-ls serve` |
+  | `clangd` | c-mode, c++-mode | `clangd` |
+  | `typescript-language-server` | typescript-mode, tsx-mode, js-mode | `typescript-language-server --stdio` |
+  | `harper-ls` | markdown-mode | `harper-ls --stdio` |
+
+  Standalone edwin's init.scm declares a name again to change it (a different argv, other settings), or another
+  server for the same modes (the one declared last serves them). **An edwinclient frame cannot change the table:**
+  it has no init.scm of its own (`Ed.boot({served: true})` skips the user's), and edwind's init.scm, which it
+  evaluates as the image replays (src/sync.ts), has every `define-language-server` skipped with the message
+  `define-language-server: NAME is not declared while the image replays` (lsp-sessions), since Scheme from the
+  image may never choose a process the frame runs (decision 1). So in edwinclient, the fleet's way of running
+  Edwin, every server in this table is declared, starts by itself on a visit (see Choices), and keeps the argv and
+  settings written here; changing, adding or turning off one there means changing scm/lsp.scm.
+- **`define-language-server … :settings SETTINGS`** (new): the server's settings, JSON as Scheme. An alist with
+  symbol keys is an object (each key defined as an own property, so `__proto__` is a key like any other; of a key
+  given twice the first, as `assq` finds it, so an entry consed in front shadows the one after it; the shadowed
+  value is still checked and refused like any other), a vector
+  or another proper list an array, a string, a finite number (an exact integer within 2^53), `#t` or `#f`. Or
+  SETTINGS is a procedure of the project's root that gives them, called when a session is made for a root (so again
+  by `eglot-reconnect`, not when the server is started again after a crash, which keeps the session's). They are
+  converted when declared (a procedure's answer when the session is made): anything else (a symbol, a character, a
+  procedure, `'()`, an improper list or a circular one, NaN or an infinity, an integer past 2^53, a nesting past
+  32 levels) signals `lsp-error` naming the server, and the declaration before is kept (a circular `:modes` or
+  `:command` is refused as an empty one); a procedure that signals, or whose answer is
+  refused, fails the start before anything is spawned (`eglot: …` on a visit, the error itself from `M-x eglot`),
+  no session kept. While the image replays the declaration is skipped as before, its settings not looked at (no
+  procedure called, a bad value not even an error).
+- **Given to the server two ways, as eglot gives `eglot-workspace-configuration`:** `workspace/configuration` is
+  answered item by item from the session's settings by the item's `section`, a dotted path (`nixd`,
+  `python.analysis`), all of them for an item with no section or an empty one, null where the path finds nothing
+  (an own property of an object at each step; an array is not indexed); and once the server is initialized
+  `workspace/didChangeConfiguration` `{settings}` is sent, right after `initialized`. A server with no settings is
+  sent no `didChangeConfiguration` and is answered null for every item, as before.
+- **nixd's settings** (`lsp--nixd-settings`): `nixd.nixpkgs.expr` is `import (builtins.getFlake "ROOT").inputs.nixpkgs
+  { }` when ROOT (the project's root) is a git repository with a `flake.nix`, else `import <nixpkgs> { }`; the
+  owner's Emacs (`yath/nixd-nixpkgs-expr`) asked only for the `flake.nix`. `getFlake` on a path copies it into the
+  world-readable `/nix/store`: of a git repository (a `.git`, a directory or a worktree's file) the tracked files,
+  which are the flake; of any other directory everything in it, untracked files and all, through the path fetcher.
+  The session's root is such a directory for a jj-only repository (a `.jj` with no `.git`) and for a file outside
+  any repository (its own directory, lsp-sessions), where visiting a `.nix` file would copy, say, a whole home
+  directory holding a `flake.nix`; those roots get `<nixpkgs>`, checked by `file-exists?` on ROOT's `.git`. With a
+  git root the copy and the fetch of the flake's locked inputs (from the network, as in Emacs) happen as nixd
+  evaluates the expression. ROOT is put in a Nix string with `\`, `"`, `$` and newlines escaped (`lsp--nix-string`),
+  so no directory's name is read as Nix code. A ROOT whose name holds a `?` or a `#` gets `<nixpkgs>` as well:
+  `getFlake` reads its argument as a flake reference, where those begin a query and a fragment (`q?dir=x` would
+  name another directory, `h#frag` fails), and the forms that take them percent-encoded (`path:`, the path fetcher
+  for a git repository too; `git+file:`) are not worth a second form.
+  `lsp--nixd-settings` looks up `lsp--nix-string`, `string-append`, `file-exists?` and `string-index` by their
+  global names each time a session opens, outside the replay, so an image that redefines one of them while it
+  replays chooses the expression a frame's nixd evaluates (impure: `readFile`, fetches). That is inside the limit
+  above (an image-defined hook that runs later can already declare a server and its argv); it is written down here
+  as one more way through it, not closed.
+- **`file-exists?`** (`file-exists-p`, src/editor-prims.ts) now asks the host's file system (`host.files.exists`,
+  a stat) in the desktop program, so a directory exists as in Emacs; before it read the file, which was false of
+  every directory. In a page it is still whether the name is saved. scm/lsp.scm was its only caller.
+- **Choices**, each reversible:
+  - Python: pyright (`pyright-langserver --stdio`), the plan's default (decision 2's answer).
+  - TypeScript: typescript-language-server, eglot's own first choice for these modes; it serves js-mode too, as
+    eglot's table has it.
+  - Every server in the table starts by itself when a file of its modes is visited (lsp-frame-docs's eglot-mode),
+    where the owner's Emacs ran `eglot-ensure` only for Nix, Terraform, Markdown, C#, Go and Rust: the plan names
+    pyright, clangd and the TypeScript server for the table, and a declared server is one that starts. Not
+    declaring one (in this file) is how a mode is kept off. Standalone edwin's init.scm cannot undeclare one, only
+    replace it; in edwinclient nothing outside this file can change one (above), so there pyright, clangd and the
+    TypeScript server start on a visit as the rest do, and a host without one says so on each visit.
+  - A server missing from PATH is said on each visit of a file of its modes (`eglot: process-error: …`), the visit
+    going on, as eglot-ensure says it in Emacs; a host without, say, gopls sees that line when it opens Go.
+  - nixd's `formatting.command` is not set: Edwin never asks a server to format (`format-buffer` runs alejandra
+    itself, the owner's Nix formatter).
+  - The settings procedure gets the session's root, which is the nearest directory up from the file that holds a
+    `.git` or a `.jj`, else the file's own (lsp-sessions), not the nearest `flake.nix` up from the file as in the
+    owner's Emacs: a flake in a subdirectory of a repository falls back to `<nixpkgs>`.
+  - A settings value refused as no JSON names what it holds: a circular list is said to be one (it cannot be
+    written out), an improper list is written out and the message adds that an object's keys are symbols, since a
+    string-keyed alist such as `(("a" . 1))` is the likeliest way to reach it (its entries are pairs, not lists).
+- **Differences from the owner's Emacs and eglot:** nixd's option sources (`yath/nixd-known-flake-option-sources`,
+  the fleet repository's NixOS and Home Manager options) are not in Edwin: they name one machine's checkout, host
+  and user. Standalone edwin's init.scm can declare nixd again with a settings procedure that adds `nixd.options`
+  next to `nixpkgs` (a `nixd` entry consed in front of `lsp--nixd-settings`' answer replaces its whole `nixd` object,
+  so it carries `nixpkgs` too); in edwinclient there is no way to add
+  them yet, since edwind's init.scm cannot declare a server there (above). No `initializationOptions` (none of the owner's servers needs them). Settings are per session (per
+  root), not per buffer (eglot's `eglot-workspace-configuration` is a directory-local variable); an item's
+  `scopeUri` is not looked at.
+- **Not in it:** C# (init-prog.el turns eglot on for csharp-mode but names no program, leaving eglot's table to pick
+  one, and the plan does not list it); GDScript (`gdscript-eglot-version` connects to the Godot editor over TCP;
+  Edwin's servers are argv only); Java's jdtls (eglot-java, not in the plan's list); the servers on each host's
+  PATH (lsp-fleet-path, the fleet repository's); direnv's environment for a server (lsp-direnv).
+- **Checked by**, on ex44 (the build host). Before review, on commit 63cb418, `nix flake check path:$PWD
+  --max-jobs 2` passed every check. After the review's fixes (the edwinclient limitation written down, the dead
+  reconnect fallback deleted, the first of a key given twice, circular lists refused, `?` and `#` in nixd's root),
+  on the final code (this Checked by paragraph the only change after the checks ran), with `--max-jobs 2`: `edwin-lsp` (132
+  passed, 0 failed, none skipped: 13 of them test/lsp-servers.test.mts, the real nixd, pyright and harper-ls run in
+  it), `edwin-typecheck`, `edit-lockdown` (6) and `edit-security` (21) (scm/lsp.scm and src/lsp.ts load in
+  edwind), and `nix build .#edwin` (unit 41 and 3 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 39
+  and 1 ignored, the two server-table ones among them). The full `nix flake check` was not run again. After the
+  second review (the `.git` guard on nixd's `getFlake`, `file-exists?` of a directory, the refusal messages), on
+  the final code with `--max-jobs 2`: `edwin-lsp` (133 passed, 0 failed, none skipped: 14 of them
+  test/lsp-servers.test.mts, the real nixd, pyright and harper-ls run in it), `edwin-typecheck`, `edit-lockdown`
+  (6) and `edit-security` (21) passed, and `nix build .#edwin` passed (unit 41 and 3 ignored, `tests/gui.rs` 5
+  and 1 ignored, `tests/terminal.rs` 39 and 1 ignored, the two server-table ones among them: they expect `<nixpkgs>`
+  in a `.git` root with no flake.nix, which the change keeps). The full `nix flake check` with `--max-jobs 2` passed on the final code.
+  The table's marginal closure in edwin-lsp is nixd (167 MiB with its closure), harper (165 MiB) and pyright (277 MiB, much of it the nodejs the check has already); clangd (clang-tools,
+  1.9 GiB), gopls and rust-analyzer (which need their toolchains to do anything) are declared but not run in a check.
+  test/lsp-servers.test.mts (14), against a stand-in (node) that asks `workspace/configuration` for the items its
+  argv names once initialized, and logs each message:
+  - The table as scm/lsp.scm leaves it: the eight servers, their modes and argv in order, nixd's settings a
+    procedure and the rest none; every mode it names reached from a file name (`a.nix` … `a.md`).
+  - nixd's settings: `<nixpkgs>` in a root with no flake.nix; the root's flake's in one named `fl "a" $b \c ${d}`,
+    escaped; a newline escaped; `<nixpkgs>` in roots named `q?dir=x` and `h#frag`, each with a flake.nix.
+  - nixd's settings in a root that is no git repository: a `.jj`-only root and a plain directory, each with a
+    flake.nix and an untracked file, get `<nixpkgs>`; a worktree's `.git` file gets the flake; `file-exists?` true
+    of a file and of a directory, false of what is not there.
+  - edwinclient's case: a well-formed `define-language-server 'nixd` (another argv, other settings) evaluated as
+    the image replays, as src/sync.ts evaluates edwind's init.scm in a frame: the message said, the shipped nixd's
+    argv and settings procedure kept.
+  - A key given twice: `((top (a . 1) (a . 2) (n (b . 1)) (n (b . 2))) (top . 0) (__proto__ . 1) (__proto__ . 2))`
+    is `{"top":{"a":1,"n":{"b":1}},"__proto__":1}`; a procedure consing `(nixd (extra . #t))` in front of
+    `lsp--nixd-settings`' answer gives `{"nixd":{"extra":true}}`.
+  - Settings as JSON: an object, an array from a vector and from a list, `#t`/`#f`, 2^53-1, an empty vector, a
+    `__proto__` key (an own key in the JSON); `didChangeConfiguration` right after `initialized` with them; the
+    items answered: a section, a nested one, a leaf, `#f`, a missing one, a path through a number, through an array,
+    through `toString` and `__proto__` (null each), an own `__proto__` key, no section and an empty one (all of them).
+  - No settings: no `didChangeConfiguration`, null for each item.
+  - A procedure: called with each root once (a second buffer of a root uses its session), its answer the session's
+    settings and the server's answers; a KILL started again with the same settings, the procedure not called; then
+    `eglot-reconnect` calling it again.
+  - The refusals at the declaration, each an `lsp-error` with the earlier declaration kept: a symbol, a symbol and
+    an improper list each shadowed by an earlier entry of their key, a string-keyed alist (`(("a" . 1))`, the
+    message writing the pair and saying an object's keys are symbols), a character,
+    `'()`, a procedure inside, an improper list (written out), an improper list whose car is a cycle through cars
+    (not written out: the writer has no guard against one), 10^20, `+nan.0`, 34 levels (32 taken), four circular
+    lists (a cycle of two, of one, an alist's entries, a value inside an object; each said to be circular);
+    `:settings` with no value; a circular `:modes` and a circular `:command`.
+  - A procedure answering a symbol, one answering a circular list, and one that signals: nothing spawned, no session, `eglot: …` said, `M-x eglot`
+    signalling.
+  - While the image replays: a declaration with a bad value skipped with the message, the one before kept.
+  - The table's own servers, from PATH (EDWIN_LSP_SERVERS=1; the check puts nixd 2.9.3, pyright 1.1.414 and harper
+    2.12.0 on PATH): nixd's settings `import <nixpkgs> { }`, `x + nosuchname` an error over `nosuchname` (undefined
+    variable), `g d` on the use of `x` to its binding; pyright: `nosuchname` an error at its place, `g d` on
+    `thing` to its assignment; harper-ls in a markdown-mode buffer: `sentense` marked at its place.
+  Each guard was also taken out of src/lsp.ts or scm/lsp.scm and the suite run: every one made a test fail (the
+  depth, the finite number, the safe integer, the alist as an object, the proper list, the replay, the own property
+  in a section's path, an array not indexed, the empty section, `didChangeConfiguration` only with settings, the
+  key defined rather than assigned, the four escapes and the flake.nix test). The guards added after review were
+  taken out one at a time the same way, test/lsp-servers.test.mts run alone from a copy of the tree: the first of a
+  key given twice, a shadowed value still checked (the skip moved before the conversion), the cycle check in the
+  list walk, a circular list not written into the message, the walk for
+  `:modes` and for `:command`, the `?` and the `#` in nixd's root, and the replay skip; each made it fail (the
+  cycle ones by running out of memory, the file failing). After the second review, in the dev shell (the real
+  servers' three tests skipped there): the `.git` guard replaced by `#t` fails the non-git-root test on `jj-only`;
+  `file-exists-p` put back to reading the file fails that test and the flake test (a `.git` directory is not
+  read); the improper list written out without the flat check fails the refusals test on the cycle through cars
+  (`RangeError: Maximum call stack size exceeded` instead of the `lsp-error`).
+  In the built program (`tests/terminal.rs`): `the_server_table_starts_nixd_in_edwin` and
+  `the_server_table_starts_nixd_in_edwinclient` put a stand-in `nixd` (a shell script running node) first on PATH,
+  give no init.scm, and visit `proj/x.nix`; the stand-in's log is `initialize`, `initialized`,
+  `workspace/didChangeConfiguration {"nixd":{"nixpkgs":{"expr":"import <nixpkgs> { }"}}}`, `shutdown`, `exit` after
+  `:q`, in edwin and in an edwinclient frame of a running edwind alike.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

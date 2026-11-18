@@ -2503,8 +2503,9 @@ interface EditorConfigApi {
 
 /* ---------- editor: language server sessions (lsp.ts) ---------- */
 
-/* A declared server: its name, the major modes it serves, its argv. */
-interface LspServer { name: string; modes: string[]; argv: string[] }
+/* A declared server: its name, the major modes it serves, its argv, its settings (JSON, null for none, or a
+   function of the project's root giving them). */
+interface LspServer { name: string; modes: string[]; argv: string[]; settings: unknown }
 /* One server process for a root: starting (initialize sent), running, restarting (waiting to start again after
    it ended), stopping, stopped, failed (ended too often in a row). */
 interface LspSession {
@@ -2520,6 +2521,8 @@ interface LspSession {
   readonly restarts: number;
   /* how it last ended */
   readonly why: string | null;
+  /* the server's settings for this root (null: none) */
+  readonly settings: unknown;
 }
 interface EdLspApi {
   /* the bounds in ms (and restartMax, a count); the suites shorten them */
@@ -2527,7 +2530,7 @@ interface EdLspApi {
   /* a file: URI for an absolute path */
   uri(path: string): string;
   /* declare a server; while the image replays it is skipped with a message and null is returned */
-  define(name: string, modes: string[], argv: string[]): LspServer | null;
+  define(name: string, modes: string[], argv: string[], settings?: unknown): LspServer | null;
   servers(): LspServer[];
   serverFor(b: EdBuffer): LspServer | null;
   /* where B's server runs: its project, else its file's directory; null when its file is not on this machine */

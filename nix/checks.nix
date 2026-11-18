@@ -334,12 +334,26 @@ in
   # cancelling; consult-eglot-symbols asking workspace/symbol once the keys stop, a blank input not asked, a
   # request cancelled by the next key, the server's order kept, an error flashed, the one chosen visited and
   # M-, and C-o back, a name numbered past a label taken; SPC p s bound, the stub gone; nil's attributes as
-  # document symbols.
-  edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
-    export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts
-    touch $out
-  '';
+  # document symbols. test/lsp-servers.test.mts, the server table (scm/lsp.scm): its servers, modes and argv;
+  # settings as JSON or from a procedure of the root, answered by section to workspace/configuration and sent in
+  # workspace/didChangeConfiguration, refused when they are no JSON; nixd's per root; and the table's own nixd,
+  # pyright and harper-ls, found on PATH as the table names them (EDWIN_LSP_SERVERS=1): definitions and an undefined
+  # name from the first two, a misspelling in a Markdown file from harper-ls.
+  edwin-lsp =
+    pkgs.runCommand "edwin-lsp"
+      {
+        nativeBuildInputs = [
+          pkgs.nodejs
+          pkgs.nixd
+          pkgs.pyright
+          pkgs.harper
+        ];
+      }
+      ''
+        export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil} EDWIN_LSP_SERVERS=1
+        node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts ${edwin}/edwin/test/lsp-servers.test.mts
+        touch $out
+      '';
 
   # Syntax trees per buffer (src/syntax.ts, Ed.syntax), with the desktop program's host.syntax stood in: fast-check
   # over edits, undo, whole-text replacement and forgotten or trimmed logs, the stand-in's text always the

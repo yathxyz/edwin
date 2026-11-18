@@ -1680,6 +1680,114 @@ setInterval(() => {}, 1000);
     }
 }
 
+/// A stand-in `nixd` in D/bin, for the shipped server table to find on PATH: it logs each message it gets (the
+/// settings of a workspace/didChangeConfiguration with it) to D/log. The PATH to give the program, and the log.
+fn table_nixd(d: &Path) -> (String, PathBuf) {
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::create_dir_all(d.join("proj/.git")).unwrap();
+    std::fs::write(d.join("proj/x.nix"), "1\n").unwrap();
+    let log = d.join("log");
+    let _ = std::fs::remove_file(&log);
+    std::fs::write(
+        d.join("server.cjs"),
+        r#"const fs = require('fs'), log = process.argv[2];
+const note = s => fs.appendFileSync(log, s + '\n');
+const send = m => { const b = Buffer.from(JSON.stringify(m)); process.stdout.write('Content-Length: ' + b.length + '\r\n\r\n'); process.stdout.write(b); };
+let buf = Buffer.alloc(0);
+process.stdin.on('data', d => {
+  buf = Buffer.concat([buf, d]);
+  for (;;) {
+    const end = buf.indexOf('\r\n\r\n');
+    if (end < 0) return;
+    const n = Number(/Content-Length: (\d+)/i.exec(buf.subarray(0, end).toString('latin1'))[1]);
+    if (buf.length < end + 4 + n) return;
+    const m = JSON.parse(buf.subarray(end + 4, end + 4 + n).toString('utf8'));
+    buf = buf.subarray(end + 4 + n);
+    note(m.method === 'workspace/didChangeConfiguration' ? m.method + ' ' + JSON.stringify(m.params.settings) : m.method);
+    if (m.method === 'initialize') send({ jsonrpc: '2.0', id: m.id, result: { capabilities: {} } });
+    else if (m.method === 'shutdown') send({ jsonrpc: '2.0', id: m.id, result: null });
+    else if (m.method === 'exit') process.exit(0);
+  }
+});
+setInterval(() => {}, 1000);
+"#,
+    )
+    .unwrap();
+    let nixd = d.join("bin/nixd");
+    std::fs::write(
+        &nixd,
+        format!(
+            "#!/bin/sh\nexec node {:?} {:?}\n",
+            d.join("server.cjs").display().to_string(),
+            log.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&nixd, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        d.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (path, log)
+}
+
+/// What the stand-in of table_nixd logged once the program in T has quit: the server started by visiting
+/// proj/x.nix, with nixd's settings from the table, then shut down.
+fn table_nixd_quit(t: &mut Pty, log: &Path) {
+    let end = Instant::now() + Duration::from_secs(10);
+    while !(log.exists() && read(log).contains("initialized\n")) {
+        assert!(
+            Instant::now() < end,
+            "nixd was never initialized; screen tail: {:?}",
+            tail(&t.out)
+        );
+        t.pump(20);
+    }
+    t.keys(":q\r");
+    assert_eq!(t.exit(), 0, "screen tail: {:?}", tail(&t.out));
+    assert_eq!(
+        read(log),
+        "initialize\ninitialized\nworkspace/didChangeConfiguration {\"nixd\":{\"nixpkgs\":{\"expr\":\"import <nixpkgs> { }\"}}}\nshutdown\nexit\n"
+    );
+}
+
+/// The shipped server table (scm/lsp.scm) is the program's own: visiting a Nix file in edwin, with no init.scm,
+/// starts the `nixd` found on PATH with the table's settings.
+#[test]
+fn the_server_table_starts_nixd_in_edwin() {
+    if !have_node() {
+        return;
+    }
+    let d = workdir("lsp-table");
+    let (path, log) = table_nixd(&d);
+    let mut t = Pty::spawn(&d, &["proj/x.nix"], &[("PATH", &path)]);
+    t.ready();
+    table_nixd_quit(&mut t, &log);
+}
+
+/// The same in an edwinclient frame: the frame evaluates its own scm/lsp.scm, not edwind's image, so the table is
+/// there and the server runs on the frame's machine.
+#[test]
+fn the_server_table_starts_nixd_in_edwinclient() {
+    if !have_node() {
+        return;
+    }
+    let up = EdwindUp::start();
+    let d = workdir("lsp-table-client");
+    let (path, log) = table_nixd(&d);
+    let c = client(&d);
+    let mut t = Pty::spawn_program(
+        &d,
+        &c,
+        &["--socket", &up.socket, "proj/x.nix"],
+        &[("PATH", &path)],
+    );
+    t.ready();
+    table_nixd_quit(&mut t, &log);
+    up.finish();
+}
+
 /// The 40 ms first draw (docs/steps.md, "Step DT1"), in an 80x24 terminal: edwin started from its snapshot with no
 /// file, and on a plain Org note, logs `startup first draw N ms` under EDWIN_TRACE within 40 ms of its start, the
 /// best of five starts each. The program runs as the package lays it out (a copy of the binary in bin/ beside
