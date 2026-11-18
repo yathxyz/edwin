@@ -1,6 +1,7 @@
 // Programming modes in the headless runtime: prog-mode and define-language (scm/prog.scm), each mode's comment
 // syntax (set-comment-syntax!, looked up through the modes a mode derives from, nearest first) and the comment
-// commands that use it, gc, gcc and M-;.
+// commands that use it, gc, gcc and M-;. Balanced brackets in Lisp buffers (lang-lisp-brackets): typing, Replace state,
+// DEL, C-d and RET keep a balanced buffer balanced, by rule and by a property test of random keys; the list motions.
 // One Edwin per process, so the cases run in order on fresh buffers.
 // Run: node --test test/prog.test.mts
 import { test } from 'node:test';
@@ -436,4 +437,500 @@ test('delete-trailing-blanks: the given lines only, the last line with no newlin
   try { assert.throws(() => ev('(delete-trailing-blanks (list (cons 4 4)))'), /read-only/); }
   finally { ev('(read-only-mode)'); }
   assert.equal(ed.text(), 'a\nb\n\nd  \ne');
+});
+
+/* lang-lisp-brackets: balanced insertion and deletion in Lisp buffers (src/extras.ts), the list motions
+   (src/editor-prims.ts) and the audit's cases for them (structural-editing-cases.jsonl in the fleet repository).
+   ‸ marks point: TEXT holds it once; the buffer starts in Insert state there. */
+async function lisp(text: string, ext = 'scm') {
+  const k = text.indexOf('‸');
+  const b = await buffer(ext, text.slice(0, k) + text.slice(k + 1));
+  b.pt = k;
+  await ed.type('i');
+  return b;
+}
+/* The same in Emacs state; C-z goes back to Normal state. */
+async function emacsAt(text: string) {
+  const k = text.indexOf('‸');
+  const b = await buffer('scm', text.slice(0, k) + text.slice(k + 1));
+  await ed.keys('C-z');
+  b.pt = k;
+  return b;
+}
+const shown = () => { const t = ed.text(), p = ed.point(); return t.slice(0, p) + '‸' + t.slice(p); };
+/* Whether the Lisp text T is balanced, as the structural suite judges it: its brackets never close more than they
+   opened and end closed, and no string, #| comment or #; datum runs on to its end. */
+function balanced(t: string) {
+  const info: { dirty?: boolean } = {}, cls = ed.Ed.lex(t, info) as Uint8Array;
+  let d = 0;
+  for (let k = 0; k < t.length; k++) if (cls[k] === ed.Ed.C.PAR) { d += '(['.includes(t[k]) ? 1 : -1; if (d < 0) return false; }
+  return d === 0 && !info.dirty;
+}
+/* KEYS as the audit wrote them: "K:NAME" one key by its name, anything else typed. */
+const AUDIT_KEYS: Record<string, string> = { Escape: 'ESC', BSpace: 'DEL' };
+async function press(keys: string[]) {
+  for (const k of keys) if (k.startsWith('K:')) await ed.keys(AUDIT_KEYS[k.slice(2)] ?? k.slice(2)); else await ed.type(k);
+}
+/* [id, extension, input, keys, expected]: the audit's cases this package decides, each with Edwin's answer; where it
+   differs from the audit's expectation, docs/steps.md says why. */
+const BRACKET_CASES: [string, string, string, string[], string][] = [
+  ['ep-DEL-after-close', 'scm', '(foo)\n', ['A', 'K:BSpace', 'K:Escape'], '\n'],
+  ['ep-DEL-after-open', 'scm', '(foo)\n', ['a', 'K:BSpace', 'K:Escape'], '\n'],
+  // The audit's keys put point after the f, not the (: DEL deletes the f, as lispy does there.
+  ['ep-DEL-open-with-content', 'scm', '(foo)\n', ['la', 'K:BSpace', 'K:Escape'], '(oo)\n'],
+  // The audit expected electric-pair's (foo, which is unbalanced: the pair goes in, a blank before the word.
+  ['ep-(-before-word', 'scm', 'foo\n', ['i(', 'K:Escape'], '() foo\n'],
+  ['ep-"-inside-string', 'scm', '(f "ab")\n', ['fb', 'i"', 'K:Escape'], '(f "a\\"b")\n'],
+  ['CMd-down-list', 'scm', '(a (b) c)\n', ['l', 'K:C-M-d', 'iX', 'K:Escape'], '(a (Xb) c)\n'],
+  ['CMn-forward-list', 'scm', '(a (b) c)\n', ['l', 'K:C-M-n', 'iX', 'K:Escape'], '(a (b)X c)\n'],
+  ['CMt-transpose-sexps', 'scm', '(a b)\n', ['fb', 'K:C-M-t'], '(b a)\n'],
+  ['CMa-beginning-of-defun', 'scm', '(define (f)\n  (g))\n', ['jw', 'K:C-M-a', 'iX', 'K:Escape'], 'X(define (f)\n  (g))\n'],
+  // Point is before the character the Normal-state cursor covers, so C-M-b from the last ) crosses c, as Emacs's
+  // backward-sexp from there does; the audit expected the list.
+  ['CMb', 'scm', '(a) (b c)\n', ['$', 'K:C-M-b', 'iX', 'K:Escape'], '(a) (b Xc)\n'],
+  // { is a plain character in Lisp, no bracket to the lexer, so it no longer pairs; the audit expected {}.
+  ['ep-{', 'scm', '\n', ['i{', 'K:Escape'], '{\n'],
+];
+for (const [id, ext, input, keys, expected] of BRACKET_CASES)
+  test(`audit case ${id}`, async () => {
+    await buffer(ext, input);
+    await press(keys);
+    assert.equal(ed.text(), expected);
+  });
+
+test('Lisp insertion: ( and [ pair, with a blank beside an atom; ) and ] leave the list; " pairs, escapes in a string, steps over its end', async () => {
+  const cases: [string, string, string][] = [
+    ['(foo‸)', '(', '(foo (‸))'], ['(‸foo)', '(', '((‸) foo)'], ["'‸", '(', "'(‸)"], ['#‸', '(', '#(‸)'], ['#u8‸', '(', '#u8(‸)'],
+    ['(let ‸)', '[', '(let [‸])'], [',@‸', '(', ',@(‸)'], ['#\\a‸', '(', '#\\a (‸)'],
+    ['(a (b‸) c)', ')', '(a (b)‸ c)'], ['(a (b‸) c)', ']', '(a (b)‸ c)'], ['(a\n  b‸\n  )', ')', '(a\n  b\n  )‸'],
+    ['(f ‸)', '"', '(f "‸")'], ['(f "a‸b")', '"', '(f "a\\"‸b")'], ['(f "ab‸")', '"', '(f "ab"‸)'],
+    ['(f "a‸")', '(', '(f "a(‸")'], ['(f "a‸")', ')', '(f "a)‸")'], ['(f ; a‸\n )', '(', '(f ; a(‸\n )'], ['(f ; a‸\n )', '"', '(f ; a"‸\n )'],
+    ['(f #| a‸ |#)', ')', '(f #| a)‸ |#)'], ['(a #‸)', '|', '(a #|‸|#)'], ['(f {‸)', '}', '(f {}‸)'],
+  ];
+  for (const [before, keys, after] of cases) {
+    await lisp(before);
+    await ed.type(keys);
+    assert.equal(shown(), after, `${keys} in ${JSON.stringify(before)}`);
+  }
+  // Typed whole, a list and a string come out as typed.
+  await lisp('‸');
+  await ed.type('(define (f x) "doc" (g [x 1]))');
+  assert.equal(shown(), '(define (f x) "doc" (g [x 1]))‸');
+});
+
+test('Lisp insertion: a backslash takes the character after it, ; before code puts the code on its own line, and ) at top level is refused', async () => {
+  await lisp('(list ‸)');
+  await ed.type('#\\( #\\) #\\" #\;');
+  assert.equal(shown(), '(list #\\( #\\) #\\" #\;‸)');
+  assert.ok(balanced(ed.text()));
+  await lisp('(f "a‸")');
+  await ed.type('\\"');
+  assert.equal(shown(), '(f "a\\"‸")');
+  await lisp('(f ; a‸\n )');
+  await ed.type('\\x');
+  assert.equal(shown(), '(f ; a\\x‸\n )');
+  // Point between a backslash and what it escapes: past it first.
+  const b = await lisp('(list #\\(‸)');
+  b.pt = 8;
+  await ed.type('x');
+  assert.equal(shown(), '(list #\\(x‸)');
+  // ; with code after it on the line: that code goes on a line of its own, indented.
+  await lisp('(a ‸b c)');
+  await ed.type(';');
+  assert.equal(shown(), '(a ;‸\n b c)');
+  await lisp('(a b)‸  \n');
+  await ed.type(';');
+  assert.equal(shown(), '(a b);‸  \n');
+  await lisp('(a ‸(b))');
+  await ed.type('#;');
+  assert.equal(shown(), '(a #;‸(b))');
+  await lisp('(a)\n‸\n');
+  await ed.type(')');
+  assert.equal(shown(), '(a)\n‸\n');
+  assert.equal(ed.E.echo, 'No list to close here');
+});
+
+test('Lisp insertion: a backslash then a key that is no character inserts nothing and runs that key', async () => {
+  const state = () => (globalThis as typeof globalThis & { EvilCore: { stateOf(b: unknown): string } }).EvilCore.stateOf(ed.E.current);
+  await lisp('(a ‸b)');
+  await ed.type('\\');
+  await ed.keys('ESC');
+  assert.equal(ed.text(), '(a b)');
+  assert.equal(state(), 'normal');
+  await lisp('(a ‸b)');
+  await ed.type('\\');
+  await ed.keys('<left>');
+  assert.equal(shown(), '(a‸ b)');
+  assert.equal(state(), 'insert');
+  assert.doesNotMatch(ed.E.echo, /Non-character/);
+  await lisp('(a ‸b)');
+  await ed.type('\\');
+  await ed.keys('C-g');
+  assert.equal(shown(), '(a ‸b)');
+  await ed.type('\\(');
+  assert.equal(shown(), '(a \\(‸b)');
+  await ed.keys('ESC');
+});
+
+test('Lisp insertion that would unbalance the brackets is refused; a text already unbalanced is edited as typed', async () => {
+  // x between the # and ; of a datum comment would make the ; a line comment over the ).
+  await lisp('(a #‸;(b) c)');
+  await ed.type('x');
+  assert.equal(shown(), '(a #‸;(b) c)');
+  assert.equal(ed.E.echo, 'That would unbalance the brackets');
+  // Inside a #; datum a bracket goes in as typed, so ( would leave the datum open.
+  await lisp('(a #;(b‸) c)');
+  await ed.type('(');
+  assert.equal(ed.text(), '(a #;(b) c)');
+  // Unbalanced already: ) goes in, to repair it, and ( pairs as electric-pair-mode does.
+  await lisp('(foo (bar‸\n');
+  await ed.type(')');
+  assert.equal(shown(), '(foo (bar)‸\n');
+  await ed.type(')');
+  assert.equal(shown(), '(foo (bar))‸\n');
+  assert.ok(balanced(ed.text()));
+});
+
+test('Lisp insertion judged on an inner list (a bracket in column 0 inside a form) refuses a ; comment that would run past the list', async () => {
+  // Between the # and ; of a datum comment, ) or ] makes the ; a line comment over the list's ) and the (c after
+  // it, outside the span: refused, as it is at top level.
+  for (const key of [')', ']']) {
+    await lisp('(a\n(b #‸;(x)) (c\nd))\n');
+    await ed.type(key);
+    assert.equal(shown(), '(a\n(b #‸;(x)) (c\nd))\n');
+    assert.equal(ed.E.echo, 'That would unbalance the brackets');
+  }
+  await lisp("(define t\n  '(\n(k #‸;v) (l\n m)))\n");
+  await ed.type(')');
+  assert.equal(shown(), "(define t\n  '(\n(k #‸;v) (l\n m)))\n");
+  assert.equal(ed.E.echo, 'That would unbalance the brackets');
+  const t = "(define t\n  '(\n(k #;v) (l\n m)))\n", cls = ed.Ed.lex(t), p = t.indexOf(';v');
+  assert.deepEqual(ed.Ed.balanceSpan(t, cls, p, p), [t.indexOf('(k'), t.indexOf(') (l') + 1]);
+  assert.equal(ed.Ed.keepsBalance(t, cls, [t.indexOf('(k'), t.indexOf(') (l') + 1], p, p, ')'), false);
+  // The same span takes edits that keep its ) a bracket: a letter after the datum, and DEL making #x; a datum.
+  await lisp('(a\n(b #;(x) ‸) (c\nd))\n');
+  await ed.type('y');
+  assert.equal(shown(), '(a\n(b #;(x) y‸) (c\nd))\n');
+  await lisp('(a\n(b #x‸;(x)) (c\nd))\n');
+  await ed.keys('DEL');
+  assert.equal(shown(), '(a\n(b #‸;(x)) (c\nd))\n');
+  assert.ok(balanced(ed.text()));
+});
+
+test('Lisp deletion: a bracket takes its list, a quote its string, an escape both characters; C-d from inside moves to the start; refused where it would unbalance', async () => {
+  const del: [string, string, string][] = [
+    ['(a (b c)‸ d)', 'DEL', '(a ‸ d)'], ['(a (‸b c) d)', 'DEL', '(a ‸ d)'], ["(a '(b)‸ d)", 'DEL', '(a ‸ d)'], ['(a (‸) d)', 'DEL', '(a ‸ d)'],
+    ['(a ‸(b c) d)', '<deletechar>', '(a ‸ d)'], ["(a '‸(b) d)", '<deletechar>', "(a '‸ d)"],
+    // C-d on a closing bracket or quote from inside deletes nothing and moves to the list's or string's start, as
+    // lispy's C-d does by default (lispy-delete-sexp-from-within nil).
+    ['(a (b c‸) d)', '<deletechar>', '(a ‸(b c) d)'], ["(a '(b‸) d)", '<deletechar>', "(a '‸(b) d)"], ['(a [‸] d)', '<deletechar>', '(a ‸[] d)'],
+    ['(f "abc‸")', '<deletechar>', '(f ‸"abc")'], ['(f "‸")', '<deletechar>', '(f ‸"")'],
+    ['(f "abc"‸)', 'DEL', '(f ‸)'], ['(f "‸abc")', 'DEL', '(f ‸)'], ['(f "‸")', 'DEL', '(f ‸)'], ['(f ‸"abc")', '<deletechar>', '(f ‸)'],
+    ['(f "a\\"‸b")', 'DEL', '(f "a‸b")'], ['(f "a\\‸"b")', 'DEL', '(f "a‸b")'], ['(f "a‸\\"b")', '<deletechar>', '(f "a‸b")'],
+    ['(list #\\(‸ x)', 'DEL', '(list ‸ x)'], ['(list ‸#\\) x)', '<deletechar>', '(list ‸ x)'], ['(list ‸#\\space x)', '<deletechar>', '(list ‸ x)'], ['(list #‸\\) x)', '<deletechar>', '(list ‸ x)'],
+    ['(a #|‸|# b)', 'DEL', '(a ‸ b)'], ['(a #||#‸ b)', 'DEL', '(a ‸ b)'], ['(a ‸#||# b)', '<deletechar>', '(a ‸ b)'], ['(a #||‸# b)', 'DEL', '(a ‸ b)'],
+    ['(a #| c |#‸ b)', 'DEL', '(a ‸ b)'], ['(a #‸| c |# b)', '<deletechar>', '(a ‸ b)'], ['(a #| c‸ |# b)', 'DEL', '(a #| ‸ |# b)'], ['(a #| ( ‸|# b)', '<deletechar>', '(a ‸ b)'],
+    ['(el ?\\(‸ x)', 'DEL', '(el ‸ x)'], ['(a ; (b‸\n c)', 'DEL', '(a ; (‸\n c)'], ['(f "a(‸")', 'DEL', '(f "a‸")'],
+    // Refused: the ; of a comment over a ), and a newline that would put a bracket into the comment above.
+    ['(a ;‸ )\n b)', 'DEL', '(a ;‸ )\n b)'], [';; c\n‸(b\n c)', 'DEL', ';; c\n‸(b\n c)'],
+    // The ; of a comment over ))((: refused at top level, where the first ) closes too much; inside two more lists the
+    // brackets stay balanced, which only the whole form, lexed again, shows.
+    ['(s ;‸))((\n r)', 'DEL', '(s ;‸))((\n r)'], ['(p (q (s ;‸))((\n r)))', 'DEL', '(p (q (s ‸))((\n r)))'],
+    // Already unbalanced: as typed.
+    ['(a))‸\n', 'DEL', '(a)‸\n'],
+  ];
+  for (const [before, key, after] of del) {
+    await lisp(before);
+    await ed.keys(key);
+    assert.equal(shown(), after, `${key} in ${JSON.stringify(before)}`);
+  }
+  // #| typed and DEL straight after give back the text, as ( and " do.
+  await lisp('(a ‸ b)');
+  await ed.type('#|');
+  assert.equal(shown(), '(a #|‸|# b)');
+  await ed.keys('DEL');
+  assert.equal(shown(), '(a ‸ b)');
+  // C-d in Emacs state, and a count.
+  await emacsAt('(a ‸(b) (c) d)');
+  await ed.keys('C-d');
+  assert.equal(shown(), '(a ‸ (c) d)');
+  await ed.keys('C-u 2 C-d');
+  assert.equal(shown(), '(a ‸ d)');
+  await ed.keys('C-z');
+  // A count ends at a move to the start, so C-d from inside never goes on to delete the list or string.
+  await emacsAt('(a (b c‸) d)');
+  await ed.keys('C-u 2 C-d');
+  assert.equal(shown(), '(a ‸(b c) d)');
+  await ed.keys('C-z');
+  await emacsAt('(f "ab‸c")');
+  await ed.keys('C-u 3 C-d');
+  assert.equal(shown(), '(f ‸"ab")');
+  await ed.keys('C-z');
+  // A negative count deletes the other way, through the same rules: C-u -2 DEL takes the list and the blank after
+  // point, C-u -1 C-d the list before it, and C-u -1 DEL of a comment's ; over a ) is refused.
+  await emacsAt('‸(a) (b)');
+  await ed.keys('C-u - 2 DEL');
+  assert.equal(shown(), '‸(b)');
+  await ed.keys('C-z');
+  await emacsAt('(a) (b)‸');
+  await ed.keys('C-u - 1 C-d');
+  assert.equal(shown(), '(a) ‸');
+  await ed.keys('C-z');
+  await emacsAt('(a ‸; )\n b)');
+  await ed.keys('C-u - 1 DEL');
+  assert.equal(shown(), '(a ‸; )\n b)');
+  assert.equal(ed.E.echo, 'That would unbalance the brackets');
+  await ed.keys('C-g C-z');
+});
+
+test('Lisp Replace state: a character that would unbalance the brackets, typed or overwritten, is refused; plain characters replace as before', async () => {
+  const cases: [string, string, string][] = [
+    // Refused: a bracket, a quote, a ; or a backslash that would leave a bracket unmatched, and a bracket overwritten.
+    ['(a ‸b)', ')', '(a ‸b)'], ['(a ‸b)', '(', '(a ‸b)'], ['(a ‸b)', ']', '(a ‸b)'], ['(a ‸b)', '"', '(a ‸b)'],
+    ['(a ‸b)', ';', '(a ‸b)'], ['(a b‸)', '\\', '(a b‸)'], ['(a ‸(b) c)', 'x', '(a ‸(b) c)'], ['(a (b‸) c)', 'x', '(a (b‸) c)'],
+    ['(f ‸"s")', 'x', '(f ‸"s")'], ['(a ‸b)\n', ')', '(a ‸b)\n'],
+    // Accepted: plain over plain, a bracket over the same bracket, a bracket or quote in a string or a comment, and
+    // a character typed at a line's end, which inserts.
+    ['(a ‸b)', 'x', '(a x‸)'], ['(a ‸bc d)', 'xy', '(a xy‸ d)'], ['(a ‸)', ')', '(a )‸'], ['(a "‸b")', '(', '(a "(‸")'],
+    ['(a ; ‸b\n c)', ')', '(a ; )‸\n c)'], ['(a b)‸\n', 'x', '(a b)x‸\n'],
+  ];
+  for (const [before, typed, after] of cases) {
+    const k = before.indexOf('‸');
+    await buffer('scm', before.slice(0, k) + before.slice(k + 1));
+    ed.E.current.pt = k;
+    ed.E.echo = '';
+    await ed.type('R' + typed);
+    assert.equal(shown(), after, `R${typed} in ${JSON.stringify(before)}`);
+    if (after === before) assert.equal(ed.E.echo, 'That would unbalance the brackets', `R${typed} in ${JSON.stringify(before)}`);
+    await ed.keys('ESC');
+  }
+  // The reviewer's case: R) then ESC on the b of (a b) leaves it as it was.
+  await buffer('scm', '(a b)\n');
+  await ed.type('fbR)');
+  await ed.keys('ESC');
+  assert.equal(ed.text(), '(a b)\n');
+  // DEL puts back the replaced character before point, wherever point is now: refused where that would unbalance.
+  await buffer('scm', '(a bc)\n');
+  ed.E.current.pt = 3;
+  await ed.type('Rx');
+  await ed.keys('<left> <left> <left> DEL');
+  assert.equal(shown(), '(‸a xc)\n');
+  assert.equal(ed.E.echo, 'That would unbalance the brackets');
+  await ed.keys('<right> <right> <right> DEL');
+  assert.equal(shown(), '(a ‸bc)\n');
+  await ed.keys('ESC');
+});
+
+test('RET in a ; comment goes on with the comment; RET elsewhere is a plain new line', async () => {
+  await lisp('(a ;; b‸ (c)\n )');
+  await ed.keys('RET');
+  assert.equal(shown(), '(a ;; b\n ;; ‸ (c)\n )');
+  assert.ok(balanced(ed.text()));
+  await lisp('(a ;; b‸\n )');
+  await ed.keys('RET');
+  assert.equal(shown(), '(a ;; b\n ‸\n )');
+  await emacsAt('(a ‸b)');
+  await ed.keys('RET');
+  assert.equal(shown(), '(a \n ‸b)');
+  await ed.keys('C-z');
+});
+
+test('the balanced brackets are Lisp buffers\' only: a minibuffer, another mode and electric-pair-mode off type as before', async () => {
+  await buffer('scm', 'a)b\n');
+  await ed.type(':s/)/x/\n');
+  assert.equal(ed.text(), 'axb\n');
+  await lisp('x ‸', 'nix');
+  await ed.type('(');
+  assert.equal(shown(), 'x (‸)');
+  await ed.type(')');
+  assert.equal(shown(), 'x ()‸');
+  await ed.type(')');
+  assert.equal(shown(), 'x ())‸');
+  ev('(electric-pair-mode -1)');
+  try {
+    await lisp('(a ‸)');
+    await ed.type('(]');
+    assert.equal(shown(), '(a (]‸)');
+    await ed.keys('DEL DEL');
+    assert.equal(shown(), '(a ‸)');
+  } finally { ev('(electric-pair-mode 1)'); }
+  await lisp('(a ‸)', 'el');
+  await ed.type('[');
+  assert.equal(shown(), '(a [‸])');
+});
+
+test('the list motions: up-list, down-list, forward-list, backward-list, beginning-of-defun, end-of-defun, transpose-sexps', async () => {
+  const at = async (text: string, form: string) => {
+    const k = text.indexOf('‸');
+    await buffer('scm', text.slice(0, k) + text.slice(k + 1));
+    ed.E.current.pt = k;
+    ev(form);
+    return shown();
+  };
+  assert.equal(await at('(a (b ‸c) d)', '(up-list)'), '(a (b c)‸ d)');
+  assert.equal(await at('(a (b ‸c) d)', '(up-list 2)'), '(a (b c) d)‸');
+  assert.equal(await at('(a (b ‸c) d)', '(up-list -1)'), '(a ‸(b c) d)');
+  assert.equal(await at('(a "(" ‸b)', '(up-list)'), '(a "(" b)‸');
+  assert.equal(await at('‸a (b (c))', '(down-list 2)'), 'a (b (‸c))');
+  assert.equal(await at('(a (b c)‸ d)', '(down-list -1)'), '(a (b c‸) d)');
+  assert.equal(await at('(a #\\( ‸ (b))', '(down-list)'), '(a #\\(  (‸b))');
+  assert.equal(await at('‸a (b) c [d]', '(forward-list 2)'), 'a (b) c [d]‸');
+  assert.equal(await at('a (b) c [d]‸', '(backward-list)'), 'a (b) c ‸[d]');
+  assert.equal(await at("a '(b)‸", '(backward-list)'), "a ‸'(b)");
+  for (const [text, form] of [['(a ‸b)', '(down-list)'], ['(a (b) ‸c)', '(forward-list)'], ['(a ‸(b) c)', '(backward-list)'], ['‸a b', '(up-list)']]) {
+    await at(text, '#t');
+    assert.throws(() => ev(form), /Containing expression ends prematurely/, `${form} in ${text}`);
+  }
+  const defs = '(define (f)\n  1)\n\n(define (g)\n  (h))\n';
+  assert.equal(await at(defs.replace('(h)', '(‸h)'), '(beginning-of-defun)'), defs.replace('(define (g)', '‸(define (g)'));
+  assert.equal(await at(defs.replace('(h)', '(‸h)'), '(beginning-of-defun 2)'), '‸' + defs);
+  assert.equal(await at(defs.replace('(define (g)', '‸(define (g)'), '(beginning-of-defun)'), '‸' + defs);
+  assert.equal(await at(defs.replace('1)', '‸1)'), '(end-of-defun)'), defs.replace('1)\n', '1)\n‸'));
+  assert.equal(await at(defs.replace('1)', '‸1)'), '(end-of-defun 2)'), defs + '‸');
+  assert.equal(await at(defs.replace('1)\n', '1)\n‸'), '(end-of-defun)'), defs + '‸');
+  // A negative count goes the other way, as Emacs's does (emacs -Q --batch, 31.1, on these texts).
+  const three = '(a)\n\n(b c)\n\n(d)\n';
+  const atPos = (p: number, form: string) => at(three.slice(0, p) + '‸' + three.slice(p), form);
+  const mark = (p: number) => three.slice(0, p) + '‸' + three.slice(p);
+  assert.equal(await atPos(5, '(beginning-of-defun -1)'), mark(12));
+  assert.equal(await atPos(0, '(beginning-of-defun -2)'), mark(12));
+  assert.equal(await atPos(13, '(beginning-of-defun -1)'), mark(16));
+  assert.equal(await atPos(12, '(end-of-defun -1)'), mark(11));
+  assert.equal(await atPos(12, '(end-of-defun -2)'), mark(4));
+  assert.equal(await atPos(16, '(end-of-defun -1)'), mark(11));
+  assert.equal(await atPos(4, '(end-of-defun -1)'), mark(0));
+  assert.equal(await at('(a)\n(b ‸c)\n', '(beginning-of-defun -1)'), '(a)\n(b c)\n‸');
+  assert.equal(await at('(a)\n(b ‸c)\n', '(end-of-defun -1)'), '(a)\n‸(b c)\n');
+  assert.equal(await at('(a ‸(b c) d)', '(transpose-sexps)'), '((b c) a‸ d)');
+  assert.equal(await at('(a b‸)', '#t'), '(a b‸)');
+  assert.throws(() => ev('(transpose-sexps)'), /Don't have two things to transpose/);
+});
+
+/* A small deterministic generator, so a failure names its seed. */
+function rng(seed: number) { return () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x80000000; }; }
+/* A random balanced Lisp text of 20 pieces drawn with R: lists and vectors (closed in order), strings with escapes,
+   character literals, ; #| and #; comments, and lists in column 0, one with a #; datum and code after it. */
+const PIECES = ['(a ', '(b ', '[c ', ')', ']', ' "x)y" ', ' "(" ', ' #\\( ', ' #\\) ', ' #\\] ', ' #\\" ', ' #\\; ', ' ?\\( ', ' ; )\n', ' ;; "\n',
+  ' #;(z) ', ' #| ( |# ', ' "a\\\\" ', ' "b\\"c" ', ' w ', '\n(d ', '\n(g #;(z) h ', " '(e) ", '\n'];
+function randomLisp(r: () => number) {
+  let text = '';
+  const open: string[] = [];
+  for (let i = 0; i < 20; i++) {
+    const piece = PIECES[Math.floor(r() * PIECES.length)];
+    if (piece === ')' || piece === ']') { if (open.length) text += open.pop(); continue; }
+    if (!balanced(piece)) open.push(piece.trimStart()[0] === '(' ? ')' : ']');
+    text += piece;
+  }
+  while (open.length) text += open.pop();
+  text += '\n';
+  assert.ok(balanced(text), JSON.stringify(text));
+  return text;
+}
+test('property: random keys at random points of random balanced Lisp text, in Insert, Emacs and Replace state, keep it balanced', async () => {
+  const insertKeys = ['a', 'SPC', '(', ')', '[', ']', '"', ';', '#', '\\', '|', "'", 'DEL', 'DEL', '<deletechar>', 'RET'];
+  const emacsKeys = [...insertKeys, 'C-d', 'C-d'];
+  /* Replace state overwrites; <left> and <right> move point away from the replacements, so DEL puts a character back
+     elsewhere. */
+  const replaceKeys = [...insertKeys, '<left>', '<right>'];
+  let changed = 0, refused = 0, keys = 0;
+  for (const seed of [21, 22, 23, 24, 25, 26, 27, 28]) {
+    const r = rng(seed), pick = <T,>(xs: T[]) => xs[Math.floor(r() * xs.length)];
+    for (let round = 0; round < 25; round++) {
+      const text = randomLisp(r);
+      const state = (['insert', 'emacs', 'replace'] as const)[round % 3], ext = r() < 0.5 ? 'scm' : 'el';
+      const emacs = state === 'emacs', b = await buffer(ext, text);
+      if (emacs) await ed.keys('C-z');
+      b.pt = Math.floor(r() * (text.length + 1));
+      if (!emacs) await ed.type(state === 'insert' ? 'i' : 'R');
+      const typed: string[] = [];
+      for (let k = 0; k < 12; k++) {
+        const key = pick(emacs ? emacsKeys : state === 'insert' ? insertKeys : replaceKeys), before = ed.text();
+        typed.push(key);
+        await ed.keys(key);
+        keys++;
+        if (ed.text() !== before) changed++;
+        else if (ed.E.echo === 'That would unbalance the brackets') refused++;
+        assert.ok(balanced(ed.text()), `seed ${seed} round ${round}: ${typed.join(' ')} from ${JSON.stringify(text)} gave ${JSON.stringify(ed.text())}`);
+      }
+      if (emacs) await ed.keys('C-g C-z'); else await ed.keys('C-g ESC');
+    }
+  }
+  console.log(`brackets property: ${keys} keys, ${changed} changed the text, ${refused} refused`);
+  assert.ok(changed >= 1000, `${changed} of ${keys} keys changed the text`);
+  assert.ok(refused >= 5, `${refused} refused`);
+});
+
+/* The guard's soundness, apart from the keys: every edit keepsBalance accepts on balanceSpan's span leaves the whole
+   text balanced. Every position of each random text, inserting each of a set of texts and replacing the character
+   there with each; the guard judges the span alone, the test the whole text, lexed again. A refusal of an edit that
+   would have kept the text balanced is the guard being careful (the ; of a comment two lists down), counted and
+   logged, not a failure. */
+test('property: every edit the guard accepts, at every point of random balanced Lisp text, leaves the whole text balanced', () => {
+  const { balanceSpan, keepsBalance, balancedLisp, lex } = ed.Ed;
+  const edits = ['a', ')', ']', '(', '"', ';', '#', '|', '\\', '\n', '#;', '||#', '()', ''];
+  let judged = 0, careful = 0;
+  for (const seed of [31, 32, 33, 34, 35, 36, 37, 38]) {
+    const r = rng(seed);
+    for (let round = 0; round < 25; round++) {
+      const text = randomLisp(r), cls = lex(text);
+      for (let from = 0; from <= text.length; from++) for (const to of [from, Math.min(text.length, from + 1)]) for (const ins of edits) {
+        if (from === to && ins === '') continue;
+        const span = balanceSpan(text, cls, from, to);
+        if (!span) continue;
+        judged++;
+        const ok = keepsBalance(text, cls, span, from, to, ins), after = text.slice(0, from) + ins + text.slice(to);
+        if (ok) assert.ok(balancedLisp(after), `seed ${seed} round ${round}: ${JSON.stringify(ins)} at ${from}..${to} of ${JSON.stringify(text)} accepted, giving ${JSON.stringify(after)}`);
+        else if (balancedLisp(after)) careful++;
+      }
+    }
+  }
+  console.log(`guard soundness: ${judged} edits judged, ${careful} refused that would have kept the text balanced`);
+  assert.ok(judged >= 100000, `${judged} edits judged`);
+});
+
+/* The guard's own cost per key: the buffer's lex is brought up to date before each key, untimed, as redisplay does
+   after every command, and its time is logged apart. That incremental lex restarts at a bracket in column 0, so
+   inside one large form it costs in proportion to the form, with or without the guard. */
+test('the bracket guard adds at most 2 ms to a keystroke (median of 50) in a 10,000-line Lisp buffer, inside one large indented form too, typing and DEL', async () => {
+  const form = (i: number) => `(define (f${i} x)\n  "Doc ${i}."\n  (let ([y #\\(] [z #\\"])\n    #;(old ${i})\n    (list x y z ${i})))\n`;
+  let forms = ''; for (let i = 0; i < 2000; i++) forms += form(i);
+  const k = forms.indexOf('(list x y z 1000)');
+  let data = "(define table\n  '(\n"; for (let i = 0; i < 10000; i++) data += `(e${i} ${i})\n`; data += '))\n';
+  let nested = "(define table\n  '(\n"; for (let i = 0; i < 5000; i++) nested += `(e${i}\n(x)\n${i})\n`; nested += '))\n';
+  let quoted = "(define table\n  '((e0 \"s\" 0)"; for (let i = 1; i < 10000; i++) quoted += `\n    (e${i} "s" ${i})`; quoted += '))\n';
+  let library = '(define-library (big)\n  (export f0)\n  (import (scheme base))\n  (begin\n';
+  for (let i = 0; i < 3332; i++) library += `    (define (f${i} x)\n      (let ((y ${i}))\n        (+ x y)))\n`; library += '    ))\n';
+  const cases: [string, string, number][] = [
+    ['top-level forms', forms, k + 6],
+    ['entries of a list in column 0', data, data.indexOf('(e5000 ') + 3],
+    ['column-0 lists inside the entries', nested, nested.indexOf('\n2500)') + 3],
+    ['a form left open (a buffer being repaired)', forms.slice(0, k) + '(' + forms.slice(k), k + 7],
+    ['inside an entry of an indented quoted list', quoted, quoted.indexOf('(e5000 ') + 4],
+    ['between the entries of an indented quoted list', quoted, quoted.indexOf('(e5000 ') - 1],
+    ['an indented define in an R7RS library', library, library.indexOf('(f1600 x)') + 3],
+  ];
+  const median = (xs: number[]) => xs.sort((x, y) => x - y)[xs.length >> 1];
+  for (const [what, text, at] of cases) {
+    await ed.type(':e budget.scm\n');
+    const b = ed.E.current;
+    ed.Ed.deleteText(b, 0, b.text.length); ed.Ed.insertText(b, text); b.pt = at; ed.Ed.lexOf(b);
+    await ed.type('i');
+    const keys: number[] = [], dels: number[] = [], lexes: number[] = [];
+    for (let i = 0; i < 50; i++) {
+      let t0 = performance.now(); ed.Ed.lexOf(b); lexes.push(performance.now() - t0);
+      t0 = performance.now(); await ed.type(i % 2 ? 'x' : ' '); keys.push(performance.now() - t0);
+    }
+    assert.equal(b.text.length, text.length + 50, `${what}: every key went in`);
+    for (let i = 0; i < 50; i++) {
+      ed.Ed.lexOf(b);
+      const t0 = performance.now(); await ed.keys('DEL'); dels.push(performance.now() - t0);
+    }
+    await ed.keys('ESC');
+    assert.equal(b.text, text, `${what}: every DEL took one character`);
+    const key = median(keys), del = median(dels);
+    console.log(`bracket guard, ${what}: key median ${key.toFixed(3)} ms (max ${keys[49].toFixed(3)}), DEL median ${del.toFixed(3)} ms, the buffer's lex ${median(lexes).toFixed(3)} ms`);
+    assert.ok(key <= 2, `${what}: key median ${key} ms`);
+    assert.ok(del <= 2, `${what}: DEL median ${del} ms`);
+    ed.Ed.deleteText(b, 0, b.text.length); b.modified = false;
+  }
 });

@@ -5375,6 +5375,195 @@ named `<<` and `>>`, which act on the headline alone.
   and `edwin-scheme` (38), and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored,
   `tests/terminal.rs` 36). `nix flake check` was not run.
 
+## Balanced brackets in Lisp buffers (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-lisp-brackets`): balanced insertion and deletion, the
+matching bracket face and the sexp motion primitives for Lisp. Before, typing in a Scheme or Emacs Lisp buffer
+was electric-pair-mode's: `(` paired except before a word, `)` was inserted unless the next character was one, `"`
+in a string ended it, `;` could comment out the closing brackets of its line, and DEL took a bracket alone unless
+the pair was empty, so a few keys left the buffer unbalanced. The audit (`structural-editing-audit.md` in the fleet
+repository, "Missing" items 1, 6 and 7) lists the cases; lispy and paredit, which the owner's Emacs uses, were the
+model. A Lisp buffer here is `scheme-mode` or `scheme-interaction-mode` (`.scm` and `.el` files), not a minibuffer,
+with `electric-pair-mode` on.
+
+- **One guard** (`balanceSpan` and `keepsBalance`, `src/editor-core.ts`): every edit the keys below make is judged
+  on a span: the text from the top-level form at or before it (a bracket in column 0) to the one after, when that is
+  balanced (no bracket closes more than opened, all closed, no string, `#|` or `#;` left open). When it is not (a
+  list in column 0 inside a form, or a buffer being repaired) and the whole buffer is, the span is the innermost
+  list around the edit, or at top level the whole text; when neither is, the keys work as they did before
+  (electric-pair-mode's), so an unbalanced buffer can be repaired by typing. `balanceSpan` reads all this off the
+  classes the buffer's lexer already holds, with no lexing. An edit that would leave its span unbalanced is refused
+  with `That would unbalance the brackets` and changes nothing. `keepsBalance` lexes only the piece of text around
+  the edit, from the bracket before it to the bracket after it (where the lexer is in its first state), with the
+  edit made: when that piece leaves nothing open, still ends with its bracket, changes the depth by as much as
+  before and goes no lower than before, the text outside it lexes as before at the same depths, and the edit is
+  allowed. Anything else (a `#;` that takes the next datum, an edit that is refused) is judged by lexing the whole
+  span with the edit made (`balancedLisp`). So a key costs the piece between two brackets, plus a scan of the
+  form's classes; the first version lexed the whole form twice per key, which inside one large indented form (an
+  R7RS `define-library`, a long quoted table) grew with the form.
+- **Typing** (`self-insert-command`, `src/extras.ts`), in code:
+  - `(` and `[` insert the pair, point inside, with a blank between it and an atom before or after it, as lispy's
+    `lispy-pair` does (lispy 20230314.1738, the nixpkgs one): `foo` then `(` gives `foo ()`, `(` before `foo` gives `() foo`. No blank after a quote or a `#` prefix
+    (`'()`, `#()`, `#u8()`).
+  - `)` and `]` move out of the list around point, past its closing bracket, whatever lies between; at top level
+    they are refused with `No list to close here`.
+  - `"` inserts `""`, point inside. In a string `"` inserts `\"`, and before the string's closing quote steps over
+    it, so `"foo"` typed whole comes out as typed.
+  - `;` with more code after point on the line puts that code on a line of its own, indented, as paredit's
+    semicolon does: `(a b c)` with `;` before `b` gives `(a ;` and ` b c)`. After `#` it is a datum comment.
+  - `|` after `#` opens and closes a block comment, `#||#`, point inside.
+  - A backslash, in code or a string, reads the next character and inserts the two together (the interactive spec
+    reads it), so `#\(`, `?\(` and `\"` never escape the text after point. In a comment it is a plain character.
+    A key after it that is no character (`ESC`, `C-g`, `<left>`) inserts nothing and runs as typed, so `\` then
+    `ESC` leaves Insert state with the text unchanged; there is no lone backslash to insert.
+  - Anything else, and every character in a string or a `;` or `#|` comment, goes in as typed, through the guard.
+  - Point between a backslash and the character it escapes is taken past that character first.
+- **Replace state** (`R`, the same `self-insert-command`): each character overwrites the one at point, or at a
+  line's end is inserted, as evil-core's Replace state does, and that edit goes through the guard first. A bracket,
+  a string quote, a `;` or a backslash that would leave a bracket unmatched, and any character over a bracket or a
+  string's quote, is refused with `That would unbalance the brackets`; plain characters over plain characters, a
+  bracket over the same bracket and brackets or quotes in a string or a comment replace as before. Replace state
+  pairs nothing and reads no character after a backslash: the rules above are Insert and Emacs state's. `DEL` there
+  (`evil-replace-backspace`) puts the replaced character back before point, wherever point now is; that edit is
+  judged too and refused, the character kept for a later `DEL`, when it would unbalance: in `(a ‸bc)`, `R x` then
+  `<left>` three times and `DEL` would put the `b` in place of the `(`. Before, Replace state was not guarded:
+  `R)` on the `b` of `(a b)`, then `ESC`, gave `(a ))`.
+- **Deleting** (`electric-pair-delete`, called by `delete-backward-char` and `delete-forward-char`, so `DEL`,
+  `<deletechar>` and Emacs state's `C-d`): a bracket takes its whole list (with the quote before it, for DEL), a
+  string's quote its whole string, a backslash or the character it escapes both, and a character literal's `#` or `?`
+  the whole literal, and a character of a `#|` or `|#` its whole block comment, so `#|` typed and DEL straight after
+  give back the text, as `(` and `"` do. `(foo)` with DEL after the `)` or after the `(` gives nothing; `"a\"b"` with
+  DEL after the `\"` gives `"ab"`. `<deletechar>` and `C-d` on a list's closing bracket or a string's closing quote
+  from inside delete nothing and move point to the list's opening bracket or the string's opening quote, as lispy's
+  `C-d` does by default (`lispy-delete-sexp-from-within` nil): `(a (b c‸) d)` gives `(a ‸(b c) d)`, `'(b‸)` gives
+  `'‸(b)`, `(f "abc‸")` gives `(f ‸"abc")`. Everything else is the one character, through the guard: DEL of the
+  only `;` of a comment over a `)`, or of the newline before a bracket the comment above would take, is refused. A
+  count deletes one at a time and ends at a move to the start, so `C-u 3 C-d` in `(f "ab‸c")` deletes the `c` and
+  stops at `(f ‸"ab")`. A negative count deletes the other way by the same rules (`C-u -2 DEL` is `C-u 2 C-d`).
+  Outside Lisp buffers DEL still deletes an empty pair whole, as before.
+- **RET** (`newline`, `evil-newline-and-indent`, through `lisp-newline-prefix`): inside a `;` comment with more of
+  it after point, the new line goes on with the comment, its run of `;` and a blank, so the rest stays a comment.
+  A new line the guard refuses (between the `#` and `;` of a datum comment) is refused.
+- **The list motions** (`src/editor-prims.ts`, on the lexer's classes, so brackets in strings, comments and character
+  literals are not lists): `down-list` (`C-M-d`, negative backward down), `up-list` (forward out, no key, as in Emacs;
+  negative is `backward-up-list`), `forward-list` and `backward-list` (`C-M-n`, `C-M-p`, over lists past the atoms
+  between), `beginning-of-defun` and `end-of-defun` (`C-M-a`, `C-M-e`, a top-level form being one that starts with a
+  bracket in column 0) and `transpose-sexps` (`C-M-t`). A step with nowhere to go signals `scan-error`. A negative
+  count goes the other way in each: `(beginning-of-defun -1)` to the start of the next form, or the buffer's end;
+  `(end-of-defun -1)` back to the line after the end of the last form that ends before point, or the buffer's start.
+  Emacs 31 (`emacs -Q --batch`) agrees on forms with blank lines between them; with none, from inside a form Emacs's
+  `end-of-defun -1` skips one more form (`(a)\n(b c)` from inside `(b c)` goes to the buffer's start), and Edwin stops
+  at the line after `(a)`. `Ed.upListForward`, `downList`, `backwardDownList`, `nextListStart`, `prevListEnd`,
+  `defunBefore`, `defunAfter`, `stringAt`, `inStringAt`, `inCommentAt` and `escapingAt` are the helpers, for the lispy
+  packages to build on.
+- **The matching bracket face** was already there: se-lexer's show-paren (`parenFlags`, the `paren` and
+  `mismatch` faces) reads the lexer, and its test is in `edwin-structural`. It is unchanged.
+- **Choices** (where Edwin differs from lispy, paredit or the audit):
+  - `ep-(-before-word` expected electric-pair's `(foo`, which is unbalanced; Edwin gives `() foo`.
+  - `ep-DEL-open-with-content` expected the list deleted, but its keys (`la`) put point after the `f`, not the
+    `(`: DEL deletes the `f`, as lispy's `lispy-delete-backward` does. `ep-DEL-after-open` covers DEL after the `(`.
+  - `CMb` (`$` then `C-M-b` on `(a) (b c)`) expected the list. Point is before the character the Normal-state
+    cursor covers, the closing `)`, so `C-M-b` crosses `c`, as Emacs's backward-sexp from there does.
+  - `)` and `]` close the list around point whatever its kind, as Emacs's scan-lists counts both kinds as one.
+  - Inside a `#;` datum comment the characters are the comment's, so `(` there goes in alone and is refused, as the
+    datum would no longer end; editing inside a datum comment needs electric-pair-mode off.
+  - Joining a line into the `;` comment above it with DEL is allowed when the brackets stay balanced (the comment
+    takes a whole list). That is Edwin's own choice; lispy was not checked for it.
+  - `{` and `}` are plain characters in Lisp (no bracket to the lexer); electric-pair-mode paired them before, so
+    audit case `ep-{` (`i{` on an empty line), which expected and got `{}`, now gives `{`.
+  - `C-M-t` is bound globally, as in Emacs, and like `C-M-f` and `C-M-b` reads every buffer with the Lisp lexer, so
+    in prose it swaps by that lexer's atoms: `it's ‸a (b) c` in a `.txt` buffer gives `ita 's (b) c`. Other modes'
+    sexps wait for their syntax tables or tree-sitter.
+  - `C-d` on a closing bracket or quote from inside moves to the start, lispy's default; the package's earlier
+    versions deleted the whole list or string, as `lispy-delete-sexp-from-within` t does, so `C-u 3 C-d` in `(f "ab‸c")` could
+    delete a whole form. Ending a count at that move is Edwin's own (lispy's count there was not checked). The `|#`
+    of a block comment, from inside, still takes the whole comment: lispy has no rule for `#| |#`.
+  - A negative count of `DEL` or `C-d` (`C-u -2 DEL` in Emacs state) deletes the other way through the guard; the
+    earlier versions passed it to `delete-char`, past the guard.
+  - Not guarded:
+    - `x`, `d`, `c`, `C-w`, `C-u`, `C-k`, `M-d` and paste: they are lang-lispy-operators'.
+    - `DEL` and `C-d` with an active region delete the region as it is (`delete-region`): `(a ‸(b) c)` with
+      `C-SPC C-f DEL` in Emacs state gives `(a b) c)`.
+    - `C-q` is undefined in Edwin (there is no `quoted-insert`), so `C-q )` says `C-q is undefined` and the `)`
+      is typed as any `)` is, through the guard, leaving the list. A literal bracket needs electric-pair-mode off
+      (`SPC t e`).
+    - A backslash then `DEL`: `DEL` is no character, so the backslash inserts nothing and `DEL` runs as typed,
+      deleting the character before point (`(a ‸b)` with `\` then `DEL` gives `(a‸b)`), through the guard as any
+      `DEL` does.
+- **Not in it**: the Normal-state motions `[(` `])` and atom motions on `W B E` (lang-lispy-motions), `d` with
+  any command as a motion (`d-CMf`) and `ep-x-on-paren` (lang-lispy-operators), slurp, barf and the rest
+  (lang-lispy-structural), `backward-kill-sexp`, and Clojure's `{ }` (lang-lisp-modes).
+- **Checked by**, on ex44, on the one commit rebased onto emacs-to-edwin (39891f7):
+  `nix build .#checks.x86_64-linux.edwin-prog` (65 tests, 65 passed: `test/prog.test.mts` now has 49, 24 new, and
+  `test/editorconfig.test.mts` 16):
+  - 11 audit cases, by id: `ep-DEL-after-close`, `ep-DEL-after-open`, `ep-DEL-open-with-content`,
+    `ep-(-before-word`, `ep-"-inside-string`, `CMd-down-list`, `CMn-forward-list`, `CMt-transpose-sexps`,
+    `CMa-beginning-of-defun`, `CMb` and `ep-{`; `ep-(-before-word`, `ep-DEL-open-with-content`, `CMb` and `ep-{`
+    differ from the audit as written above.
+  - Typing: the pairs and their blanks, `)` `]` out of a list over lines, `"` in code and in a string and at its
+    end, brackets in strings and comments, `#|`, `{}`; backslashes in code, a string and a comment, point between a
+    backslash and what it escapes, `;` before code, at a line's end and after `#`, `)` at top level; a backslash
+    then `ESC` (Normal state, text unchanged), `<left>` (point moved, still Insert) and `C-g`; a refused edit and an
+    unbalanced buffer typed into as before; on an inner-list span (a list in column 0 inside a form), `)` and `]`
+    between the `#` and `;` of a datum comment refused, in a quoted table too, while a letter after the datum and
+    DEL turning `#x;` into `#;` go through.
+  - Deleting: lists by either bracket, with a quote, empty; strings by either quote and empty; escapes in strings
+    and character literals (`#\(`, `#\)`, `#\space`, `?\(`) with DEL and `<deletechar>`; block comments, empty and
+    not, by each character of `#|` and `|#`, and `#|` then DEL giving the text back; brackets in comments and strings
+    as one character; the refusals, among them the `;` of a comment over `))((`, refused at top level and allowed two
+    lists down (where only the whole form, lexed again, decides); an unbalanced buffer; `C-d` and `C-u 2 C-d` in
+    Emacs state; `<deletechar>` on a closing `)`, `]` (with a quote before the list) and `"` (of an empty string
+    too) from inside moving to the start; `C-u 2 C-d` and `C-u 3 C-d` ending at that move; `C-u -2 DEL` and
+    `C-u -1 C-d` in Emacs state, and `C-u -1 DEL` of a comment's `;` over a `)` refused.
+  - Replace state: `R` with `)`, `(`, `]`, `"` and `;` over a plain character, a backslash before a `)`, and a
+    plain character over a bracket and over a string's quote, refused with the message; plain over plain (a count of
+    two), `)` over `)`, `(` in a string, `)` in a comment and a character at a line's end replacing or inserting;
+    the reviewer's `R)` then `ESC` on `(a b)`; `DEL` putting back a character away from the replacement refused,
+    and right after it allowed.
+  - RET in a comment, at a comment's end and in Emacs state; a minibuffer, a Nix buffer, electric-pair-mode off
+    and an `.el` buffer.
+  - The list motions with counts and their refusals, negative counts of `beginning-of-defun` and `end-of-defun`
+    against Emacs 31's answers, and `transpose-sexps`.
+  - The property test: 200 random balanced texts of lists, vectors, strings with escapes, character literals,
+    `;`, `#|` and `#;` comments, and lists in column 0 (one with a `#;` datum and code after it on its line), in
+    `.scm` and `.el`, in Insert, Emacs and Replace state in turn, each given 12 random keys at a random point
+    (letters, blanks, brackets, `"`, `;`, `#`, `\`, `|`, `'`, DEL, `<deletechar>`, RET, `C-d` in Emacs state, and
+    `<left>` and `<right>` in Replace state), checked balanced after every key; of the 2,400 keys, 1,655 changed the
+    text and 335 were refused. With the guard taken out (`keepsBalance` always true) it fails on seed 21's second
+    text; with Replace state's guard taken out, for a typed character or for `DEL` putting one back, it fails, as
+    does the Replace-state test; with either of `keepsBalance`'s depth conditions on the piece taken out, the
+    property test or the `))((` cases fail.
+  - The guard's soundness, apart from the keys: 200 more such texts, and at every position of each, 14 edits (a
+    letter, each bracket, `"`, `;`, `#`, `|`, `\`, a newline, `#;`, `||#`, `()`, inserted and replacing the
+    character there, and that character deleted), judged by `keepsBalance` on `balanceSpan`'s span; every edit it
+    accepts must leave the whole text balanced, lexed again. 567,556 edits judged, 2,669 refused that would have
+    kept the text balanced (the guard being careful, logged, not a failure). A review found the hole this catches:
+    on an inner-list span (a list in column 0 inside a form, where the span is the innermost list around the edit),
+    `)` typed between the `#` and `;` of a `#;` datum made `#);`, a `;` comment running past the list's `)` and
+    commenting out the line's rest outside the span; the span's own text lexed as balanced. Now a span that ends at
+    a list's closing bracket must still end with that bracket after the edit (`balancedLisp`'s `closed`). Before
+    the fix 114 of 358,933 edits of a direct fuzz were such unsound accepts, all of this kind; after it none, and
+    8 more refusals.
+  - The keystroke budget: in a 10,000-line buffer, 50 keys typed and then 50 DEL, each at a median of 2 ms or less
+    for the guard. Before each key the buffer's lex is brought up to date untimed, as redisplay does after every
+    command, and its time logged apart: that incremental lex restarts at a bracket in column 0, so inside one large
+    form it costs in proportion to the form, with or without the guard (about 3 to 4 ms per key inside a 10,000-line
+    form on ex44), and is not this package's. The shapes: top-level forms, entries of a list in column 0, column-0
+    lists inside those entries, a form left open, and inside one indented form: in an entry of a quoted list, between
+    its entries, and in an indented `define` of an R7RS `define-library`. In `edwin-prog` the key medians were
+    0.045, 0.036, 0.351, 0.510, 0.902, 0.870 and 1.013 ms, and DEL's 0.038, 0.035, 0.275, 0.479, 0.915, 0.878 and
+    0.984 ms (ex44 under a load average near 30). The first version, which lexed
+    the whole form twice per key, took 5.055 ms per key in an entry of the indented quoted list (a local `node
+    --test` run of this suite on it), so that case fails the budget there.
+
+  Of the second version's tests (5028688), 4 failed on the first version (0858893; both are squashed into this
+  commit): the backslash test, the deletion test, the list motions and the budget. Also passed on the final code, in the same `nix build` (exit 0): `edwin-typecheck` and
+  `edwin-structural` (188 passed, its 2 ms keystroke budget at a median of 0.102 ms). Then `nix flake check`, on the
+  same code with this paragraph's last sentence not yet written: every check passed but `edwin-bench`, whose shadow
+  stack overhead came out at 11.8% and then 14.5% (limit 10%) while another worktree's flake check loaded ex44; it
+  times `src/scheme.ts` alone, which this package does not change, and passed at 7.9% built again at a lower load,
+  after which `nix flake check --keep-going` exited 0.
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

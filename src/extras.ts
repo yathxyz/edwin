@@ -1,5 +1,5 @@
 /* Editing extras that need the display or the key queue: avy jumps, pulse after a jump,
-   electric pairs, fill-paragraph, centered view, bookmarks, the save hook, face colours. */
+   electric pairs and balanced brackets in Lisp, fill-paragraph, centered view, bookmarks, the save hook, face colours. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, EC = globalThis.EvilCore;
@@ -93,16 +93,103 @@ H.postCommand = (def, b, failed) => {
   if (arr(L.get('post-command-pulse') ?? NIL).includes(s)) pulse(E.current);
 };
 
-/* ---------- electric pairs in Insert state ---------- */
+/* ---------- electric pairs in Insert state, and balanced brackets in Lisp buffers ---------- */
 const PAIRS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"' };
+/* A buffer of Lisp code that keeps its brackets balanced: a Scheme or Emacs Lisp buffer, not a minibuffer, with
+   electric-pair-mode on (SPC t e turns it all off). */
+const lispBrackets = (b: EdBuffer) => Ed.isLisp(b) && !b.minibuf && !b.readOnly && truthy(L.get('electric-pair-enabled'));
+const unbalanced = () => signal('user-error', 'That would unbalance the brackets');
+/* Replace FROM..TO with TEXT and put point at PT, or refuse when that leaves the brackets unbalanced. SPAN is
+   balanceSpan's. */
+function balancedEdit(b: EdBuffer, span: [number, number], from: number, to: number, text: string, pt: number) {
+  if (!Ed.keepsBalance(b.rope, Ed.lexOf(b)!, span, from, to, text)) unbalanced();
+  Ed.replaceText(b, from, to, text); b.pt = pt;
+}
+/* Type CH at point in a Lisp buffer (ESC the character read after a backslash), keeping the brackets balanced;
+   false when the text around point is not balanced to begin with, for the caller to insert CH as typed.
+   In code ( and [ insert a pair, with a blank between it and an atom next to it; ) and ] move out of the list
+   around point; " inserts an empty string; ; before more code on the line puts that code on a line of its own;
+   | after # opens and closes a #| |# comment. In a string " inserts \", or steps over the closing quote. A
+   backslash comes with the character after it. Anything else is inserted as typed, if that keeps the brackets
+   balanced. Point between a backslash and the character it escapes is taken past that character first. */
+function lispSelfInsert(b: EdBuffer, ch: string, esc: string | null) {
+  const t = b.rope, cls = Ed.lexOf(b)!, n = t.length;
+  let p = b.pt;
+  if (p > 0 && p < n && Ed.escapingAt(t, cls, p - 1)) p++;
+  const span = Ed.balanceSpan(t, cls, p, p);
+  if (!span) return false;
+  const put = (text: string, at = text.length) => balancedEdit(b, span, p, p, text, p + at);
+  const prev = p > 0 ? t.charAt(p - 1) : '', next = p < n ? t.charAt(p) : '';
+  if (ch === '\\' && esc !== null && !Ed.inCommentAt(t, cls, p)) return put('\\' + esc), true;
+  if (Ed.inStringAt(t, cls, p)) {
+    const s = Ed.stringAt(t, cls, p - 1)!;
+    if (ch === '"' && s[2] && p === s[1] - 1) b.pt = p + 1;
+    else put(ch === '"' ? '\\"' : ch);
+    return true;
+  }
+  if (Ed.inCommentAt(t, cls, p)) return put(ch), true;
+  if (ch === '(' || ch === '[') {
+    let q = p; while (q > 0 && !/[\s()[\]";'`,]/.test(t.charAt(q - 1))) q--;
+    /* No blank after a # prefix (#( #u8( #s(), as the reader takes it with its list. */
+    const hash = q < p && t.charAt(q) === '#' && !t.slice(q, p).includes('\\');
+    const pre = prev && !/[\s([`',@]/.test(prev) && !hash ? ' ' : '';
+    const post = next && !/[\s)\]]/.test(next) ? ' ' : '';
+    put(pre + ch + PAIRS[ch] + post, pre.length + 1);
+  } else if (ch === ')' || ch === ']') {
+    const e = Ed.upListForward(t, cls, p);
+    if (e === null) signal('user-error', 'No list to close here');
+    b.pt = e!;
+  } else if (ch === '"') put('""', 1);
+  else if (ch === ';' && prev !== '#') {
+    let code = false;
+    for (let k = p, e = Ed.eol(t, p); k < e && !code; k++) code = !/\s/.test(t.charAt(k)) && cls[k] !== Ed.C.CMT;
+    if (!code) return put(';'), true;
+    put(';\n', 1);
+    const at = b.pt; b.pt = at + 1; Ed.indentLine(b); b.pt = at;
+  } else if (ch === '|' && prev === '#') put('||#', 1);
+  else put(ch);
+  return true;
+}
 {
   const sic = L.toFn(intern('self-insert-command'));
-  CMD('self-insert-command', sic.interactive as ExtrasSpec, sic.params!, sic.doc!, ([n]) => {
+  /* A backslash typed in Lisp code or a string reads the character it escapes, so the two go in together. A key
+     that is no character (ESC, C-g, <left>) inserts nothing and is run as typed, so ESC still leaves Insert state. */
+  const spec = async () => {
+    const args = await Ed.specArgs(sic.interactive as string);
+    const b = cur(), ch = L.chr(L.get('last-command-event'));
+    if (ch === '\\' && lispBrackets(b) && EC.stateOf(b) !== 'replace' && !Ed.inCommentAt(b.rope, Ed.lexOf(b)!, b.pt)) {
+      const k = await Ed.nextKey(), c = Ed.keyChar(k);
+      if (c === null) { Ed.unreadKeys([k], E.lastKeyReal); args.push(false); } else args.push(L.mkchar(c));
+    }
+    return args;
+  };
+  CMD('self-insert-command', spec, sic.params!, sic.doc!, ([n, esc]) => {
     const b = cur(), ch = L.chr(L.get('last-command-event'));
     const st = EC.stateOf(b);
+    const count = Math.max(1, L.absent(n) ? 1 : n as number);
+    if (esc === false) return false;
+    if (ch && st === 'replace' && lispBrackets(b)) {
+      /* Replace state overwrites the character at point, as evil-core's command does, or inserts at a line's end:
+         each such edit is judged by the guard first and refused when it would unbalance the brackets. */
+      for (let k = 0; k < count; k++) {
+        const t = b.rope, cls = Ed.lexOf(b)!, p = b.pt;
+        const to = p < t.length && t.charAt(p) !== '\n' && ch !== '\n' ? p + 1 : p;
+        const span = Ed.balanceSpan(t, cls, p, to);
+        if (span && !Ed.keepsBalance(t, cls, span, p, to, ch)) unbalanced();
+        sic([1]);
+      }
+      return false;
+    }
+    if (ch && st !== 'replace' && lispBrackets(b)) {
+      const e = esc === undefined ? null : L.chr(esc);
+      let done = 0;
+      while (done < count && lispSelfInsert(b, ch, e)) done++;
+      if (done === count) return false;
+      if (e !== null) { Ed.insertText(b, '\\' + e); return false; }
+      if (done) return sic([count - done]);
+    }
     if (truthy(L.get('electric-pair-enabled')) && st !== 'replace' && ch && (ch in PAIRS || ch === ')' || ch === ']' || ch === '}') && !b.readOnly) {
       const next = b.rope.at(b.pt), prev = b.rope.at(b.pt - 1);
-      const count = Math.max(1, L.absent(n) ? 1 : n as number);
       if (count === 1) {
         if ((ch === ')' || ch === ']' || ch === '}') && next === ch) { b.pt++; return false; }
         if (ch === '"' && next === '"' && prev !== '\\') { b.pt++; return false; }
@@ -114,13 +201,114 @@ const PAIRS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"' }
     return sic([n]);
   });
 }
+/* DEL in Replace state puts back the character the last replacement took, before point wherever point now is: in a
+   Lisp buffer that edit is judged by the guard too, and refused, the character kept for a later DEL, when it would
+   unbalance the brackets. */
+{
+  const rb = L.toFn(intern('evil-replace-backspace'));
+  CMD('evil-replace-backspace', '', '', rb.doc!, () => {
+    const b = cur(), replaced = E.ins ? E.ins.replaced : [];
+    if (lispBrackets(b) && b.pt > 0 && replaced.length) {
+      const t = b.rope, cls = Ed.lexOf(b)!, p = b.pt, old = replaced[replaced.length - 1];
+      const span = Ed.balanceSpan(t, cls, p - 1, p);
+      if (span && !Ed.keepsBalance(t, cls, span, p - 1, p, old ?? '')) unbalanced();
+    }
+    return rb([]);
+  });
+}
 /* The ad hoc toggles are minor modes (R4.25). Each one's state is its -enabled variable. */
 Ed.defineMinorMode({ name: 'rainbow-delimiters-mode', global: true, init: true, pretty: 'Rainbow delimiters', doc: 'Toggle colouring parentheses by depth in Scheme buffers. The state is rainbow-delimiters-enabled.' });
 Ed.defineMinorMode({ name: 'electric-pair-mode', global: true, init: true, pretty: 'Electric pairs', doc: 'Toggle inserting the closing bracket or quote when you type the opening one. The state is electric-pair-enabled.' });
-D('electric-pair-delete', '', 'Delete the pair around point when it is empty, as DEL does with electric pairs. Return #t if it did.', () => {
-  const b = cur(), prev = b.rope.at(b.pt - 1), next = b.rope.at(b.pt);
-  if (truthy(L.get('electric-pair-enabled')) && prev! in PAIRS && PAIRS[prev!] === next && !b.readOnly && !b.markActive) { Ed.deleteText(b, b.pt - 1, b.pt + 1); return true; }
+/* The #| |# comment whose #| or |# holds the character at K, as [START, END], or null. The comment starts where its
+   run of comment classes does, and ends at the first |# after its #|, as the lexer reads it. */
+function blockCommentAt(t: EdText, cls: ArrayLike<number>, k: number): [number, number] | null {
+  if (cls[k] !== Ed.C.CMT || (t.charAt(k) !== '#' && t.charAt(k) !== '|')) return null;
+  let s = k; while (s > 0 && cls[s - 1] === Ed.C.CMT) s--;
+  if (t.charAt(s) !== '#' || t.charAt(s + 1) !== '|') return null;
+  const c = t.indexOf('|#', s + 2);
+  return c >= 0 && (k <= s + 1 || k === c || k === c + 1) ? [s, c + 2] : null;
+}
+/* The text a deletion at point takes in a Lisp buffer, as [FROM, TO]: the character before point (FORWARD #f) or
+   after it, widened to the whole list when it is a bracket, to the whole string when it is a string's quote, to
+   both characters of a backslash escape, to the whole of a character literal and to the whole #| |# comment when it
+   is a character of the comment's #| or |#. A forward deletion of a list's closing bracket or a string's closing
+   quote from inside deletes nothing: it gives the position of the list's opening bracket or the string's opening
+   quote, for point to move to, as lispy's C-d does (lispy-delete-sexp-from-within nil). */
+function lispDeletion(t: EdText, cls: ArrayLike<number>, p: number, forward: boolean): [number, number] | number {
+  const k = forward ? p : p - 1, c = t.charAt(k);
+  /* In code a # or ? before the backslash (#\( ?\() makes a character literal of it, taken whole. */
+  const escape = (s: number): [number, number] =>
+    !Ed.inStringAt(t, cls, s + 1) && s > 0 && (t.charAt(s - 1) === '#' || t.charAt(s - 1) === '?') && (s === 1 || /[\s()[\]";'`,]/.test(t.charAt(s - 2))) ? [s - 1, s + 2] : [s, s + 2];
+  if ((c === '#' || c === '?') && Ed.escapingAt(t, cls, k + 1) && !Ed.inStringAt(t, cls, k + 1) && (k === 0 || /[\s()[\]";'`,]/.test(t.charAt(k - 1))))
+    return [k, Ed.forwardSexp(t, cls, k) ?? k + 3];
+  if (Ed.escapingAt(t, cls, k)) return escape(k);
+  if (Ed.escapingAt(t, cls, k - 1)) return escape(k - 1);
+  if (cls[k] === Ed.C.PAR) {
+    if (c === '(' || c === '[') {
+      const e = Ed.forwardSexp(t, cls, k);
+      if (e !== null) { let s = k; while (s > 0 && cls[s - 1] === Ed.C.QUO) s--; return [forward ? k : s, e]; }
+    } else if (forward) {
+      const s = Ed.upList(t, cls, p);
+      if (s !== null) return s;
+    } else {
+      const s = Ed.backwardSexp(t, cls, k + 1);
+      if (s !== null) return [s, k + 1];
+    }
+  }
+  const block = blockCommentAt(t, cls, k);
+  if (block) return block;
+  if (c === '"') {
+    const s = Ed.stringAt(t, cls, k);
+    if (s && s[2] && forward && k === s[1] - 1 && k > s[0]) return s[0];
+    if (s && s[2] && (k === s[0] || k === s[1] - 1)) return [s[0], s[1]];
+  }
+  return [k, k + 1];
+}
+D('electric-pair-delete', '&optional N FORWARD', `Delete as DEL (FORWARD #f) or C-d does when that is not plain: return #t if it did.
+In a Lisp buffer with electric-pair-mode on, the N characters before or after point go one at a time (a negative N the
+other way), a bracket taking its whole list, a string's quote its whole string, a backslash escape both its characters;
+C-d on a list's closing bracket or a string's closing quote from inside moves point to the list's or string's start
+and deletes nothing, ending the count there; a deletion that would leave the brackets unbalanced is refused.
+Elsewhere, DEL between an empty pair of brackets or quotes deletes both.`, ([n, fwd]) => {
+  const b = cur();
+  let forward = truthy(fwd ?? false), count = L.absent(n) ? 1 : n as number;
+  if (b.markActive) return false;
+  if (lispBrackets(b) && count !== 0) {
+    if (count < 0) { forward = !forward; count = -count; }
+    for (let k = 0; k < count; k++) {
+      const t = b.rope, cls = Ed.lexOf(b)!, p = b.pt;
+      if (forward ? p >= t.length : p <= 0) signal(forward ? 'end-of-buffer' : 'beginning-of-buffer');
+      const d = lispDeletion(t, cls, p, forward);
+      const span = typeof d === 'number' ? Ed.balanceSpan(t, cls, p, p) : Ed.balanceSpan(t, cls, d[0], d[1]);
+      if (!span) { if (k === 0) return false; Ed.deleteText(b, forward ? p : p - 1, forward ? p + 1 : p); continue; }
+      if (typeof d === 'number') { b.pt = d; break; }
+      balancedEdit(b, span, d[0], d[1], '', d[0]);
+    }
+    return true;
+  }
+  const prev = b.rope.at(b.pt - 1), next = b.rope.at(b.pt);
+  if (!forward && count === 1 && truthy(L.get('electric-pair-enabled')) && prev! in PAIRS && PAIRS[prev!] === next && !b.readOnly) { Ed.deleteText(b, b.pt - 1, b.pt + 1); return true; }
   return false;
+});
+/* RET in a Lisp buffer: the text to put after the new line's indentation. Inside a ; comment with more of it after
+   point, the comment goes on there, with its run of ; and a blank, so the rest of the comment stays a comment; else
+   the empty string. Point between a backslash and the character it escapes is taken past that character first, and
+   a new line that would still unbalance the brackets (between the # and ; of a datum comment) is refused. */
+D('lisp-newline-prefix', '', 'The text RET puts after the new line\'s indentation in a Lisp buffer: the comment\'s ; and a blank inside a ; comment with more of it after point, else "". Refuses a new line that would unbalance the brackets.', () => {
+  const b = cur();
+  if (!lispBrackets(b)) return '';
+  const t = b.rope, cls = Ed.lexOf(b)!;
+  if (b.pt > 0 && b.pt < t.length && Ed.escapingAt(t, cls, b.pt - 1)) b.pt++;
+  const p = b.pt;
+  let prefix = '';
+  if (Ed.inCommentAt(t, cls, p) && !/^\s*$/.test(t.slice(p, Ed.eol(t, p)))) {
+    let s = p - 1; while (s > 0 && cls[s - 1] === Ed.C.CMT && t.charAt(s - 1) !== '\n') s--;
+    const m = /^;+/.exec(t.slice(s, p));
+    if (m) prefix = m[0] + ' ';
+  }
+  const span = Ed.balanceSpan(t, cls, p, p);
+  if (span && !Ed.keepsBalance(t, cls, span, p, p, '\n' + prefix)) unbalanced();
+  return prefix;
 });
 
 /* ---------- paragraphs, centred view, bookmarks ---------- */

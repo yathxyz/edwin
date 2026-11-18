@@ -1519,10 +1519,29 @@ interface EdApi {
   lex(t: string, info?: { dirty: boolean }): Uint8Array;
   lexOf(b: EdBuffer, soft?: boolean): Uint8Array | number[] | null;
   markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, base?: number): Uint8Array;
-  forwardSexp(t: EdText, cls: Uint8Array | number[], p: number): number | null;
-  backwardSexp(t: EdText, cls: Uint8Array | number[], p: number): number | null;
-  upList(t: EdText, cls: Uint8Array | number[], p: number): number | null;
-  matchParen(t: EdText, cls: Uint8Array | number[], k: number): number | null;
+  forwardSexp(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  backwardSexp(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  upList(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  matchParen(t: EdText, cls: ArrayLike<number>, k: number): number | null;
+  /* Lisp brackets: the string holding the character at K as [start, end, closed]; whether P is in a string, in a
+     comment, or K a backslash that escapes the next character */
+  stringAt(t: EdText, cls: ArrayLike<number>, k: number): [number, number, boolean] | null;
+  inStringAt(t: EdText, cls: ArrayLike<number>, p: number): boolean;
+  inCommentAt(t: EdText, cls: ArrayLike<number>, p: number): boolean;
+  escapingAt(t: EdText, cls: ArrayLike<number>, k: number): boolean;
+  /* list motions: a position, or null where Emacs's scan-lists would signal */
+  upListForward(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  downList(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  backwardDownList(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  nextListStart(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  prevListEnd(t: EdText, cls: ArrayLike<number>, p: number): number | null;
+  /* the line start of the top-level form at or before P, or after P; -1 for none */
+  defunBefore(t: EdText, cls: ArrayLike<number>, p: number): number;
+  defunAfter(t: EdText, cls: ArrayLike<number>, p: number): number;
+  balancedLisp(s: string): boolean;
+  /* the span an edit of FROM..TO is judged on, null when it was not balanced */
+  balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number): [number, number] | null;
+  keepsBalance(t: EdText, cls: ArrayLike<number>, span: [number, number], from: number, to: number, text: string): boolean;
   indentLine(b: EdBuffer): void;
   /* null inside a string: leave the line alone */
   lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp?: boolean): number | null;

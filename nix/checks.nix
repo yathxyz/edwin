@@ -172,6 +172,12 @@ in
   # the lines that differ from the file only, so untouched dirty lines survive it. EditorConfig (src/editorconfig.ts):
   # the glob, parser, properties and filetree cases of the core library's own test suite, from editorconfig-core-c's
   # source, and a visited file's .editorconfig setting its buffer's indent, fill column, final newline and trimming.
+  # Balanced brackets in Lisp buffers (src/extras.ts): typing, Replace state, DEL, C-d and RET keep them balanced, a
+  # bracket deleting its list, a quote its string, C-d on a closing one from inside moving to the start; an edit that
+  # would unbalance them refused; a property test of random keys at random points of random balanced text in Insert,
+  # Emacs and Replace state, and one of the guard's soundness, every edit it accepts at every point of such text
+  # leaving the whole text balanced; the list motions (C-M-d C-M-n C-M-p C-M-a C-M-e C-M-t, up-list), the audit's
+  # cases for all of them, and the 2 ms keystroke budget in a 10,000-line buffer.
   edwin-prog = pkgs.runCommand "edwin-prog" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR EDITORCONFIG_CORE_TESTS=${pkgs.editorconfig-core-c.src}/tests
     node --test ${edwin}/edwin/test/prog.test.mts ${edwin}/edwin/test/editorconfig.test.mts

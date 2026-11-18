@@ -736,11 +736,12 @@ The replaced text goes to the unnamed register."
 ;;;; Entering Insert state
 
 (evil-define-command (evil-newline-and-indent)
-  "Insert a newline, then indent like the line above (RET in Insert state)."
+  "Insert a newline, then indent like the line above (RET in Insert state); in Lisp, inside a ; comment, go on with it."
   (interactive "*")
-  (let ((indent (evil--line-indentation)))
+  (let ((indent (evil--line-indentation))
+        (prefix (lisp-newline-prefix)))
     (insert "\n")
-    (if (lisp-buffer?) (lisp-indent-line) (insert indent))))
+    (if (lisp-buffer?) (begin (insert prefix) (lisp-indent-line)) (insert indent))))
 
 (evil-define-command (evil-insert count)
   "Insert before point; COUNT repeats the text (i)."

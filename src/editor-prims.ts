@@ -627,6 +627,73 @@ CMD('backward-up-list', '^p', '&optional N', 'Move backward out of N levels of p
   for (let k = 0; k < optNum(n, 1); k++) { const p = Ed.upList(b.text, cls, b.pt); if (p === null) signal('scan-error', 'Unbalanced parentheses'); b.pt = p!; }
   return false;
 });
+/* The list motions, as Emacs's scan-lists moves: each step from where the last one left point, a negative N the
+   other way; a step with nowhere to go signals scan-error and leaves point after the steps made. */
+function listMotion(n: number, fwd: (t: EdText, cls: ArrayLike<number>, p: number) => number | null, back: (t: EdText, cls: ArrayLike<number>, p: number) => number | null) {
+  const b = cur(), cls = bufLex(b);
+  for (let k = 0; k < Math.abs(n); k++) {
+    const p = (n > 0 ? fwd : back)(b.rope, cls, b.pt);
+    if (p === null) signal('scan-error', 'Containing expression ends prematurely');
+    b.pt = p!;
+  }
+  return false;
+}
+CMD('up-list', '^p', '&optional N', 'Move forward out of N levels of brackets; a negative N moves backward out.', ([n]) =>
+  listMotion(optNum(n, 1), Ed.upListForward, Ed.upList));
+CMD('down-list', '^p', '&optional N', 'Move forward down into N levels of brackets (C-M-d); a negative N moves backward down.', ([n]) =>
+  listMotion(optNum(n, 1), Ed.downList, Ed.backwardDownList));
+CMD('forward-list', '^p', '&optional N', 'Move forward over N lists, past the atoms between (C-M-n).', ([n]) =>
+  listMotion(optNum(n, 1), (t, cls, p) => { const s = Ed.nextListStart(t, cls, p); return s === null ? null : Ed.forwardSexp(t, cls, s); },
+    (t, cls, p) => { const e = Ed.prevListEnd(t, cls, p); return e === null ? null : Ed.backwardSexp(t, cls, e); }));
+CMD('backward-list', '^p', '&optional N', 'Move backward over N lists, past the atoms between (C-M-p).', ([n]) => L.call('forward-list', [-optNum(n, 1)]));
+/* A top-level form starts with a bracket in column 0; its end, for these motions, is the start of the line after
+   its closing bracket (or the closing bracket at the text's end). */
+const defunEnd = (t: EdText, cls: ArrayLike<number>, s: number) => {
+  const e = Ed.forwardSexp(t, cls, s);
+  return e === null ? null : t.charAt(e) === '\n' ? e + 1 : e;
+};
+CMD('beginning-of-defun', '^p', '&optional N', 'Move back to the start of the top-level form around point, or of the one before when point is at one (C-M-a); N times; a negative N moves forward to the start of the next one, or to the end.', ([n]) => {
+  const b = cur(), cls = bufLex(b), t = b.rope, count = optNum(n, 1);
+  for (let k = 0; k < Math.abs(count); k++) {
+    if (count < 0) { const s = Ed.defunAfter(t, cls, b.pt); if (s < 0) { b.pt = t.length; break; } b.pt = s; continue; }
+    if (b.pt === 0) break;
+    const s = Ed.defunBefore(t, cls, b.pt - 1); b.pt = s < 0 ? 0 : s;
+  }
+  return false;
+});
+CMD('end-of-defun', '^p', '&optional N', 'Move to the line after the end of the top-level form around or after point (C-M-e); N times; a negative N moves back to the line after the end of the last form that ends before point, or to the start.', ([n]) => {
+  const b = cur(), cls = bufLex(b), t = b.rope, count = optNum(n, 1);
+  for (let k = 0; k < Math.abs(count); k++) {
+    if (count < 0) {
+      let e: number | null = null;
+      for (let s = Ed.defunBefore(t, cls, b.pt); s >= 0; s = s === 0 ? -1 : Ed.defunBefore(t, cls, s - 1)) { e = defunEnd(t, cls, s); if (e !== null && e < b.pt) break; e = null; }
+      if (e === null) { b.pt = 0; break; }
+      b.pt = e;
+      continue;
+    }
+    let s = Ed.defunBefore(t, cls, b.pt);
+    let e = s < 0 ? null : defunEnd(t, cls, s);
+    /* Point at or after the end of the form it is in (on the line past it): the next form's end. */
+    if (e === null || e <= b.pt) { s = Ed.defunAfter(t, cls, b.pt); e = s < 0 ? null : defunEnd(t, cls, s); }
+    if (e === null) { b.pt = t.length; break; }
+    b.pt = e;
+  }
+  return false;
+});
+CMD('transpose-sexps', '*p', '&optional N', 'Swap the expressions before and after point, and leave point after both (C-M-t).', ([n]) => {
+  const b = cur();
+  for (let k = 0; k < optNum(n, 1); k++) {
+    const t = b.rope, cls = bufLex(b);
+    const be = Ed.backwardSexp(t, cls, b.pt), ae = Ed.forwardSexp(t, cls, b.pt);
+    if (be === null || ae === null) signal('scan-error', "Don't have two things to transpose");
+    const aEnd = Ed.forwardSexp(t, cls, be!)!, bStart = Ed.backwardSexp(t, cls, ae!)!;
+    if (aEnd > bStart) signal('scan-error', "Don't have two things to transpose");
+    const first = t.slice(be!, aEnd), mid = t.slice(aEnd, bStart), second = t.slice(bStart, ae!);
+    Ed.replaceText(b, be!, ae!, second + mid + first);
+    b.pt = ae!;
+  }
+  return false;
+});
 CMD('lisp-indent-line', '*', '', 'Indent the current line as Lisp code.', () => { Ed.indentLine(cur()); return false; });
 L.defvar('tab-always-indent', intern('complete'), "TAB indents; 'complete also completes the word at point once the line is indented, as corfu does on the desktop.");
 L.defvar('indent-tabs-mode', true, 'Non-#f: TAB in a text buffer inserts a tab character; #f: spaces up to the next tab-width stop.');

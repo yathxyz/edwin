@@ -149,9 +149,11 @@ With a numeric prefix ARG, kill that many whole lines."
                  (point))))
 
 (define-command (newline #!optional n)
-  "Insert N newlines.  In Scheme buffers, indent the new line."
+  "Insert N newlines.  In Scheme buffers, indent the new line, and inside a ; comment go on with it."
   (interactive "*p")
-  (dotimes (_ (or n 1)) (insert "\n"))
+  (let ((prefix (lisp-newline-prefix)))
+    (dotimes (_ (or n 1)) (insert "\n"))
+    (insert prefix))
   (when (lisp-buffer?) (lisp-indent-line)))
 
 (define-command (open-line n)
@@ -162,18 +164,23 @@ With a numeric prefix ARG, kill that many whole lines."
 
 (define-command (delete-backward-char n)
   "Delete the active region, or the N characters before point.
-Between an empty pair of brackets or quotes, delete both."
+Between an empty pair of brackets or quotes, delete both.  In a Lisp
+buffer a bracket takes its list and a quote its string, and the brackets
+stay balanced (electric-pair-delete)."
   (interactive "*p")
   (cond ((region-active?) (delete-region (region-beginning) (region-end)))
-        ((and (= n 1) (electric-pair-delete)) #t)
+        ((electric-pair-delete n) #t)
         (else (delete-char (- n)))))
 
 (define-command (delete-forward-char n)
-  "Delete the active region, or the N characters after point."
+  "Delete the active region, or the N characters after point.  In a Lisp
+buffer a bracket takes its list and a quote its string, a closing bracket
+or quote from inside moves point to the start of its list or string and
+deletes nothing, and the brackets stay balanced (electric-pair-delete)."
   (interactive "*p")
-  (if (region-active?)
-      (delete-region (region-beginning) (region-end))
-      (delete-char n)))
+  (cond ((region-active?) (delete-region (region-beginning) (region-end)))
+        ((electric-pair-delete n #t) #t)
+        (else (delete-char n))))
 
 (define-command (transpose-chars n)
   "Swap the characters around point, then move forward.  At the end
@@ -453,6 +460,9 @@ takes the -N lines above the current one, as Emacs's; 0 takes none."
    ("M-:" . eval-expression)         ("C-x C-e" . eval-last-sexp)
    ("C-M-f" . forward-sexp)          ("C-M-b" . backward-sexp)
    ("C-M-u" . backward-up-list)      ("C-M-k" . kill-sexp)
+   ("C-M-d" . down-list)             ("C-M-t" . transpose-sexps)
+   ("C-M-n" . forward-list)          ("C-M-p" . backward-list)
+   ("C-M-a" . beginning-of-defun)    ("C-M-e" . end-of-defun)
    ("C-M-\\" . indent-region)
    ("C-x b" . consult-buffer)        ("C-x k" . kill-buffer)
    ("M-s l" . consult-line)          ("M-s i" . consult-imenu)

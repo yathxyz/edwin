@@ -1050,6 +1050,144 @@ function matchParen(t: EdText, cls: ArrayLike<number>, k: number) {
   return backwardSexp(t, cls, k + 1);
 }
 
+/* ---------- Lisp brackets: where a position stands, and whether an edit keeps the brackets balanced ---------- */
+const isOpen = (c: string) => c === '(' || c === '[';
+/* The string that holds the character at K, as [START, END, CLOSED]: START its opening quote, END past its closing
+   one (the text's end when it has none, CLOSED #f). A run of string classes can hold more than one string ("a""b"),
+   so the run is read from its start, string by string, as the lexer reads it. */
+function stringAt(t: EdText, cls: ArrayLike<number>, k: number): [number, number, boolean] | null {
+  const n = t.length;
+  if (k < 0 || k >= n || !inStr(cls[k])) return null;
+  let s = k; while (s > 0 && inStr(cls[s - 1])) s--;
+  while (s <= k) {
+    let j = s + 1, closed = false;
+    while (j < n) { const c = t.charCodeAt(j); if (c === 92) { j += 2; continue; } j++; if (c === 34) { closed = true; break; } }
+    j = Math.min(j, n);
+    if (k < j) return [s, j, closed];
+    s = j;
+  }
+  return null;
+}
+/* Whether position P (between characters) is inside a string: after its opening quote, up to its closing one. */
+function inStringAt(t: EdText, cls: ArrayLike<number>, p: number) { const r = stringAt(t, cls, p - 1); return !!r && (p < r[1] || !r[2]); }
+/* Whether position P is inside a comment: a ; comment up to its line's end, a #| |# or a #; datum. */
+function inCommentAt(t: EdText, cls: ArrayLike<number>, p: number) {
+  const n = t.length;
+  if (p <= 0 || cls[p - 1] !== C.CMT) return false;
+  if (p < n && cls[p] === C.CMT) return true;
+  if (p < n && t.charAt(p) !== '\n') return false;
+  let s = p - 1; while (s > 0 && cls[s - 1] === C.CMT) s--;
+  return t.charAt(s) === ';';
+}
+/* Whether the character at K is a backslash that escapes the one after it, in code or in a string: the run of
+   backslashes it ends is odd, as the lexer pairs them (#\\( is the character \ before a real bracket). */
+function escapingAt(t: EdText, cls: ArrayLike<number>, k: number) {
+  if (k < 0 || k + 1 >= t.length || t.charCodeAt(k) !== 92 || cls[k] === C.CMT) return false;
+  let j = k; while (j > 0 && t.charCodeAt(j - 1) === 92 && cls[j - 1] !== C.CMT) j--;
+  return (k - j) % 2 === 0;
+}
+/* Forward out of the list around P: the position after its closing bracket, or null at top level. */
+function upListForward(t: EdText, cls: ArrayLike<number>, p: number) {
+  let d = 0;
+  for (let k = p, n = t.length; k < n; k++) if (cls[k] === C.PAR) { if (isOpen(t.charAt(k))) d++; else if (d-- === 0) return k + 1; }
+  return null;
+}
+/* Forward into the next list after P: the position after its opening bracket, or null when a closing bracket or
+   the text's end comes first. */
+function downList(t: EdText, cls: ArrayLike<number>, p: number) {
+  for (let k = p, n = t.length; k < n; k++) if (cls[k] === C.PAR) return isOpen(t.charAt(k)) ? k + 1 : null;
+  return null;
+}
+/* Backward into the list before P: the position before its closing bracket, or null when an opening bracket or the
+   text's start comes first. */
+function backwardDownList(t: EdText, cls: ArrayLike<number>, p: number) {
+  for (let k = p - 1; k >= 0; k--) if (cls[k] === C.PAR) return isOpen(t.charAt(k)) ? null : k;
+  return null;
+}
+/* The start of the next list after P, at P's depth, or null when the list around P closes first. */
+function nextListStart(t: EdText, cls: ArrayLike<number>, p: number) {
+  for (let k = p, n = t.length; k < n; k++) if (cls[k] === C.PAR) return isOpen(t.charAt(k)) ? k : null;
+  return null;
+}
+/* The end of the last list before P, at P's depth, or null when the list around P opens first. */
+function prevListEnd(t: EdText, cls: ArrayLike<number>, p: number) {
+  for (let k = p - 1; k >= 0; k--) if (cls[k] === C.PAR) return isOpen(t.charAt(k)) ? null : k + 1;
+  return null;
+}
+/* A top-level form starts with a bracket in column 0, as Emacs's open-paren-in-column-0 convention has it. */
+const defunAt = (t: EdText, cls: ArrayLike<number>, ls: number) => ls < t.length && isOpen(t.charAt(ls)) && cls[ls] === C.PAR;
+/* The line start of the last top-level form starting at or before P, or -1. */
+function defunBefore(t: EdText, cls: ArrayLike<number>, p: number) {
+  for (let ls = bol(t, Math.min(p, t.length)); ; ls = bol(t, ls - 1)) { if (defunAt(t, cls, ls)) return ls; if (ls === 0) return -1; }
+}
+/* The line start of the first top-level form starting after P, or -1. */
+function defunAfter(t: EdText, cls: ArrayLike<number>, p: number) {
+  const n = t.length;
+  for (let ls = eol(t, p) + 1; ls < n; ls = eol(t, ls) + 1) if (defunAt(t, cls, ls)) return ls;
+  return -1;
+}
+/* Whether the Lisp text S is balanced: its brackets never close more than they opened and end closed, and no
+   string, #| comment or #; datum runs on to its end. With CLOSED, S is a piece of a larger text that ends at a
+   list's closing bracket, so that bracket must still be read as one: a ; comment open at the piece's end would run
+   on past it, through the line's rest outside the piece. */
+function balancedLisp(s: string, closed = false) {
+  const info = { dirty: false }, cls = lex(s, info);
+  let d = 0;
+  for (let k = 0; k < s.length; k++) if (cls[k] === C.PAR) { if (isOpen(s[k])) d++; else if (--d < 0) return false; }
+  return d === 0 && !info.dirty && (!closed || cls[s.length - 1] === C.PAR);
+}
+/* Whether S..E of the text T, whose classes are CLS (the buffer's own lex), is balanced, read off CLS with no lexing.
+   S is where the lexer is in its first state (the text's start or a bracket classed as one); E is a bracket classed
+   as one, the position after one, or the text's end. Before a bracket or after one nothing is left open; at the
+   text's end only a string, a #| comment or a #; still waiting can be, so the last of those is lexed again. */
+function balancedRange(t: EdText, cls: ArrayLike<number>, s: number, e: number) {
+  let d = 0;
+  for (let k = s; k < e; k++) if (cls[k] === C.PAR) { const c = t.charCodeAt(k); if (c === 40 || c === 91) d++; else if (--d < 0) return false; }
+  if (d !== 0 || e < t.length) return d === 0;
+  let k = e - 1; while (k >= s && isWS(t.charAt(k))) k--;
+  if (k < s || (!inStr(cls[k]) && cls[k] !== C.CMT)) return true;
+  if (inStr(cls[k])) { const r = stringAt(t, cls, k); return !!r && r[2] && k === r[1] - 1; }
+  let c = k; while (c > s && cls[c - 1] === C.CMT) c--;
+  return balancedLisp(t.slice(c, e));
+}
+/* The span of text an edit of FROM..TO is judged on, as [START, END], or null when that text was not balanced to
+   begin with (a buffer being repaired, which is edited as typed). The span is first the text from the last line
+   that starts with a bracket at or before FROM to the next one after TO, which is one top-level form or one entry of
+   a list written in column 0. When that is not balanced, and the whole text is, the span is the innermost list
+   around FROM that holds TO before its closing bracket, or at top level the whole text. Each is judged on the
+   buffer's classes, with no lexing. */
+function balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number): [number, number] | null {
+  const n = t.length, s = Math.max(0, defunBefore(t, cls, from)), a = defunAfter(t, cls, to), e = a < 0 ? n : a;
+  if (balancedRange(t, cls, s, e)) return [s, e];
+  if (!balancedRange(t, cls, 0, n)) return null;
+  for (let o = upList(t, cls, from); o !== null; o = upList(t, cls, o)) {
+    const z = forwardSexp(t, cls, o);
+    if (z !== null && to < z) return [o, z];
+  }
+  return [0, n];
+}
+/* Whether replacing FROM..TO of the text T (classes CLS) with TEXT leaves the span SPAN (from balanceSpan)
+   balanced. Only the text around the edit is lexed: from the bracket before FROM to the one after TO (or the span's
+   ends), where the lexer is in its first state. The edit keeps the span balanced when that piece, lexed with TEXT
+   in place, leaves nothing open, ends with the same bracket, changes the depth by as much as before and never goes
+   lower than before: the text outside it then lexes as before, at the same depths. Anything else (a #; that takes
+   the next datum, an edit refused) is judged on the whole span, lexed again; a span that ends at a list's closing
+   bracket (the innermost list around the edit) must still end with that bracket, else a ; comment opened in the
+   span runs on past it (typing ) between the # and ; of a #; datum: #); comments out the line's rest). */
+function keepsBalance(t: EdText, cls: ArrayLike<number>, span: [number, number], from: number, to: number, text: string) {
+  const [s, e] = span;
+  let a = from; while (a > s && cls[a - 1] !== C.PAR) a--;
+  let z = to; while (z < e && cls[z] !== C.PAR) z++;
+  const bracket = z < e; if (bracket) z++;
+  let d = 0, low = 0;
+  for (let k = a; k < z; k++) if (cls[k] === C.PAR) { d += isOpen(t.charAt(k)) ? 1 : -1; low = Math.min(low, d); }
+  const piece = t.slice(a, from) + text + t.slice(to, z), info = { dirty: false }, pc = lex(piece, info);
+  let nd = 0, nlow = 0;
+  for (let k = 0; k < piece.length; k++) if (pc[k] === C.PAR) { nd += isOpen(piece[k]) ? 1 : -1; nlow = Math.min(nlow, nd); }
+  if (!info.dirty && nd === d && nlow >= low && (!bracket || pc[piece.length - 1] === C.PAR)) return true;
+  return balancedLisp(t.slice(s, from) + text + t.slice(to, e), e < t.length && cls[e - 1] === C.PAR);
+}
+
 /* ---------- Lisp indentation ---------- */
 /* Emacs's calculate-lisp-indent with scheme-mode's scheme-indent-function or emacs-lisp-mode's lisp-indent-function
    (Emacs 31). A form's method is how many of its arguments are distinguished (indented by 4 on lines of their own;
@@ -2610,7 +2748,8 @@ globalThis.Ed = {
   Marker, shiftMarkers, editText, applyOps, applyLineDiff, diffLines: globalThis.Rope.diffLines, withOrigin, runHookSafely, removeHookEverywhere,
   localized, localize, makeLocal, localValue, defaultValue, setDefault, minorModes, minorOn, modeParents, modeChain, lighters, LEX_SOURCE, Store, Buffer, Keymap, PREFIX, C, SENTINEL, getBuffer, getBufferCreate, toBuffer, setWindowBuffer, otherBuffer, checkRO,
   insertText, deleteText, replaceText, spanOf, changedSince, forgetLog, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, markDocstrings,
-  forwardSexp, backwardSexp, upList, matchParen, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,
+  forwardSexp, backwardSexp, upList, matchParen, stringAt, inStringAt, inCommentAt, escapingAt, upListForward, downList, backwardDownList,
+  nextListStart, prevListEnd, defunBefore, defunAfter, balancedLisp, balanceSpan, keepsBalance, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,
   normKey, kbd, defineKey, lookupIn, lookupKey, lookupWith, activeMaps, whereIs, keyName, keyChar, selfInsertable, message, ding,
   reportError, errorText, quietQuit, QUIET, feedKey, unreadKeys, flushReplay, nextKey, readMini, exitMini, abortMini, completeMini, historyMove,
   miniCandidates, miniMove, miniInsert, markUsed, termRegex, histories, historyFor, prescient, annotateCommand, annotateFunction, annotateVariable, annotateBuffer, annotateFile, readKeySeq, readChar, commandNames, functionNames, variableNames, bufferNames, isCommand, prefixNumeric, specArgs,
