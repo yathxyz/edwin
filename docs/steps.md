@@ -4633,6 +4633,126 @@ requests cancelled on movement.
   - These mutations of src/lsp.ts each fail the suite: no cancel when point moves (only on leaving the
     state), no debounce (the timer at 0 ms), the signature not shown again after a key.
 
+## Diagnostics (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-diagnostics`, on lsp-eldoc and proc-next-error; owner
+decision 2: the client in the frame, the other LSP details the plan's defaults; decision 11: no underlines):
+a diagnostics list buffer, counts in the mode line, the message at point, next and previous through next-error;
+proved by edwin-lsp. Risk named: no in-text underline.
+
+- **`src/lsp.ts`** holds it, beside hover and signature help (no new file); `scm/next-error.scm` gains
+  `next-error-replace-list!`; the list's keys are in `scm/evil.scm` and `scm/emacs.scm`. `Ed.lsp` gains
+  `diagnostics(b)` and `timing.diagnostics` (100 ms). initialize now also says `publishDiagnostics` with
+  `versionSupport`.
+- **What a server publishes** (`textDocument/publishDiagnostics`) is kept per session and file (absolute path; a
+  URI of another scheme is left out), replacing that file's last publish; an empty one forgets it. Each item needs
+  a range of whole non-negative numbers and a string message, else it is left out; a severity other than 1 to 4,
+  or none, is an error; a range ending before its start is empty at its start; the source and code (a string or a
+  number) are shown together. Messages, sources and codes have their control characters blanked (`\r\n` and a lone
+  `\r` made `\n`), as hover text is. Bounds: 1000 diagnostics a file (the first 1000 of a publish), 2000 files a
+  session (a publish for one more is dropped), a message cut at 2000 characters, a source and code at 100.
+- **Placed in the buffer.** In the buffer attached to the session that visits the file, each diagnostic's start
+  and end become positions in `buffer.temps`, so they follow the edits made after the publish until the next one
+  replaces them. A publish is of the text the server holds: when the buffer has an edit it was not told of yet,
+  positions after that edit move by its length (the edit taken as one change, from the common prefix and suffix),
+  one inside it goes to its start (an end to its end), and at the place of a plain insertion a start goes after
+  the inserted text and an end stays before it. Positions are UTF-16 units over `\n`, `\r\n` and a lone `\r`
+  (one line-start index a publish), a position between the halves of a surrogate pair at the pair's start. A
+  publish whose `version` is older than the one the server was last told of the buffer (its didOpen or the last
+  didChange sent: an edit undone before it was sent, or a server that takes no changes, tells it nothing, so the
+  document keeps that version beside the buffer's) is about text gone and is dropped; one with no version is
+  taken. A buffer attached later (visiting a file the server published for, its
+  document opened again) is placed from what is kept.
+- **Forgotten** when the server ends (crash or start again: it publishes afresh) and when it is shut down; a buffer's
+  positions are released when it stops using its server (eglot-mode off, killed, detached).
+- **Mode line**: the counts of the buffer's errors, warnings and notes (information and hints are notes, as
+  flymake has them) in its extra field, `E2 W1 N3`, a kind with none left out, nothing when there are none;
+  counted at each publish, so a redraw only reads them.
+- **At point**: after each command at top level (not in the minibuffer) the buffer's diagnostics whose range holds
+  point (an empty range: the characters on either side of it, so one at a line's end shows in Normal state) are
+  shown in the echo area, errors first, one `SEVERITY: MESSAGE (SOURCE)` a line, cut at 4096 characters, and again
+  when a publish arrives for the current buffer. As with signatures, only while the echo area holds nothing of
+  anyone else's (empty, an Evil state's tag, or these): never over the minibuffer, a prompt, an isearch or a
+  message; never in `*Messages*`. A signature shown while typing comes first, and replaces it when its answer
+  comes. Leaving them clears what they showed.
+- **Lists.** `flymake-show-buffer-diagnostics` lists the buffer's in `*Flymake diagnostics for NAME*`, and
+  `flymake-show-project-diagnostics` every file's the server published for (open or not) in `*Flymake diagnostics
+  for project ROOT*`, shown and selected in another window: for each file (relative to the root when under it) a
+  heading, then a row for each diagnostic, `LINE:COL  SEVERITY  MESSAGE  (SOURCE)` by place, the message on one
+  line and cut at 500 characters. A placed file's rows are where its diagnostics are now; a file not visited, where
+  the server put them. `flymake-diagnostics-buffer-mode` (special-mode, Motion state): RET
+  (`flymake-goto-diagnostic`) visits the row's place in another window, `o` (`flymake-show-diagnostic`) shows it,
+  `q` quits; *xref*'s row commands share the code. The rows become the error list (owner: the list's name), so
+  `M-g n`, `M-g p`, `:cn` step through them. A publish draws the session's lists again `timing.diagnostics` after
+  it (a run of publishes, one redraw), point kept on its line, and replaces the error list with
+  `next-error-replace-list!` when it is still the list's: the next `M-g n` goes past the error last visited by its
+  file, line and column, so fixing it does not go back to the top. A list made after a compile or a search took the
+  error list leaves that list alone. After a shutdown a list says `No diagnostics: SERVER in ROOT was shut down`.
+- **`next-error-replace-list! OWNER ENTRIES`** (scm/next-error.scm): replaces the list when OWNER set it, as
+  `next-error-add-to-list!` adds to it; the entries grouped by file and ordered by line and column. The new place:
+  the last entry of the visited error's file at or before its line and column; when that file's entries all come
+  after it, the one before them; when the file has none, the start. #f, replacing nothing, for another owner.
+- **Choices**, each reversible:
+  - flymake's command and buffer names (`flymake-show-buffer-diagnostics`, `flymake-show-project-diagnostics`,
+    `flymake-diagnostics-buffer-mode`), as the owner's Emacs used flymake inside eglot buffers (init-prog.el,
+    `yath/eglot-managed-diagnostics`). No leader key: the owner's configuration binds none for flymake, so `M-x`,
+    then `M-g n` and `M-g p`.
+  - A stale versioned publish is dropped rather than shown at shifted places; a server publishes again for the
+    version it was last sent.
+  - Showing a list makes it the error list; a publish alone never does, so a compile or grep list is not taken over
+    while the server works.
+  - The message at point is shown at once after a command, not after eldoc's idle delay: it is a lookup in the
+    buffer's placed list, with no request.
+  - Counts as `E W N` letters in the mode line: Edwin's mode line draws one face, so flymake's coloured counters
+    `[2 1 0]` would not say which is which.
+- **Differences from Emacs's flymake and eglot:** no underlines, fringe marks or other in-text marking (Edwin has
+  no overlays; plan decision 11 keeps them cut); no `flymake-goto-next-error` stepping by place in the source
+  buffer (`M-g n` goes through a shown list); the list is plain text, not a tabulated list (no sorting by column, no
+  header); pull diagnostics (`textDocument/diagnostic`) and `relatedInformation`, tags (unnecessary, deprecated)
+  and `codeDescription` are not used; flymake's other backends (flycheck, checkers run on save) are not ported:
+  diagnostics come from language servers only.
+- **Not in it:** code actions on a diagnostic (lsp-code-actions); the servers' own settings (lsp-servers);
+  diagnostics in a web frame or edwind (no processes there, so no server).
+- **Checked by**, on ex44 (the build host), on the final tree: `nix build .#checks.x86_64-linux.edwin-lsp` (64
+  passed, 0 failed: test/lsp-rpc.test.mts 10, test/lsp.test.mts 17, test/lsp-docs.test.mts 10,
+  test/lsp-xref.test.mts 10, test/lsp-eldoc.test.mts 10, test/lsp-diagnostics.test.mts 7, nil from nixpkgs run in
+  the sandbox, not skipped), `edwin-next-error` (13), `edwin-typecheck`, `nix build .#edwin` (unit 35 passed and 2
+  ignored, gui 5 and 1, terminal 37) and `nix flake check --keep-going path:$PWD`: every check passed but two
+  timing ones, `edwin-prog`'s 2 ms bracket-guard budget (2.29 ms) and `edwin-bench`'s shadow-stack bound (15.4%
+  against 10%), at a load average of 5; each rebuilt alone at a load under 2 passed (`edwin-prog` 65, `edwin-bench`
+  8.2%). Among the passing: `edwin-headless` 21, `edwin-scheme` 38, `edit-lockdown` 6, `edit-security` 21. An
+  earlier tree (before the stale-version fix and a one-line guard in dropping diagnostics) had passed the whole
+  flake check, after the same `edwin-prog` budget failed once at a load of 9 (2.53 ms).
+  test/lsp-diagnostics.test.mts (7), against a stand-in (node) that publishes what the test wrote after each
+  didOpen, didChange and didSave and on a test notification, with the document's version when asked:
+  - initialize's `publishDiagnostics`; a publish of every shape placed after `😀` in UTF-16 units, a position inside
+    the pair at its start, by place; malformed items (no range, no message, a negative line, null, a number) and
+    another URI scheme left out; no severity an error; a backwards range empty; a line past the end at the end;
+    ESC and BEL blanked, `\r\n` one line end; source and code joined; the mode line `E2 W4 N3`.
+  - At point: two overlapping, the error first; one left as point moves on; nothing when point leaves; an empty
+    range at a line's end shown from the character before it; nothing in `*Messages*`; `Quit` from C-g and the
+    minibuffer left as they are.
+  - Following edits: a line inserted before a publish moves both; a publish with an edit the server was not told
+    of placed past it; an insertion not yet sent inside a range widens it, before and after the next publish; a
+    publish of version 0 after the change dropped while the newer one is taken; an edit undone before it was sent
+    (no didChange) leaves a publish of the version the server holds current; an empty publish clears them and the
+    counts.
+  - The buffer list's exact text, RET visiting a row in the other window, `M-g n` from its first row; the visited
+    error and the one before it fixed, the list drawn again and `M-g n` going on to the next (`(1 of 2) note:
+    three`); the rows following an edit not yet sent; another producer's list left alone by a later publish.
+  - The project list across two files, one not visited, RET opening it at its row's place, `M-g n` reaching it.
+  - Cleared: a shutdown (positions released from `buffer.temps`, no counts, the list saying it was shut down), a
+    crash (forgotten until the server started again publishes), eglot-mode off; 1500 diagnostics kept as 1000, a
+    3000-character message cut at 2000.
+  - nil from nixpkgs: an undefined name an error at exactly its range, counted, shown at point.
+  - These mutations of src/lsp.ts each fail the suite: positions not moved for an edit not yet sent (2 tests), a
+    stale version not dropped, the version compared with the buffer's last flushed rather than the one the server
+    was told of, a redraw not replacing the error list, the echo area written over a message (3),
+    diagnostics not forgotten when the server ends.
+  test/next-error.test.mts (13: 1 new): `next-error-replace-list!` with nothing visited, the visited error gone,
+  still there, its file's entries all after it, its file gone; a bad entry, another owner, no owner and another
+  producer's list replacing nothing.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

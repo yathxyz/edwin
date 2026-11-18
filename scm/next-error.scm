@@ -4,7 +4,9 @@
 ;;; list over with next-error-set-list!, which replaces the one before it: as in Emacs, next-error goes through
 ;;; the errors of whatever produced them last. A producer that finds them as it goes (a compilation) names
 ;;; itself as the list's owner and adds to it with next-error-add-to-list!, which keeps the place stepped to and
-;;; adds nothing once another producer's list has replaced its own. M-g n and M-g p (and :cn, :cp) step through it, visiting each
+;;; adds nothing once another producer's list has replaced its own; one whose errors change (a language server's
+;;; diagnostics) replaces its own list with next-error-replace-list!, which keeps the place. M-g n and M-g p (and
+;;; :cn, :cp) step through it, visiting each
 ;;; error's file with point on its line and column; :cc N goes to the Nth. The list lives in this frame only.
 ;;; Loads after evil.scm (its ex commands) and before init.scm, so init.scm can rebind the keys.
 
@@ -63,6 +65,38 @@ is another's. All of ENTRIES is checked before any is added."
           (else (unless (= (vector-length new) 0)
                   (set! next-error--errors (vector-append next-error--errors new)))
                 (vector-length next-error--errors)))))
+
+(define (next-error--place-in v e)
+  "The index in V, a vector of entries grouped by file and ordered by line and column in each, of the last entry of
+E's file at or before E's line and column; when that file has entries only after it, the index before its first;
+#f when V has none of E's file."
+  (let ((at-or-before? (lambda (x)
+                         (or (< (cadr x) (cadr e))
+                             (and (= (cadr x) (cadr e)) (<= (or (caddr x) 0) (or (caddr e) 0)))))))
+    (let loop ((i 0) (first #f) (last #f))
+      (cond ((= i (vector-length v)) (if last last (and first (- first 1))))
+            ((not (string=? (car (vector-ref v i)) (car e))) (loop (+ i 1) first last))
+            ((at-or-before? (vector-ref v i)) (loop (+ i 1) (or first i) i))
+            (else (loop (+ i 1) (or first i) last))))))
+
+(define (next-error-replace-list! owner entries)
+  "Replace the error list with ENTRIES (as next-error-set-list! takes them, grouped by file and ordered by line and
+column in each) when it is still the one OWNER set (equal?): a producer whose errors change (a language server's
+diagnostics) keeps its list up to date this way. The place is kept: the next M-g n goes to the first entry of the
+error last visited's file past its line and column (an entry at the same place counts as visited), or from the
+first entry when that file has none. Gives the list's new length, or #f, replacing nothing, when the list is
+another's. All of ENTRIES is checked first."
+  (unless (list? entries)
+    (error "next-error-replace-list!: not a list:" entries))
+  (let ((new (list->vector (map next-error--entry entries))))
+    (cond ((not (and owner (equal? owner next-error--owner))) #f)
+          (else (let ((i next-error--index) (old next-error--errors))
+                  (set! next-error--errors new)
+                  (set! next-error--index
+                        (and i (< i (vector-length old))
+                             (let ((k (next-error--place-in new (vector-ref old i))))
+                               (and k (>= k 0) k)))))
+                (vector-length new)))))
 
 (define (next-error--go i)
   "Visit error I (from 0) of the list and show its message, leaving point's place in the jump list (C-o comes back

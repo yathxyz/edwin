@@ -539,6 +539,9 @@ C-c C-k aborts the rebase."
 ;; *xref* (src/lsp.ts), out of Evil and in Emacs state: RET visits the row at point, o shows it
 (define-key xref-mode-map "RET" 'xref-goto-xref)
 (define-key xref-mode-map "o" 'xref-show-location-at-point)
+;; A diagnostics list (src/lsp.ts), the same
+(define-key flymake-diagnostics-buffer-mode-map "RET" 'flymake-goto-diagnostic)
+(define-key flymake-diagnostics-buffer-mode-map "o" 'flymake-show-diagnostic)
 
 ;; The minibuffer
 (define-key minibuffer-local-map "RET" 'exit-minibuffer)

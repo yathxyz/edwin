@@ -1791,5 +1791,10 @@ FILES    Files are kept in this browser's storage.  emacs.scm, evil.scm
 (evil-define-key 'motion 'xref-mode
   "RET" 'xref-goto-xref
   "o" 'xref-show-location-at-point)
+;; A diagnostics list (flymake-show-buffer-diagnostics, src/lsp.ts), as *xref*: RET visits the row's place, o
+;; shows it.
+(evil-define-key 'motion 'flymake-diagnostics-buffer-mode
+  "RET" 'flymake-goto-diagnostic
+  "o" 'flymake-show-diagnostic)
 
 ;;; evil.scm ends here

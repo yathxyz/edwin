@@ -154,6 +154,45 @@ test('next-error-add-to-list! adds to the list its owner set, keeping the place;
   assert.equal(ev('(vector-length next-error--errors)'), 1);
 });
 
+test('next-error-replace-list! replaces the list its owner set, keeping the place by file, line and column; nothing once another list replaced it', async () => {
+  ed.Ed.setWindowBuffer(ed.Ed.getBufferCreate('*ne-scratch*'));
+  const three = `'(("ne-a.rs" 2 9 "a2") ("ne-a.rs" 4 5 "a4") ("ne-b.nix" 3 3 "b3"))`;
+  ev(`(next-error-set-list! ${three} "lsp")`);
+  /* Nothing visited yet: the next step is the first. */
+  assert.equal(ev(`(next-error-replace-list! "lsp" ${three})`), 3);
+  await from('M-g n');
+  assert.equal(lastMessage(), '(1 of 3) a2');
+  await from('M-g n');
+  assert.deepEqual(here(), ['ne-a.rs', 4, 5]);
+  /* The error visited is gone: the next one past its place in its file. */
+  assert.equal(ev(`(next-error-replace-list! "lsp" '(("ne-a.rs" 1 1 "a1") ("ne-a.rs" 2 9 "a2") ("ne-a.rs" 5 1 "a5") ("ne-b.nix" 3 3 "b3")))`), 4);
+  await from('M-g n');
+  assert.equal(lastMessage(), '(3 of 4) a5');
+  /* The error visited is still there: the step goes past it. */
+  assert.equal(ev(`(next-error-replace-list! "lsp" '(("ne-a.rs" 5 1 "a5") ("ne-b.nix" 2 1 "b2") ("ne-b.nix" 3 3 "b3")))`), 3);
+  await from('M-g n');
+  assert.equal(lastMessage(), '(2 of 3) b2');
+  /* Its file's entries all come after its place: the first of them next. */
+  await from('M-g n');
+  assert.equal(lastMessage(), '(3 of 3) b3');
+  ev(`(next-error-replace-list! "lsp" '(("ne-a.rs" 5 1 "a5") ("ne-b.nix" 4 1 "b4")))`);
+  await from('M-g n');
+  assert.equal(lastMessage(), '(2 of 2) b4');
+  /* Its file has none left: from the first. */
+  ev(`(next-error-replace-list! "lsp" '(("ne-c.py" 2 1 "c2") ("ne-a.rs" 3 1 "a3")))`);
+  await from('M-g n');
+  assert.equal(lastMessage(), '(1 of 2) c2');
+  /* A bad entry replaces nothing; another owner, no owner, and a list of another's take nothing. */
+  assert.throws(() => ev(`(next-error-replace-list! "lsp" '(("ne-a.rs" 0)))`), /next-error/);
+  assert.equal(ev('(vector-length next-error--errors)'), 2);
+  assert.equal(ev(`(next-error-replace-list! "other" '(("ne-a.rs" 1)))`), false);
+  assert.equal(ev(`(next-error-replace-list! #f '(("ne-a.rs" 1)))`), false);
+  ev(`(next-error-set-list! '(("ne-a.rs" 4 5 "compiler")) "compile")`);
+  assert.equal(ev(`(next-error-replace-list! "lsp" '(("ne-a.rs" 1)))`), false);
+  await from('M-g n');
+  assert.equal(lastMessage(), '(1 of 1) compiler');
+});
+
 test('a step is a jump, by key and by ex command: C-o goes back to where point was in that buffer', async () => {
   ev(`(next-error-set-list! '(("ne-a.rs" 5 1) ("ne-a.rs" 3 5)))`);
   await ed.type(':e ne-a.rs\n');

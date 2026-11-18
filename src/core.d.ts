@@ -2480,7 +2480,7 @@ interface LspSession {
 }
 interface EdLspApi {
   /* the bounds in ms (and restartMax, a count); the suites shorten them */
-  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number; request: number; eldoc: number };
+  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number; request: number; eldoc: number; diagnostics: number };
   /* a file: URI for an absolute path */
   uri(path: string): string;
   /* declare a server; while the image replays it is skipped with a message and null is returned */
@@ -2506,6 +2506,8 @@ interface EdLspApi {
   flush(b: EdBuffer): void;
   /* the LSP languageId of a major mode */
   languageId(mode: string): string;
+  /* B's diagnostics where they are now in its text, by place: severity 1 (error) to 4, message, source and code */
+  diagnostics(b: EdBuffer): { start: number; end: number; severity: number; message: string; source: string }[];
 }
 
 /* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is

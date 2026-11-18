@@ -30,7 +30,13 @@
 
    Hover and signature help (docs/steps.md, "Hover and signature help"): eldoc (K where eglot-mode is on) shows the
    server's hover at point in the echo area; while typing, the active signature of the call at point is asked for
-   once no command came for timing.eldoc and shown there, one request at a time, cancelled when point moves. */
+   once no command came for timing.eldoc and shown there, one request at a time, cancelled when point moves.
+
+   Diagnostics (docs/steps.md, "Diagnostics"): what a server publishes is kept per session and file; in a buffer
+   attached to it they are placed as positions that follow its edits until the next publish. The mode line counts
+   them, the echo area shows the ones at point, and flymake-show-buffer-diagnostics and
+   flymake-show-project-diagnostics list them (RET visits one), the list becoming the error list (M-g n), kept up
+   to date as the server publishes again. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -42,9 +48,10 @@ const cur = () => E.current;
    time, and how many starts again in a row before the session gives up; how long a server must have run for its
    end to count as a first one again; how long a session with no buffer lives; how long after an edit its change
    is sent (eglot's eglot-send-changes-idle-time); how long a cross-reference or hover command waits for its server to be
-   ready, then for its answer; how long after the last command a signature is asked for while typing. Mutable
-   for the suites. */
-const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300 };
+   ready, then for its answer; how long after the last command a signature is asked for while typing; how long a
+   diagnostics list waits after a publish before it is drawn again (a run of publishes, one redraw). Mutable for
+   the suites. */
+const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300, diagnostics: 100 };
 /* The tail of a server's error output a session keeps (eglot-stderr-buffer). */
 const STDERR_MAX = 64 * 1024;
 
@@ -78,6 +85,8 @@ interface Session extends LspSession {
   waiters: { resolve: () => void; reject: (e: unknown) => void }[];
   err: string;
   done: Promise<void> | null;
+  /* what the server last published, by absolute path */
+  diags: Map<string, Diag[]>;
 }
 
 /* How a server wants documents synced (its textDocumentSync): whether opening and closing are told, changes as
@@ -85,9 +94,10 @@ interface Session extends LspSession {
 interface Sync { openClose: boolean; change: number; save: { includeText: boolean } | null }
 /* A buffer's document as its server holds it: the session and connection (the session's gen) it was opened on,
    the file, mode, URI and language it was opened with, the buffer's version and text the server last got, the
+   version it was last told of (didOpen or a didChange sent; an edit undone before it was sent tells nothing), the
    pending change's timer. */
 interface Doc {
-  s: Session; gen: number; file: string; mode: string; uri: string; lang: string; ver: number; text: string; sync: Sync;
+  s: Session; gen: number; file: string; mode: string; uri: string; lang: string; ver: number; sent: number; text: string; sync: Sync;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -168,6 +178,7 @@ function serverRequests(s: Session): Record<string, (params: unknown) => unknown
 }
 const MESSAGE_TYPES = ['', 'error', 'warning', 'info', 'log'];
 function notified(s: Session, method: string, params: unknown) {
+  if (method === 'textDocument/publishDiagnostics') { published(s, params); return; }
   if (method === 'window/showMessage' && params && typeof params === 'object') {
     const { type, message } = params as { type?: unknown; message?: unknown };
     if (typeof message === 'string' && (type === 1 || type === 2)) Ed.message(`${s.name}: ${MESSAGE_TYPES[type as number]}: ${message.slice(0, 500)}`);
@@ -195,6 +206,7 @@ function initializeParams(s: Session) {
         implementation: { linkSupport: true }, references: {},
         hover: { contentFormat: ['plaintext', 'markdown'] },
         signatureHelp: { signatureInformation: { documentationFormat: ['plaintext', 'markdown'], parameterInformation: { labelOffsets: true }, activeParameterSupport: true } },
+        publishDiagnostics: { versionSupport: true },
       },
       window: { workDoneProgress: false, showMessage: {} },
     },
@@ -243,6 +255,7 @@ function lost(s: Session, gen: number, why: string) {
   s.proc = null; s.conn = null; s.capabilities = null;
   if (conn) conn.close(why);
   if (proc) proc.kill('KILL');
+  dropDiags(s);
   s.why = why;
   if (Date.now() - s.started >= timing.healthy) s.restarts = 0;
   if (s.restarts >= timing.restartMax) {
@@ -269,7 +282,8 @@ function shutdown(s: Session): Promise<void> {
   if (s.done) return s.done;
   clearTimers(s);
   if (sessions.get(s.key) === s) sessions.delete(s.key);
-  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); forgetEldoc(b); setFlag(b, false); }
+  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); forgetEldoc(b); unplace(b); setFlag(b, false); }
+  dropDiags(s);
   s.buffers.clear();
   const wasRunning = s.state === 'running';
   s.state = 'stopping';
@@ -313,7 +327,7 @@ function attach(s: Session, b: EdBuffer) {
 function detach(b: EdBuffer) {
   const s = ofBuffer.get(b);
   if (!s) return;
-  closeDoc(b); forgetEldoc(b);
+  closeDoc(b); forgetEldoc(b); unplace(b);
   ofBuffer.delete(b); s.buffers.delete(b);
   setFlag(b, false);
   idleWhenUnused(s);
@@ -372,9 +386,10 @@ const live = (d: Doc) => d.s.state === 'running' && d.s.gen === d.gen && !!d.s.c
    has made the session lost, which opens it again on the next start. */
 function openDoc(s: Session, b: EdBuffer) {
   forgetDoc(b);
+  place(s, b);
   const sync = syncOf(s.capabilities);
   if (!sync.openClose || !s.conn || !b.file) return;
-  const text = b.text, d: Doc = { s, gen: s.gen, file: b.file, mode: b.mode, uri: fileUri(b), lang: languageId(b.mode), ver: b.ver, text, sync, timer: null };
+  const text = b.text, d: Doc = { s, gen: s.gen, file: b.file, mode: b.mode, uri: fileUri(b), lang: languageId(b.mode), ver: b.ver, sent: b.ver, text, sync, timer: null };
   docs.set(b, d);
   try { s.conn.notify('textDocument/didOpen', { textDocument: { uri: d.uri, languageId: d.lang, version: d.ver, text } }); }
   catch (e) { docs.delete(b); }
@@ -407,7 +422,7 @@ function flush(b: EdBuffer) {
   if (text === d.text || !d.sync.change) { d.text = text; return; }
   const changes = d.sync.change === 2 ? [change(d.text, text)] : [{ text }];
   d.text = text;
-  try { d.s.conn!.notify('textDocument/didChange', { textDocument: { uri: d.uri, version: d.ver }, contentChanges: changes }); }
+  try { d.s.conn!.notify('textDocument/didChange', { textDocument: { uri: d.uri, version: d.ver }, contentChanges: changes }); d.sent = d.ver; }
   catch (e) { /* lost: it is opened again on the next start */ }
 }
 const prevEdited = H.edited;
@@ -482,7 +497,7 @@ function open(server: LspServer, root: string): Session {
   const s: Session = {
     key: `${server.name}\0${root}`, name: server.name, root, argv: server.argv.slice(), state: 'starting', proc: null,
     conn: null, capabilities: null, buffers: new Set(), restarts: 0, started: 0, why: null, gen: 0, timer: null,
-    idle: null, waiters: [], err: '', done: null,
+    idle: null, waiters: [], err: '', done: null, diags: new Map(),
   };
   launch(s);
   sessions.set(s.key, s);
@@ -698,11 +713,11 @@ async function find(name: string) {
   else list(xs, s ? s.root : '/', kind.what);
   return false;
 }
-/* The *xref* row at point, the window to visit it in (another, not showing *xref*, split from it when there is
-   none) and *xref*'s own. */
+/* The row at point of *xref* or a diagnostics list, the window to visit it in (another, not showing the list,
+   split from it when there is none) and the list's own. */
 function rowHere() {
-  const b = cur(), rows = xrefRows.get(b), x = rows && rows.get(Ed.lineNoB(b, b.pt));
-  if (!x) return signal('user-error', 'No reference here');
+  const b = cur(), xr = xrefRows.get(b), rows = xr || diagRows.get(b), x = rows && rows.get(Ed.lineNoB(b, b.pt));
+  if (!x) return signal('user-error', xr ? 'No reference here' : 'No diagnostic here');
   const here = E.sel!, others = Ed.windowList().filter(w => w !== here && w.buffer !== b);
   const there = others.find(w => !w.popup) || others[0] || Ed.splitWindow(here, 'above');
   return { x, here, there };
@@ -713,18 +728,15 @@ CMD('xref-find-references', '', '', "List the references to the identifier at po
 CMD('eglot-find-implementation', '', '', `Go to the implementation of the identifier at point. ${XREF_DOC}`, () => find('implementation'));
 CMD('eglot-find-typeDefinition', '', '', `Go to the definition of the type of the identifier at point. ${XREF_DOC}`, () => find('typeDefinition'));
 CMD('eglot-find-declaration', '', '', `Go to the declaration of the identifier at point. ${XREF_DOC}`, () => find('declaration'));
-CMD('xref-goto-xref', '', '', 'Visit the place of the *xref* row at point in another window and select it (RET); xref-go-back (M-,) returns to where the list was asked for.', async () => {
-  const { x, there } = rowHere();
-  Ed.selectWindow(there);
-  await visitXref(x);
-  return false;
-});
-CMD('xref-show-location-at-point', '', '', 'Show the place of the *xref* row at point in another window, staying in *xref* (o).', async () => {
+/* Visit the place of the row at point in another window, selecting it; with STAY the list's window stays selected. */
+async function visitRow(stay: boolean) {
   const { x, here, there } = rowHere();
   Ed.selectWindow(there);
-  try { await visitXref(x); } finally { if (Ed.windowList().includes(here)) Ed.selectWindow(here); }
+  try { await visitXref(x); } finally { if (stay && Ed.windowList().includes(here)) Ed.selectWindow(here); }
   return false;
-});
+}
+CMD('xref-goto-xref', '', '', 'Visit the place of the *xref* row at point in another window and select it (RET); xref-go-back (M-,) returns to where the list was asked for.', () => visitRow(false));
+CMD('xref-show-location-at-point', '', '', 'Show the place of the *xref* row at point in another window, staying in *xref* (o).', () => visitRow(true));
 CMD('xref-go-back', '', '', 'Go back to where point was before the last visit of a definition or reference (M-, and C-t), in its buffer; a killed buffer\'s place is skipped.', () => {
   for (let m = back.pop(); m; m = back.pop()) {
     const b = m.buffer, p = m.pos;
@@ -811,7 +823,7 @@ function signatures(b: EdBuffer) {
    state's (-- INSERT --). */
 const STATE_ECHO = /^-- [A-Za-z() ]+ --$/;
 const echoFree = () => !E.mini && !E.isearch && (E.prompt === null || E.prompt === undefined) &&
-  (E.echo === '' || STATE_ECHO.test(E.echo) || (!!shown && E.echo === shown.text));
+  (E.echo === '' || STATE_ECHO.test(E.echo) || (!!shown && E.echo === shown.text) || (!!diagShown && E.echo === diagShown.text));
 function cancelSig() {
   const a = sig;
   sig = null;
@@ -873,6 +885,273 @@ CMD('eldoc', '', '', "Show the documentation of the identifier at point in the e
   return false;
 });
 
+/* ---- diagnostics ---- */
+
+/* A file keeps at most DIAG_FILE_MAX diagnostics of a publish and a session at most DIAG_FILES_MAX files with
+   some (a publish for one more is dropped); a message is cut at DIAG_MESSAGE_MAX characters, a source and code at
+   DIAG_SOURCE_MAX, a list row's message at DIAG_ROW_MAX, and the echo area's text at HOVER_MAX. */
+const DIAG_FILE_MAX = 1000, DIAG_FILES_MAX = 2000, DIAG_MESSAGE_MAX = 2000, DIAG_SOURCE_MAX = 100, DIAG_ROW_MAX = 500;
+/* LSP's severities 1 to 4 as flymake names them: an information and a hint are both notes. */
+const SEVERITY = ['', 'error', 'warning', 'note', 'note'];
+/* A diagnostic as published: its range (from 0, UTF-16 units), severity (1 to 4, an absent one an error), message
+   and where it comes from (its source and code, '' for none). */
+interface Diag { line: number; character: number; endLine: number; endCharacter: number; severity: number; message: string; source: string }
+/* A buffer's diagnostics placed in its text: positions in buffer.temps that follow its edits until the next
+   publish, and the counts of errors, warnings and notes. */
+interface Placed { s: Session; path: string; items: { d: Diag; start: EdTempMarker; end: EdTempMarker }[]; counts: [number, number, number] }
+const placed = new WeakMap<EdBuffer, Placed>();
+/* A diagnostics list: the session it is of, the file it lists (null: every file the server published for), its
+   owner name for the error list. */
+interface DiagList { s: Session; path: string | null; owner: string }
+const diagLists = new Map<EdBuffer, DiagList>();
+/* The places of a list's rows, by line (from 1). */
+const diagRows = new WeakMap<EdBuffer, Map<number, Xref>>();
+/* The diagnostics at point in the echo area (and the buffer they are of). */
+let diagShown: { b: EdBuffer; text: string } | null = null;
+
+/* One published diagnostic, or null when it is not one (no range, no message). */
+function diagOf(it: unknown): Diag | null {
+  if (!it || typeof it !== 'object') return null;
+  const o = it as { range?: { start?: { line?: unknown; character?: unknown }; end?: { line?: unknown; character?: unknown } }; severity?: unknown; message?: unknown; source?: unknown; code?: unknown };
+  const r = o.range, st = r && typeof r === 'object' ? r.start : undefined, en = r && typeof r === 'object' ? r.end : undefined;
+  if (!st || !en || !isCount(st.line) || !isCount(st.character) || !isCount(en.line) || !isCount(en.character) || typeof o.message !== 'string') return null;
+  const severity = o.severity === 1 || o.severity === 2 || o.severity === 3 || o.severity === 4 ? o.severity : 1;
+  const code = typeof o.code === 'string' || (typeof o.code === 'number' && Number.isFinite(o.code)) ? String(o.code) : '';
+  const source = cut(clean([typeof o.source === 'string' ? o.source : '', code].filter(Boolean).join(' ')).replace(/\s+/g, ' ').trim(), DIAG_SOURCE_MAX);
+  const backwards = en.line < st.line || (en.line === st.line && en.character < st.character);
+  return {
+    line: st.line, character: st.character, endLine: backwards ? st.line : en.line, endCharacter: backwards ? st.character : en.character,
+    severity, message: cut(clean(o.message).trim(), DIAG_MESSAGE_MAX), source,
+  };
+}
+const byPlace = (a: { line: number; character: number }, c: { line: number; character: number }) => a.line - c.line || a.character - c.character;
+
+/* The attached buffer of S that visits PATH. */
+function bufferAt(s: Session, path: string): EdBuffer | null {
+  const f = Ed.host.files;
+  if (!f) return null;
+  for (const b of s.buffers) if (b.file && !b.shared && f.resolve(b.file) === path) return b;
+  return null;
+}
+/* textDocument/publishDiagnostics: PARAMS' file's diagnostics replaced (none: forgotten), placed in the buffer
+   visiting it. A publish naming a version older than the one its server was last told of the buffer is about text
+   gone and is dropped (the server publishes again for the newer one); a URI of another scheme is left out. */
+function published(s: Session, params: unknown) {
+  if (!params || typeof params !== 'object') return;
+  const { uri: u, diagnostics, version } = params as { uri?: unknown; diagnostics?: unknown; version?: unknown };
+  const path = typeof u === 'string' ? pathOf(u) : null;
+  if (!path || !Array.isArray(diagnostics)) return;
+  const b = bufferAt(s, path), d = b ? docs.get(b) : undefined;
+  if (d && isCount(version) && version < d.sent) return;
+  const list: Diag[] = [];
+  for (const it of diagnostics) { if (list.length >= DIAG_FILE_MAX) break; const x = diagOf(it); if (x) list.push(x); }
+  list.sort((a, c) => byPlace(a, c) || a.severity - c.severity);
+  if (!list.length) s.diags.delete(path);
+  else if (s.diags.has(path) || s.diags.size < DIAG_FILES_MAX) s.diags.set(path, list);
+  else return;
+  if (b) place(s, b);
+  diagsChanged(s);
+}
+/* The offsets in T of LSP positions, as offsetOf finds them, over an index of T's line starts made once. */
+function offsetsIn(t: string) {
+  const starts = [0];
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    if (c === 10 || (c === 13 && t.charCodeAt(i + 1) !== 10)) starts.push(i + 1);
+  }
+  return (line: number, character: number) => {
+    if (line >= starts.length) return t.length;
+    const i = starts[line];
+    let end = line + 1 < starts.length ? starts[line + 1] - 1 : t.length;
+    if (end > i && t.charCodeAt(end) === 10 && t.charCodeAt(end - 1) === 13) end--;
+    let p = Math.min(end, i + character);
+    if (p > i && isHigh(t.charCodeAt(p - 1)) && isLow(t.charCodeAt(p))) p--;
+    return p;
+  };
+}
+/* B's diagnostics from S placed in its text. They are of the text the server holds (its document's, else the
+   buffer's own): an edit not yet sent (one change, from the common prefix and suffix) moves those after it. */
+function place(s: Session, b: EdBuffer) {
+  unplace(b);
+  const f = Ed.host.files;
+  if (!f || !b.file) return;
+  const path = f.resolve(b.file), list = s.diags.get(path);
+  if (!list) return;
+  const d = docs.get(b), base = d && d.s === s && live(d) ? d.text : b.text, now = b.text;
+  const at = offsetsIn(base);
+  let pre = 0, suf = 0;
+  if (now !== base) {
+    const n = Math.min(base.length, now.length);
+    while (pre < n && base.charCodeAt(pre) === now.charCodeAt(pre)) pre++;
+    while (suf < n - pre && base.charCodeAt(base.length - 1 - suf) === now.charCodeAt(now.length - 1 - suf)) suf++;
+  }
+  /* P in BASE where it is in NOW: before the change kept, after it moved by its length, inside it its start (an end
+     its end); at the place of an insertion a start goes after the text inserted and an end stays before it. */
+  const cutEnd = base.length - suf, delta = now.length - base.length;
+  const moved = (p: number, end: boolean) => {
+    if (now === base || p < pre) return p;
+    if (p > cutEnd || (p === cutEnd && (p > pre || !end))) return p + delta;
+    if (p === pre) return p;
+    return end ? now.length - suf : pre;
+  };
+  const counts: [number, number, number] = [0, 0, 0];
+  const items = list.map(x => {
+    const start = { pos: moved(at(x.line, x.character), false) }, end = { pos: Math.max(start.pos, moved(at(x.endLine, x.endCharacter), true)) };
+    b.temps.add(start); b.temps.add(end);
+    counts[Math.min(x.severity, 3) - 1]++;
+    return { d: x, start, end };
+  });
+  placed.set(b, { s, path, items, counts });
+}
+function unplace(b: EdBuffer) {
+  const p = placed.get(b);
+  if (!p) return;
+  for (const it of p.items) { b.temps.delete(it.start); b.temps.delete(it.end); }
+  placed.delete(b);
+  if (diagShown && diagShown.b === b) diagShown = null;
+}
+/* S's server ended or was shut down: what it published is forgotten (a server started again publishes afresh). */
+function dropDiags(s: Session) {
+  s.diags.clear();
+  for (const b of s.buffers) if (placed.get(b)?.s === s) unplace(b);
+  diagsChanged(s);
+}
+
+/* The mode line's counts of B's diagnostics: E errors, W warnings, N notes, those with none left out. */
+function countText(b: EdBuffer) {
+  const p = placed.get(b);
+  if (!p) return '';
+  return p.counts.map((n, i) => (n ? `${'EWN'[i]}${n}` : '')).filter(Boolean).join(' ');
+}
+const prevLookDiag = H.look;
+H.look = (b, w) => {
+  const o: EdLook = prevLookDiag ? prevLookDiag(b, w) : {};
+  const t = countText(b);
+  if (t) o.extra = (o.extra ? o.extra + ' ' : '') + t;
+  return o;
+};
+
+/* What the echo area shows of B's diagnostics at point: each whose range holds point (an empty range the
+   characters beside it), errors first, `SEVERITY: MESSAGE (SOURCE)` on lines of their own; '' for none. */
+function diagText(b: EdBuffer) {
+  const p = placed.get(b);
+  if (!p) return '';
+  const pt = b.pt, hits = p.items.filter(it => (it.start.pos === it.end.pos ? it.start.pos - 1 <= pt && pt <= it.start.pos : it.start.pos <= pt && pt < it.end.pos));
+  hits.sort((a, c) => a.d.severity - c.d.severity);
+  return cut(hits.map(it => `${SEVERITY[it.d.severity]}: ${it.d.message}${it.d.source ? ` (${it.d.source})` : ''}`).join('\n'), HOVER_MAX);
+}
+/* Show B's diagnostics at point in the echo area when it holds nothing of anyone else's and no signature of B's
+   is shown (a signature while typing comes first); a message of them shown before is cleared when point left
+   them. Never in *Messages*. */
+function showDiagAt(b: EdBuffer) {
+  if (diagShown && diagShown.b !== b) diagShown = null;
+  if (shown && shown.b === b) return;
+  const text = diagText(b);
+  if (!text) {
+    if (diagShown && E.echo === diagShown.text) E.echo = '';
+    diagShown = null;
+    return;
+  }
+  if (diagShown && E.echo === diagShown.text && diagShown.text === text) return;
+  if (!echoFree()) return;
+  E.echo = text; diagShown = { b, text };
+}
+const prevPostDiag = H.postCommand;
+H.postCommand = (def, b0, failed) => {
+  if (prevPostDiag) prevPostDiag(def, b0, failed);
+  if (E.depth > 0 || E.mini) return;
+  showDiagAt(cur());
+};
+
+/* The rows of PATH's diagnostics from S, by place: where they are now in the attached buffer that visits it,
+   else where the server put them. */
+function rowsOf(s: Session, path: string) {
+  const b = bufferAt(s, path), p = b && placed.get(b);
+  const out: { x: Xref; d: Diag }[] = [];
+  if (b && p && p.s === s && p.path === path) {
+    for (const it of p.items) {
+      const pos = Math.min(it.start.pos, b.rope.length), n = Ed.lineNoB(b, pos);
+      out.push({ x: { path, line: n - 1, character: pos - Ed.lineStartB(b, n) }, d: it.d });
+    }
+  } else for (const d of s.diags.get(path) || []) out.push({ x: { path, line: d.line, character: d.character }, d });
+  return out.sort((a, c) => byPlace(a.x, c.x) || a.d.severity - c.d.severity);
+}
+/* Draw the list LB of DL: for each file (by name, relative to the session's root when under it) a heading, then
+   a row for each diagnostic, `LINE:COL  SEVERITY  MESSAGE  (SOURCE)`, the message on one line; point stays on its
+   line. The error list's entries for them, and how many. */
+function drawDiags(lb: EdBuffer, dl: DiagList) {
+  const s = dl.s, top = s.root.replace(/\/+$/, '') + '/';
+  const paths = dl.path ? [dl.path] : [...s.diags.keys()].sort();
+  const out: string[] = [], rows = new Map<number, Xref>(), errors: SchemeValue[] = [];
+  for (const path of paths) {
+    const rs = rowsOf(s, path);
+    if (!rs.length) continue;
+    out.push(path.startsWith(top) ? path.slice(top.length) : abbr(path));
+    const w = Math.max(...rs.map(r => `${r.x.line + 1}:${r.x.character + 1}`.length));
+    for (const { x, d } of rs) {
+      const msg = cut(d.message.replace(/\s*\n\s*/g, ' '), DIAG_ROW_MAX), sev = SEVERITY[d.severity];
+      out.push(`  ${`${x.line + 1}:${x.character + 1}`.padEnd(w)}  ${sev.padEnd(7)}  ${msg}${d.source ? `  (${d.source})` : ''}`);
+      rows.set(out.length, x);
+      errors.push(L.list(path, x.line + 1, x.character + 1, `${sev}: ${msg}`, intern('utf-16')));
+    }
+  }
+  if (!errors.length) out.push(s.state === 'stopping' || s.state === 'stopped' ? `No diagnostics: ${label(s)} was shut down` : 'No diagnostics');
+  const line = Ed.lineNoB(lb, lb.pt);
+  lb.readOnly = false; lb.text = out.join('\n') + '\n'; lb.readOnly = true; lb.modified = false;
+  lb.mode = 'flymake-diagnostics-buffer-mode'; lb.evilState = 'motion'; lb.undo = []; lb.redo = []; Ed.forgetLog(lb);
+  lb.pt = Ed.lineStartB(lb, Math.min(line, Ed.lineCountB(lb)));
+  for (const w of Ed.windowList()) if (w.buffer === lb && w !== E.sel) w.pt = lb.pt;
+  diagRows.set(lb, rows);
+  return errors;
+}
+/* The sessions whose diagnostics changed since the lists were last drawn, and the timer that draws them. */
+const diagDirty = new Set<Session>();
+let diagTimer: ReturnType<typeof setTimeout> | null = null;
+/* S's diagnostics changed: the mode line drawn again, the echo area's diagnostics at point, and S's lists after
+   timing.diagnostics, each list's error list replaced when it is still the list's (the place kept). */
+function diagsChanged(s: Session) {
+  Ed.scheduleRender();
+  if (E.depth === 0 && !E.mini && ofBuffer.get(cur()) === s) showDiagAt(cur());
+  diagDirty.add(s);
+  if (diagTimer) return;
+  diagTimer = setTimeout(() => {
+    diagTimer = null;
+    const dirty = new Set(diagDirty);
+    diagDirty.clear();
+    for (const [lb, dl] of diagLists) {
+      if (!E.buffers.includes(lb) || lb.mode !== 'flymake-diagnostics-buffer-mode') { diagLists.delete(lb); continue; }
+      if (!dirty.has(dl.s)) continue;
+      const errors = drawDiags(lb, dl);
+      try { L.call('next-error-replace-list!', [dl.owner, L.list(...errors)]); } catch (e) { Ed.reportError(e); }
+    }
+    Ed.scheduleRender();
+  }, timing.diagnostics);
+}
+/* List the current buffer's diagnostics (of its file, or with PROJECT of every file its server published for)
+   in a buffer of their own, shown and selected in another window, point on the first row; the rows become the
+   error list. */
+function showDiags(project: boolean) {
+  const b = cur(), s = sessionHere() as Session;
+  const path = project ? null : Ed.host.files!.resolve(b.file!);
+  const name = project ? `*Flymake diagnostics for project ${abbr(s.root)}*` : `*Flymake diagnostics for ${b.name}*`;
+  const lb = Ed.getBufferCreate(name), dl: DiagList = { s, path, owner: name };
+  diagLists.set(lb, dl);
+  lb.pt = 0;
+  const errors = drawDiags(lb, dl);
+  L.call('next-error-set-list!', [L.list(...errors), dl.owner]);
+  const w = Ed.popToBuffer(lb, true);
+  lb.pt = errors.length ? Ed.lineStartB(lb, 2) : 0; w.start = 0;
+  Ed.message(`${errors.length} diagnostic${errors.length === 1 ? '' : 's'}`);
+  return false;
+}
+CMD('flymake-show-buffer-diagnostics', '', '', "List this buffer's diagnostics from its language server in *Flymake diagnostics for NAME*, kept up to date as the server publishes: RET visits one, o shows it, M-g n and M-g p step through them.", () => showDiags(false));
+CMD('flymake-show-project-diagnostics', '', '', "List the diagnostics of every file this buffer's language server published for, by file, kept up to date: RET visits one, o shows it, M-g n and M-g p step through them.", () => showDiags(true));
+CMD('flymake-goto-diagnostic', '', '', 'Visit the place of the diagnostic on the row at point in another window and select it (RET).', () => visitRow(false));
+CMD('flymake-show-diagnostic', '', '', 'Show the place of the diagnostic on the row at point in another window, staying in the list (o).', () => visitRow(true));
+Ed.MODE_NAMES['flymake-diagnostics-buffer-mode'] = 'Flymake diagnostics';
+Ed.modeParents.set('flymake-diagnostics-buffer-mode', 'special-mode');
+L.set('flymake-diagnostics-buffer-mode-map', new Ed.Keymap('flymake-diagnostics-buffer-mode-map'));
+
 /* ---- Scheme and commands ---- */
 
 D('%lsp-declare', 'NAME MODES COMMAND', 'Declare the language server NAME for the major modes MODES, run as the argv COMMAND (define-language-server, scm/lsp.scm).',
@@ -923,5 +1202,9 @@ Ed.lsp = {
   sessions: () => [...sessions.values()],
   sessionOf: b => ofBuffer.get(b) || null,
   stderr: s => (s as Session).err.slice(-STDERR_MAX),
+  diagnostics: b => {
+    const p = placed.get(b);
+    return p ? p.items.map(it => ({ start: it.start.pos, end: it.end.pos, severity: it.d.severity, message: it.d.message, source: it.d.source })) : [];
+  },
 };
 })();
