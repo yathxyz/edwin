@@ -311,10 +311,19 @@ in
   # resource operation, another scheme, a file out of the project (also through a link), a missing file, a
   # directory, a backwards range, overlapping edits, a file twice, malformed edits, a read-only buffer, names from
   # the server shown with control characters blanked; 1000 files at once, each true name asked once; inserts at
-  # one place in the server's order; nil renaming a binding.
+  # one place in the server's order; nil renaming a binding. test/lsp-completion.test.mts, completion: a stand-in
+  # answering each shape (a list, a CompletionList, isIncomplete asked again with triggerKind 3), one request once the
+  # keys stop and cancelled by a key, a move, Normal state, the answer filtered again as the word grows, the words
+  # when it has nothing or answers an error, a server with no completion never asked; C-SPC and TAB waiting (a trigger character, C-g,
+  # the time bound, an answer to text changed meanwhile dropped); textEdit and additionalTextEdits inserted as one
+  # undo step over what was typed since, edits at one place in the server's order,
+  # snippets as plain text, malformed items and the bounds left out; refused
+  # with nothing changed: a range off point's line or not around point, other edits past the end, backwards or
+  # overlapping, the text changed since the answer, read-only; the 2 ms keystroke budget with a request pending in a
+  # 10,000-line buffer; nil completing a builtin.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts
     touch $out
   '';
 

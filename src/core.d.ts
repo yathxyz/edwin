@@ -2292,13 +2292,27 @@ interface EvilExApi {
 /* complete.ts: the in-buffer completion popup (corfu). */
 interface CompleteApi {
   open(b: EdBuffer, auto?: boolean, min?: number): boolean;
+  /* the popup over CANDS, completing the text from START (PREFIX) to point */
+  show(start: number, prefix: string, cands: EdCompletion[], auto: boolean): void;
   close(): void;
   accept(): boolean | void;
+  /* TAB and C-SPC: the popup opened (one candidate inserted at once); a promise while a language server is asked */
+  atPoint(b: EdBuffer): boolean | Promise<boolean>;
   prefixAt(b: EdBuffer): { start: number; text: string; [k: string]: unknown } | null;
   fileCandidates(text: string): EdCompletion[];
+  /* lsp.ts's: a language server's candidates before the words and file names */
+  setSource(s: CompleteSource | null): void;
 }
-/* A completion candidate: its text, its score and an annotation shown beside it. */
-interface EdCompletion { text: string; score: number; ann: string }
+/* Candidates that come later (lsp.ts): typed, after a key typed with corfu-auto on, whether it takes the popup
+   over for B, never waiting; ask, for TAB and C-SPC, null when it does not complete in B, else a promise of
+   whether it opened the popup. */
+interface CompleteSource {
+  typed(b: EdBuffer, min: number): boolean;
+  ask(b: EdBuffer): Promise<boolean> | null;
+}
+/* A completion candidate: its text, its score and an annotation shown beside it; APPLY, when given, inserts it
+   instead of the text (a language server's item and its other edits). */
+interface EdCompletion { text: string; score: number; ann: string; apply?: (b: EdBuffer) => void }
 /* stack.ts: snippets. */
 interface YasApi {
   keyAt(b: EdBuffer): { start: number; snippet: { template: string; [k: string]: unknown }; [k: string]: unknown } | null;
@@ -2509,7 +2523,7 @@ interface LspSession {
 }
 interface EdLspApi {
   /* the bounds in ms (and restartMax, a count); the suites shorten them */
-  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number; request: number; eldoc: number; diagnostics: number };
+  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number; request: number; eldoc: number; diagnostics: number; completion: number };
   /* a file: URI for an absolute path */
   uri(path: string): string;
   /* declare a server; while the image replays it is skipped with a message and null is returned */

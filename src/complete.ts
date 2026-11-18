@@ -1,7 +1,8 @@
 /* In-buffer completion, as corfu with cape does: a popup at point listing words from the open
    buffers (cape-dabbrev), in Scheme buffers the global names, and for a word that looks like a
    path the saved file names (cape-file). It opens on TAB, and by itself after a few characters
-   of a word. */
+   of a word. Where a language server completes (lsp.ts, the source), its candidates come first, as
+   eglot's capf comes before cape's: the words and file names only when it has none or fails. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, EC = globalThis.EvilCore;
@@ -118,22 +119,45 @@ function candidates(b: EdBuffer, prefix: string) {
 function open(b: EdBuffer, auto: boolean, min?: number) {
   const r = completionAt(b, min || 1);
   if (!r) { close(); return false; }
-  E.corfu = { start: r.p.start, prefix: r.p.text, cands: r.cs, index: 0, scroll: 0, auto };
+  show(r.p.start, r.p.text, r.cs, auto);
   return true;
+}
+/* The popup over CANDS, completing the text from START (PREFIX) to point. */
+function show(start: number, prefix: string, cands: EdCompletion[], auto: boolean) {
+  E.corfu = { start, prefix, cands, index: 0, scroll: 0, auto };
 }
 function close() { E.corfu = null; }
 function accept() {
   const c = E.corfu, b = cur();
   if (!c) return;
   const pick = c.cands[c.index];
-  Ed.replaceText(b, c.start, b.pt, pick.text); b.pt = c.start + pick.text.length;
   close();
+  if (pick.apply) { pick.apply(b); return; }
+  Ed.replaceText(b, c.start, b.pt, pick.text); b.pt = c.start + pick.text.length;
 }
-CMD('completion-at-point', '*', '', 'Complete the word before point from the open buffers and the global names, or a path from the saved file names (TAB, C-SPC).', () => {
-  const b = cur();
+/* A language server's candidates, set by lsp.ts. typed, after a key typed while corfu-auto is on: whether it
+   takes the popup over for B (showing its candidates now or once its server answers), never waiting. ask, for
+   TAB and C-SPC: null when it does not complete in B, else a promise of whether it opened the popup. */
+let source: CompleteSource | null = null;
+/* Complete at point (TAB, C-SPC): the popup opened, a single candidate inserted at once; false when there is
+   nothing to complete. A promise while a language server is asked, the words and file names tried when it has
+   nothing or fails (its error said, or signalled when they have nothing either; C-g's quit is not a failure). */
+function atPoint(b: EdBuffer): boolean | Promise<boolean> {
+  const local = () => {
+    if (!open(b, false)) return false;
+    if (E.corfu!.cands.length === 1) accept();
+    return true;
+  };
+  const r = source ? source.ask(b) : null;
+  return r ? r.then(shown => shown || (cur() === b && local()), e => {
+    if (L.isQuit(e) || cur() !== b || !local()) throw e;
+    Ed.message(Ed.errorText(e));
+    return true;
+  }) : local();
+}
+CMD('completion-at-point', '*', '', "Complete the word before point from this buffer's language server, else from the open buffers and the global names, or a path from the saved file names (TAB, C-SPC).", async () => {
   if (E.corfu) { accept(); return false; }
-  if (!open(b, false)) signal('user-error', 'No completions');
-  if (E.corfu!.cands.length === 1) accept();
+  if (!await atPoint(cur())) signal('user-error', 'No completions');
   return false;
 });
 CMD('corfu-next', '', '', 'Highlight the next completion.', () => { const c = E.corfu; if (c) c.index = (c.index + 1) % c.cands.length; return false; });
@@ -159,7 +183,9 @@ H.postCommand = (def, b, failed) => {
   const self = L.cmdSym(def) === intern('self-insert-command');
   const st = EC.stateOf(E.current);
   if (self && truthy(L.get('corfu-auto')) && (st === 'insert' || st === null || st === 'emacs')) {
-    open(E.current, true, Number(L.get('corfu-auto-prefix')) || 3);
+    const min = Number(L.get('corfu-auto-prefix')) || 3;
+    if (source && source.typed(E.current, min)) return;
+    open(E.current, true, min);
   }
 };
 /* The popup itself, placed under the cursor of the selected window. Its rows are rebuilt only when
@@ -202,5 +228,5 @@ H.renderOverlay = () => {
   if (E.inFrame) place();
   else if (!placing) { placing = true; Ed.host.nextFrame(place); }
 };
-globalThis.Complete = { open, close, accept, prefixAt, fileCandidates };
+globalThis.Complete = { open, show, close, accept, atPoint, prefixAt, fileCandidates, setSource: (s: CompleteSource | null) => { source = s; } };
 })();

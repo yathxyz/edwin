@@ -713,16 +713,27 @@ CMD('indent-for-tab-command', '*', '', 'Expand a snippet key before point; else 
   const rules = Ed.isLisp(b) || (Ed.syntax?.indent(b, b.pt, b.pt, true, again ? 'cycle' : undefined) ?? 0) > 0;
   if (Ed.isLisp(b)) Ed.indentLine(b);
   else if (rules) b._tab = { ver: b.ver, ls: Ed.bol(b.rope, b.pt) };
-  if (!Ed.changedSince(b, ver) && b.pt === pt) {
-    if (complete && globalThis.Complete && globalThis.Complete.prefixAt(b) && globalThis.Complete.open(b, false)) { b._tab = undefined; if (E.corfu!.cands.length === 1) globalThis.Complete.accept(); return false; }
-    if (!rules) {
-      /* tab-to-tab-stop: a tab, or with indent-tabs-mode #f spaces to the next tab-width column. */
-      const tw = Math.max(1, Math.floor(Number(L.get('tab-width'))) || 8);
-      if (truthy(L.get('indent-tabs-mode'))) Ed.insertText(b, '\t');
-      else { const col = Ed.column(b.rope, b.pt); Ed.insertText(b, ' '.repeat(tw - (col % tw))); }
-    }
-  }
-  return false;
+  if (Ed.changedSince(b, ver) || b.pt !== pt) return false;
+  /* tab-to-tab-stop: a tab, or with indent-tabs-mode #f spaces to the next tab-width column. */
+  const tab = () => {
+    if (rules) return false;
+    const tw = Math.max(1, Math.floor(Number(L.get('tab-width'))) || 8);
+    if (truthy(L.get('indent-tabs-mode'))) Ed.insertText(b, '\t');
+    else { const col = Ed.column(b.rope, b.pt); Ed.insertText(b, ' '.repeat(tw - (col % tw))); }
+    return false;
+  };
+  /* a promise while a language server is asked: TAB waits for it, as C-SPC does, and when neither it nor the
+     words had anything, and nothing changed meanwhile, goes on as with no completion */
+  const done = complete && globalThis.Complete ? globalThis.Complete.atPoint(b) : false;
+  if (done === true) { b._tab = undefined; return false; }
+  if (!done) return tab();
+  const tabbed = b._tab;
+  b._tab = undefined;
+  return done.then(shown => {
+    if (shown || cur() !== b || Ed.changedSince(b, ver) || b.pt !== pt) return false;
+    b._tab = tabbed;
+    return tab();
+  });
 });
 CMD('indent-region', '*r', 'START END', 'Indent each line in the region: as Lisp in Scheme buffers, else by the buffer\'s tree where its grammar has indent rules.', ([s, e]) => {
   const b = cur(), [a, z0] = region(b, s, e); let z = z0;

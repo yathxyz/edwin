@@ -42,7 +42,14 @@
    to rename the identifier at point and applies the workspace edit it answers to every file it names or to none:
    each file is checked (in the project, on this machine, writable, the text and version the server made the edit
    against, ranges that neither overlap nor run past the end) before any is changed. Each buffer's part is one
-   batch and one undo step; a file not open is visited for it without being shown, and nothing is saved. */
+   batch and one undo step; a file not open is visited for it without being shown, and nothing is saved.
+
+   Completion (docs/steps.md, "Completion"): the server's items in complete.ts's popup, before the words and file
+   names. While typing, once a word has corfu-auto-prefix characters, the server is asked after timing.completion
+   with no further key, one request at a time, cancelled by the next key; the keys never wait for it. Its answer
+   is filtered again as the word grows, asked again only when the server says it is incomplete. TAB and C-SPC ask
+   and wait (C-g quits). An item goes in with its textEdit and additionalTextEdits, all or none, one undo step;
+   a snippet as its plain text. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -55,9 +62,9 @@ const cur = () => E.current;
    end to count as a first one again; how long a session with no buffer lives; how long after an edit its change
    is sent (eglot's eglot-send-changes-idle-time); how long a cross-reference or hover command waits for its server to be
    ready, then for its answer; how long after the last command a signature is asked for while typing; how long a
-   diagnostics list waits after a publish before it is drawn again (a run of publishes, one redraw). Mutable for
-   the suites. */
-const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300, diagnostics: 100 };
+   diagnostics list waits after a publish before it is drawn again (a run of publishes, one redraw); how long after
+   the last key typed completions are asked for (corfu's corfu-auto-delay). Mutable for the suites. */
+const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300, diagnostics: 100, completion: 200 };
 /* The tail of a server's error output a session keeps (eglot-stderr-buffer). */
 const STDERR_MAX = 64 * 1024;
 
@@ -213,6 +220,7 @@ function initializeParams(s: Session) {
         hover: { contentFormat: ['plaintext', 'markdown'] },
         signatureHelp: { signatureInformation: { documentationFormat: ['plaintext', 'markdown'], parameterInformation: { labelOffsets: true }, activeParameterSupport: true } },
         publishDiagnostics: { versionSupport: true },
+        completion: { completionItem: { snippetSupport: false }, contextSupport: true },
       },
       window: { workDoneProgress: false, showMessage: {} },
     },
@@ -288,7 +296,7 @@ function shutdown(s: Session): Promise<void> {
   if (s.done) return s.done;
   clearTimers(s);
   if (sessions.get(s.key) === s) sessions.delete(s.key);
-  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); forgetEldoc(b); unplace(b); setFlag(b, false); }
+  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); forgetEldoc(b); forgetCompletion(b); unplace(b); setFlag(b, false); }
   dropDiags(s);
   s.buffers.clear();
   const wasRunning = s.state === 'running';
@@ -333,7 +341,7 @@ function attach(s: Session, b: EdBuffer) {
 function detach(b: EdBuffer) {
   const s = ofBuffer.get(b);
   if (!s) return;
-  closeDoc(b); forgetEldoc(b); unplace(b);
+  closeDoc(b); forgetEldoc(b); forgetCompletion(b); unplace(b);
   ofBuffer.delete(b); s.buffers.delete(b);
   setFlag(b, false);
   idleWhenUnused(s);
@@ -1396,6 +1404,303 @@ CMD('eglot-rename', async () => {
   Ed.message(`Renamed to ${cut(clean(name), 200)}: ${r.edits} edit${r.edits === 1 ? '' : 's'} in ${r.files} file${r.files === 1 ? '' : 's'}${r.opened ? ` (${r.opened} visited for it)` : ''}, not saved`);
   return false;
 });
+
+/* ---- completion ---- */
+
+/* An answer keeps at most COMPLETION_MAX items and the popup shows at most COMPLETION_SHOWN; an item whose text (or
+   an other edit's) is past COMPLETION_TEXT_MAX characters, or with more than COMPLETION_EDITS_MAX other edits, is
+   left out; a label is cut at LABEL_MAX characters and its annotation at ANN_MAX. A word is looked for at most
+   WORD_MAX characters back from point. */
+const COMPLETION_MAX = 5000, COMPLETION_SHOWN = 200, COMPLETION_TEXT_MAX = 10_000, COMPLETION_EDITS_MAX = 100, LABEL_MAX = 200, ANN_MAX = 80, WORD_MAX = 256;
+/* LSP's CompletionItemKind, the annotation of an item with no detail. */
+const KINDS = ['', 'text', 'method', 'function', 'constructor', 'field', 'variable', 'class', 'interface', 'module', 'property', 'unit', 'value', 'enum', 'keyword', 'snippet', 'color', 'file', 'reference', 'folder', 'enum member', 'constant', 'struct', 'event', 'operator', 'type parameter'];
+type LspPos = { line: number; character: number };
+type LspRange = { start: LspPos; end: LspPos };
+/* An item as kept: its label (made fit for the popup), what it is matched by (its filterText, else label, in lower
+   case) and sorted by (its sortText, else label), the text it inserts (a snippet's plain text), the range that
+   text replaces (null: the word before point), its other edits (an import) and its annotation. */
+interface CompletionItem { label: string; key: string; sort: string; text: string; range: LspRange | null; extra: (LspRange & { text: string })[]; ann: string }
+/* A server's answer: the buffer, point when it was asked (REQ), the word's start there (START) and the word up to
+   point then (HEAD); the text the server held (TEXT), its items in order and whether the server says typing more
+   gives other items (INCOMPLETE). */
+interface CompletionAnswer { b: EdBuffer; req: number; start: number; head: string; text: string; items: CompletionItem[]; incomplete: boolean }
+let answer: CompletionAnswer | null = null;
+/* The one request while typing: where point was when it was scheduled, the shortest word that opens the popup,
+   its debounce timer, then its request. */
+interface CompletionAsk { b: EdBuffer; pt: number; ver: number; min: number; timer: ReturnType<typeof setTimeout> | null; req: LspRpcRequest | null }
+let asking: CompletionAsk | null = null;
+
+/* A snippet's plain text: a tab stop ($1, ${1}) and a variable ($NAME) left out, a placeholder (${1:text}, ${NAME:text})
+   its text, a choice (${1|a,b|}) its first, an escape (\$, \}, \\) the character. Linear in the text: the end of
+   a choice is looked for only at a ${N| and only until a look finds none (i only grows, so none is found after
+   that either), and a choice found is consumed. */
+function snippetText(s: string): string {
+  let i = 0, noChoice = false;
+  const stop = /\$(\d+|[A-Za-z_][A-Za-z0-9_]*)/y, open = /\$\{(\d+|[A-Za-z_][A-Za-z0-9_]*)/y;
+  const run = (inner: boolean): string => {
+    let out = '';
+    while (i < s.length) {
+      const c = s[i];
+      if (c === '\\' && i + 1 < s.length && '$}\\,|'.includes(s[i + 1])) { out += s[i + 1]; i += 2; continue; }
+      if (inner && c === '}') return out;
+      if (c === '$') {
+        stop.lastIndex = i;
+        if (stop.test(s)) { i = stop.lastIndex; continue; }
+        open.lastIndex = i;
+        if (open.test(s)) {
+          const j = open.lastIndex;
+          if (s[j] === '}') { i = j + 1; continue; }
+          if (s[j] === ':') { i = j + 1; out += run(true); if (s[i] === '}') i++; continue; }
+          if (s[j] === '|' && !noChoice) {
+            const k = s.indexOf('|}', j + 1);
+            if (k < 0) noChoice = true;
+            else { out += s.slice(j + 1, k).split(/(?<!\\),/)[0].replace(/\\(.)/g, '$1'); i = k + 2; continue; }
+          }
+        }
+      }
+      out += c; i++;
+    }
+    return out;
+  };
+  return run(false);
+}
+/* A Range of whole non-negative numbers, else null. */
+function rangeOf(r: unknown): LspRange | null {
+  const o = r && typeof r === 'object' ? r as { start?: { line?: unknown; character?: unknown }; end?: { line?: unknown; character?: unknown } } : null;
+  const st = o ? o.start : undefined, en = o ? o.end : undefined;
+  if (!st || !en || !isCount(st.line) || !isCount(st.character) || !isCount(en.line) || !isCount(en.character)) return null;
+  return { start: { line: st.line, character: st.character }, end: { line: en.line, character: en.character } };
+}
+const oneLine = (t: string, n: number) => cut(clean(t).replace(/\s+/g, ' ').trim(), n);
+/* One CompletionItem of an answer, or null when it is malformed or past the bounds. */
+function itemOf(it: unknown): CompletionItem | null {
+  if (!it || typeof it !== 'object') return null;
+  const o = it as { label?: unknown; filterText?: unknown; sortText?: unknown; insertText?: unknown; insertTextFormat?: unknown; textEdit?: unknown; additionalTextEdits?: unknown; detail?: unknown; kind?: unknown };
+  if (typeof o.label !== 'string') return null;
+  const label = oneLine(o.label, LABEL_MAX);
+  if (!label) return null;
+  let text = typeof o.insertText === 'string' ? o.insertText : o.label, range: LspRange | null = null;
+  if (o.textEdit !== undefined && o.textEdit !== null) {
+    const te = o.textEdit as { newText?: unknown; range?: unknown; insert?: unknown };
+    if (typeof te !== 'object' || typeof te.newText !== 'string') return null;
+    /* an InsertReplaceEdit inserts: the text after point stays */
+    range = rangeOf(te.range !== undefined ? te.range : te.insert);
+    if (!range) return null;
+    text = te.newText;
+  }
+  /* bounded before a snippet is read (its plain text is never longer), so its nesting is too */
+  if (text.length > COMPLETION_TEXT_MAX) return null;
+  if (o.insertTextFormat === 2) text = snippetText(text);
+  const extra: CompletionItem['extra'] = [];
+  if (o.additionalTextEdits !== undefined && o.additionalTextEdits !== null) {
+    if (!Array.isArray(o.additionalTextEdits) || o.additionalTextEdits.length > COMPLETION_EDITS_MAX) return null;
+    for (const e of o.additionalTextEdits) {
+      const r = rangeOf(e && typeof e === 'object' ? (e as { range?: unknown }).range : undefined), t = e && typeof e === 'object' ? (e as { newText?: unknown }).newText : undefined;
+      if (!r || typeof t !== 'string' || t.length > COMPLETION_TEXT_MAX) return null;
+      extra.push({ ...r, text: t });
+    }
+  }
+  const detail = typeof o.detail === 'string' ? oneLine(o.detail, ANN_MAX) : '';
+  const kind = typeof o.kind === 'number' && Number.isInteger(o.kind) && o.kind > 0 && o.kind < KINDS.length ? KINDS[o.kind] : '';
+  return {
+    label, key: (typeof o.filterText === 'string' ? o.filterText : o.label).toLowerCase(), sort: typeof o.sortText === 'string' ? o.sortText : o.label,
+    text, range, extra, ann: detail || kind,
+  };
+}
+/* The answer RES (a list of items, or a CompletionList) to a request about B at REQ, the word from START, the
+   server holding TEXT: its items by sortText, then label. */
+function answerOf(b: EdBuffer, req: number, start: number, text: string, res: unknown): CompletionAnswer {
+  const list = Array.isArray(res) ? res : res && typeof res === 'object' && Array.isArray((res as { items?: unknown }).items) ? (res as { items: unknown[] }).items : [];
+  const items: CompletionItem[] = [];
+  for (const it of list) { if (items.length >= COMPLETION_MAX) break; const x = itemOf(it); if (x) items.push(x); }
+  const by = (a: string, c: string) => (a < c ? -1 : a > c ? 1 : 0);
+  items.sort((x, y) => by(x.sort, y.sort) || by(x.label, y.label));
+  const incomplete = !Array.isArray(res) && !!res && typeof res === 'object' && (res as { isIncomplete?: unknown }).isIncomplete === true;
+  return { b, req, start, head: text.slice(start, req), text, items, incomplete };
+}
+
+/* The start of the word before point in B: letters, digits, _ and $ (a Lisp's symbol characters in a Lisp). */
+const WORD_CHAR = /[\p{L}\p{N}_$]/u, LISP_CHAR = /[\p{L}\p{N}_\-!?*<>=+\/.:$]/u;
+function wordStart(b: EdBuffer) {
+  const t = b.rope, re = Ed.isLisp(b) ? LISP_CHAR : WORD_CHAR;
+  let s = b.pt;
+  while (s > 0 && b.pt - s < WORD_MAX && re.test(t.slice(s - 1, s))) s--;
+  return s;
+}
+/* Whether B's server completes in it now: it runs and gives completions. */
+function completes(b: EdBuffer) {
+  const s = ofBuffer.get(b);
+  return !!s && s.state === 'running' && !!(s.capabilities || {}).completionProvider;
+}
+/* Whether A still answers about B's word: point at or after where it was asked, the word starting where it did and
+   as it was up to there (word characters typed on since). Cheap, for each key: a list shown that no longer fits
+   the text is refused when an item is inserted, which checks the whole text. */
+function fits(a: CompletionAnswer, b: EdBuffer) {
+  return a.b === b && b.pt >= a.req && wordStart(b) === a.start && b.rope.slice(a.start, a.req) === a.head;
+}
+/* The candidates of A for B's word as typed now: the items it matches the start of (ignoring case), then those
+   holding it, each in A's order. */
+function candidatesOf(a: CompletionAnswer, b: EdBuffer): EdCompletion[] {
+  const typed = b.rope.slice(a.start, b.pt).toLowerCase(), first: CompletionItem[] = [], then: CompletionItem[] = [];
+  for (const it of a.items) {
+    const k = it.key.indexOf(typed);
+    if (k === 0) first.push(it); else if (k > 0 && then.length < COMPLETION_SHOWN) then.push(it);
+    if (first.length >= COMPLETION_SHOWN) break;
+  }
+  return first.concat(then).slice(0, COMPLETION_SHOWN).map(it => ({ text: it.label, score: 0, ann: it.ann, apply: (buf: EdBuffer) => insertItem(a, it, buf) }));
+}
+/* The popup over A's candidates in B (AUTO: opened by typing), when it has any. */
+function showAnswer(a: CompletionAnswer, b: EdBuffer, auto: boolean) {
+  const cs = candidatesOf(a, b);
+  if (!cs.length) return false;
+  Complete.show(a.start, b.rope.slice(a.start, b.pt), cs, auto);
+  Ed.scheduleRender();
+  return true;
+}
+
+/* Why an item is not inserted: nothing has changed. */
+const refuseItem = (why: string): never => signal('user-error', `The completion is not inserted: ${why}`) as never;
+/* Insert IT of A in B: its text over its range (the word before point when it has none), the range's end moved on
+   by what was typed since the server answered, and its other edits; all or none, as one batch (the command's undo
+   step), point after its text. Refused when the text is no longer the server's with the word typed on, when its
+   range is not on point's line around where it was asked (LSP's rule: a server may not replace text elsewhere
+   through it), and when an other edit runs past the end, ends before it starts, overlaps another or the item's. */
+function insertItem(a: CompletionAnswer, it: CompletionItem, b: EdBuffer) {
+  Ed.checkRO(b);
+  const typed = b.pt - a.req;
+  if (b.pt < a.req || b.rope.slice(0, a.req) !== a.text.slice(0, a.req) || b.rope.slice(b.pt) !== a.text.slice(a.req))
+    refuseItem('the buffer has changed since its server answered');
+  const at = offsetsIn(a.text), here = position(a.text, a.req);
+  let lines = 1;
+  for (let i = 0; i < a.text.length; i++) { const c = a.text.charCodeAt(i); if (c === 10 || (c === 13 && a.text.charCodeAt(i + 1) !== 10)) lines++; }
+  let ms = a.start, me = a.req;
+  if (it.range) {
+    const r = it.range;
+    if (r.start.line !== here.line || r.end.line !== here.line || byPlace(r.start, here) > 0 || byPlace(r.end, here) < 0)
+      refuseItem('its edit is not on the line of point, around where it was asked');
+    ms = at(r.start.line, r.start.character); me = at(r.end.line, r.end.character);
+  }
+  /* in the text as it is now: before the item's range as the server had it, after it moved on by what was typed */
+  /* RANK: 0 an other edit before the item's text, 1 the item's, 2 one after it; I the server's order */
+  const main = { s: ms, e: me + typed, text: it.text, rank: 1, i: 0 };
+  const all = [main];
+  for (const [i, x] of it.extra.entries()) {
+    if (pastEnd(x.start, lines) || pastEnd(x.end, lines)) refuseItem(`one of its other edits is past the last line, ${lines}`);
+    if (byPlace(x.end, x.start) < 0) refuseItem('one of its other edits ends before it starts');
+    const s = at(x.start.line, x.start.character), e = at(x.end.line, x.end.character);
+    if (e <= ms) all.push({ s, e, text: x.text, rank: 0, i });
+    else if (s >= me) all.push({ s: s + typed, e: e + typed, text: x.text, rank: 2, i });
+    else refuseItem('one of its other edits overlaps its text');
+  }
+  /* by place; at one place an insertion first (an other edit's before the item's), then the server's order, as
+     opsOf: the item's text never overlaps an other edit, so two that overlap are other edits */
+  const empty = (x: typeof main) => (x.e === x.s ? 0 : 1);
+  all.sort((x, y) => x.s - y.s || empty(x) - empty(y) || x.rank - y.rank || x.i - y.i);
+  for (let k = 1; k < all.length; k++) if (all[k].s < all[k - 1].e) refuseItem('two of its other edits overlap');
+  /* from the last to the first, so each place is of the text as it was and each edit at one place goes in front
+     of those after it */
+  const ops = all.slice().reverse().map(x => [x.s, x.e - x.s, x.text] as EdEditOp);
+  Ed.applyOps(b, ops);
+  b.modified = true;
+  b.pt = main.s + main.text.length + all.reduce((n, x) => n + (x.rank === 0 ? x.text.length - (x.e - x.s) : 0), 0);
+}
+
+function cancelCompletion() {
+  const c = asking;
+  asking = null;
+  if (!c) return;
+  if (c.timer) clearTimeout(c.timer);
+  if (c.req) c.req.cancel();
+}
+/* B no longer uses its server: nothing more asked of it, its answer forgotten. */
+function forgetCompletion(b: EdBuffer) {
+  if (asking && asking.b === b) cancelCompletion();
+  if (answer && answer.b === b) answer = null;
+}
+/* Ask about point in B after timing.completion, the request scheduled before cancelled. */
+function scheduleCompletion(b: EdBuffer, min: number) {
+  cancelCompletion();
+  const c: CompletionAsk = { b, pt: b.pt, ver: b.ver, min, timer: null, req: null };
+  c.timer = setTimeout(() => askCompletion(c), timing.completion);
+  asking = c;
+}
+/* Whether the popup may open in B now: it is current and typed in, no minibuffer. */
+const mayShow = (b: EdBuffer) => cur() === b && !E.mini && typing(b);
+/* The debounce of C ran out: the pending change sent, then the request, when point is still where C was
+   scheduled. Its answer opens the popup when point is still there; with no candidate, or an error, the words and file names
+   are tried. */
+function askCompletion(c: CompletionAsk) {
+  c.timer = null;
+  if (asking !== c) return;
+  const b = c.b;
+  if (b.pt !== c.pt || b.ver !== c.ver || !mayShow(b) || !completes(b)) { asking = null; return; }
+  flush(b);
+  const s = ofBuffer.get(b), conn = s && s.conn;
+  if (!conn || conn.closed() !== null) { asking = null; return; }
+  const req = b.pt, start = wordStart(b), text = b.text, again = !!answer && answer.b === b && answer.incomplete && fits(answer, b);
+  try { c.req = conn.request('textDocument/completion', { ...docParams(b), context: { triggerKind: again ? 3 : 1 } }, { timeout: timing.request }); }
+  catch (e) { asking = null; return; }
+  c.req.then(res => {
+    if (asking !== c) return;
+    asking = null;
+    if (b.pt !== c.pt || b.ver !== c.ver || !mayShow(b)) return;
+    answer = answerOf(b, req, start, text, res);
+    if (!showAnswer(answer, b, true)) { Complete.open(b, true, c.min); Ed.scheduleRender(); }
+  }, () => {
+    if (asking !== c) return;   // cancelled: nothing shown
+    asking = null;
+    /* timed out, an error answer, the session lost: the words and file names, as for an empty answer */
+    if (b.pt === c.pt && b.ver === c.ver && mayShow(b)) { Complete.open(b, true, c.min); Ed.scheduleRender(); }
+  });
+}
+Complete.setSource({
+  /* after a key typed: the answer kept, filtered again, while it fits (asked again when incomplete); else a
+     request once the keys stop. A word shorter than MIN is the words' and file names' (a path). */
+  typed(b, min) {
+    if (!completes(b)) return false;
+    const start = wordStart(b);
+    if (b.pt - start < min) { cancelCompletion(); return false; }
+    const a = answer && fits(answer, b) ? answer : null;
+    if (!a) { answer = null; scheduleCompletion(b, min); return true; }
+    if (a.incomplete) scheduleCompletion(b, min);
+    return showAnswer(a, b, true) || a.incomplete;
+  },
+  /* TAB and C-SPC: ask about the word before point, or after a character the server names as a trigger */
+  ask(b) {
+    if (!completes(b)) return null;
+    const start = wordStart(b), s = ofBuffer.get(b)!, cp = (s.capabilities || {}).completionProvider as { triggerCharacters?: unknown } | true;
+    const triggers = cp && typeof cp === 'object' && Array.isArray(cp.triggerCharacters) ? cp.triggerCharacters : [];
+    const prev = b.pt > 0 ? b.rope.slice(b.pt - 1, b.pt) : '', trigger = start === b.pt && triggers.includes(prev) ? prev : null;
+    if (start === b.pt && !trigger) return null;
+    cancelCompletion();
+    return (async () => {
+      const pt = b.pt, ver = b.ver;
+      let req = pt, text = '';
+      const moved = () => !E.buffers.includes(b) || cur() !== b || b.pt !== pt || b.ver !== ver;
+      let res: unknown;
+      /* an error (C-g's quit aside) after moving on is dropped as an answer is; else complete.ts tries the words */
+      try { res = await askAt(b, 'textDocument/completion', 'completionProvider', 'completions', { context: trigger ? { triggerKind: 2, triggerCharacter: trigger } : { triggerKind: 1 } }, () => { req = b.pt; text = b.text; }); }
+      catch (e) { if (!L.isQuit(e) && moved()) return true; throw e; }
+      if (moved()) return true;   // moved on while it waited: dropped
+      answer = answerOf(b, req, start, text, res);
+      if (!showAnswer(answer, b, false)) return false;
+      if (E.corfu!.cands.length === 1) Complete.accept();
+      return true;
+    })();
+  },
+});
+/* After each command: the request waiting is cancelled once point moved, the text changed (but by the key that
+   scheduled it), B is no longer current or typed in; the answer kept is forgotten once its buffer is not current
+   or typed in (Normal state: the next insertion asks afresh). */
+const prevPostCompletion = H.postCommand;
+H.postCommand = (def, b0, failed) => {
+  if (prevPostCompletion) prevPostCompletion(def, b0, failed);
+  if (E.depth > 0) return;
+  if (answer && !mayShow(answer.b)) answer = null;
+  if (!asking) return;
+  const b = asking.b;
+  if (b.pt !== asking.pt || b.ver !== asking.ver || !mayShow(b)) cancelCompletion();
+};
 
 /* ---- Scheme and commands ---- */
 

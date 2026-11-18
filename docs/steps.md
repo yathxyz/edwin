@@ -4911,6 +4911,127 @@ named: partial application across files.
   - At the bound: 1000 files, 999 not open, one edit each: all applied, 999 visited, 1001 true names asked (at most
     3000), the loop never held 2 s (a 5 ms ticker's longest gap: 6 to 119 ms over runs).
 
+## Completion (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-completion`, on lsp-workspace-edit; owner decision 2: the
+client in the frame): completion at point from the server with additional edits, in the existing completion UI;
+proved by edwin-lsp, the keystroke budget holding while a request is pending. Risk named: snippet items are
+inserted as plain text.
+
+- **`src/lsp.ts`** holds it, beside the workspace edits, and gives `src/complete.ts` (the corfu popup) a source:
+  `Complete.setSource`, with `typed` (after a self-inserted key, never waiting) and `ask` (TAB and `C-SPC`). The
+  popup, its keys and its look are unchanged. initialize now also says `textDocument.completion` with
+  `completionItem.snippetSupport` false and `contextSupport`; no `resolveSupport`, so a server sends each item's
+  `additionalTextEdits` in the answer.
+- **The order of sources**, as the owner's Emacs has them (eglot's capf before cape-dabbrev and cape-file): in a
+  buffer whose server is running and gives `completionProvider`, its items fill the popup; the words of the
+  buffers, the global names and the file names only when it has none (an empty answer, an error answer, no
+  answer within `timing.request`, a word it is not asked about). After a
+  failure TAB and `C-SPC` show the words and echo the error, or signal the error when there are no words either;
+  while typing the words open silently. C-g's quit is not a failure: nothing is offered. A buffer with no
+  server, or a server without `completionProvider`, is never asked and completes as before.
+- **While typing** (`corfu-auto` on, Insert, Replace or Emacs state, a self-inserted key): once the word before
+  point (letters, digits, `_` and `$`; Lisp's symbol characters in a Lisp buffer) has `corfu-auto-prefix` (3)
+  characters, one `textDocument/completion` (triggerKind 1, the pending change sent first, UTF-16 positions) is
+  asked `timing.completion` (200 ms, corfu-auto-delay) after the last key; each key, a move, leaving Insert
+  state or the minibuffer opening cancels a pending one (`$/cancelRequest`), and its late answer is not shown;
+  after an edit by no command (a process, auto-revert) nothing is asked, and an answer that comes after one is
+  not shown. The answer is shown only if point, the buffer and its
+  text are as they were when it was asked. The key itself never waits: it only schedules or filters.
+- **The answer kept.** While the user types on in the same word, the kept answer is filtered again without asking
+  (by `filterText`, else the label: those it starts, ignoring case, then those holding it), in the server's
+  `sortText` order then the label's; at most 200 shown. It is asked again when the word is another one, changed
+  before where it was asked, point went back before it, or the buffer is another; with `isIncomplete`, again
+  after each key (triggerKind 3), its candidates shown meanwhile. It is forgotten when its buffer is no longer
+  current or no longer typed in (ESC).
+- **TAB and `C-SPC`** (`completion-at-point`; `indent-for-tab-command` where its indentation changed nothing,
+  as before) ask at once and wait, as K waits for the hover: C-g quits and cancels, `timing.request` (10 s) bounds
+  the wait and says so (the words offered, as after an error). After a trigger character the server names with no word yet typed, they
+  ask with triggerKind 2. A single item goes in at once. An answer to a buffer changed, moved in or left while
+  it worked is dropped, nothing inserted; so is an error then.
+- **An item goes in** with its `textEdit` (a `TextEdit`, or an `InsertReplaceEdit`'s `insert` range) or else its
+  `insertText` or label over the word, stretched over what was typed since the request, and its
+  `additionalTextEdits` (an import at the top; at one place in the server's order, an insertion before a
+  replacement, as a workspace edit's), all in one `applyOps` batch: one undo step, point after the
+  inserted text. Snippets (`insertTextFormat` 2) go in as plain text: `$1`, `$0` and `$VAR` dropped, `${1:x}`
+  as `x` (nested too), `${1|a,b|}` as `a`, `\$`, `\}`, `\\` as the character, a malformed `${` as written.
+- **Refused, nothing changed** (`The completion is not inserted: WHY`, a user-error): the buffer changed since
+  the server answered other than by typing on at point (the text before the request or after point differs, or
+  point went back before it); a `textEdit` off point's line or not around where it was asked; an additional edit
+  past the last line, ending before it starts, overlapping the item's text, or two overlapping each other; a
+  read-only buffer.
+- **Left out**: an item that is not an object, has no label or an empty one, a malformed `textEdit` or
+  additional edit, text over 10,000 characters (a snippet's measured before it is read, so its nesting is
+  bounded too, and it is read in time linear in its length: the end of a choice, `|}`, is looked for only at a
+  `${N|` and only until a look finds none), more than 100 additional edits; past 5000 items the rest. Labels
+  are cleaned of control characters and cut at 200, the annotation (`detail`, else the kind's name) at 80.
+- **Choices**, each reversible:
+  - Matching is by start then substring, not orderless or flex: the owner's `orderless` style is a later step for
+    the whole popup, not this source.
+  - No snippets: the plan's risk taken as named. No `completionItem/resolve`: additional edits come in the answer.
+  - TAB waits for the server where it would have opened the words, and right after a trigger character. When
+    neither the server nor the words have anything, and nothing changed while it waited, it goes on as before:
+    a tab (tab-to-tab-stop) where the line has no indent rules. A server error with no words is signalled instead:
+    no tab.
+- **Differences from eglot and corfu:** no snippet expansion (yasnippet) or fields; no resolve, so no lazy
+  documentation or edits; no auto-open after a trigger character (only TAB and `C-SPC` ask there); no `labelDetails` shown;
+  the `insert` range of an InsertReplaceEdit, never
+  `replace`; no `commitCharacters`; no `command` run after an item (lsp-code-actions owns commands).
+- **Not in it:** snippets, resolve, item commands, documentation popups, orderless matching, a web frame or
+  edwind (no processes there, so no server).
+- **Checked by**, on ex44 (the build host), on the tree after the third review (the error answer's fallback,
+  8c46d60; this entry and the README's row are the only changes after it): `edwin-lsp` (93 passed, none skipped: 18 of them
+  test/lsp-completion.test.mts, nil from nixpkgs run in it; load average 0.4 as it started) and `nix flake check
+  --max-jobs 2` (all checks passed at the first run, load average 3.5 as it ended), among them `edwin-typecheck`, `edwin-lockdown` (6)
+  and `edwin-security` (21), since src/lsp.ts loads in edwind, and `.#edwin`'s cargo tests (unit 41 and 3
+  ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37 and 1 ignored). test/lsp-completion.test.mts
+  (18), against a stand-in (node, lsp-eldoc's) that answers `textDocument/completion` with what the test wrote,
+  after a `delay` or never:
+  - initialize's `completion`, `snippetSupport` false, `contextSupport`.
+  - Typing `pri`: one request, its items in the popup in `sortText` order, not the words; `n` filters without
+    asking; the item goes in with its import at the top, one `u` undoing both.
+  - The kept answer asked again for another word, a word changed before the request, point moved back before
+    it, and another buffer with the same text made current by no command.
+  - An incomplete answer asked again with triggerKind 3, its candidates shown meanwhile.
+  - The words instead: an empty answer, a server with no `completionProvider` (never asked), a word of two
+    characters (nothing asked); an error answer (`-32603 boom`) while typing.
+  - Snippets as plain text; labels with control characters cleaned and cut.
+  - Malformed items and items past each bound left out, the rest shown (a snippet nested 200,000 deep among
+    them, as `insertText` and as a `textEdit`; one nested 2500 deep, 10,000 characters, kept); 5001 items: the last left out, 200 shown
+    (some matching from the start, some inside), a label cut at 200 and an annotation at 80.
+  - An answer of 300 snippets of 10,000 characters (3 MB), each a run of `${1|` that never closes or of
+    `${1|a,` closed only at the end: the loop held for under a second from the request to the popup (117 ms in
+    edwin-lsp, the JSON of the answer read in it), every item kept, the one chosen inserted as written.
+  - TAB and `C-SPC`: a single item inserted; after `.` with no word (triggerKind 2); C-g; past `timing.request`;
+    an error answer (`-32603 boom`): the words shown and the error echoed, and with no words the error signalled;
+    an answer to text changed meanwhile dropped with nothing inserted; `No completions` when neither has any;
+    then TAB there inserts its tab.
+  - Cancelled by a move, a key and ESC; a late answer not shown.
+  - An edit by no command during the debounce or while the answer is out; the minibuffer open when it comes.
+  - Every refusal above, the buffer as it was after each, then an item with a `textEdit` and three additional
+    edits before and after it applied whole.
+  - Other edits at one place in the server's order (two imports at the top), an insertion there before a
+    replacement there (either order), and an item inserted empty at point before an other edit replacing what
+    follows point.
+  - The budget: 50 keys typed while a request hangs in a 10,000-line buffer, median 0.246 ms (max 0.797 ms) in edwin-lsp (2 ms allowed),
+    each cancelling the last.
+  - The session shut down while a request waits: nothing left, the words still offered.
+  - nil: `toS` typed after `builtins.`, `toString` chosen with RET.
+  Each check was also taken out of the code and the suite run: every one made a test fail (43 removals: read-only,
+  the text before and after, point back, each condition of the range's line and containment, past the end at the
+  start and at the end, backwards, the overlaps, each reason an item is left out, the word's minimum, the
+  provider, the trigger character, the checks before asking and on the answer, the drop on the explicit path,
+  the cancel on a move, the forgotten answer, each condition of the kept answer fitting, asking again when
+  incomplete, the 5000 items kept, the 200 shown, the label's and the annotation's cuts, TAB's tab after nothing
+  from the server). The fixes after review were checked the same way: on the old ordering each of the four
+  shapes of the one-place test failed, and without the bound before a snippet is read the malformed test did
+  (the stack overflowed and the popup never opened). After the second review: with the choice's end looked for
+  at every `${N` and again after a look found none (the old scan, square in the text: 17 ms a 10,000-character
+  snippet), the 300-snippet test held the loop 3565 ms and failed; with the linear scan, 101 ms run alone. After
+  the third review: with the corfu-auto path's fallback on an error taken out of lsp.ts the error-while-typing
+  test failed (no popup), and with atPoint's rejection handler taken out of complete.ts the C-SPC error test
+  failed (`the words`).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
