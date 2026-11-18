@@ -56,7 +56,12 @@
    quick fixes alone and carries out a single one at once. An action's workspace edit is applied as a rename's is.
    Its command is run by the server (workspace/executeCommand) only when the server names it among its own and the
    user says yes; while it runs, and only then, the server's own edits (workspace/applyEdit) are applied, as any
-   workspace edit. Nothing a server names is run here. */
+   workspace edit. Nothing a server names is run here.
+
+   Symbols (docs/steps.md, "Symbols"): consult-imenu in a buffer whose server gives document symbols lists the
+   server's (textDocument/documentSymbol), else the buffer's own definitions as before; consult-eglot-symbols (SPC p
+   s) asks the buffer's server for the workspace's symbols matching what is typed (workspace/symbol), asked again
+   timing.symbols after each change, and visits the one chosen as a definition is visited. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -70,8 +75,9 @@ const cur = () => E.current;
    is sent (eglot's eglot-send-changes-idle-time); how long a cross-reference or hover command waits for its server to be
    ready, then for its answer; how long after the last command a signature is asked for while typing; how long a
    diagnostics list waits after a publish before it is drawn again (a run of publishes, one redraw); how long after
-   the last key typed completions are asked for (corfu's corfu-auto-delay). Mutable for the suites. */
-const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300, diagnostics: 100, completion: 200 };
+   the last key typed completions are asked for (corfu's corfu-auto-delay); how long after the last change of
+   consult-eglot-symbols's input the workspace's symbols are asked for. Mutable for the suites. */
+const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300, diagnostics: 100, completion: 200, symbols: 200 };
 /* The tail of a server's error output a session keeps (eglot-stderr-buffer). */
 const STDERR_MAX = 64 * 1024;
 
@@ -211,7 +217,7 @@ function stderr(s: Session, text: string) {
 }
 
 function initializeParams(s: Session) {
-  const name = s.root.split('/').pop() || s.root;
+  const name = s.root.split('/').pop() || s.root, symbolKind = { valueSet: SYMBOL_KINDS.map((_, k) => k).slice(1) };
   return {
     processId: null,
     clientInfo: { name: 'Edwin' },
@@ -220,7 +226,7 @@ function initializeParams(s: Session) {
     workspaceFolders: [{ uri: uri(s.root), name }],
     capabilities: {
       general: { positionEncodings: ['utf-16'] },
-      workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true }, applyEdit: true, executeCommand: {} },
+      workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true }, applyEdit: true, executeCommand: {}, symbol: { symbolKind } },
       textDocument: {
         synchronization: { didSave: true },
         definition: { linkSupport: true }, declaration: { linkSupport: true }, typeDefinition: { linkSupport: true },
@@ -230,6 +236,7 @@ function initializeParams(s: Session) {
         publishDiagnostics: { versionSupport: true },
         completion: { completionItem: { snippetSupport: false }, contextSupport: true },
         codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ACTION_KINDS } }, isPreferredSupport: true },
+        documentSymbol: { hierarchicalDocumentSymbolSupport: true, symbolKind },
       },
       window: { workDoneProgress: false, showMessage: {} },
     },
@@ -640,11 +647,9 @@ function docParams(b: EdBuffer) {
   const d = docs.get(b);
   return { textDocument: { uri: d ? d.uri : fileUri(b) }, position: position(b.text, b.pt) };
 }
-/* Ask B's server METHOD about point, PARAMS beside the document and position, when its capabilities give CAP
-   (else a user-error that it gives no WHAT): its answer. Waits for the server to be ready and then for its answer,
-   each at most timing.request; C-g quits either wait, cancelling the request. The pending change is sent first,
-   and SENDING (when given) is called with the session just before the request is. */
-async function askAt(b: EdBuffer, method: string, cap: string, what: string, params: Record<string, unknown> = {}, sending?: (s: Session) => void): Promise<unknown> {
+/* B's session once its server is ready (waiting at most timing.request; C-g quits the wait), when its
+   capabilities give CAP; else a user-error that it gives no WHAT. */
+async function readyFor(b: EdBuffer, cap: string, what: string): Promise<Session> {
   const s = ofBuffer.get(b);
   if (!s) return signal('user-error', 'No language server for this buffer (M-x eglot starts one)');
   if (s.state !== 'running') {
@@ -653,6 +658,14 @@ async function askAt(b: EdBuffer, method: string, cap: string, what: string, par
     try { await quittable(Promise.race([ready(s), bound])); } finally { if (timer) clearTimeout(timer); }
   }
   if (!(s.capabilities || {})[cap]) return signal('user-error', `${s.name} gives no ${what}`);
+  return s;
+}
+/* Ask B's server METHOD about point, PARAMS beside the document and position, when its capabilities give CAP
+   (else a user-error that it gives no WHAT): its answer. Waits for the server to be ready (readyFor) and then for
+   its answer, at most timing.request; C-g quits either wait, cancelling the request. The pending change is sent
+   first, and SENDING (when given) is called with the session just before the request is. */
+async function askAt(b: EdBuffer, method: string, cap: string, what: string, params: Record<string, unknown> = {}, sending?: (s: Session) => void): Promise<unknown> {
+  const s = await readyFor(b, cap, what);
   flush(b);
   const conn = s.conn;
   if (!conn || conn.closed() !== null || s.state !== 'running') return signal('lsp-error', `${label(s)}: not running`);
@@ -1597,6 +1610,178 @@ async function codeActions(only: string[] | null, sole: boolean) {
 }
 CMD('eglot-code-actions', '', '', "Choose one of the code actions this buffer's language server offers at point (or for the region) and carry it out: its edit applied to every file it names or to none, each buffer's part one undo step, nothing saved; a command of the server's run only once you say yes.", () => codeActions(null, false));
 CMD('eglot-code-action-quickfix', '', '', 'Carry out the quick fix this buffer\'s language server offers for the diagnostics at point (or in the region): a single one at once, else the one chosen; as eglot-code-actions does.', () => codeActions(['quickfix'], true));
+
+/* ---- symbols ---- */
+
+/* An answer keeps at most SYMBOL_MAX symbols, and a document symbol's children are followed SYMBOL_DEPTH levels
+   down; a name is cut at LABEL_MAX characters, a container at ANN_MAX, and a name under others (`outer.inner`)
+   past LABEL_MAX keeps its end, '…' in place of the start. */
+const SYMBOL_MAX = 5000, SYMBOL_DEPTH = 32;
+/* LSP's SymbolKind (1 to 26; not CompletionItemKind), the annotation of a symbol. */
+const SYMBOL_KINDS = ['', 'file', 'module', 'namespace', 'package', 'class', 'method', 'property', 'field', 'constructor', 'enum', 'interface', 'function', 'variable', 'constant', 'string', 'number', 'boolean', 'array', 'object', 'key', 'null', 'enum member', 'struct', 'event', 'operator', 'type parameter'];
+const symbolKind = (k: unknown) => (Number.isSafeInteger(k) && (k as number) > 0 && (k as number) < SYMBOL_KINDS.length ? SYMBOL_KINDS[k as number] : '');
+const cutStart = (t: string) => {
+  if (t.length <= LABEL_MAX) return t;
+  const k = t.length - LABEL_MAX;
+  return '…' + t.slice(isLow(t.charCodeAt(k)) ? k + 1 : k);
+};
+/* The start of the LSP range R, or null when it has none. */
+function startOf(r: unknown): LspPos | null {
+  const st = r && typeof r === 'object' ? (r as { start?: unknown }).start : undefined;
+  const o = st && typeof st === 'object' ? st as { line?: unknown; character?: unknown } : null;
+  return o && isCount(o.line) && isCount(o.character) ? { line: o.line, character: o.character } : null;
+}
+/* A symbol as kept: its name (under its parents', `outer.inner`, or its container's), its kind and where it is. */
+interface LspSymbol { name: string; kind: string; container: string; x: Xref }
+type SymbolItem = { name?: unknown; kind?: unknown; containerName?: unknown; location?: unknown; range?: unknown; selectionRange?: unknown; children?: unknown };
+/* The symbols of a textDocument/documentSymbol or workspace/symbol answer, in its order, at most SYMBOL_MAX:
+   DocumentSymbols, each at its selectionRange's start (else its range's), followed into their children, named
+   under their parent; SymbolInformation and WorkspaceSymbols at their location's range's start. Left out: an item
+   that is no object or has no name or a blank one (its children with it), one with no place (a WorkspaceSymbol
+   whose location has no range, to be resolved, which initialize does not offer), one in no file (another URI
+   scheme). A DocumentSymbol's path is IN. */
+function symbolsOf(res: unknown, inPath: string | null): LspSymbol[] {
+  const out: LspSymbol[] = [];
+  const walk = (items: unknown, parent: string, depth: number) => {
+    if (!Array.isArray(items) || depth > SYMBOL_DEPTH) return;
+    for (const it of items) {
+      if (out.length >= SYMBOL_MAX) return;
+      /* anything but an object has no name */
+      const o = (it || {}) as SymbolItem;
+      const name = typeof o.name === 'string' ? oneLine(o.name, LABEL_MAX) : '';
+      if (!name) continue;
+      const kind = symbolKind(o.kind);
+      if (o.location !== undefined) {
+        const loc = o.location && typeof o.location === 'object' ? o.location as { uri?: unknown; range?: unknown } : {};
+        const path = typeof loc.uri === 'string' ? pathOf(loc.uri) : null, at = startOf(loc.range);
+        const container = typeof o.containerName === 'string' ? oneLine(o.containerName, ANN_MAX) : '';
+        if (path && at) out.push({ name, kind, container, x: { path, ...at } });
+        continue;
+      }
+      const at = startOf(o.selectionRange) || startOf(o.range);
+      if (!at || inPath === null) continue;
+      const full = parent ? cutStart(`${parent}.${name}`) : name;
+      out.push({ name: full, kind, container: '', x: { path: inPath, ...at } });
+      walk(o.children, full, depth + 1);
+    }
+  };
+  walk(res, '', 0);
+  return out;
+}
+
+/* B's symbols from its server for consult-imenu (name, kind, offset), in the order of the text; null, for the
+   buffer's own definitions, when the server is not asked (B has no session, or its server gives no
+   documentSymbolProvider, as one still starting gives none) or its answer is not used (an error answer, none in
+   timing.request, no symbol of B in it, or B changed while it was asked). The pending change is sent first; C-g
+   quits the wait. The answer to a buffer killed or no longer current meanwhile is dropped with a user-error. */
+async function serverImenu(b: EdBuffer): Promise<{ name: string; kind: string; pos: number }[] | null> {
+  const s = ofBuffer.get(b);
+  /* a server has capabilities (and a connection) only while it runs */
+  if (!s || !(s.capabilities || {}).documentSymbolProvider) return null;
+  flush(b);
+  const conn = s.conn!, d = docs.get(b), u = d ? d.uri : fileUri(b), ver = b.ver;
+  /* an error answer, or none in time: no symbol */
+  let res: unknown = null;
+  try { res = await quittable(conn.request('textDocument/documentSymbol', { textDocument: { uri: u } }, { timeout: timing.request })); }
+  catch (e) { if (L.isQuit(e)) throw e; }
+  /* a killed buffer is in no window, so never the current one */
+  if (cur() !== b) return signal('user-error', `Symbols dropped: ${cut(clean(b.name), 200)} is no longer the current buffer`);
+  if (b.ver !== ver) return null;
+  const path = pathOf(u), t = b.text;
+  const items = symbolsOf(res, path).filter(y => y.x.path === path)
+    .map(y => ({ name: y.container ? cutStart(`${y.container}.${y.name}`) : y.name, kind: y.kind, pos: offsetOf(t, y.x) }));
+  /* in the order of the text, symbols at one place in the answer's */
+  items.sort((a, c) => a.pos - c.pos);
+  return items.length ? items : null;
+}
+/* consult-imenu: the server's symbols where serverImenu gives them, else as before (the buffer's own definitions,
+   a Markdown buffer's headings), chosen with the same live preview and visited by the same command. */
+{
+  const orig = L.toFn(intern('consult-imenu'));
+  const spec = async () => {
+    const b = cur(), items = await serverImenu(b);
+    if (!items) return (orig.interactive as () => unknown)();
+    const w = E.sel!, start = b.pt, startScroll = w.start;
+    const names = items.map((it, i) => it.name + (items.findIndex(x => x.name === it.name) !== i ? ' <' + (i + 1) + '>' : ''));
+    let cancelled = true, v;
+    try {
+      v = await Ed.readMini('Go to symbol: ', '', () => names, { kind: 'imenu', require: true, keepOrder: true, annotate: c => items[names.indexOf(c)].kind,
+        onSelect: c => { if (!c) return; b.pt = items[names.indexOf(c)].pos; E.recenter = 'center'; } });
+      cancelled = false;
+    } finally { if (cancelled) { b.pt = start; w.start = startScroll; } }
+    return [items[names.indexOf(v)].pos + 1];
+  };
+  const g: SchemeProcedure = CMD('consult-imenu', spec, orig.params as string, `${orig.doc} In a buffer whose language server gives document symbols, its symbols.`, (args: SchemeValue[]) => orig(args));
+  if (orig.props) g.props = new Map(orig.props);
+}
+
+/* The labels of SYMS for the minibuffer: each its name, numbered when given before (`name (2)`), past a label
+   taken. NEXT keeps each name's next number, so many symbols of one name are labelled in linear time. */
+function labelSymbols(syms: LspSymbol[]) {
+  const labels: string[] = [], by = new Map<string, LspSymbol>(), next = new Map<string, number>();
+  for (const y of syms) {
+    let l = y.name, n = next.get(y.name) || 2;
+    while (by.has(l)) l = `${y.name} (${n++})`;
+    next.set(y.name, n);
+    by.set(l, y); labels.push(l);
+  }
+  return { labels, by };
+}
+/* consult-eglot-symbols: the workspace's symbols from the current buffer's server, asked for (workspace/symbol)
+   timing.symbols after the input last changed, one request at a time (the one before cancelled), none for a blank
+   input. The candidates are those of the last answer: while it is the answer for the input shown, in the server's
+   order as it matched them, else filtered by the minibuffer. An answer for an input no longer shown is dropped; an
+   error answer is flashed after the input. The one chosen is visited as a definition is (its place recorded for
+   xref-go-back and C-o). Leaving the minibuffer cancels what is pending. */
+async function workspaceSymbols() {
+  const b = cur(), s = await readyFor(b, 'workspaceSymbolProvider', 'workspace symbols');
+  const top = s.root.replace(/\/+$/, '') + '/';
+  let shown = labelSymbols([]), answered = '', timer: ReturnType<typeof setTimeout> | null = null, req: LspRpcRequest | null = null;
+  const stop = () => { if (timer) clearTimeout(timer); timer = null; if (req) req.cancel(); req = null; };
+  const annotate = (l: string) => {
+    const y = shown.by.get(l);
+    if (!y) return '';
+    const where = (y.x.path.startsWith(top) ? y.x.path.slice(top.length) : abbr(y.x.path)) + ':' + (y.x.line + 1);
+    return [y.kind, y.container && `in ${y.container}`, where].filter(Boolean).join('  ');
+  };
+  const take = (m: EdMini, text: string, syms: LspSymbol[]) => {
+    shown = labelSymbols(syms); answered = text;
+    /* new candidates for the same input: the minibuffer's cache dropped, the first highlighted */
+    m.cache = null; m.scroll = 0; m.index = 0;
+    Ed.scheduleRender();
+  };
+  /* called by the minibuffer after each change of its input, so a request or an answer outlives no input */
+  const onChange = (text: string) => {
+    const m = E.mini!;
+    stop();
+    if (text === answered) return;
+    if (!text.trim()) { take(m, text, []); return; }
+    timer = setTimeout(() => {
+      timer = null;
+      if (s.state !== 'running') return;
+      const r = req = s.conn!.request('workspace/symbol', { query: text }, { timeout: timing.request });
+      /* a request is cancelled whenever the input changes: an answer is for the input shown */
+      r.then(res => {
+        req = null;
+        take(m, text, symbolsOf(res, null));
+      }, e => {
+        if (req !== r) return;   // cancelled
+        req = null;
+        E.miniFlash = ` [${Ed.errorText(e)}]`; Ed.scheduleRender();
+      });
+    }, timing.symbols);
+  };
+  let label: string;
+  try { label = await Ed.readMini('Workspace symbol: ', '', () => shown.labels, { kind: 'eglot-symbol', require: true, keepOrder: true, filtered: t => t === answered, annotate, onChange }); }
+  finally { stop(); }
+  const y = shown.by.get(label)!;   // require: one of them
+  need(y.x);
+  pushBack(b);
+  EvilCore.pushJump(b, b.pt);
+  await visitXref(y.x);
+  return false;
+}
+CMD('consult-eglot-symbols', '', '', "Visit a symbol of the workspace, chosen from those this buffer's language server finds for what is typed (SPC p s), asked again as it changes; point's place is recorded first, for xref-go-back (M-,).", () => workspaceSymbols());
 
 /* ---- completion ---- */
 

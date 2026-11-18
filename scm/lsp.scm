@@ -4,8 +4,9 @@
 ;;; commands, *xref* and xref-go-back), eldoc (the hover at point), the signatures shown while typing and the
 ;;; diagnostics (counted in the mode line, the ones at point in the echo area, flymake-show-buffer-diagnostics and
 ;;; flymake-show-project-diagnostics), the workspace edits (eglot-rename), completion (the server's items in the
-;;; completion popup) and the code actions (eglot-code-actions, eglot-code-action-quickfix) are src/lsp.ts's; their
-;;; keys are in scm/evil.scm and scm/emacs.scm.
+;;; completion popup), the code actions (eglot-code-actions, eglot-code-action-quickfix) and the symbols (the
+;;; server's in consult-imenu, the workspace's in consult-eglot-symbols) are src/lsp.ts's; their keys are in
+;;; scm/evil.scm, scm/emacs.scm and scm/init.scm.
 
 (define (define-language-server name . options)
   "(define-language-server NAME :modes MODES :command ARGV) declares the language server NAME (a symbol) for the

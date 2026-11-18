@@ -5167,6 +5167,130 @@ edwin-lsp. Risk named: server commands; only workspace edits are applied, and ex
   was strengthened after "the command's buffer's undo step" first survived (it now checks that a second `u` is at
   the oldest change).
 
+## Symbols (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-symbols`, on lsp-code-actions; owner decision 2: the client
+in the frame, the other LSP details the plan's defaults): symbol pickers, removing the consult-eglot-symbols
+desktop-only stub; proved by edwin-lsp.
+
+- **`src/lsp.ts`** holds it, after the code actions (no new file). initialize now also says
+  `textDocument.documentSymbol` with `hierarchicalDocumentSymbolSupport` and `workspace.symbol`, both with
+  `symbolKind.valueSet` 1 to 26 (every SymbolKind); no `resolveSupport`, so a server puts each workspace symbol's
+  range in its answer. The wait for a starting server that the finds and the code actions share is now its own
+  function (`readyFor`), which `consult-eglot-symbols` uses too.
+- **Document symbols: `consult-imenu`** (`SPC i`, `M-g i`, `M-s i`), as eglot gives imenu its index in the owner's
+  Emacs. In a buffer whose server gives `documentSymbolProvider`, the pending change is sent and
+  `textDocument/documentSymbol` asked (C-g quits and cancels, `timing.request` bounds the wait); the symbols are
+  listed under `Go to symbol: ` with the same live preview and jump as before (`C-g` puts point back; the jump is
+  recorded for `C-o`). Each is shown by its name, a child under its parent's (`outer.inner`), a SymbolInformation
+  under its `containerName` (`Mod.two`), its kind (the SymbolKind's name: `function`, `class`, `field`) as the
+  annotation; in the order of the text (symbols at one place in the answer's order), a name given twice numbered
+  as consult-imenu numbers it (`last <7>`). A DocumentSymbol is placed at its `selectionRange`'s start, else its
+  `range`'s; a SymbolInformation at its location's start, and only one in this file is kept (another file's, or
+  another URI scheme's, left out).
+- **Else the buffer's own definitions**, as before (its grammar's, its Lisp definers, a Markdown buffer's headings,
+  under `Go to definition: `/`Go to heading: `), when the server is not asked or its answer is not used: no server
+  for the buffer, a server still starting (it has no capabilities yet, so it is neither waited for nor asked), a
+  server without `documentSymbolProvider` (a Markdown buffer whose server gives none keeps its headings), an error answer, no
+  answer in `timing.request`, an answer with no symbol of this file, or the buffer changed while it was asked (its
+  places would be of another text). The answer to a buffer killed or no longer current meanwhile is dropped:
+  `Symbols dropped: BUFFER is no longer the current buffer`.
+- **Workspace symbols: `consult-eglot-symbols`** (`SPC p s`, the owner's key; the stub that said it runs on the
+  desktop is gone, the key's comment says what it is). It asks the current buffer's server (waiting for one that is
+  starting as the finds do; `No language server for this buffer (M-x eglot starts one)` with none, `NAME gives no
+  workspace symbols` without `workspaceSymbolProvider`, not asked). `Workspace symbol: ` reads the query: each
+  change of the input cancels what is pending (`$/cancelRequest` for a request sent) and asks `workspace/symbol`
+  `{query}` `timing.symbols` (200 ms) after it, one request at a time; a blank input is not asked and lists
+  nothing; an input back to the one last answered is not asked again. While the candidates are the answer for the
+  input shown they are shown in the server's order, as it matched them (`filtered`); after a key and before the
+  next answer the minibuffer filters the last answer's. A new answer highlights its first. An error answer is
+  flashed after the input (`[…]`) and the candidates stay. Each candidate is the symbol's name (a name given
+  twice numbered, `thing (2)`), annotated by its kind, `in CONTAINER` and `FILE:LINE` (relative to the project's
+  root, else abbreviated). RET takes the highlighted candidate, so RET typed before the answer for the input takes
+  the first of the last answer as filtered. The one chosen is visited as a definition is: its file checked first
+  (`FILE: no such file`, nothing recorded), point's place recorded for `xref-go-back` (`M-,`) and the jump list,
+  then its file visited with point at its place. Leaving the minibuffer (RET or C-g) cancels the timer and the
+  request pending.
+- **Bounds and cleaning:** at most 5000 symbols an answer; a DocumentSymbol's children followed 32 levels down;
+  names and containers cleaned of control characters and put on one line (a kind is a name from the SymbolKind
+  table, none past 26); a name cut at 200 characters, a
+  container at 80, and a name under others longer than 200 keeps its end (`…` in place of the start, a surrogate
+  pair never split), so children stay told apart. Left out: an item that is not an object, has no name or a blank
+  one (its children with it), has no place, or is a WorkspaceSymbol whose location has no range (one to be
+  resolved, which initialize does not offer); in a workspace answer a DocumentSymbol (it names no file).
+- **Choices**, each reversible:
+  - Document symbols through `consult-imenu`, not a command of their own: the owner reaches them by `SPC i` in
+    Emacs, where eglot supplies imenu. The server's are used only when it runs and gives them, so imenu never waits
+    for a starting server and a Markdown buffer's headings stay when its server gives no symbols.
+  - Nothing asked for a blank query: consult asks only past a minimum input; no minimum length beyond one
+    non-blank character is set.
+  - No preview of a workspace symbol (consult-eglot previews by visiting the file): visiting files as the
+    highlight moves would open buffers and attach servers for each.
+- **Differences from consult-eglot and eglot's imenu:** no grouping of imenu entries by kind (eglot's
+  `Function`/`Variable` submenus; the kind is the annotation); no `consult-async-min-input` of 3; no preview of
+  workspace symbols; a starting server's symbols not waited for; no narrowing
+  by kind (consult-eglot's `consult-eglot-narrow`).
+- **Not in it:** `workspaceSymbol/resolve`; call or type hierarchies; a web frame or edwind (no processes there, so
+  no server: `consult-imenu` is as before and `consult-eglot-symbols` says there is no server).
+- **Checked by**, on ex44 (the build host), on the final tree after review (this entry's wording the only change
+  after the checks ran): `edwin-lsp` (119 passed, none skipped: 13 of them test/lsp-symbols.test.mts, nil from
+  nixpkgs run in it; its first build, at load average 14 to 18, failed only lsp.test.mts's known race 'a broken
+  stream and an initialize past its time count as ends', the rebuild passed) and `edwin-typecheck`;
+  `nix flake check --max-jobs 2` (its first run, at load average 22, failed only `edit-anchors`' R8.12 test,
+  which passed when that check was built alone; the second run passed every check, load average 16 as it started
+  and 5.3 as it ended), among them `edwin-lockdown` and `edwin-security`, since src/lsp.ts loads in edwind, and
+  `.#edwin`'s cargo tests (unit 41 and 3 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37 and 1
+  ignored). Also run outside nix: test/markdown.test.mts and test/prog.test.mts (80 together), which use
+  consult-imenu.
+  test/lsp-symbols.test.mts (13), against a stand-in (node) that answers each request with what the test wrote (a
+  delay, `hang`, an error), can answer initialize late, and logs every message:
+  - initialize's `documentSymbol` and `workspace.symbol`, SymbolKind 1 to 26.
+  - Document symbols: the pending edit sent first; nested ones under their parent, in the order of the text, a
+    DocumentSymbol at its selectionRange (its range with none), UTF-16 places after an emoji; an item that is no
+    object, has no name or a blank one (its children with it) or no place left out; a name with ESC and a newline
+    cleaned; SymbolKind 12 a `function`, a kind past 26 none; a name given twice numbered; the highlight
+    previewed and C-g putting point back; the one chosen visited.
+  - SymbolInformation of this file under its container; another file's, another scheme's and one with no range
+    left out.
+  - The fallback to the buffer's own definitions: no server, no `documentSymbolProvider` (not asked), a server
+    starting (not asked), an error, no answer in time, an empty or null answer or one of another file, the text
+    changed while asked; then the server's again.
+  - Dropped: the answer to a buffer no longer current, and to one killed; C-g quitting the wait (`Quit`, the
+    request cancelled, no fallback).
+  - Bounds: 41 levels nested give 33; 5001 symbols give 5000.
+  - Cuts: a name at 200, a child under a long parent keeping its end, a container at 80, a surrogate pair at the
+    cut not split; the same in workspace symbols' names and annotations.
+  - Workspace symbols: nothing listed before anything is typed; asked once for `thi` as the keys stopped; the
+    server's order kept, names numbered, annotated by kind, container and `FILE:LINE`; a malformed item, another
+    scheme's, a rangeless one and a DocumentSymbol left out; the highlight moved while the next input was asked
+    for, the new answer's first highlighted; an input back to the one answered not asked again; the second
+    chosen visited at its UTF-16 place and `M-,` back; RET before the answer for the input taking the first of the
+    last answer as filtered, nothing more asked.
+  - A symbol in the same buffer chosen: point there, and `C-o` back to where it was (the jump list); `x`, the
+    server's own `x (2)`, then `x` twice more labelled `x (3)` and `x (4)`, past the label taken.
+  - A blank input not asked; a request cancelled by the next key (`$/cancelRequest`, the cancellation not flashed)
+    and its late answer dropped, the next answer shown unfiltered; an error flashed; C-g cancelling a request that
+    waits, and a timer that has not run (nothing asked); the server shut down while the list is open (nothing
+    asked).
+  - No server; no `workspaceSymbolProvider` (not asked); a place whose file is gone (`no such file`, no place
+    recorded for `M-,`).
+  - `SPC p s` bound to `consult-eglot-symbols`, the stub gone.
+  - nil: `foo`, `bar`, `bar.baz` as fields, `bar.baz` visited; `nil gives no workspace symbols`.
+  Each check was also taken out of src/lsp.ts and the suite run: every one made a test fail (31 removals: the
+  jump recorded for `C-o` and a label taken skipped past, added after review, and the
+  capability, no session, the pending change sent, a quit passed on, the drop, the text changed, this file only,
+  an empty answer falling back, the order of the text, the depth, the bound of 5000, a blank name, a place in a
+  file, a DocumentSymbol in a workspace answer, the selectionRange, the end of a long nested name kept, the
+  container's cut, the surrogate pair at a cut, an answered input not asked again, a blank input not asked, a
+  stopped server not asked, a cancelled request not flashed, the highlight reset, the server's order kept
+  (`filtered`), the timer and request cancelled on leaving, the file checked before the place is recorded, the
+  place recorded for `M-,`, initialize's `documentSymbol`, the SymbolKind table). Four guards a removal showed
+  redundant were folded away rather than kept: a check before the drop that the buffer is not killed (a killed
+  buffer is in no window, so never the current one), a check that the server runs before document symbols are asked (a starting
+  server has no capabilities), a check that an item is an object (one that is not has no name), and a check on a
+  workspace answer that its request was still the current one (a request is cancelled whenever the input changes,
+  so an answer that arrives is for the input shown).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

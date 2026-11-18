@@ -117,7 +117,6 @@
      (define-command (name) what
        (message "~a runs ~a on the desktop (~a); it is not in Edwin" key 'name what)))))
 
-(desktop-only consult-eglot-symbols "SPC p s" "LSP symbols")
 (desktop-only citar-open "SPC y o" "citar: open a reference")
 (desktop-only embark-act "SPC e a" "embark-act")
 (desktop-only devdocs-lookup "SPC h d" "devdocs")
@@ -154,7 +153,7 @@
   "SPC p f" 'project-find-file
   "SPC p g" 'project-find-regexp
   "SPC p p" 'project-switch-project
-  "SPC p s" 'consult-eglot-symbols   ; desktop only
+  "SPC p s" 'consult-eglot-symbols   ; the workspace's symbols (consult-eglot)
   ;; git and LLM (g)
   "SPC g g" 'vc-status               ; git's status, a jj workspace's log (vile-vcs-status)
   "SPC g G" 'git-status              ; git's status, a colocated jj workspace's too (vile-magit-status)

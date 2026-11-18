@@ -327,9 +327,17 @@ in
   # when the text changed since the request; a command run only when the server names it and the user says yes, the
   # server's workspace/applyEdit applied only while it runs (another time, or another server's, answered applied
   # false); answers dropped when the buffer is left or the server stops; nil rewriting a string.
+  # test/lsp-symbols.test.mts, symbols: consult-imenu listing the server's document symbols (children under their
+  # parent, SymbolInformation of this file under its container, in the order of the text, malformed ones left out,
+  # names cut, at most 5000 and 32 levels), else the buffer's own definitions (no server, no capability, an error,
+  # no answer in time, none of this file, the text changed meanwhile); the answer to a buffer left dropped, C-g
+  # cancelling; consult-eglot-symbols asking workspace/symbol once the keys stop, a blank input not asked, a
+  # request cancelled by the next key, the server's order kept, an error flashed, the one chosen visited and
+  # M-, and C-o back, a name numbered past a label taken; SPC p s bound, the stub gone; nil's attributes as
+  # document symbols.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts
     touch $out
   '';
 
