@@ -20,7 +20,9 @@
 
    Nothing in the buffer changes unless the formatter exited 0 with whole UTF-8 output within FORMAT_MAX_BYTES,
    printed something for a buffer that holds something, and the buffer did not change while it ran. Else the
-   echo area says why, and what it wrote to its error output is in *Format Output*. */
+   echo area says why, and what it wrote to its error output is in *Format Output*.
+
+   format-on-save-mode (below) runs the same before a save the user typed. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -108,7 +110,12 @@ function keepLines(b: EdBuffer, old: string) {
   };
 }
 
-async function formatBuffer(b: EdBuffer): Promise<boolean> {
+/* What a run of B's formatter came to: CHANGED when its output replaced the text, FAILED when the text was left
+   because the formatter failed or the buffer changed or went meanwhile, and what to say (a failure without the
+   words on what was left). */
+interface FormatResult { changed: boolean; failed: boolean; msg: string }
+
+async function runFormatter(b: EdBuffer): Promise<FormatResult> {
   const why = Ed.proc.refusal();
   if (why) signal('process-error', `format-buffer: ${why}`);
   Ed.checkRO(b);
@@ -130,7 +137,7 @@ async function formatBuffer(b: EdBuffer): Promise<boolean> {
   const exit = Object.assign(p.exit, { cancel: () => { p.kill('KILL'); } });
   const x = await (EdPool.interruptible ? EdPool.interruptible(exit) : exit);
   const result = out.join('');
-  const left = (msg: string) => { Ed.message(`${msg}; the buffer is left as it was`); return false; };
+  const left = (msg: string): FormatResult => ({ changed: false, failed: true, msg });
   const failed = (msg: string) => { const line = keepError(err.join('')); return left(line ? `${msg}: ${line}` : msg); };
   if (x.error) return failed(`${prog} stopped: ${x.error}`);
   if (x.timedOut) return failed(`${prog} took longer than ${FORMAT_TIMEOUT / 1000} s`);
@@ -140,14 +147,69 @@ async function formatBuffer(b: EdBuffer): Promise<boolean> {
   if (!result && text.trim()) return failed(`${prog} printed nothing`);
   if (!E.buffers.includes(b)) return left(`${b.name} was killed while ${prog} ran`);
   if (Ed.changedSince(b, ver)) return left(`${b.name} changed while ${prog} ran`);
-  if (result === text) { Ed.message(`${b.name} is formatted already (${prog})`); return false; }
+  if (result === text) return { changed: false, failed: false, msg: `${b.name} is formatted already (${prog})` };
   Ed.checkRO(b);
   const keep = keepLines(b, text), applied = Ed.applyLineDiff(b, result);
   keep(applied, result);
   if (applied.length) b.modified = true;
-  Ed.message(`Formatted ${b.name} with ${prog}`);
-  return true;
+  return { changed: true, failed: false, msg: `Formatted ${b.name} with ${prog}` };
 }
+
+async function formatBuffer(b: EdBuffer): Promise<boolean> {
+  const r = await runFormatter(b);
+  Ed.message(r.failed ? `${r.msg}; the buffer is left as it was` : r.msg);
+  return r.changed;
+}
+
+/* ---------- format-on-save-mode: the formatter runs before a save the user typed ----------
+   Saving is synchronous (save-buffer, and the callers that save and go straight on: vc's offer to save, org's
+   autosave, C-x C-c's !), and a formatter is a child to wait for. So the formatting is done before a command
+   that saves runs, when the command loop calls it (Ed.callInteractively asks hooks.formatOnSave, below): the
+   current buffer for SPC f s, C-x C-s and M-x save-buffer, :w without a file name, :wq, :x and ZZ; every buffer
+   they save for :wa, :wqa and :xa. A save from code formats nothing. A buffer is formatted when
+   format-on-save-mode is on in it (per language: format-on-save-modes, scm/prog.scm), it is modified, writable
+   and visits a file on this machine, its mode has a formatter and processes can start here; else it is saved
+   as it is, with nothing said. A formatter that fails leaves the text as it was and the save goes on; once the
+   command is done the echo area says why. C-g while one runs quits the command, nothing saved.
+   The argv is still only define-formatter's, never the image's: turning the mode on starts no process, and
+   the formatter starts on the user's own save. */
+const MODE_VAR = 'format-on-save-enabled';
+Ed.defineMinorMode({ name: 'format-on-save-mode', pretty: 'Format on save', doc: "Toggle formatting this buffer with its mode's formatter (format-buffer) before a save typed by the user: SPC f s, C-x C-s, :w, :wq, :x, ZZ, :wa. format-on-save-modes turns it on per language. The state is format-on-save-enabled." });
+
+/* The buffers the command NAME, given ARGS, saves. */
+const noFile = (a: SchemeValue) => a === undefined || a === false || a === L.NIL;
+const SAVES: Record<string, (args: SchemeValue[]) => EdBuffer[]> = {
+  'save-buffer': () => [E.current],
+  'evil-write': a => (noFile(a[0]) ? [E.current] : []),
+  'evil-save-and-quit': () => [E.current],
+  'evil-save-modified-and-close': () => [E.current],
+  'evil-write-all': () => E.buffers.slice(),
+  'evil-save-and-quit-all': () => E.buffers.slice(),
+};
+const formatsOnSave = (b: EdBuffer) => L.truthy(Ed.localValue(b, MODE_VAR)) && b.modified && !b.readOnly
+  && formatters.has(b.mode) && localFile(b) !== null && Ed.proc.available();
+
+/* Formats each of BS in turn; what failed is said by the function it gives, called once the save is done. */
+async function beforeSave(bs: EdBuffer[]): Promise<() => void> {
+  const why: string[] = [];
+  for (const b of bs) {
+    if (!E.buffers.includes(b) || !formatsOnSave(b)) continue;
+    try {
+      const r = await runFormatter(b);
+      if (r.failed) why.push(`${r.msg}; ${b.name} is saved as it was`);
+    } catch (e) {
+      if (L.isQuit(e)) throw e;
+      why.push(`${Ed.errorText(e)}; ${b.name} is saved as it was`);
+    }
+  }
+  return () => { if (why.length) Ed.message(why.join('; ')); };
+}
+H.formatOnSave = (name: string, args: SchemeValue[]) => {
+  const pick = SAVES[name];
+  if (!pick) return null;
+  const bs = pick(args).filter(formatsOnSave);
+  return bs.length ? beforeSave(bs) : null;
+};
 
 D('%format-declare', 'MODES COMMAND', 'Declare COMMAND (an argv, or #f) the formatter of MODES (define-formatter, scm/prog.scm).',
   ([m, c]: SchemeValue[]) => declare(m, c));

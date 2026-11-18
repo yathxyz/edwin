@@ -1,6 +1,7 @@
 ;;; prog.scm: prog-mode, the mode every programming language's mode derives from, and define-language,
 ;;; which declares one language: the files that open in it, its comment syntax and its indent width; and
-;;; define-formatter, which names the program format-buffer runs on a mode's buffers.
+;;; define-formatter, which names the program format-buffer runs on a mode's buffers, and
+;;; format-on-save-modes, the languages formatted before each save.
 ;;;
 ;;; A language's mode is a define-derived-mode of prog-mode, so it has the usual NAME-map and NAME-hook, and
 ;;; prog-mode-hook runs in every one of them. Visiting a file turns its mode on (Ed.visit), so the indent width
@@ -136,6 +137,19 @@ with a message, while the image replays."
 (define-formatter 'python-mode '("black" "--quiet" "-"))
 (define-formatter '(c-mode c++-mode) '("clang-format" "--assume-filename" file))
 (define-formatter 'sh-mode '("shfmt" "--filename" file))
+
+;; Format on save (format-on-save-mode, src/format.ts): off in every language unless its mode is listed here.
+(define format-on-save-modes '()
+  "The major modes whose buffers turn format-on-save-mode on as the mode starts, so that a save typed by the user
+(SPC f s, C-x C-s, :w, :wq, :x, ZZ, :wa) runs format-buffer first. Empty: no language formats on save unless
+listed, as in (set! format-on-save-modes '(nix-mode rust-mode)) in init.scm. Buffers already open keep their
+state; M-x format-on-save-mode turns it on or off in one buffer.")
+
+(define (format-on-save--turn-on)
+  "On prog-mode-hook: turn format-on-save-mode on when the buffer's major mode is in format-on-save-modes."
+  (when (memq (major-mode) format-on-save-modes) (format-on-save-mode 1)))
+
+(add-hook! 'prog-mode-hook format-on-save--turn-on)
 
 ;;;; ws-butler: trailing blanks removed on save from the lines that changed, and from no others
 

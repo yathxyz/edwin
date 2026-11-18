@@ -4735,6 +4735,78 @@ the owner's choice (answer 8: alejandra).
   `edit-frame` (24), `edwin-display` (20); `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1
   ignored, `tests/terminal.rs` 36). Not run: the whole `nix flake check`.
 
+## format-on-save-mode: the formatter before a save (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-format-on-save`, on lang-format-buffer): a minor mode
+that formats before saving, off unless enabled per language. Risk named: the default is the owner's choice; the
+plan's default (answer 8) is taken: off in every language.
+
+- **`format-on-save-mode`** (src/format.ts, buffer-local, `format-on-save-enabled`, no lighter): with it on, a
+  save the user types runs the buffer's formatter first (`format-buffer`'s own run: the mode's `define-formatter`
+  argv in the file's directory and direnv environment, the output applied as a line diff), and the formatted
+  text is what is written, in one write. `M-x format-on-save-mode` turns it on or off in one buffer.
+- **Per language: `format-on-save-modes`** (scm/prog.scm), a list of major modes, empty by default; on
+  `prog-mode-hook` a buffer whose major mode is listed turns the mode on, as in `(set! format-on-save-modes
+  '(nix-mode rust-mode))` in init.scm. Buffers already open keep their state.
+- **Which saves.** Saving is synchronous (`save-buffer`, and its callers that save and go straight on: vc's offer
+  to save, org's autosave, `C-x C-c`'s `!`), and a formatter is a child to wait for, which frame Scheme cannot
+  do. So the formatting happens before the saving command runs, when the command loop calls it:
+  `Ed.callInteractively` (src/editor-core.ts) asks `Ed.hooks.formatOnSave(NAME, ARGS)` after reading the
+  arguments, waits for what it gives, runs the command, then says what the formatting came to. Formatted: the
+  current buffer for `SPC f s`, `C-x C-s` and `M-x save-buffer`, `:w` without a file name, `:wq`, `:x` and `ZZ`;
+  each buffer they save for `:wa`, `:wqa` and `:xa`, one formatter at a time. A buffer is formatted when the mode
+  is on in it, it is modified, writable and visits a file on this machine, its major mode has a formatter and
+  processes can start here; else it is saved as it is and nothing is said. Every other command costs one table
+  lookup and no wait.
+- **A failure never holds the save.** A formatter that fails (each case of format-buffer: non-zero exit, signal,
+  timeout, too much output, not UTF-8, empty output, not on PATH, the directory missing, the buffer changed
+  meanwhile) leaves the text as it was, the save goes on with the text as typed, and after it the echo area says
+  `REASON; NAME is saved as it was` in place of `Wrote ...`; the error output is in `*Format Output*`.
+- **The wait.** As for `SPC b f`, the save waits for the formatter with every key held, up to its 30 s timeout
+  (then it is killed and the save goes on unformatted). `C-g` while a formatter runs kills it and quits the
+  command: nothing is saved, the buffer stays modified. After `C-g` in `:wa`, the buffers formatted before it
+  keep their formatted text, unsaved and modified.
+- **The image (R16.15).** The argv is still define-formatter's alone, never set while the image replays; turning
+  the mode on starts nothing. No formatter starts on a save while the image replays (`Ed.proc.available()`), in
+  a web frame or on edwind's Node host; the save goes on unformatted. `format-on-save-modes` is a plain Scheme
+  variable, and a replayed form may set it: that only chooses which of the declared formatters run on the
+  user's own saves, as binding a key to `format-buffer` would.
+- **In an edwinclient frame nothing formats on save**: a file visited there is edwind's shared buffer, not a
+  file on this machine (`localFile` in src/format.ts, as for `format-buffer`'s file name), so its formatter's
+  directory, settings and direnv environment are not known here; the save goes to edwind as typed. Only a
+  frame that visits files itself (the desktop program started without edwind) formats on save. `SPC b f`
+  still runs a formatter that needs no file name in such a buffer, in the program's own directory.
+- **Choices**, each reversible:
+  - Off in every language by default; the owner lists the ones wanted.
+  - Before the save, not apheleia's after-save format and second write: `:wq`, `:x` and `ZZ` close the buffer or
+    end the program right after saving, which would drop an after-save result, and one write is what file
+    watchers and auto-revert see.
+  - A save from code (`(save-buffer)` in Scheme or `L.call('save-buffer')`: vc's offer to save before a commit,
+    org's autosave, `C-x C-c`'s `!`, `:wa`'s loop when called from code) formats nothing: those callers go on
+    straight after the save returns. `:w FILE` writes a copy and formats nothing.
+  - The commands that format are a table in src/format.ts by name (`save-buffer`, `evil-write`,
+    `evil-save-and-quit`, `evil-save-modified-and-close`, `evil-write-all`, `evil-save-and-quit-all`).
+- **Differences from Emacs** (apheleia-mode): apheleia formats after the save and writes again, on every save
+  however started; here before the save and only for a save the user typed. No global mode; per language by
+  `format-on-save-modes`.
+- **Not in it:** formatting on save in a shared buffer or a served note (edwind's files, above); the fleet's choice of
+  languages (an owner step: `format-on-save-modes` in the fleet's init.scm, with the formatters on the frames'
+  PATH, as format-buffer's entry says).
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-format` (test/format.test.mts, 16 passed: the
+  11 of format-buffer and 5 new), with real alejandra in the sandbox: off by default (saved as typed, nothing
+  spawned); with nix-mode listed, `SPC f s`, `C-x C-s`, `:w`, `:wq` and `ZZ` each one alejandra run and the
+  formatted text on disk, the buffer unmodified, point on its line where the buffer stays, `:wq` and `ZZ` closing it; a sh buffer not
+  listed, the mode turned off by `M-x format-on-save-mode`, and `:w FILE`, nothing spawned; broken Nix saved as
+  typed with alejandra's error and `is saved as it was`, a formatter not on PATH the same; no file, read-only,
+  unmodified and a command that does not save given nothing to wait for; `:wa` one run per listed buffer and the
+  others as typed; a save from code unformatted; `C-g` on a hung formatter quitting the save, nothing written;
+  inside `Ed.proc.replay`, in a web frame and with no `host.proc` saved as typed with nothing spawned, then
+  formatted with processes back. Taking the `formatOnSave` call out of `Ed.callInteractively` fails the 5 new
+  cases. Also passed, each exit 0, on the final tree: `edwin-typecheck`, `edwin-headless` (21), `edit-frame`
+  (24), `edwin-scheme` (38), `edwin-prog` (41), `edit-security` (21), `edit-lockdown` (6), and `nix build .#edwin`
+  (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 36). Not run: the whole `nix flake
+  check`, and the other suites.
+
 ## The Lisp lexer: character literals, [ ] and #; (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `se-lexer`): B1, B4 and B5 of the structural-editing audit

@@ -1364,6 +1364,9 @@ interface EdHooks {
   undefinedKey?: ((seq: string) => void) | null;
   preCommand?: ((def: SchemeValue, b: EdBuffer) => void) | null;
   postCommand?: ((def: SchemeValue, b: EdBuffer, failed: boolean) => void) | null;
+  /* before the command NAME runs from the command loop with ARGS: when it saves buffers in format-on-save-mode,
+     their formatting, giving what to say once the command is done (format.ts); else null */
+  formatOnSave?: ((name: string, args: SchemeValue[]) => Promise<() => void> | null) | null;
   /* the keymaps of B's Evil state, ahead of the mode's */
   stateMaps?: ((b: EdBuffer) => EdKeymap[]) | null;
   canSelfInsert?: ((b: EdBuffer) => boolean) | null;

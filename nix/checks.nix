@@ -184,7 +184,10 @@ in
   # .editorconfig; a failing formatter (alejandra on broken Nix, a non-zero exit, no output, non-UTF-8, a signal, past
   # 16 MiB, not on PATH), a buffer changed or killed meanwhile, and C-g on a hung one leave text, point and the
   # modified flag as they were; a formatter only on the direnv PATH found; nothing starts while the image replays
-  # (where a declaration is skipped), in a web frame or with no host.proc.
+  # (where a declaration is skipped), in a web frame or with no host.proc. format-on-save-mode, off unless a language is in
+  # format-on-save-modes: SPC f s, C-x C-s, :w, :wq, ZZ and :wa save alejandra's output, one run per buffer; a failing
+  # formatter leaves the text and the save goes on; C-g quits the save; a save from code, :w FILE, a replay, a web frame
+  # and no host.proc format nothing.
   edwin-format = suiteWith [ pkgs.alejandra pkgs.python3Packages.black pkgs.shfmt ] "format" [ "format.test.mts" ];
 
   # Structural editing in Lisp buffers, the fix track of the Emacs-to-Edwin plan, each case of the audit by its id:

@@ -1667,9 +1667,15 @@ async function callInteractively(cmd: SchemeValue) {
     else if (spec === false || spec === undefined || spec === L.UNSPEC) args = [];
     else args = arr(spec);
   }
+  /* A command that saves first waits for the formatters of format-on-save-mode (src/format.ts); what they
+     came to is said after it. Null, at once, for every other command. */
+  const fos = hooks.formatOnSave ? hooks.formatOnSave(L.cmdName(cmd), args) : null;
+  const said = fos ? await fos : null;
   L.resetOps();
   const r = L.callProc(f, args);
-  return r && typeof (r as Promise<SchemeValue>).then === 'function' ? await r : r;
+  const v = r && typeof (r as Promise<SchemeValue>).then === 'function' ? await r : r;
+  if (said) said();
+  return v;
 }
 /* An operator whose work was done while reading its motion (surround) throws OpDone: not an error. */
 const callInteractively0 = callInteractively;

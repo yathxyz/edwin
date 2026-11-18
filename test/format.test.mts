@@ -35,8 +35,13 @@ L.evalText('(set! corfu-auto #f)');
 host.files = {
   cwd: root, exists: (p: string) => fs.existsSync(p), resolve: (p: string) => path.resolve(root, p),
   stamp: (p: string) => { try { const s = fs.statSync(p); return s.isFile() ? `${s.ino}:${s.mtimeMs}:${s.size}` : null; } catch { return null; } },
+  /* What a save writes (format-on-save's cases): on the disk under root. */
+  read: (p: string) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
+  write: (p: string, v: string) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, v); },
+  remove: (p: string) => { fs.rmSync(p, { force: true }); },
+  list: () => [] as string[], truename: (p: string) => p, temp: [] as string[],
 };
-after(() => { for (const id of proc.running()) proc.kill(id, 'KILL'); fs.rmSync(root, { recursive: true, force: true }); });
+after(() => { L.evalText('(global-auto-revert-mode 0)'); for (const id of proc.running()) proc.kill(id, 'KILL'); fs.rmSync(root, { recursive: true, force: true }); });
 
 const keys = async (s: string) => { for (const k of Ed.kbd(s).split(' ')) Ed.feedKey(k); await Ed.whenIdle(); };
 const until = async (cond: () => unknown, what: string, ms = 8000) => { const end = Date.now() + ms; for (;;) { const v = cond(); if (v) return v; if (Date.now() > end) throw new Error('timeout waiting for ' + what); await new Promise(r => setTimeout(r, 10)); } };
@@ -290,4 +295,144 @@ test('R16.15: a declaration while the image replays is skipped, and format-buffe
 test('SPC b f is format-buffer, and the desktop-only stub is gone', () => {
   assert.equal(L.evalText('(symbol->string (lookup-key evil-normal-state-map "SPC b f"))'), 'format-buffer');
   assert.equal(L.evalText("(bound? 'apheleia-format-buffer)"), false);
+});
+
+/* ---------- format-on-save-mode ---------- */
+
+/* A buffer visiting FILE in MODE as visit gives it, then holding TEXT as typed: modified. */
+function typed(file: string | null, mode: string, text: string) {
+  const b = visit(file, mode, '');
+  b.text = text; b.pt = 0; b.modified = true;
+  return b;
+}
+const saved = (b: { file: string | null }) => Ed.Store.get(b.file);
+const on = (b: unknown) => L.call('minor-mode-active-p', [L.S.intern('format-on-save-mode'), b]);
+const UGLY = '{ pkgs, ... }:\n{\n  a=1;b=  2;\n}\n';
+
+test('format-on-save-mode is off unless its language is in format-on-save-modes; then SPC f s, C-x C-s, :w, :wq and ZZ format before saving', async () => {
+  const want = direct(['alejandra', '--quiet', '-'], UGLY);
+  /* Off by default: saved as typed, nothing spawned. */
+  assert.equal(L.evalText('format-on-save-modes'), L.NIL);
+  let calls = proc.calls.length;
+  const off = typed('fos/off.nix', 'nix-mode', UGLY);
+  assert.equal(on(off), false);
+  await keys('SPC f s');
+  assert.equal(saved(off), UGLY); assert.equal(off.modified, false);
+  assert.equal(proc.calls.length, calls, 'nothing spawned');
+  L.evalText("(set! format-on-save-modes '(nix-mode))");
+  for (const [how, k] of [['SPC f s', 'SPC f s'], ['C-x C-s', 'C-x C-s'], [':w', ': w RET'], [':wq', ': w q RET'], ['ZZ', 'Z Z']]) {
+    const b = typed(`fos/${how.replace(/\W/g, '_')}.nix`, 'nix-mode', UGLY);
+    assert.equal(on(b), true, `${how}: on in a Nix buffer`);
+    b.pt = posOf(b, 3, 0);
+    calls = proc.calls.length;
+    if (how === 'C-x C-s') L.evalText('(evil-emacs-state)');
+    await keys(k); await settled();
+    assert.equal(proc.calls.length, calls + 1, `${how}: one formatter run`);
+    assert.deepEqual(lastCall().argv, ['alejandra', '--quiet', '-']);
+    assert.equal(saved(b), want, `${how}: the formatted text is what is saved`);
+    assert.equal(b.modified, false, `${how}: unmodified after`);
+    if (how === ':wq' || how === 'ZZ') assert.ok(!E.buffers.includes(b), `${how}: the buffer is closed`);
+    else { assert.equal(b.text, want); assert.match(E.echo, /^Wrote /); assert.equal(b.text.split('\n')[lineCol(b, b.pt)[0]], '}', `${how}: point stays on its line`); }
+  }
+  /* A buffer of a language not listed, and one where the mode was turned off by hand. */
+  calls = proc.calls.length;
+  const sh = typed('fos/a.sh', 'sh-mode', 'echo   x\n');
+  assert.equal(on(sh), false);
+  await keys('SPC f s');
+  assert.equal(saved(sh), 'echo   x\n');
+  const by = typed('fos/by-hand.nix', 'nix-mode', UGLY);
+  await Ed.callInteractively(L.S.intern('format-on-save-mode'));
+  assert.equal(on(by), false);
+  assert.match(E.echo, /Format on save disabled in current buffer/);
+  await keys('SPC f s');
+  assert.equal(saved(by), UGLY);
+  assert.equal(proc.calls.length, calls, 'nothing spawned');
+  /* :w FILE writes a copy and formats nothing. */
+  const copy = typed('fos/copy.nix', 'nix-mode', UGLY);
+  await keys(`: w SPC ${path.join(root, 'fos/copy2.nix').split('').map(c => (c === ' ' ? 'SPC' : c)).join(' ')} RET`); await settled();
+  assert.equal(copy.text, UGLY);
+  copy.modified = false;
+  assert.equal(proc.calls.length, calls, ':w FILE spawned nothing');
+});
+
+test('on save a formatter that fails, is not on PATH or has no file to run by leaves the text, and the save goes on and says why', async () => {
+  L.evalText("(set! format-on-save-modes '(nix-mode sh-mode fmt-test-mode))");
+  const broken = '{ a = ;\n';
+  const b = typed('fos/broken.nix', 'nix-mode', broken);
+  const calls = proc.calls.length;
+  await keys('SPC f s'); await settled();
+  assert.equal(proc.calls.length, calls + 1);
+  assert.equal(saved(b), broken); assert.equal(b.text, broken); assert.equal(b.modified, false);
+  assert.match(E.echo, /^alejandra exited with code 1.*; \*format-\d+\* is saved as it was$/);
+  L.evalText(`(define-formatter 'fmt-test-mode '("no-such-formatter-anywhere"))`);
+  const c = typed('fos/c.txt', 'fmt-test-mode', 'x\n');
+  await keys('SPC f s'); await settled();
+  assert.equal(saved(c), 'x\n');
+  assert.match(E.echo, /cannot run no-such-formatter-anywhere.*is saved as it was/);
+  /* A buffer with no file (save-buffer asks for a name) or a read-only one: nothing to format, so the save is not held. */
+  const d = typed('fos/d.sh', 'sh-mode', 'echo   y\n');
+  assert.notEqual(Ed.hooks.formatOnSave('save-buffer', []), null, 'a changed sh buffer with a file is formatted');
+  d.file = null;
+  assert.equal(Ed.hooks.formatOnSave('save-buffer', []), null, 'not with no file');
+  d.file = path.join(root, 'fos/d.sh'); d.readOnly = true;
+  assert.equal(Ed.hooks.formatOnSave('save-buffer', []), null, 'nor read-only');
+  d.readOnly = false; d.modified = false;
+  assert.equal(Ed.hooks.formatOnSave('save-buffer', []), null, 'nor unmodified');
+  assert.equal(Ed.hooks.formatOnSave('find-file', []), null, 'nor for a command that does not save');
+});
+
+test(':wa formats each changed buffer in format-on-save-mode, and saves the others as typed; a save from code formats nothing', async () => {
+  L.evalText("(set! format-on-save-modes '(nix-mode))");
+  const want = direct(['alejandra', '--quiet', '-'], UGLY);
+  const x = typed('fos/wa1.nix', 'nix-mode', UGLY);
+  const y = typed('fos/wa2.nix', 'nix-mode', UGLY);
+  const z = typed('fos/wa.sh', 'sh-mode', 'echo   z\n');
+  const calls = proc.calls.length;
+  await keys(': w a RET'); await settled();
+  assert.equal(proc.calls.length, calls + 2, 'one run for each Nix buffer');
+  assert.equal(saved(x), want); assert.equal(saved(y), want); assert.equal(saved(z), 'echo   z\n');
+  assert.match(E.echo, /^Saved \d+ buffers$/);
+  const w = typed('fos/code.nix', 'nix-mode', UGLY);
+  L.call('save-buffer', []);
+  assert.equal(saved(w), UGLY);
+  assert.equal(proc.calls.length, calls + 2, 'nothing spawned for a save from code');
+});
+
+test('C-g while the formatter of a save runs quits the save: nothing written, the text as typed', async () => {
+  L.evalText("(set! format-on-save-modes '(fmt-test-mode))");
+  L.evalText(`(define-formatter 'fmt-test-mode '("sh" "-c" "sleep 30"))`);
+  const b = typed('fos/hang.txt', 'fmt-test-mode', 'abc\n');
+  await keys('SPC f');
+  Ed.feedKey('s');
+  await until(() => proc.running().length === 1, 'the formatter');
+  Ed.feedKey('C-g');
+  await until(() => proc.running().length === 0 && E.running === 0, 'the command over');
+  assert.equal(E.echo, 'Quit');
+  assert.equal(saved(b), null); assert.equal(b.text, 'abc\n'); assert.equal(b.modified, true);
+});
+
+test('R16.15: no formatter starts on save while the image replays, in a web frame or with no host.proc; the save goes on', async () => {
+  L.evalText("(set! format-on-save-modes '(fmt-test-mode))");
+  L.evalText(`(define-formatter 'fmt-test-mode '("tr" "a-z" "A-Z"))`);
+  const calls = proc.calls.length;
+  const a = typed('fos/r1.txt', 'fmt-test-mode', 'abc\n');
+  assert.equal(on(a), true);
+  let r: unknown;
+  Ed.proc.replay(() => { r = Ed.callInteractively(L.S.intern('save-buffer')); });
+  await r;
+  assert.equal(saved(a), 'abc\n');
+  await new Promise(res => setTimeout(res, 5));
+  const b = typed('fos/r2.txt', 'fmt-test-mode', 'abc\n');
+  Ed.host.kind = 'browser';
+  try { await keys('SPC f s'); } finally { Ed.host.kind = 'node'; }
+  assert.equal(saved(b), 'abc\n');
+  const c = typed('fos/r3.txt', 'fmt-test-mode', 'abc\n');
+  delete host.proc;
+  try { await keys('SPC f s'); } finally { host.proc = proc; }
+  assert.equal(saved(c), 'abc\n');
+  assert.equal(proc.calls.length, calls, 'nothing spawned');
+  /* And with processes back, the same save formats. */
+  const d = typed('fos/r4.txt', 'fmt-test-mode', 'abc\n');
+  await keys('SPC f s'); await settled();
+  assert.equal(saved(d), 'ABC\n');
 });
