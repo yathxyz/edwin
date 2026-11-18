@@ -291,8 +291,10 @@ in
   # grammar, a refused edit, a killed buffer's tree freed, no tree without host.syntax. Highlighting from the
   # stand-in's captures: capture names to faces, which of one node's captures wins, nested nodes, a segment inside
   # a node begun above it, the cache, a failure and the size bounds, the mode table against the bundle's
-  # grammars.json, the frame's side of the 2 ms budget. Tree-sitter's side and the golden face runs of each
-  # language with the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
+  # grammars.json, the frame's side of the 2 ms budget. Imenu from the stand-in's tags query: definitions paired
+  # with their names by match, a name two patterns take listed once, no references, null for each fallback, and
+  # consult-imenu using it. Tree-sitter's side and the golden face runs and imenu lists of each language with
+  # the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
   # SYNTAX_RUNS raises the run count.
   edwin-syntax = pkgs.runCommand "edwin-syntax" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules

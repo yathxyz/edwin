@@ -5756,6 +5756,70 @@ types, builtins and properties added.
   package build. The golden runs are a cargo test, not `edwin-syntax`'s: only the desktop program has
   tree-sitter. `nix flake check` on the final tree, rebased on emacs-to-edwin (2026-11-18): exit 0.
 
+## Imenu from the tree (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-syntax-imenu`): the definitions of a programming
+language's buffer, for jumping to, from its tree-sitter tree.
+
+- **`Ed.syntax.imenu(b)`** (`src/syntax.ts`) runs the grammar's `tags` query (tree-sitter's code-navigation
+  captures, from the bundle) over the buffer's whole tree, kept in step by the edit log as highlighting's is. Each
+  match's `@definition.KIND` is paired with that match's `@name`; an item is the name's text (blanks and newlines
+  as one space), KIND (function, method, class, interface, module, macro, type, constant) and the earlier start
+  of the two, in the order of the text. `@reference.*` and `@doc` captures are left out; so are the query's
+  `#strip!` and `#select-adjacent!` directives (only the doc captures use them).
+- **A name two patterns capture is listed once**, as the earlier pattern's: Rust's tags take a method by its
+  `declaration_list` pattern and again as a function, and TypeScript's and TSX's tags are their own, then
+  JavaScript's (`nix/grammars.nix`).
+- **`consult-imenu`** (`M-g i`, `M-s i`, `SPC i`) lists these with their kind when the buffer has them
+  (`imenuItems` in `src/editor-prims.ts` asks `Ed.syntax.imenu` first): the same prompt, live preview and jump
+  as before. It lists its own patterns as before (Lisp definitions, Org headings, paragraphs) when there is no tree
+  (a web frame, edwind), the mode has no grammar, the buffer is over highlighting's 4 Mi-character bound
+  (`MAX_CHARS`), the grammar has no tags query, or the query fails (its 1 s bound). A grammar with a tags query
+  and a buffer with no definitions gives no items ("No definitions found"), not the paragraph patterns. A failed
+  tags query leaves the buffer's highlighting on. Markdown's `consult-imenu` (its headings) is unchanged.
+- **Match ids from the native side.** The pairing needs to know which captures belong to one match: Nix's tags
+  capture the binding's attrpath as `@name` beside, not inside, the function captured as the definition, and
+  nested definitions of one pattern (a Python function in a function) make pairing by pattern and position
+  ambiguous. So `synQuery` (`native/src/natives.rs`) takes a fifth argument, MATCHES: when true, the result
+  also has `matches`, one number per capture (tree-sitter's match id, `Capture::id` in `native/src/syntax.rs`),
+  the same for one match's captures. Highlighting does not ask, so its result and cost are unchanged.
+  `host.syntax.query` (`native/js/host-native.ts`) and the types (`src/core.d.ts`) pass it through. This is why
+  the package touches natives.rs, syntax.rs and host-native.ts, which the plan's Where did not list.
+- **Languages:** the eleven grammars of the bundle with a tags query: Rust, Nix, Go, C, C++, Java, C#,
+  Python, JavaScript, TypeScript and TSX. JSON, YAML, TOML, Bash, HCL, GDScript, Just, Meson, NASM, nginx and
+  Typst have none, so their buffers keep the paragraph patterns. No tags queries were written for them.
+- **Differences from Emacs** (its ts-modes' `treesit-simple-imenu`):
+  - a flat list with kinds as annotations: no Class.method nesting and no submenus by category. A name defined
+    twice is told apart by consult-imenu's `<N>` suffix, as before;
+  - what is listed is what the upstream tags queries name. Nix lists only bindings of functions, so a module
+    file shows little. C and C++ list a prototype as well as the definition. Java and TypeScript list interface
+    method signatures, but Rust does not list a trait's. TypeScript lists neither type aliases nor namespaces,
+    and Python's methods are functions;
+  - the jump goes to the definition's start, or to the name's when the name comes first (Nix).
+- **Choices where the plan left one open:**
+  - the golden lists with the real grammars are a cargo test in the package build, as the golden faces are
+    (only the desktop program has tree-sitter); check `edwin-syntax` has the rules with a stand-in tags query;
+  - pairing by tree-sitter's match id, not by containment;
+  - the whole buffer is queried each time consult-imenu runs, with no cache: it runs on a command, not a redraw.
+- **Not in it:** imenu in web frames and edwind (no tree-sitter there); `which-func` and breadcrumbs; LSP
+  document symbols (lsp-symbols); tags queries written for the grammars without one.
+- **Checked by** check `edwin-syntax` (16 passed, 3 new): the stand-in's tags query paired by match (with its
+  captures reversed too), a name two patterns take listed once, references and doc captures left out, a name over
+  lines listed on one, an edit followed, a buffer with no definitions giving none; null with no host.syntax, a
+  mode with no grammar, a grammar with no tags query or a failing one (highlighting still on after either), a
+  buffer past 4 Mi characters and a host that gives no matches; and, booted, `M-g i` in a python-mode buffer
+  jumping to the definition chosen, and in a scheme-mode buffer (no grammar) to a `define` by editor-prims'
+  patterns. `nix build .#edwin` of the final tree: passed, unit tests 33 passed and 2 ignored, `tests/gui.rs` 5
+  passed and 1 ignored, `tests/terminal.rs` 37 passed; the unit tests include
+  `natives::tests::the_core_lists_each_languages_definitions_as_its_golden_imenu`. That test boots the core
+  as the startup snapshot holds it, on the real natives and the bundle, and lists each of
+  `test/syntax-imenu.txt`'s 11 fixtures (one per mode whose grammar has a tags query, every such mode and no
+  other) as its golden KIND, NAME and line. `natives::tests::the_syntax_natives_from_javascript` checks
+  synQuery's matches: one per capture, shared by a match's @name and @definition, and absent unless asked for.
+  `nix flake check --keep-going` of the final tree (2026-11-18, load average up to 70 from other builds): every
+  check passed except the timing tests of `edwin-prog` (the bracket guard's 2 ms budget, the glob property's
+  time) and `edwin-bench`; each passed when rebuilt alone at a load near 4. Check `edwin-typecheck` passed.
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

@@ -834,9 +834,11 @@ fn index(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Result<Option<
         .map(|n| Some(n as usize))
         .ok_or_else(|| "synQuery: start and end are string indices".into())
 }
-/// synQuery(tree, kind, start = 0, end = its length): the captures of the grammar's KIND query that overlap
-/// [start, end), in the order of the text, as {names, captures}: captures holds four numbers per capture (its
-/// index in names, its start and end as indices of the parsed string, the pattern that matched).
+/// synQuery(tree, kind, start = 0, end = its length, matches = false): the captures of the grammar's KIND query
+/// that overlap [start, end), in the order of the text, as {names, captures}: captures holds four numbers per
+/// capture (its index in names, its start and end as indices of the parsed string, the pattern that matched).
+/// With MATCHES true there is also matches, a number per capture that the captures of one match share (imenu
+/// pairs a tags query's @name with its @definition by it; highlighting does not ask for it).
 fn syn_query(
     scope: &mut v8::HandleScope,
     args: v8::FunctionCallbackArguments,
@@ -871,6 +873,14 @@ fn syn_query(
         }
     }
     set(scope, o, "captures", flat.into());
+    if args.get(4).is_true() {
+        let ids = v8::Array::new(scope, caps.len() as i32);
+        for (i, c) in caps.iter().enumerate() {
+            let v = v8::Integer::new_from_unsigned(scope, c.id).into();
+            ids.set_index(scope, i as u32, v);
+        }
+        set(scope, o, "matches", ids.into());
+    }
     rv.set(o.into());
 }
 /// synEdit(tree, pos, del, ins): the tree's text changed, DEL code units at POS replaced by INS, and the tree parsed
@@ -1210,6 +1220,13 @@ mod tests {
       const r = __n.synQuery(t, 'highlights', text.indexOf('Foo'), text.indexOf(';'));
       eq(r.captures.length % 4, 0, 'four numbers a capture');
       eq(spans(r).filter(s => s[0] === 'constructor'), [['constructor', 'Foo']], 'a range');
+      // Asked for, a match a capture, one match's captures sharing it: 𝔸's @name and @definition.function.
+      const tg = __n.synQuery(t, 'tags', 0, text.length, true);
+      eq(tg.matches.length * 4, tg.captures.length, 'a match a capture');
+      const first = k => { for (let i = 0; i < tg.captures.length; i += 4) if (tg.names[tg.captures[i]] === k) return i / 4; return -1; };
+      eq(text.slice(tg.captures[4 * first('name') + 1], tg.captures[4 * first('name') + 2]), '𝔸', 'the name');
+      eq(tg.matches[first('name')], tg.matches[first('definition.function')], 'one match');
+      eq('matches' in __n.synQuery(t, 'tags'), false, 'not asked for');
       eq(err(() => __n.synLoad('../rust')), 'no grammar "../rust": a grammar\'s name is letters, digits and _', 'a path');
       eq(err(() => __n.synLoad('nosuch')), 'no grammar nosuch', 'a missing grammar');
       eq(err(() => __n.synParse('rust', 5)), 'synParse: the text is not a string', 'not a string');
@@ -1420,6 +1437,52 @@ mod tests {
         const after = runs(b), fresh = runs(buffer(f.mode, b.rope.toString()));
         if (b.rope.toString() !== f.text) errors.push(`${f.mode}: the edits did not give the text back`);
         if (JSON.stringify(after) !== JSON.stringify(fresh)) errors.push(`${f.mode}: after edits the runs differ from a fresh buffer's`);
+      }
+      errors.length ? errors.join('\n\n') : 'ok'
+    "#;
+
+    /// Imenu from the grammars' tags queries (Ed.syntax.imenu, src/syntax.ts), for each mode of the bundle
+    /// whose grammar has one: the definitions of each fixture of test/syntax-imenu.txt, as KIND, NAME and line,
+    /// are its golden list. Every such mode has a fixture, and no other mode does.
+    #[test]
+    fn the_core_lists_each_languages_definitions_as_its_golden_imenu() {
+        let golden = include_str!("../../test/syntax-imenu.txt");
+        let prog = include_str!("../../scm/prog.scm");
+        let code = format!(
+            "const GOLDEN = {}, PROG = {};\n{}",
+            js_str(golden),
+            js_str(prog),
+            IMENU_JS
+        );
+        assert_eq!(with_core(code), "ok");
+    }
+
+    const IMENU_JS: &str = r#"
+      const Ed = globalThis.Ed;
+      /* The fixtures: "=== MODE", its text, "---", then one "KIND<tab>NAME<tab>LINE" line a definition. */
+      const fixtures = [];
+      for (const part of GOLDEN.split(/^=== /m).slice(1)) {
+        const nl = part.indexOf('\n'), mode = part.slice(0, nl).trim(), rest = part.slice(nl + 1);
+        const sep = rest.indexOf('\n---\n');
+        if (sep < 0) throw new Error(`${mode}: no ---`);
+        const want = rest.slice(sep + 5).split('\n').filter(l => l && !l.startsWith('#'));
+        fixtures.push({ mode, text: rest.slice(0, sep + 1), want });
+      }
+      const modes = [...PROG.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1])
+        .filter(m => globalThis.__n.synLoad(Ed.syntax.grammarOf(m)).includes('tags'));
+      const have = fixtures.map(f => f.mode);
+      if (JSON.stringify([...modes].sort()) !== JSON.stringify([...have].sort()))
+        throw new Error(`modes with tags ${modes} but fixtures for ${have}`);
+      const errors = [];
+      let n = 0;
+      for (const f of fixtures) {
+        const b = Ed.getBufferCreate(`imenu-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, f.text);
+        Ed.switchMajorMode(b, f.mode);
+        const items = Ed.syntax.imenu(b);
+        if (!items) { errors.push(`${f.mode}: no items`); continue; }
+        const got = items.map(it => `${it.kind}\t${it.name}\t${Ed.lineNo(b.rope, it.pos)}`);
+        if (JSON.stringify(got) !== JSON.stringify(f.want)) errors.push(`${f.mode}: the definitions are\n${got.join('\n')}`);
       }
       errors.length ? errors.join('\n\n') : 'ok'
     "#;

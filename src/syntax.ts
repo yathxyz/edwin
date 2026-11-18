@@ -10,7 +10,8 @@
 
    Only the desktop program has host.syntax: in a web frame and in edwind (the Node host) Ed.syntax.tree gives
    null. Nothing here is reachable from Scheme, and nothing here starts a process or reads a file: the grammar is
-   named, and the native side loads it from the program's own bundle. */
+   named, and the native side loads it from the program's own bundle. What uses the trees: highlighting (lexSeg)
+   and imenu (consult-imenu's definitions, from the grammar's tags query). */
 (function () {
 'use strict';
 const Ed = globalThis.Ed, E = Ed.E;
@@ -148,6 +149,48 @@ function highlight(b: EdBuffer, grammar: string, from: number, to: number): Lex 
   return { ver: b.ver, from, to, grammar, cls, names: NAMES };
 }
 
+/* ---------- imenu: the definitions the grammar's tags query names ---------- */
+/* B's definitions from its grammar's tags query (tree-sitter's code-navigation captures): each match's
+   @definition.KIND with its @name, as the name's text, KIND and the earlier start of the two (Nix captures the
+   binding's attrpath as the name, beside the function it binds), in the order of the text. A name two patterns
+   capture is listed once, as the earlier pattern's (Rust's method is a function too; TypeScript's tags are its
+   own, then JavaScript's). References and @doc are not definitions. null when the host parses nothing, the mode
+   has no grammar, the buffer is past the bound highlighting keeps to, or the grammar has no tags query or it
+   fails: the caller lists its own then. A failure here leaves the buffer's highlighting alone. */
+type ImenuItem = { name: string; kind: string; pos: number };
+function imenu(b: EdBuffer): ImenuItem[] | null {
+  const syn = Ed.host.syntax, grammar = syn && !b.minibuf ? grammarOf(b.mode) : null;
+  if (!syn || !grammar || b.rope.length > MAX_CHARS) return null;
+  let r: { names: string[]; captures: number[]; matches?: number[] };
+  try {
+    const id = tree(b, grammar);
+    if (id === null) return null;
+    r = syn.query(id, 'tags', 0, b.rope.length, true);
+  } catch (e) {
+    return null;
+  }
+  const { names, captures: caps, matches } = r;
+  if (!matches) return null;
+  type Match = { pattern: number; kind?: string; def?: number; ns?: number; ne?: number };
+  const byMatch = new Map<number, Match>();
+  for (let i = 0, j = 0; i < caps.length; i += 4, j++) {
+    let m = byMatch.get(matches[j]);
+    if (!m) byMatch.set(matches[j], m = { pattern: caps[i + 3] });
+    const n = names[caps[i]];
+    if (n === 'name') { m.ns = caps[i + 1]; m.ne = caps[i + 2]; }
+    else if (n.startsWith('definition.')) { m.kind = n.slice(11); m.def = caps[i + 1]; }
+  }
+  const byName = new Map<number, Match>();
+  for (const m of byMatch.values()) {
+    if (m.kind === undefined || m.ns === undefined || m.ne! <= m.ns) continue;
+    const o = byName.get(m.ns);
+    if (!o || m.pattern < o.pattern) byName.set(m.ns, m);
+  }
+  return [...byName.values()]
+    .map(m => ({ name: b.rope.slice(m.ns!, m.ne!).replace(/\s+/g, ' '), kind: m.kind!, pos: Math.min(m.def!, m.ns!) }))
+    .sort((x, y) => x.pos - y.pos);
+}
+
 const H = Ed.hooks, prevLexSeg = H.lexSeg;
 H.lexSeg = (b, from, to, seg) => {
   const grammar = Ed.host.syntax && !b.minibuf ? grammarOf(b.mode) : null;
@@ -160,5 +203,5 @@ H.lexSeg = (b, from, to, seg) => {
   return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
 };
 
-Ed.syntax = { tree, grammarOf };
+Ed.syntax = { tree, grammarOf, imenu };
 })();

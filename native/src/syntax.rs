@@ -224,13 +224,14 @@ impl Grammar {
 }
 
 /// One capture of a query: the capture's index among the query's names, its node's extent in UTF-16 code units,
-/// and the pattern that matched.
+/// the pattern that matched, and the match it belongs to (the captures of one match share it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capture {
     pub capture: u32,
     pub start: usize,
     pub end: usize,
     pub pattern: usize,
+    pub id: u32,
 }
 
 /// QUERY's captures in TREE (parsed from TEXT) between code units START and END, in the order of the text. The
@@ -272,6 +273,7 @@ pub fn captures(
             start: c.node.start_byte() / 2,
             end: c.node.end_byte() / 2,
             pattern: m.pattern_index,
+            id: m.id(),
         });
     }
     drop(it);

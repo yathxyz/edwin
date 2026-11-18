@@ -1036,7 +1036,10 @@ CMD('consult-line', async () => {
 }, 'line', 'Jump to a line chosen by searching its text, with live preview (SPC s s).', ([n]) => {
   const b = cur(); EvilCore.pushJump(b, b.pt); b.pt = Ed.lineStartOf(b.rope, n as number); b.pt = EvilCore.firstNonBlank(b.rope, b.pt); E.recenter = 'center'; return false;
 });
+/* The definitions of B for consult-imenu: its grammar's, from the tree (syntax.ts), else what these patterns find. */
 function imenuItems(b: EdBuffer) {
+  const tagged = Ed.syntax ? Ed.syntax.imenu(b) : null;
+  if (tagged) return tagged;
   const t = b.text, out: { name: string; kind: string; pos: number }[] = [];
   if (Ed.isLisp(b)) {
     const re = /^\((?:define(?:-command|-syntax|-macro|-record-type)?|evil-define-(?:motion|operator|text-object|command))\s+\(?([^\s()]+)/gm; let m: RegExpExecArray | null;

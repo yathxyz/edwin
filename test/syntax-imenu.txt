@@ -1,0 +1,163 @@
+# The definitions Ed.syntax.imenu lists from each grammar's tags query (natives.rs, the golden imenu test): a
+# fixture a mode whose grammar has a tags query, "---", then KIND<tab>NAME<tab>LINE for each, in order.
+=== rust-mode
+//! A crate.
+mod geometry {
+    pub struct Point { x: f64 }
+    enum Shape { Dot }
+    type Len = f64;
+    trait Area { fn area(&self) -> f64; }
+    impl Point {
+        pub fn new(x: f64) -> Self { Point { x } }
+        fn norm(&self) -> f64 { helper(self.x) }
+    }
+}
+fn helper(x: f64) -> f64 { x }
+macro_rules! twice { ($e:expr) => { $e * 2 } }
+---
+# new and norm match the function pattern too: listed once, as methods. A trait's signature (area) is not listed.
+module	geometry	2
+class	Point	3
+class	Shape	4
+class	Len	5
+interface	Area	6
+method	new	8
+method	norm	9
+function	helper	12
+macro	twice	13
+=== nix-mode
+{ lib, ... }:
+let
+  add = a: b: a + b;
+  attrs.nested = x: x;
+  value = 1;
+in {
+  inherit add;
+  f = { x }: lib.id x;
+}
+---
+# The name is the attrpath beside the function it binds; value binds no function.
+function	add	3
+function	attrs.nested	4
+function	f	8
+=== go-mode
+package main
+
+// Point is a point.
+type Point struct{ X int }
+
+// Norm gives its norm.
+func (p Point) Norm() int { return abs(p.X) }
+
+func abs(x int) int { return x }
+---
+type	Point	4
+method	Norm	7
+function	abs	9
+=== c-mode
+struct point { int x; };
+typedef int len;
+enum color { RED };
+int norm(struct point p);
+int norm(struct point p) { return p.x; }
+---
+# The prototype is listed as well as the definition.
+class	point	1
+type	len	2
+type	color	3
+function	norm	4
+function	norm	5
+=== c++-mode
+namespace geo {
+class Point {
+ public:
+  int norm() const;
+};
+int Point::norm() const { return 0; }
+}
+int main() { return 0; }
+---
+class	Point	2
+function	norm	4
+method	norm	6
+function	main	8
+=== java-mode
+interface Shape { int area(); }
+class Point implements Shape {
+  public int area() { return norm(); }
+}
+---
+interface	Shape	1
+method	area	1
+class	Point	2
+method	area	3
+=== csharp-mode
+namespace Geo {
+  interface IShape { int Area(); }
+  class Point : IShape {
+    public int Area() { return 0; }
+  }
+}
+---
+module	Geo	1
+interface	IShape	2
+method	Area	2
+class	Point	3
+method	Area	4
+=== python-mode
+LIMIT = 10
+
+class Point:
+    def norm(self):
+        def inner():
+            return 1
+        return inner()
+
+def main():
+    pass
+---
+# A function nested in a method is listed; Python's tags call a method a function.
+constant	LIMIT	1
+class	Point	3
+function	norm	4
+function	inner	5
+function	main	9
+=== js-mode
+/** Adds. */
+function add(a, b) { return a + b; }
+const twice = (x) => x * 2;
+class Point {
+  constructor(x) { this.x = x; }
+  norm() { return Math.abs(this.x); }
+}
+const handlers = { onClick: function () {} };
+---
+# The constructor is left out (the query's #not-eq?); the doc comment is not part of the name.
+function	add	2
+function	twice	3
+class	Point	4
+method	norm	6
+function	onClick	8
+=== typescript-mode
+interface Shape { area(): number; }
+type Len = number;
+namespace Geo { export const x = 1; }
+abstract class Point implements Shape {
+  area(): number { return 0; }
+}
+function make(): Point { return null as any; }
+export const twice = (x: number) => x * 2;
+---
+# TypeScript's tags, then JavaScript's: each definition once. The type alias and the namespace are not in them.
+interface	Shape	1
+method	area	1
+class	Point	4
+method	area	5
+function	make	7
+function	twice	8
+=== tsx-mode
+function App() { return <div />; }
+const Button = () => <button />;
+---
+function	App	1
+function	Button	2
