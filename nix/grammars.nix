@@ -8,8 +8,8 @@
 # its own; TypeScript is JavaScript's then its own, TSX JavaScript's, JSX's and TypeScript's), since of two
 # patterns capturing one node the later wins (src/syntax.ts) and a language's own patterns are its specific ones. HCL (the Terraform mode) and GDScript ship no queries: both come from Helix, the grammar at
 # the revision Helix's queries are written for and the queries from Helix's runtime. The indents queries are
-# Edwin's own (nix/indents, the capture names src/syntax.ts reads), for Rust, Go, C, JSON, JavaScript, TypeScript
-# and TSX: JavaScript's then JSX's for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The
+# Edwin's own (nix/indents, the capture names src/syntax.ts reads), for Rust, Go, C, JSON, JavaScript, TypeScript,
+# TSX and Python: JavaScript's then JSX's for JavaScript, and TypeScript's after JavaScript's (and JSX's for TSX). The
 # edwin-grammars check loads every library and compiles every query file against it.
 {
   lib,
@@ -47,7 +47,7 @@ let
     }))
     (fromNixpkgs "java" "java-mode" g.tree-sitter-java (queriesOf g.tree-sitter-java [ "highlights" "tags" ]))
     (fromNixpkgs "c_sharp" "csharp-mode" g.tree-sitter-c-sharp (queriesOf g.tree-sitter-c-sharp [ "highlights" "tags" ]))
-    (fromNixpkgs "python" "python-mode" g.tree-sitter-python (queriesOf g.tree-sitter-python [ "highlights" "tags" ]))
+    (fromNixpkgs "python" "python-mode" g.tree-sitter-python (queriesOf g.tree-sitter-python [ "highlights" "tags" ] // indents [ "python" ]))
     (fromNixpkgs "javascript" "js-mode" g.tree-sitter-javascript (own js [ "injections" "locals" "tags" ] // {
       highlights = [ "${js}/highlights.scm" "${js}/highlights-jsx.scm" "${js}/highlights-params.scm" ];
     } // indents [ "javascript" "jsx" ]))

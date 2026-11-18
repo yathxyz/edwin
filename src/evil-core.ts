@@ -809,9 +809,9 @@ D('syntax-node-bounds', 'BEG END', 'Start and end (exclusive) of each node of th
   const ns = Ed.syntax ? Ed.syntax.nodes(cur(), num(s) - 1, num(e) - 1) : null;
   return ns ? L.listOf(ns.map(([a, z]) => L.list(a + 1, z + 1))) : false;
 });
-D('syntax-indent-line', '', 'Indent the current line by its buffer\'s tree (the grammar\'s indents query), blank or not; point in its blanks goes to its first non-blank character. #t when it did, #f when the buffer has no indent rules (a web frame, edwind, a mode with no grammar or no indents query) or they leave the line as it is (inside a string or comment begun above).', () => {
+D('syntax-indent-line', '[new]', 'Indent the current line by its buffer\'s tree (the grammar\'s indents query), blank or not; point in its blanks goes to its first non-blank character. NEW non-#f: the line was just opened, so a Python statement\'s line takes the likeliest level rather than keep its own. #t when it did, #f when the buffer has no indent rules (a web frame, edwind, a mode with no grammar or no indents query) or they leave the line as it is (inside a string or comment begun above).', ([fresh]: SchemeValue[]) => {
   const b = cur();
-  return (Ed.syntax?.indent(b, b.pt, b.pt, true) ?? 0) > 0;
+  return (Ed.syntax?.indent(b, b.pt, b.pt, true, fresh !== undefined && truthy(fresh) ? 'new' : undefined) ?? 0) > 0;
 });
 D('syntax-indent-region', 'BEG END', 'Indent the lines from the one holding BEG to the one before END (the one holding END when it is not a line start) by the buffer\'s tree, the blank lines left as they are: #t when the buffer has indent rules, #f when not.', ([s, e]: SchemeValue[]) => {
   const b = cur(), a = num(s) - 1, z = Math.max(a, num(e) - 2);

@@ -705,11 +705,16 @@ CMD('indent-for-tab-command', '*', '', 'Expand a snippet key before point; else 
   /* yasnippet binds TAB itself, whatever tab-always-indent says. */
   if (globalThis.Yas && globalThis.Yas.keyAt(b)) return globalThis.Yas.expand(b);
   const ver = b.ver, pt = b.pt;
+  /* A TAB right after a TAB that indented this line and opened no completion, with no edit between: a Python
+     statement's line goes a level down (Ed.syntax.indent's 'cycle'). */
+  const again = E.lastCommand === intern('indent-for-tab-command') && b._tab?.ver === ver && b._tab.ls === Ed.bol(b.rope, pt);
+  b._tab = undefined;
   /* A line the tree's rules indent is like a Lisp one: TAB indents it, then completes, and inserts no tab. */
-  const rules = Ed.isLisp(b) || (Ed.syntax?.indent(b, b.pt, b.pt, true) ?? 0) > 0;
+  const rules = Ed.isLisp(b) || (Ed.syntax?.indent(b, b.pt, b.pt, true, again ? 'cycle' : undefined) ?? 0) > 0;
   if (Ed.isLisp(b)) Ed.indentLine(b);
+  else if (rules) b._tab = { ver: b.ver, ls: Ed.bol(b.rope, b.pt) };
   if (!Ed.changedSince(b, ver) && b.pt === pt) {
-    if (complete && globalThis.Complete && globalThis.Complete.prefixAt(b) && globalThis.Complete.open(b, false)) { if (E.corfu!.cands.length === 1) globalThis.Complete.accept(); return false; }
+    if (complete && globalThis.Complete && globalThis.Complete.prefixAt(b) && globalThis.Complete.open(b, false)) { b._tab = undefined; if (E.corfu!.cands.length === 1) globalThis.Complete.accept(); return false; }
     if (!rules) {
       /* tab-to-tab-stop: a tab, or with indent-tabs-mode #f spaces to the next tab-width column. */
       const tw = Math.max(1, Math.floor(Number(L.get('tab-width'))) || 8);

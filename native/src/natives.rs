@@ -1686,6 +1686,162 @@ mod tests {
       changed ? `the re-indent changed the text` : `${ms} ${line} ${all}`
     "#;
 
+    /// Python's indentation (nix/indents/python.scm and the offside rules of src/syntax.ts) with the real grammar:
+    /// the black-formatted fixture re-indents to itself with no edit; with the blanks of the lines inside brackets
+    /// taken away it comes back (a statement's blanks are what the tree is parsed from, so they are not taken
+    /// away); statement lines at a level Python does not take there go to the likeliest; RET after a `:`, inside
+    /// brackets, after return and pass and on a typed else, except or case, and `o`, give the new line (and the
+    /// line left) black's blanks; TAB after TAB goes a level down and back to the top; and 10,000 lines of the
+    /// fixture re-indent within a second.
+    #[test]
+    fn the_core_indents_python_as_black() {
+        let code = format!(
+            "const FIXTURE = {};\n{}",
+            js_str(include_str!("../../test/fixtures/syntax-indent/python.py")),
+            PYTHON_JS
+        );
+        assert_eq!(with_core(code), "ok");
+    }
+
+    const PYTHON_JS: &str = r#"
+      const Ed = globalThis.Ed, S = globalThis.Scheme;
+      const errors = [];
+      let n = 0;
+      const buffer = text => {
+        const b = Ed.getBufferCreate(`python-${++n}`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, 'python-mode');
+        Ed.setWindowBuffer(b);
+        return b;
+      };
+      const firstDiff = (a, b) => {
+        const x = a.split('\n'), y = b.split('\n');
+        const i = x.findIndex((l, k) => l !== y[k]);
+        return `line ${i + 1}: ${JSON.stringify(x[i])}, not ${JSON.stringify(y[i])}`;
+      };
+      const b = buffer(FIXTURE), ver = b.ver;
+      b.modified = false;
+      if (Ed.syntax.indent(b, 0, FIXTURE.length, false) === null) errors.push('no indent rules');
+      if (b.ver !== ver || b.modified || b.rope.toString() !== FIXTURE)
+        errors.push(`re-indenting black's text changed it: ${firstDiff(b.rope.toString(), FIXTURE)}`);
+      /* The lines that begin inside a bracket, outside strings: a count of open brackets at each line's start. */
+      const inside = [];
+      for (let i = 0, depth = 0, q = null; i < FIXTURE.length; i++) {
+        if (i === 0 || FIXTURE[i - 1] === '\n') inside.push(depth > 0 && q === null);
+        const c = FIXTURE[i];
+        if (q !== null) { if (FIXTURE.startsWith(q, i)) { i += q.length - 1; q = null; } else if (c === '\\') i++; continue; }
+        if (c === '#') { while (i + 1 < FIXTURE.length && FIXTURE[i + 1] !== '\n') i++; continue; }
+        if (c === '"' || c === "'") { q = FIXTURE.startsWith(c.repeat(3), i) ? c.repeat(3) : c; i += q.length - 1; continue; }
+        if ('([{'.includes(c)) depth++;
+        else if (')]}'.includes(c)) depth--;
+      }
+      const bare = FIXTURE.split('\n').map((l, i) => inside[i] ? l.trimStart() : l).join('\n');
+      if (bare === FIXTURE) errors.push('nothing taken away');
+      const r = buffer(bare);
+      Ed.syntax.indent(r, 0, bare.length, false);
+      if (r.rope.toString() !== FIXTURE) errors.push(`re-indenting the bracket lines as a region: ${firstDiff(r.rope.toString(), FIXTURE)}`);
+      const l = buffer(bare);
+      for (let ls = 0; ls < l.rope.length; ls = Ed.eol(l.rope, ls) + 1) Ed.syntax.indent(l, ls, ls, false);
+      if (l.rope.toString() !== FIXTURE) errors.push(`re-indenting the bracket lines line by line: ${firstDiff(l.rope.toString(), FIXTURE)}`);
+      /* [text, the text re-indented]: a statement's blanks that Python does not take there go to the likeliest. */
+      const FIX = [
+        ['def f():\nx = 1\n', 'def f():\n    x = 1\n'],
+        ['def f():\n    x = 1\n      y = 2\n', 'def f():\n    x = 1\n    y = 2\n'],
+        ['if a:\n    b\n  c\n', 'if a:\n    b\n    c\n'],
+        ['if a:\n    b\n    else:\n        c\n', 'if a:\n    b\nelse:\n    c\n'],
+        ['def f():\n    return 1\n        x = 2\n', 'def f():\n    return 1\nx = 2\n'],
+        ['x = 1 + \\\n2\n', 'x = 1 + \\\n    2\n'],
+        ['x = 1 + \\\n        2\n', 'x = 1 + \\\n        2\n'],
+        ['from x import a, \\\n        b\n', 'from x import a, \\\n        b\n'],
+        ['from x import a, \\\nb\n', 'from x import a, \\\n    b\n'],
+        ['with a as b, \\\n     c as d:\n    pass\n', 'with a as b, \\\n     c as d:\n    pass\n'],
+        ['with a as b, \\\nc as d:\npass\n', 'with a as b, \\\n    c as d:\n    pass\n'],
+        ['from __future__ import (\nannotations,\n)\n', 'from __future__ import (\n    annotations,\n)\n'],
+        ['if a:\n  if b:\n    c\n  d\ne\n', 'if a:\n  if b:\n    c\n  d\ne\n'],
+        ['if a:\n\tb\n\tif c:\n\t\td\n\te\n', 'if a:\n\tb\n\tif c:\n\t\td\n\te\n'],
+      ];
+      for (const [text, want] of FIX) {
+        const f = buffer(text);
+        Ed.syntax.indent(f, 0, text.length, false);
+        if (f.rope.toString() !== want) errors.push(`${JSON.stringify(text)}: ${JSON.stringify(f.rope.toString())}`);
+      }
+      /* [text with | for point, the text after RET with | for point] */
+      const CASES = [
+        ['def f():|', 'def f():\n    |'],
+        ['class A:\n    def f(self):|', 'class A:\n    def f(self):\n        |'],
+        ['def f():\n    x = 1|', 'def f():\n    x = 1\n    |'],
+        ['def f():\n    return 1|', 'def f():\n    return 1\n|'],
+        ['def f():\n    if a:\n        return 1|', 'def f():\n    if a:\n        return 1\n    |'],
+        ['for x in y:\n    pass|', 'for x in y:\n    pass\n|'],
+        ['while a:\n    if b:\n        break|', 'while a:\n    if b:\n        break\n    |'],
+        ['def f():\n    raise E(\n        "x"\n    )|', 'def f():\n    raise E(\n        "x"\n    )\n|'],
+        ['x = foo(|)', 'x = foo(\n    |\n)'],
+        ['x = [|]', 'x = [\n    |\n]'],
+        ['def f():\n    x = foo(a,|', 'def f():\n    x = foo(a,\n        |'],
+        ['x = foo(a,|b)', 'x = foo(a,\n        |b)'],
+        ['items = [\n    1,|\n]\n', 'items = [\n    1,\n    |\n]\n'],
+        ['def f(\n    a,\n):|', 'def f(\n    a,\n):\n    |'],
+        ['if a:\n    b\n    else:|', 'if a:\n    b\nelse:\n    |'],
+        ['try:\n    a()\n    except E:|', 'try:\n    a()\nexcept E:\n    |'],
+        ['if a:\n    if b:\n        c\n        else:|', 'if a:\n    if b:\n        c\n    else:\n        |'],
+        ['match x:\n    case 1:\n        a\n        case 2:|', 'match x:\n    case 1:\n        a\n    case 2:\n        |'],
+        ['x = 1 + \\|', 'x = 1 + \\\n    |'],
+        ['def f():\n    """Doc|"""', 'def f():\n    """Doc\n    |"""'],
+        ['def f():\n    x = 1|  # c', 'def f():\n    x = 1\n    |# c'],
+      ];
+      const run = (src, form) => {
+        const c = buffer(src.replace('|', ''));
+        c.pt = src.indexOf('|');
+        S.evalString(form);
+        return c.rope.slice(0, c.pt) + '|' + c.rope.slice(c.pt, c.rope.length);
+      };
+      for (const [src, want] of CASES) {
+        const got = run(src, '(evil-newline-and-indent)');
+        if (got !== want) errors.push(`RET in ${JSON.stringify(src)}: ${JSON.stringify(got)}`);
+      }
+      for (const [src, want] of [
+        ['def f():\n    return 1|', 'def f():\n    return 1\n|'],
+        ['def f():\n    if a:|\n        b', 'def f():\n    if a:\n        |\n        b'],
+      ]) {
+        const got = run(src, '(evil-open-below 1)');
+        if (got !== want) errors.push(`o in ${JSON.stringify(src)}: ${JSON.stringify(got)}`);
+      }
+      /* TAB, then TAB again: the likeliest level, then each level down, then the top again. */
+      const tabs = (src, count) => {
+        const c = buffer(src.replace('|', ''));
+        c.pt = src.indexOf('|');
+        const out = [];
+        for (let i = 0; i < count; i++) {
+          S.evalString('(indent-for-tab-command)');
+          S.evalString("(set! last-command 'indent-for-tab-command)");
+          const ls = Ed.bol(c.rope, c.pt), line = c.rope.slice(ls, Ed.eol(c.rope, ls));
+          out.push(line.slice(0, line.length - line.trimStart().length));
+        }
+        S.evalString("(set! last-command #f)");
+        return JSON.stringify(out);
+      };
+      const TABS = [
+        ['def f():\n    if a:\n        b()\n|', 4, ['        ', '    ', '', '        ']],
+        ['def f():\n    if a:\n        return\n|', 4, ['    ', '', '        ', '    ']],
+        ['if a:\n    if b:\n        c\n        else:|', 3, ['    ', '', '    ']],
+        ['def f():\n    x = 1\n    |y = 2', 3, ['    ', '', '    ']],
+        ['x = foo(\n|', 2, ['    ', '    ']],
+      ];
+      for (const [src, count, want] of TABS) {
+        const got = tabs(src, count);
+        if (got !== JSON.stringify(want)) errors.push(`TAB ${count} times in ${JSON.stringify(src)}: ${got}`);
+      }
+      /* 10,000 lines: the whole re-indent with nothing to change. */
+      const big = FIXTURE.repeat(Math.ceil(10000 / FIXTURE.split('\n').length)), g = buffer(big);
+      Ed.syntax.tree(g, 'python');
+      const gv = g.ver, t0 = Date.now();
+      Ed.syntax.indent(g, 0, big.length, false);
+      const ms = Date.now() - t0;
+      if (g.ver !== gv) errors.push('the 10,000 lines changed');
+      if (ms > 1000) errors.push(`the 10,000 lines took ${ms} ms`);
+      errors.length ? errors.join('\n') : 'ok'
+    "#;
+
     /// expreg-expand (SPC v, scm/evil.scm) with the real grammars: from a point, the selections it steps through
     /// are the named nodes around it, then the buffer, each larger than the one before; expreg-contract (SPC V)
     /// gives them back in turn.

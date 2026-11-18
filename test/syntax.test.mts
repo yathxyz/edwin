@@ -14,7 +14,8 @@
 // nodes holding a range, innermost first, null for each reason, and the selection grown and shrunk by keys.
 // Indentation (Ed.syntax.indents, Ed.syntax.indent), with the stand-in's indents query for a grammar of brackets:
 // the innermost holder and its base, @align, @none, @keep, no edit where the blanks are right, the level, an ERROR
-// (queried once a re-indent), null for each reason; and RET, o, O, = and TAB by keys. The tree-sitter side (edit,
+// (queried once a re-indent), null for each reason, Python's statement lines (@offside); and RET, o, O, = and TAB
+// by keys, in python-mode TAB after TAB too. The tree-sitter side (edit,
 // reparse, the incremental tree against a whole parse, the nodes holding a range) is native/src/syntax.rs's cargo tests; the golden runs,
 // imenu lists, expreg steps and formatted indent fixtures of each language with the real grammars are natives.rs's
 // (`nix build .#edwin`).
@@ -484,7 +485,7 @@ test('expreg: the nodes holding a range, innermost first; the tree follows an ed
    an @outdent,
 [ ] an @indent and a @none, "..." a @keep; a { left open makes the whole text an ERROR with it an @error.open.
    The captures are those of the nodes meeting START..END, as tree-sitter's range gives them. */
-const IND = ['indent', 'outdent', 'keep', 'align', 'none', 'open', 'error', 'error.open', 'error.close'];
+const IND = ['indent', 'outdent', 'keep', 'align', 'none', 'open', 'error', 'error.open', 'error.close', 'offside'];
 const brackets = (text: string, start: number, end: number) => {
   const captures: number[] = [], open: number[] = [];
   const add = (name: string, s: number, e: number) => { if (s < end && e > start) captures.push(IND.indexOf(name), s, e, 0); };
@@ -615,6 +616,78 @@ test('indent: a re-indent queries the lines asked for once and each ERROR once, 
   const r = spaced(inMode('rust-mode', RS)), at = RS.indexOf('if a {');
   assert.equal(Ed.syntax.indent(r, at, at, true), 1);
   assert.deepEqual(calls.spans, [[Ed.bol(RS, Ed.bol(RS, at) - 1), Ed.eol(RS, at) + 1], [0, Ed.eol(RS, 0) + 1]]);
+  ind = null;
+});
+/* The stand-in's brackets, and the whole text an @offside node: Python's line rules for the lines no bracket or
+   string holds. */
+const offside = (text: string, start: number, end: number) => {
+  const r = brackets(text, start, end);
+  return { names: r.names, captures: [...r.captures, IND.indexOf('offside'), 0, text.length, 0] };
+};
+const PYS = 'def f(a,\n      b):\n    if a:\n        return g(\n            1)\n    elif b:\n        pass\n    else:\n'
+  + '        x = 1\n    y = "s\n  t"\n    while y:\n        break\n    try:\n        h()\n    except E:\n        raise\n'
+  + '    finally:\n        z = 1 + \\\n            2\n    return z\nw = 0\n';
+test('indent: Python\'s statement lines (@offside) by the statement before them; a re-indent keeps each line\'s blanks where they are a level Python takes there', () => {
+  host.syntax = syntax; reset();
+  ind = offside;
+  const b = spaced(inMode('python-mode', PYS));
+  assert.deepEqual(Ed.syntax.indents(b, 0, PYS.length)!.want, lines(PYS).map((l, i) => i === 10 ? null : l.slice(0, l.length - l.trimStart().length)));
+  const ver = b.ver;
+  Ed.syntax.indent(b, 0, PYS.length, false);
+  assert.equal(b.ver, ver, 'no edit');
+  // [text, re-indented]: under a `:` the one level a level in; else, elif, except, finally and case at a
+  // statement's they go with; a level Python does not take there to the likeliest; a backslash's line a level in.
+  for (const [text, want] of [
+    ['if a:\nb\n', 'if a:\n    b\n'],
+    ['if a:\n    b\n      c\n', 'if a:\n    b\n    c\n'],
+    ['if a:\n    if b:\n        c\n    d\ne\n', 'if a:\n    if b:\n        c\n    d\ne\n'],
+    ['if a:\n    b\n    else:\n        c\n', 'if a:\n    b\nelse:\n    c\n'],
+    ['for x in y:\n    if a:\n        b\n        else:\n', 'for x in y:\n    if a:\n        b\n    else:\n'],
+    ['if a:\n    b\nc = 1\n    else:\n', 'if a:\n    b\nc = 1\nelse:\n'],
+    ['match x:\n    case 1:\n        a\n        case 2:\n', 'match x:\n    case 1:\n        a\n    case 2:\n'],
+    ['try:\n    a\n    finally:\n', 'try:\n    a\nfinally:\n'],
+    ['def f():\n    return 1\n      x\n', 'def f():\n    return 1\nx\n'],
+    ['x = 1 + \\\n2\n', 'x = 1 + \\\n    2\n'],
+    ['x = 1 + \\\n        2\n', 'x = 1 + \\\n        2\n'],
+    ['x = 1  # a: \\\ny\n', 'x = 1  # a: \\\ny\n'],
+    ['x = "a:"\n  y\n', 'x = "a:"\ny\n'],
+    ['  x\n', 'x\n'],
+    // The levels are the text's own, at another width than evil-shift-width's or in tabs: no block changes.
+    ['if a:\n  if b:\n    c\n  d\ne\n', 'if a:\n  if b:\n    c\n  d\ne\n'],
+    ['def f():\n  x = 1\n  if y:\n    z\n  w\n', 'def f():\n  x = 1\n  if y:\n    z\n  w\n'],
+    ['if a:\n\tb\n\tif c:\n\t\td\n\te\n', 'if a:\n\tb\n\tif c:\n\t\td\n\te\n'],
+    ['def f():\n  if a:\n    return\n  x\n', 'def f():\n  if a:\n    return\n  x\n'],
+    ['if a:\n  b\n   c\n', 'if a:\n  b\n  c\n'],
+  ]) {
+    const s = spaced(inMode('python-mode', text));
+    Ed.syntax.indent(s, 0, text.length, false);
+    assert.equal(s.rope.toString(), want, JSON.stringify(text));
+  }
+  // A line just opened ('new') takes the likeliest level, not its own; 'cycle' the next level down, then the top.
+  const at = (text: string, line: number, how?: 'new' | 'cycle') => {
+    const s = spaced(inMode('python-mode', text)), ls = lines(text).slice(0, line).join('\n').length + (line ? 1 : 0);
+    Ed.syntax.indent(s, ls, ls, true, how);
+    const l = lines(s.rope.toString())[line];
+    return l.slice(0, l.length - l.trimStart().length);
+  };
+  assert.equal(at('def f():\n    x = 1\ny\n', 2), '');
+  assert.equal(at('def f():\n    x = 1\ny\n', 2, 'new'), '    ');
+  assert.equal(at('def f():\n    return\n\n', 2), '');
+  assert.equal(at('def f():\n    if a:\n        return\n\n', 3), '    ');
+  assert.equal(at('def f():\n    if a:\n        b\n    \n', 3, 'cycle'), '');
+  assert.equal(at('def f():\n    if a:\n        b\n\n', 3, 'cycle'), '        ');
+  assert.equal(at('def f():\n    if a:\n        b\n        \n', 3, 'cycle'), '    ');
+  assert.equal(at('if a:\n    if b:\n        c\n    else:\n', 3, 'cycle'), '');
+  assert.equal(at('if a:\n    if b:\n        c\nelse:\n', 3, 'cycle'), '    ');
+  // Two spaces a level in the text: TAB keeps a dedented line, a blank one after return goes one block out, and
+  // TAB after TAB steps through the text's own levels.
+  assert.equal(at('if a:\n  if b:\n    c\n  d\n', 3), '  ');
+  assert.equal(at('def f():\n  if a:\n    return\n\n', 3), '  ');
+  assert.equal(at('if a:\n  if b:\n    c\n    \n', 3, 'cycle'), '  ');
+  assert.equal(at('if a:\n  if b:\n    c\n  \n', 3, 'cycle'), '');
+  assert.equal(at('if a:\n  if b:\n    c\n\n', 3, 'cycle'), '    ');
+  // Inside a bracket the bracket's rule, whatever HOW says.
+  assert.equal(at('x = g(\n\n)\n', 1, 'cycle'), '    ');
   ind = null;
 });
 /* Near the end: it boots the image (keymaps, the minibuffer), which the tests above do without. */
@@ -748,6 +821,51 @@ test('indent: RET, o, O, = and TAB indent by the tree; RET after {, ( and a clos
   b = await start('text-mode', '  a {\n', 5);
   await keys('A'); await type('\nb'); await keys('ESC');
   assert.equal(b.rope.toString(), '  a {\n  b\n');
+  ind = null;
+});
+
+/* After the image is booted. */
+test('indent: Python by keys: RET after a `:` a level in, after return a level out, a typed else back to its if; TAB after TAB a level down; o and =', async () => {
+  host.syntax = syntax; reset();
+  ind = offside;
+  const feed = async (ks: string[]) => { for (const k of ks) Ed.feedKey(k); await Ed.whenIdle(); };
+  const keys = (s: string) => feed(Ed.kbd(s).split(' ')), type = (s: string) => feed([...s].map(ch => ch === '\n' ? 'RET' : ch === ' ' ? 'SPC' : ch));
+  const EvilCore = (globalThis as unknown as { EvilCore: Edwin }).EvilCore;
+  const start = async (text: string, pt: number) => {
+    const b = inMode('python-mode', text);
+    Ed.setWindowBuffer(b);
+    if (EvilCore.stateOf(b) !== 'normal') await keys('ESC');
+    b.pt = pt;
+    return b;
+  };
+  // python-mode's width is 4 (prog.scm).
+  let b = await start('\n', 0);
+  await keys('i'); await type('def f():\nif a:\nreturn 1\nx = 2');
+  assert.equal(b.rope.toString(), 'def f():\n    if a:\n        return 1\n    x = 2\n');
+  await keys('ESC');
+  b = await start('\n', 0);
+  await keys('i'); await type('if a:\nb\nelse:\nc');
+  assert.equal(b.rope.toString(), 'if a:\n    b\nelse:\n    c\n');
+  await keys('ESC');
+  // TAB on the new line keeps the likeliest level; TAB again goes a level down, and after the margin the top.
+  b = await start('\n', 0);
+  await keys('i'); await type('if a:\nb\n'); await keys('TAB TAB'); await type('c');
+  assert.equal(b.rope.toString(), 'if a:\n    b\nc\n');
+  await keys('RET TAB TAB TAB'); await type('d');
+  assert.equal(b.rope.toString(), 'if a:\n    b\nc\nd\n', 'one level only: the margin, again and again');
+  await keys('ESC');
+  b = await start('if a:\n    b\n    c\n', 13);
+  await keys('I TAB TAB');
+  assert.equal(b.rope.toString(), 'if a:\n    b\nc\n', 'a line at a level Python takes: TAB keeps it, TAB again a level down');
+  await keys('TAB ESC');
+  assert.equal(b.rope.toString(), 'if a:\n    b\n    c\n', 'after the margin, the top');
+  // o after a return; = over the buffer.
+  b = await start('def f():\n    return 1\n', 10);
+  await keys('o'); await type('x'); await keys('ESC');
+  assert.equal(b.rope.toString(), 'def f():\n    return 1\nx\n');
+  b = await start('if a:\nb\n  c\n', 0);
+  await keys('g g = G');
+  assert.equal(b.rope.toString(), 'if a:\n    b\n    c\n');
   ind = null;
 });
 

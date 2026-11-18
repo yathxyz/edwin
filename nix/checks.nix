@@ -316,8 +316,10 @@ in
   # line by its innermost holder and the base of the line that holder starts on, an aligned list, a @none, a
   # string kept, a re-indent of indented text making no edit, a base two closed conditions up, the level from
   # evil-shift-width or a tab, a { left open (an ERROR) queried once a re-indent, null for each fallback with
-  # highlighting left alone;
-  # booted, RET (between { and its }), o (leaving its line alone), O, = and TAB by keys. Tree-sitter's side, the
+  # highlighting left alone; Python's statement lines (@offside) by the statement before them, a line's blanks
+  # kept where Python takes that level, else, except, finally and case back to what they go with, a line just
+  # opened at the likeliest level and TAB after TAB a level down; booted, RET (between { and its }), o (leaving its
+  # line alone), O, = and TAB by keys, and in python-mode RET, TAB TAB, o and =. Tree-sitter's side, the
   # golden face runs and imenu lists of each language, expreg's steps and each language's formatted fixture
   # re-indented with the real grammars are the package's cargo tests (nix build .#edwin), which boot the core.
   # SYNTAX_RUNS raises the run count.

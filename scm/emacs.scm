@@ -155,7 +155,7 @@ buffer's grammar has indent rules, indent it by the tree."
   (let ((prefix (lisp-newline-prefix)))
     (dotimes (_ (or n 1)) (insert "\n"))
     (insert prefix))
-  (if (lisp-buffer?) (lisp-indent-line) (syntax-indent-line)))
+  (if (lisp-buffer?) (lisp-indent-line) (syntax-indent-line #t)))
 
 (define-command (open-line n)
   "Insert N newlines after point without moving point."

@@ -6429,10 +6429,10 @@ indent queries and the editorconfig width, with rules for Rust, TypeScript and T
     `scm/emacs.scm`, `nix/grammars.nix` and `native/src/natives.rs`, which the plan's Where did not list. No new
     `src/*.ts` or `.scm` file is added, so the touch lists are unchanged.
 - **Not in it:** indenting a line when `}`, `)` or `]` is typed at its start (Emacs's electric-indent chars). The
-  line goes to its column on the next TAB, `=` or `RET`. Rules for the other languages of the bundle (Python, Nix,
-  YAML, TOML, Java, C#, C++ and the rest): their buffers keep the old behaviour. Emacs's c-mode styles and
-  offsets per syntactic symbol. Indentation inside a multi-line string or block comment, which is kept. In web
-  frames and edwind, which have no tree, nothing changes.
+  line goes to its column on the next TAB, `=` or `RET`. Rules for the other languages of the bundle (Python,
+  since in "Python indentation"; Nix, YAML, TOML, Java, C#, C++ and the rest): their buffers keep the old
+  behaviour. Emacs's c-mode styles and offsets per syntactic symbol. Indentation inside a multi-line string or
+  block comment, which is kept. In web frames and edwind, which have no tree, nothing changes.
 - **Risks:** C. clang-format's alignments the rules do not follow: a ternary's `?` and `:` lines under the
   condition, a continued operand nested a level inside another operator (+4 from it), a member (`->symbol`,
   `.actions[...]`) taken on the line after a call, an aligned trailing comment's continuation line, and a braced
@@ -6521,6 +6521,160 @@ indent queries and the editorconfig width, with rules for Rust, TypeScript and T
   `edwin-prog` (65: its 2 ms keystroke budget failed once at a load average of about 14 and passed built alone at
   7) and `nix build .#edwin` (unit 37 and 2 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37)
   passed. Not rerun: `nix flake check`.
+
+## Python indentation (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-syntax-indent-python`): indent rules for Python (block
+openers, dedent keywords, continuation lines, hanging brackets), with TAB cycling through the valid levels.
+
+- **TAB, `=`, `RET`, `o`, `O` and `newline` in python-mode** indent by the tree as in the brace languages
+  ("Indentation by the tree"), where before they took the line above's blanks. The rules are
+  `nix/indents/python.scm` (the bundle's `indents` kind for `python`) and Python's offside rule in
+  `src/syntax.ts`.
+- **Inside brackets and strings** the query decides, as for the other languages. A bracket's lines go under its
+  first element when that is on the bracket's line (`@align`, PEP 8's visual indent). Otherwise they go a level in
+  from the bracket's line (black's hanging indent). The brackets of a subscript, of `from x import (...)`, of a
+  parenthesized `with` and of a class pattern are no node of their own, so their node is an `@indent`, the import
+  and the `with` clause only when they have the brackets (`(import_from_statement "(")`): without them their
+  lines are a statement's, so a backslash's line in a bare `from x import a, \` or `with a, \` is the offside
+  rule's, kept or a level in like any other backslash's line. The closing
+  bracket beginning a line is at that line's level. A string's later lines keep their blanks (a docstring's body).
+  An ERROR's open bracket (typing `x = foo(a,`) puts the lines after it a level in. `alignAt` no longer takes a `#`
+  after the bracket as the element to align under (`raise E(  # c`, which black follows with a level in). Only C's
+  query used `@align` before, and C has no `#` there.
+- **A statement's line** is one no bracket or string holds, and the query marks the grammar with `@offside` (on
+  `module`). Its blanks are what tree-sitter parses the blocks from, so the tree cannot say where it goes, and while
+  typing the tree is often an ERROR. The rule reads the text instead, as Emacs's python-mode does: the code line
+  before it (blank and comment lines skipped), and the first line of that one's statement (up through brackets,
+  strings and backslashes). It gives the levels Python takes for the line, and the likeliest of them:
+  - after a line ending with `:` (outside strings and comments), any level deeper than the statement's, the
+    likeliest one level (`evil-shift-width`, or a tab) in from it. A line at another depth keeps it only while
+    the statement keeps its own blanks: when this re-indent moved the statement, its block's first line goes to
+    the likeliest;
+  - for a line beginning with `else`, `elif`, `except` or `finally`, or with `case` and ending with `:`, the
+    levels of the statements above it that it can go with, each less deep than every statement after it (`else`
+    with `if`, `elif`, `for`, `while`, `try` and `except`; `elif` with `if` and `elif`; `except` with `try` and
+    `except`; `finally` with `try`, `except` and `else`; `case` with `case`). The nearest is the likeliest. With
+    none, the rule below;
+  - else the statement's level or that of a block it is in: the blanks of the statement lines above it, each
+    less deep than every one after it, to the margin. These are the text's own blanks, whatever their width and
+    whether spaces or tabs (Emacs's python-mode counts them the same way). The likeliest is the statement's own,
+    or one block out after a statement beginning with `return`, `pass`, `raise`, `break` or `continue`;
+  - a line after a backslash goes a level in from its statement's first line, or to the line above's blanks when
+    that one continues too. It keeps its own blanks when they are deeper than its statement's.
+- **Which level.** A statement's line that is not blank keeps its blanks when they are one of those levels, and
+  otherwise takes the likeliest. This holds for `=`, TAB and the line `RET` leaves, so a re-indent never moves a
+  statement into or out of a block, also in a file indented by 2 spaces or by tabs while `evil-shift-width` is
+  4 (the levels are read from the text, not counted in `evil-shift-width`). A blank line takes the likeliest, and so does the line `RET` or `newline` opens,
+  blank or not (`(syntax-indent-line #t)`, `Ed.syntax.indent`'s HOW `'new'`). So `RET` after `def f():` is a
+  level in, after `x = 1` at its level, and after `return 1` a level out. `RET` on a typed `else:` puts it back at
+  its `if`'s level and the new line a level in from there.
+- **TAB after TAB.** `indent-for-tab-command` goes a level down from the line's blanks (HOW `'cycle'`), and from
+  the margin back to the highest level. The levels are the text's own, as above, and after a `:` also the one
+  a level in. That is when the last command was TAB and it indented this line by the
+  tree, opened no completion, and the buffer has not changed since (`b._tab`, its version and line). A line inside
+  a bracket or a string, and a backslash's line, has one level, and TAB again leaves it there.
+- **The interface:** `Ed.syntax.indents(b, from, to, how)` and `Ed.syntax.indent(b, from, to, blanks, how)` take
+  an optional HOW (`IndentHow`, `'new'` or `'cycle'`, `src/core.d.ts`), used only by an `@offside` grammar's
+  statement lines. `syntax-indent-line` takes an optional NEW. Still only leading blanks change; nothing new reaches
+  a process, a file or the network.
+- **Choices where the plan left one open:**
+  - Statement lines from the text, not the tree, as the plan's Risks asks ("rules must work from the previous
+    line too"). The query keeps what the tree knows whatever the blanks: brackets, strings and ERRORs.
+  - A line keeps a valid level. Emacs's TAB goes to the highest level first. Emacs's `indent-region` re-indents a
+    statement's line to the highest level unless the line begins a block or follows a blank or comment line, so it
+    moves a `z()` after a nested block into that block. Edwin's `=` changes no block.
+  - The dedent of `else:` and the rest comes on `RET`, which re-indents the line it leaves (as in the brace
+    languages). Emacs's python-mode dedents as `:` is typed (its electric-indent-chars) and inhibits the
+    re-indent of the line left. Here, a typed `else:` left without `RET` stays until TAB, `=` or `RET`.
+  - Hanging brackets as black lays them out: a level in from the bracket's line, a `def`'s parameters too
+    (not PEP 8's two levels). `case` pairs with `case`, which Emacs 30's python-mode does not do.
+  - TAB after TAB does not cycle inside brackets, which Emacs's does.
+  - The engine's fixture test takes away all of a fixture's blanks and expects them back. In Python the blanks
+    are the blocks, so the Python test takes away only those of the lines beginning inside a bracket (implicit
+    line joining: the tree is the same).
+  - The package touches `src/editor-prims.ts` (TAB after TAB), `src/evil-core.ts` (`syntax-indent-line`'s
+    argument), `src/core.d.ts`, `scm/evil.scm` and `scm/emacs.scm` (the line `RET` and `newline` open),
+    `nix/grammars.nix` and `native/src/natives.rs`, beside the plan's query file and `src/syntax.ts`. No new
+    `src/*.ts` or `.scm` file, so the touch lists are unchanged.
+- **Not in it:** re-indenting as `:` or a closing bracket is typed. Emacs's alignment of a backslash's line with
+  an assignment's value or a dotted chain. Cycling inside brackets. PEP 8's visual indent for `from x import (a,`
+  (it is an `@indent`: a level in). In web frames and edwind, which have no tree, nothing changes.
+- **Risks:** the line's last character (`:` or `\`) is read by a small lexer over the line. A string whose
+  f-string fields hold the same quote (Python 3.12) can mislead it, and then that line is not taken for an opener
+  or a continued one. An unclosed bracket (an ERROR) holds every line after it a level in, as in the other
+  languages. In Python that means `gg=G` with one bracket left open moves the statements after it, so their
+  blocks change (undo puts them back). The tests type into incomplete text for each case of the rule, but they do
+  not cover every way Python can be half-typed. A line the rule climbs through that is outside the
+  queried lines (a statement's first line far above, or the statements an `else` is matched against) costs one
+  query each, so `RET` on an `else:` below a long block at the margin is slower than elsewhere; so does a
+  dedented line's climb to the statement at its level, and a blank line's after `return` to the block around it.
+  The width of a level is not guessed from the file (Emacs's `python-indent-guess-indent-offset`): existing lines
+  keep their blocks at any width, but the lines Edwin makes a level in take `evil-shift-width` and
+  `indent-tabs-mode`: the line after a `:` that `RET`, `o` or a TAB on a blank line opens, and the first line of
+  a block whose opener a re-indent moved. In a 2-space file a new block is 4 spaces in; in a tab-indented file
+  with python-mode's spaces, a new block's line is the opener's tabs then 4 spaces, which Python 3 rejects (TabError)
+  when a line of the same block is indented by tabs alone. A TAB then leaves it, as its blanks are valid.
+- **Checked by** check `edwin-syntax` (26 passed, 2 new). With the stand-in's grammar of brackets and an `@offside`
+  capture over the whole text:
+  - a Python-like text (an aligned `def f(a,`, `if`/`elif`/`else`, `while`, `try`/`except`/`finally`, a string
+    over two lines, a backslash) gives each line its own blanks, and its re-indent makes no edit;
+  - 19 texts re-indented: a line under a `:` a level in, a valid level kept, an invalid one to the likeliest,
+    `else` back to its `if` and to the nearer of two (`for` and `if`), an `else` after a statement at the margin
+    left there, `case` and `finally`, a level out after `return`, a backslash's line a level in or kept deeper, a
+    `#` comment's or a string's `:` and `\` not counted, the first line at the margin; and, with
+    `evil-shift-width` 4, texts indented by 2 spaces (nested `if`s with a dedented line after each, a `def` with
+    an `if` and a line after it, a `return` in a nested block and the line after it, an over-indented line back
+    to its level) and by tabs, each unchanged but the over-indented line;
+  - HOW `'new'` against the default, a blank line after `return` (flat and nested), and `'cycle'` down from each
+    level, from the margin to the top and through an `else`'s two levels; in a 2-space text, a dedented line
+    kept, a blank line after `return` one block out, and `'cycle'` down through the text's levels and from the
+    margin to the top; a bracket's line keeps its one level;
+  - booted, in python-mode by keys: `def f():`, `if a:`, `return 1`, `x = 2` typed with `RET`; a typed `else:`
+    put back by `RET`; `TAB TAB` on the new line a level down and, at the margin, staying there; `I TAB TAB` on a
+    statement at a valid level keeping it, then a level down, and `TAB` back to the top; `o` after `return`; `gg=G`.
+
+  `nix build .#edwin`: unit tests 38 passed (1 new) and 2 ignored, `tests/gui.rs` 5 passed and 1 ignored,
+  `tests/terminal.rs` 37 passed. The run before it, at a load average of about 50, failed only in
+  `open::tests::the_opener_gets_exactly_its_name_and_the_target` (a `remove_dir_all` racing the opener's child,
+  "Directory not empty"), which this package does not touch; the rerun passed. The new
+  `natives::tests::the_core_indents_python_as_black` boots the core with the real grammar and checks:
+  - `test/fixtures/syntax-indent/python.py`, which black 26.5.1 leaves unchanged (`black --check`), re-indents
+    with no edit; with the blanks of its 40 indented lines that begin inside a bracket taken away, it comes back as a
+    region and line by line. It has decorators (one with a multi-line call), nested defs and a class,
+    `if`/`elif`/`else`, `for`/`else`, `while`, `try`/`except`/`else`/`finally`, `except*`, a parenthesized
+    `with`, `match` with a multi-line class pattern, `async def`/`with`/`for`, comprehensions and dicts over
+    lines, `return (...)`, `from x import (...)`, docstrings, a comment after an opening bracket, comments at a
+    block's end and between methods, and lines with non-ASCII text;
+  - 14 texts: statement lines at levels Python does not take there, backslash lines (an expression's, a bare
+    `from x import a, \`'s and a bare `with a as b, \`'s, each kept when deeper than its statement's and a level in
+    from bare; the review found the two statements' lines moved to a level in while their nodes were
+    unconditional `@indent`s), `from __future__ import (` a level in, and nested blocks indented by 2 spaces and
+    by tabs, each left as it is;
+  - 21 cases of `RET` (`evil-newline-and-indent`): after `:` in a `def`, a method, a `def` with its parameters
+    over lines; after `x = 1`; after `return`, `pass`, `break` and a multi-line `raise`, flat and nested; between
+    `(` and `)` and `[` and `]`; after `foo(a,` with no `)` (an ERROR) and before `b)`; inside a list; on a typed
+    `else:`, `except E:`, a nested `else:` and `case 2:`; after a backslash; inside a docstring; and before a
+    comment;
+  - 2 cases of `o` (after `return`, after `if a:`), and 5 of TAB repeated (down through the levels and back, after
+    `return`, an `else`'s two levels, a statement at a valid level, a bracket's one level);
+  - 10,000 lines of the fixture re-indented with no change, under 1,000 ms (46 ms in a release build).
+  `gg=G` (`Ed.syntax.indent` over the whole text, in a scratch test not kept) on black 26.5.1's output of 26
+  standard-library files of Python 3.14.7 (`argparse`, `ast`, `asyncio/base_events`, `collections`,
+  `configparser`, `csv`, `dataclasses`, `difflib`, `email/message`, `enum`, `functools`, `http/client`,
+  `inspect`, `json/decoder`, `logging`, `pathlib/_local`, `pprint`, `shutil`, `string`, `subprocess`,
+  `tarfile`, `tempfile`, `textwrap`, `typing`, `unittest/case`, `zipfile`; 45,834 lines) changes none. Before
+  `alignAt` passed over a `#`, `subprocess.py` had 3 lines changed (`raise RuntimeError(  # Impossible :)`).
+  After the fix that reads a dedented line's levels from the text (the review found 2-space and tab-indented
+  code moved into the block above), re-run on the same 26 files of Python 3.14.8 (45,869 lines) in the built
+  `edwin -nw` by keys, `g g = G` then `:w`, with a throwaway HOME and XDG_RUNTIME_DIR: none changed, while a
+  control file (`if a:\nb\n  c\n`) changed 2 lines; the reviewer's 2-space and tab texts there are unchanged too.
+  Checks `edwin-grammars` (1,163 query patterns; indents for 8 grammars, Python's 11), `edwin-typecheck`,
+  `edwin-structural`, `edwin-headless`, `edwin-scheme`, `edit-lockdown` and `edit-security` passed.
+  `edwin-prog` failed once on its 2 ms Lisp keystroke budget (2.14 ms median) at a load average of about 25 and
+  passed built alone at about 12. After the fix, `edwin-syntax` (26 passed), `edwin-typecheck`, `edwin-prog`,
+  `edwin-headless`, `edwin-structural`, `edwin-grammars` and `nix build .#edwin` (the counts above) passed again;
+  `edwin-scheme`, `edit-lockdown` and `edit-security` were not re-run. Not run: `nix flake check`.
 
 ## Comment syntax per mode (done)
 

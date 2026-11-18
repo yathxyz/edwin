@@ -756,7 +756,7 @@ brackets of a pair (electric-pair-mode) a line opened between them; elsewhere, a
              (skip-chars-backward " \t")
              (delete-region (point) end))
            (insert "\n")
-           (unless (syntax-indent-line) (insert indent))
+           (unless (syntax-indent-line #t) (insert indent))
            (when pair
              (insert "\n")
              (syntax-indent-line)

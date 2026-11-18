@@ -256,9 +256,13 @@ function nodes(b: EdBuffer, from: number, to: number): [number, number][] | null
    blank line after it, typed before its statements), and while typing, when the tree is often wrong, a node
    whose closing bracket tree-sitter made up (MISSING), so the line typed after `fn f() {` is inside its block.
    Inside an ERROR (@error) the brackets the query names (@error.open, @error.close) are paired in order, and each
-   one left open holds as an @indent from itself to the next non-blank character after the ERROR. */
+   one left open holds as an @indent from itself to the next non-blank character after the ERROR.
+
+   A grammar whose query captures @offside (Python's, on its module) is indented by the offside rule: a line no node
+   holds is a statement's, and since its blanks are what the tree is parsed from, it is placed by the statement
+   before it, read from the text, not the tree (often wrong while typing): see offside in indents. */
 type INode = { s: number; e: number; indent: boolean; keep: boolean; align: boolean; none: boolean; chain: boolean; brace: boolean; flat: boolean; unflat: boolean; start: boolean; stem: boolean };
-type INodes = { nodes: INode[]; outdent: Map<number, number>; dedent: Set<number>; flush: Set<number>; either: Set<number>; cont: Set<number>; roots: Map<number, number[]>; hangs: Map<string, Hang> };
+type INodes = { nodes: INode[]; outdent: Map<number, number>; dedent: Set<number>; flush: Set<number>; either: Set<number>; cont: Set<number>; roots: Map<number, number[]>; hangs: Map<string, Hang>; offside: boolean };
 /* A @hang node's level: for what it holds and itself, for itself alone (@hang.self), or none (@unhang). */
 type Hang = 'held' | 'self' | 'off';
 const blank = (c: string) => c === ' ' || c === '\t';
@@ -306,6 +310,7 @@ function indentNodes(syn: EdHostSyntax, id: number, t: EdText, from: number, to:
   const dedent = new Set<number>(), flush = new Set<number>(), either = new Set<number>(), cont = new Set<number>(), roots = new Map<number, number[]>();
   const hangs = new Map<string, Hang>();
   const open: string[] = [], errs: [number, number][] = [];
+  let offside = false;
   const node = (s: number, e: number) => {
     const k = s + ',' + e;
     let n = byExtent.get(k);
@@ -337,13 +342,14 @@ function indentNodes(syn: EdHostSyntax, id: number, t: EdText, from: number, to:
       case 'outdent': if (e > s) outdent.set(s, e); break;
       case 'open': open.push(s + ',' + e); break;
       case 'error': errs.push([s, e]); break;
+      case 'offside': offside = true; break;
     }
   }
   for (const k of open) { const n = byExtent.get(k); if (n) n.e = onward(t, n.e); }
   for (const [s, e] of errs) for (const at of errorOpens(syn, id, s, e, errors)) node(at, onward(t, e)).indent = true;
   const nodes = [...byExtent.values()].filter(n => !n.none && (holder(n) || n.brace))
     .sort((x, y) => x.s - y.s || y.e - x.e);
-  return { nodes, outdent, dedent, flush, either, cont, roots, hangs };
+  return { nodes, outdent, dedent, flush, either, cont, roots, hangs, offside };
 }
 /* Whether a token ending at E is node N's closing bracket: N ends with it, or with a comment after it on its line
    (JavaScript's block holds the `// c` of `} // c`). */
@@ -353,21 +359,30 @@ const closes = (t: EdText, n: INode, e: number | undefined) =>
 const holder = (n: INode) => n.indent || n.keep || n.align || n.flat;
 /* Whether node N holds the line whose first non-blank character is at P (BLANK: the line has none). */
 const holds = (n: INode, p: number, isBlank: boolean) => n.s < p && (p < n.e || (isBlank && p <= n.e));
-/* Where an @align node's lines go: the first non-blank character after its opening bracket, on its line. */
+/* Where an @align node's lines go: the first non-blank character after its opening bracket, on its line, when that
+   is no `#` comment (Python's `f(  # c`, which black follows with a level in). */
 function alignAt(t: EdText, s: number) {
   const i = nonBlank(t, s + 1);
-  return i < t.length && t.charAt(i) !== '\n' && t.charAt(i) !== '\r' ? i : null;
+  return i < t.length && !'\n\r#'.includes(t.charAt(i)) ? i : null;
 }
 
 type Indents = { starts: number[]; want: (string | null)[] };
+/* Python's (offside): the statements an else, elif, except, finally or case can go with, by their first word, and
+   the statements after which the next line is likeliest a level out. */
+const PY_PAIRS = new Map([
+  ['else', ['if', 'elif', 'for', 'while', 'try', 'except']], ['elif', ['if', 'elif']], ['except', ['try', 'except']],
+  ['finally', ['try', 'except', 'else']], ['case', ['case']],
+]);
+const PY_ENDERS = new Set(['return', 'pass', 'raise', 'break', 'continue']);
 /* The leading blanks each line from the one holding FROM to the one holding TO should have by B's grammar's
    indents query: STARTS the lines' starts, WANT a string each, null for a line the rules leave alone (@keep). null
    for all when B has no rules: no host.syntax (a web frame, edwind), a mode with no grammar, a minibuffer, a
    buffer past MAX_CHARS, a grammar with no indents query, a failed parse or query. One query over the lines and
    the one before the first that is not blank (where an ERROR's last tokens are while typing); one more a line
    above them that a base is looked up on, and one each ERROR, once a re-indent (errorOpens). A failure here leaves
-   the highlighting alone. */
-function indents(b: EdBuffer, from: number, to: number): Indents | null {
+   the highlighting alone. HOW is for Python's statement lines (offside): 'new' for a line just opened (the
+   likeliest level, not its own), 'cycle' for a TAB after a TAB (the next level down). */
+function indents(b: EdBuffer, from: number, to: number, how?: IndentHow): Indents | null {
   const syn = Ed.host.syntax, grammar = syn && !b.minibuf ? grammarOf(b.mode) : null;
   if (!syn || !grammar || b.rope.length > MAX_CHARS) return null;
   const t = b.rope, len = t.length, clamp = (p: number) => Math.max(0, Math.min(len, p));
@@ -463,6 +478,110 @@ function indents(b: EdBuffer, from: number, to: number): Indents | null {
       }
       return alignAt(t, o);
     };
+    /* Python's line rules (@offside), for a line no bracket or string holds: a statement's line, whose blanks are
+       what the tree is parsed from, so they come from the statement before it, as in Emacs's python-mode. The last
+       character of the line at LS outside strings and comments ('' for none; a string begun above is skipped). */
+    const lastOf = (ls: number) => {
+      const le = Ed.eol(t, ls), h = holderOf(ls);
+      let i = nonBlank(t, ls), last = '';
+      if (h && h.keep) { if (h.e >= le) return ''; i = h.e; }
+      while (i < le) {
+        const c = t.charAt(i);
+        if (c === '#') break;
+        if (c === '"' || c === "'") {
+          const q = t.slice(i, i + 3) === c.repeat(3) ? c.repeat(3) : c;
+          let j = i + q.length;
+          while (j < le && t.slice(j, j + q.length) !== q) j += t.charAt(j) === '\\' ? 2 : 1;
+          if (j >= le) return '';
+          i = j + q.length; last = c;
+          continue;
+        }
+        if (!/[ \t\r]/.test(c)) last = c;
+        i++;
+      }
+      return last;
+    };
+    /* Whether the line at LS continues the one above it by a backslash. */
+    const continued = (ls: number) => ls > 0 && lastOf(Ed.bol(t, ls - 1)) === '\\';
+    /* The first line of the statement the line at LS is in: up from a line a holder holds to the line the holder
+       begins on, and from a line after a backslash to the one with it. */
+    const stmtOf = (ls: number) => {
+      for (;;) {
+        const h = holderOf(ls), up = h ? Ed.bol(t, h.s) : continued(ls) ? Ed.bol(t, ls - 1) : ls;
+        if (up === ls) return ls;
+        ls = up;
+      }
+    };
+    /* The first word of the line at LS (after `async`). */
+    const wordOf = (ls: number) => {
+      const q = nonBlank(t, ls), m = /^(?:async[ \t]+)?([A-Za-z_]\w*)/.exec(t.slice(q, Math.min(Ed.eol(t, ls), q + 40)));
+      return m ? m[1] : '';
+    };
+    /* The blanks of the statement line at S and of the blocks it is in, nearest first: up through the statement
+       lines less deep than every one after them, to the margin, or to one no deeper than STOP blanks. They are
+       the text's own blanks, whatever their width and whether spaces or tabs, as in Emacs's python-mode. */
+    const around = (s: number, stop = 0) => {
+      const out = [lead(s)];
+      let k = s, limit = out[0].length;
+      while (limit > stop && k > 0) {
+        k = Ed.bol(t, k - 1);
+        const q = nonBlank(t, k), w = lead(k);
+        if (q >= Ed.eol(t, k) || w.length >= limit || t.charAt(q) === '#' || holderOf(k) || continued(k)) continue;
+        out.push(w); limit = w.length;
+      }
+      if (limit > stop) out.push('');
+      return out;
+    };
+    /* The blanks of the statement line at LS: the line's own (CUR) when they are a level Python takes there and
+       HOW is not 'new' (so a re-indent never moves a statement into or out of a block), else the likeliest level;
+       with HOW 'cycle', the next level down from CUR, after the lowest the highest. The levels: under a line ending
+       with `:`, any deeper than its statement's while that statement keeps its own blanks, the likeliest a level
+       in (evil-shift-width); after an else, elif, except, finally or case, the levels of the statements above it
+       that it can go with, the nearest the likeliest; else the statement before's or that of a block it is in
+       (around), the likeliest its own, or one block out after return, pass, raise, break and continue. A line
+       after a backslash goes a level in from its statement's line, or with the line above when that one continues
+       too, and keeps its blanks when they are deeper than its statement's. */
+    const offside = (ls: number, p: number, isBlank: boolean) => {
+      const cur = t.slice(ls, p), keeps = !isBlank && how !== 'new';
+      if (continued(ls)) {
+        const up = Ed.bol(t, ls - 1), s = stmtOf(up);
+        return keeps && cur.length > lead(s).length ? cur : s === up ? lead(s) + unit : lead(up);
+      }
+      let prev = -1;
+      for (let k = ls; k > 0 && prev < 0;) {
+        k = Ed.bol(t, k - 1);
+        const q = nonBlank(t, k);
+        if (q < Ed.eol(t, k) && (t.charAt(q) !== '#' || holderOf(k))) prev = k;
+      }
+      let most = '', valid = [''], levels = [''];
+      if (prev >= 0) {
+        const s = stmtOf(prev), base = lead(s), kw = wordOf(ls);
+        const pairs = kw !== 'case' || lastOf(ls) === ':' ? PY_PAIRS.get(kw) : undefined;
+        const mates: string[] = [];
+        /* Up through the statements less deep than every one after them, to one at the margin. */
+        for (let k = ls, limit = Infinity; pairs && limit > 0 && k > 0;) {
+          k = Ed.bol(t, k - 1);
+          const q = nonBlank(t, k), w = lead(k);
+          if (q >= Ed.eol(t, k) || w.length >= limit || t.charAt(q) === '#' || holderOf(k) || continued(k)) continue;
+          if (pairs.includes(wordOf(k))) mates.push(w);
+          limit = w.length;
+        }
+        if (mates.length) { most = mates[0]; valid = levels = mates; }
+        else if (lastOf(prev) === ':') {
+          most = base + unit;
+          valid = [cur.length > base.length && base === t.slice(s, nonBlank(t, s)) ? cur : most];
+          levels = how === 'cycle' ? [most, ...around(s)] : valid;
+        } else {
+          valid = levels = around(s, how === 'cycle' ? 0 : cur.length);
+          most = PY_ENDERS.has(wordOf(s)) ? around(s, Math.max(0, base.length - 1))[1] ?? base : base;
+        }
+      }
+      if (how === 'cycle') {
+        const down = levels.filter(w => w.length < cur.length);
+        return (down.length ? down : levels).reduce((a, w) => w.length > a.length ? w : a);
+      }
+      return keeps && valid.includes(cur) ? cur : most;
+    };
     const starts: number[] = [], want: (string | null)[] = [], stack: INode[] = [];
     let k = 0;
     for (let ls = first; ;) {
@@ -476,7 +595,7 @@ function indents(b: EdBuffer, from: number, to: number): Indents | null {
       }
       if (!isBlank) inner.set(ls, n);
       let w: string | null, a: number | null;
-      if (!n) w = '';
+      if (!n) w = all.offside ? offside(ls, p, isBlank) : '';
       else if (n.keep) w = null;
       else if (flush.has(p)) w = '';
       else if (n.align && (a = alignOf(n, p)) !== null) {
@@ -510,9 +629,9 @@ function indents(b: EdBuffer, from: number, to: number): Indents | null {
 
 /* Re-indent the lines from the one holding FROM to the one holding TO by B's indents query, the blank ones too
    when BLANKS, each changed only where its blanks differ: the number of lines the rules gave blanks to, or null
-   when B has none (indents). Point in a line's blanks goes to its first non-blank character. */
-function indent(b: EdBuffer, from: number, to: number, blanks: boolean): number | null {
-  const r = indents(b, from, to);
+   when B has none (indents; HOW as there). Point in a line's blanks goes to its first non-blank character. */
+function indent(b: EdBuffer, from: number, to: number, blanks: boolean, how?: IndentHow): number | null {
+  const r = indents(b, from, to, how);
   if (!r) return null;
   let n = 0;
   for (let i = r.starts.length - 1; i >= 0; i--) {
