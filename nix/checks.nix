@@ -286,10 +286,14 @@ in
   # test/lsp-xref.test.mts, cross references: g d, g r and the other finds against a stand-in answering each shape
   # (a Location, LocationLinks, lists across files, null, an error, a URI of another scheme or a malformed one),
   # UTF-16 positions, *xref* (RET, o, M-g n), C-t and M-, back, C-g and the time bound on a server that does not
-  # answer; nil going to a binding and listing its references.
+  # answer; nil going to a binding and listing its references. test/lsp-eldoc.test.mts, hover and signature help:
+  # K against a stand-in answering each shape of hover (UTF-16 positions, the pending edit first, control characters
+  # blanked, the cut), C-g and the time bound; signatures while typing, one request once the keys stop, the active
+  # signature and parameter, cancelled when point moves, an edit or Normal state, a late answer not shown, the
+  # minibuffer and a message left alone; nil showing a builtin's documentation on K.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts
     touch $out
   '';
 

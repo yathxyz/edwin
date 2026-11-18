@@ -4535,6 +4535,104 @@ buffer and jump back; proved by edwin-lsp.
   - These mutations of src/lsp.ts each fail the suite: `\r\n` counted as two line ends, no move out of a
     surrogate pair, no `includeDeclaration`, a link's `targetRange` taken over its `targetSelectionRange`.
 
+## Hover and signature help (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-eldoc`, on lsp-xref; owner decision 2: the client in the
+frame, the other LSP details the plan's defaults): signature while typing, hover on K; proved by edwin-lsp and
+requests cancelled on movement.
+
+- **`src/lsp.ts`** holds it, beside the cross references (no new file); the key is in `scm/evil.scm`;
+  `Ed.lsp.timing` gains `eldoc` (300 ms). The cross references' wait (ready, flush, capability, answer) is one
+  helper now, `askAt`, which `eldoc` uses too. initialize now also says `hover` (`contentFormat` plaintext, then
+  markdown) and `signatureHelp` (the same formats for documentation, `labelOffsets`, `activeParameterSupport`).
+- **Hover.** `eldoc` (`K` in Normal state while eglot-mode is on, its Evil minor map, so `K` stays `evil-lookup`
+  in Scheme and in every buffer with no server; `M-x eldoc` elsewhere and in Emacs state) asks
+  `textDocument/hover` at point and shows the answer in the echo area, not in `*Messages*`. It waits as the
+  finds do: the pending change sent first, the position in UTF-16 units, C-g quits (sending `$/cancelRequest`),
+  `timing.request` (10 s) bounds the wait for a starting server and for the answer. The contents may be a
+  MarkupContent, a MarkedString (a string or `{language, value}`) or a list of them (joined by a blank line). The
+  text is cut at 4096 characters (`…`), line ends made `\n`, every other control character (ESC above all: a
+  terminal frame draws the echo area) a blank, Markdown's fence lines (```` ``` ````, `~~~`) left out, a run of
+  blank lines one, then trimmed. None left, or a null answer: `No documentation here`. A server whose
+  capabilities lack `hoverProvider` is not asked: `NAME gives no hover documentation`. The next key clears it,
+  as any message. Nothing is shown if the buffer was killed, is no longer current, or point or the text changed
+  while it waited.
+- **Signatures while typing.** After each command (H.postCommand; it compares only the buffer, point and the
+  buffer's version, never the text), in a buffer that is being typed in (Insert, Replace or Emacs state; any
+  without Evil) whose server runs and gives `signatureHelpProvider`: once point or the text changed since the
+  last request, a timer of `timing.eldoc` starts; a command before it runs out that moves point or edits starts
+  it again, so a run of keys gives one request. When it runs out with point where it was, the pending change is
+  sent (flush) and `textDocument/signatureHelp` asked at point, bounded by `timing.request`. There is at most one
+  such request: a command that moves point, edits, changes buffer or leaves those states cancels it (the
+  timer, or the request, which sends `$/cancelRequest`); its answer, should it still come, is dropped.
+- **What it shows**: the active signature (`activeSignature`, else the first) as one line, whitespace runs one
+  blank, control characters blanked, cut at 500 characters, its active parameter (the signature's own
+  `activeParameter`, else the answer's) between `‹` and `›`: a parameter label of `[start, end]` is that span of
+  the signature's label in UTF-16 units (ignored when it lies outside), a string label its first occurrence
+  after the label's first `(`. No signatures, or a malformed answer: nothing, and the signature shown before is
+  cleared. It is written only while the echo area holds nothing of anyone else's: empty, an Evil state's
+  `-- INSERT --`, or the signature shown before; never over the minibuffer, a prompt, an isearch or a message.
+  As each key clears the echo area, a command that leaves it empty shows the last signature again (in the same
+  buffer, still typing) until the next answer replaces or clears it.
+- **Choices**, each reversible:
+  - Hover only on K, not on idle as Emacs's eldoc does: the package asks hover on K, and asking the server for
+    both on every pause doubles the traffic. K waits as the finds do (the loop holds keys; C-g quits), so it is
+    "cancelled on movement" by C-g alone; the signature request is the one that runs in the background and is
+    cancelled when point moves.
+  - Signatures only while typing (Insert, Replace, Emacs state), not in Normal state as Emacs shows them on
+    any idle.
+  - 300 ms, not eldoc's 0.5 s idle delay, so a signature comes while typing; trigger characters are not used
+    (no immediate request after `(`) and no `SignatureHelpContext` is sent (none is offered in initialize).
+  - The active parameter marked by `‹ ›` in plain text: the echo area draws one face.
+  - `K` where eglot-mode is on replaces `evil-lookup` (which only knows Scheme names) there, as
+    evil-collection's eglot keys bind `K` to the documentation (remembered; its source is not on this host).
+- **Differences from Emacs's eldoc and eglot:** no `*eldoc*` buffer (`eldoc-doc-buffer`), so a hover longer than
+  the echo area (half the frame) is clipped there; no hover or signature on idle in Normal state; no faces in the
+  echo area (Emacs highlights the parameter and the signature's name); no parameter documentation or signature
+  count shown; Markdown is shown as its text less the fences (no rendering); `eldoc-echo-area-use-multiline-p`
+  has no counterpart (a hover may use several lines, a signature one).
+- **Not in it:** diagnostics in the echo area (lsp-diagnostics); `eldoc-box` (declined in the plan); a hover in
+  a web frame or edwind (no processes there, so no server).
+- **Checked by**, on ex44 (the build host), on the final tree: `nix build .#checks.x86_64-linux.edwin-lsp` (57 passed,
+  0 failed: test/lsp-rpc.test.mts 10, test/lsp.test.mts 17, test/lsp-docs.test.mts 10, test/lsp-xref.test.mts 10,
+  test/lsp-eldoc.test.mts 10, nil from nixpkgs run in the sandbox, not skipped), `edwin-typecheck`, `nix build
+  .#edwin` (unit 35 passed and 2 ignored, gui 5 and 1, terminal 37) and `nix flake check --keep-going path:$PWD`
+  (all passed, among them `edwin-headless` 21, `edwin-scheme` 38, `edit-lockdown` 6, `edit-security` 21 and
+  `edwin-prog` 65). Twice a flake check failed only `edwin-prog`'s timing tests (the 2 ms bracket-guard budget at
+  2.5 and 2.6 ms, and the glob cost bound) at a load average of 17 to 21; rebuilt alone at a load under 4 it passed
+  (65), and the flake check after it passed. The suite's waits are wide (a 1 s debounce for the run of keys, a 2 s
+  delayed answer for the cancel): six runs of the five suites, three at once at a load of 13, passed it each time.
+  test/lsp-eldoc.test.mts (10), against a stand-in (node) that answers each request with what the test wrote for
+  its method (a result, a result after a delay, an error, or nothing), logs each message and each request's id,
+  and keeps each document's text, so a request's position is checked against the text the server holds:
+  - initialize's `hover` and `signatureHelp` capabilities.
+  - `K` after an edit not yet sent: one didChange first, the position after `😀` in UTF-16 units, the Markdown
+    hover's fences left out and its blank lines one, nothing in `*Messages*`, the next key clears it; a string, a
+    `{language, value}`, a list, plaintext with `\r\n` and a lone `\r`, ESC, BEL and a tab blanked, 5000
+    characters cut at 4096; null, `''`, `[]`, only fences and a number say `No documentation here`; an error
+    answer is shown.
+  - A server with no `hoverProvider`: not asked, said; in a buffer with no server `K` is `evil-lookup`.
+  - `K` on a server that does not answer: C-g `Quit`, that request's id cancelled; `timing.request` at 200 ms:
+    timed out and cancelled; keys work after.
+  - Typing: entering Insert state asks; eight keys 20 ms apart under a 1 s debounce give one request, after
+    one didChange, at point; the signature `add(a: int, ‹b: int›) -> int` from a `[12, 18]` label, not in
+    `*Messages*`; after the next key it is still shown while the next request waits; a null answer clears it;
+    in Normal state `h h l` asks nothing.
+  - Labels: a string parameter found after `(` (`a(‹a›)`, not the name), `activeSignature` choosing the second
+    and its own `activeParameter` over the answer's, an `activeSignature` and `activeParameter` out of range,
+    a multi-line label with ESC, an offset past the label's end, a 600-character label cut at 500; no
+    signatures, a label not a string and a string answer show nothing.
+  - Cancelled on movement: `<left>` while an answer is on its way sends `$/cancelRequest` with its id, the
+    answer arriving later is not shown, the new place is asked; an edit and ESC cancel the next ones; every
+    request cancelled, by id.
+  - The minibuffer opened while a request waits, and a message shown, are left as they are when its answer
+    comes.
+  - A server with no `signatureHelpProvider` is never asked while typing; a session shut down while a request
+    waits leaves nothing shown, its child gone.
+  - nil from nixpkgs: `K` on `builtins.toString` shows its documentation, no fences.
+  - These mutations of src/lsp.ts each fail the suite: no cancel when point moves (only on leaving the
+    state), no debounce (the timer at 0 ms), the signature not shown again after a key.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

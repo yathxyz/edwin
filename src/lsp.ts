@@ -26,7 +26,11 @@
    eglot-find-declaration ask the buffer's server about point. A single place of a definition's kind is visited
    at once; references, and several places of any kind, are listed in *xref* (xref-mode: RET visits a row, o
    shows it, M-g n steps through them). Each visit first records where point was, which xref-go-back (M-, and
-   C-t) returns to, across buffers. */
+   C-t) returns to, across buffers.
+
+   Hover and signature help (docs/steps.md, "Hover and signature help"): eldoc (K where eglot-mode is on) shows the
+   server's hover at point in the echo area; while typing, the active signature of the call at point is asked for
+   once no command came for timing.eldoc and shown there, one request at a time, cancelled when point moves. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -37,9 +41,10 @@ const cur = () => E.current;
    (together under the 2 s a frame may block on quitting); the first delay before a start again, doubled each
    time, and how many starts again in a row before the session gives up; how long a server must have run for its
    end to count as a first one again; how long a session with no buffer lives; how long after an edit its change
-   is sent (eglot's eglot-send-changes-idle-time); how long a cross-reference command waits for its server to be
-   ready, then for its answer. Mutable for the suites. */
-const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000 };
+   is sent (eglot's eglot-send-changes-idle-time); how long a cross-reference or hover command waits for its server to be
+   ready, then for its answer; how long after the last command a signature is asked for while typing. Mutable
+   for the suites. */
+const timing = { connect: 30_000, shutdown: 1000, exitWait: 400, killWait: 200, restartDelay: 1000, restartMax: 5, healthy: 60_000, idle: 300_000, change: 500, request: 10_000, eldoc: 300 };
 /* The tail of a server's error output a session keeps (eglot-stderr-buffer). */
 const STDERR_MAX = 64 * 1024;
 
@@ -188,6 +193,8 @@ function initializeParams(s: Session) {
         synchronization: { didSave: true },
         definition: { linkSupport: true }, declaration: { linkSupport: true }, typeDefinition: { linkSupport: true },
         implementation: { linkSupport: true }, references: {},
+        hover: { contentFormat: ['plaintext', 'markdown'] },
+        signatureHelp: { signatureInformation: { documentationFormat: ['plaintext', 'markdown'], parameterInformation: { labelOffsets: true }, activeParameterSupport: true } },
       },
       window: { workDoneProgress: false, showMessage: {} },
     },
@@ -262,7 +269,7 @@ function shutdown(s: Session): Promise<void> {
   if (s.done) return s.done;
   clearTimers(s);
   if (sessions.get(s.key) === s) sessions.delete(s.key);
-  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); setFlag(b, false); }
+  for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); forgetEldoc(b); setFlag(b, false); }
   s.buffers.clear();
   const wasRunning = s.state === 'running';
   s.state = 'stopping';
@@ -306,7 +313,7 @@ function attach(s: Session, b: EdBuffer) {
 function detach(b: EdBuffer) {
   const s = ofBuffer.get(b);
   if (!s) return;
-  closeDoc(b);
+  closeDoc(b); forgetEldoc(b);
   ofBuffer.delete(b); s.buffers.delete(b);
   setFlag(b, false);
   idleWhenUnused(s);
@@ -590,9 +597,15 @@ function places(res: unknown): { xs: Xref[]; foreign: number } {
 
 /* P, which C-g quits (cancelling it when it can be), as the command loop holds every key while a command waits. */
 const quittable = <T>(p: Promise<T>) => (EdPool.interruptible ? EdPool.interruptible(p) : p);
-/* Ask B's server KIND about point: the places it answers, at least one. Waits for the server to be ready and then
-   for its answer, each at most timing.request; C-g quits either wait, cancelling the request. */
-async function ask(b: EdBuffer, kind: XrefKind): Promise<Xref[]> {
+/* B's document and point as its server holds them (once flush has sent the pending change). */
+function docParams(b: EdBuffer) {
+  const d = docs.get(b);
+  return { textDocument: { uri: d ? d.uri : fileUri(b) }, position: position(b.text, b.pt) };
+}
+/* Ask B's server METHOD about point, PARAMS beside the document and position, when its capabilities give CAP
+   (else a user-error that it gives no WHAT): its answer. Waits for the server to be ready and then for its answer,
+   each at most timing.request; C-g quits either wait, cancelling the request. The pending change is sent first. */
+async function askAt(b: EdBuffer, method: string, cap: string, what: string, params: Record<string, unknown> = {}): Promise<unknown> {
   const s = ofBuffer.get(b);
   if (!s) return signal('user-error', 'No language server for this buffer (M-x eglot starts one)');
   if (s.state !== 'running') {
@@ -600,13 +613,15 @@ async function ask(b: EdBuffer, kind: XrefKind): Promise<Xref[]> {
     const bound = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(lspError(`${label(s)}: not ready after ${timing.request / 1000} s`)), timing.request); });
     try { await quittable(Promise.race([ready(s), bound])); } finally { if (timer) clearTimeout(timer); }
   }
-  if (!(s.capabilities || {})[kind.cap]) return signal('user-error', `${s.name} gives no ${kind.what}`);
+  if (!(s.capabilities || {})[cap]) return signal('user-error', `${s.name} gives no ${what}`);
   flush(b);
-  const conn = s.conn, d = docs.get(b);
+  const conn = s.conn;
   if (!conn || conn.closed() !== null || s.state !== 'running') return signal('lsp-error', `${label(s)}: not running`);
-  const params: Record<string, unknown> = { textDocument: { uri: d ? d.uri : fileUri(b) }, position: position(b.text, b.pt) };
-  if (kind === XREF_KINDS.references) params.context = { includeDeclaration: true };
-  const { xs, foreign } = places(await quittable(conn.request(kind.method, params, { timeout: timing.request })));
+  return quittable(conn.request(method, { ...docParams(b), ...params }, { timeout: timing.request }));
+}
+/* Ask B's server KIND about point: the places it answers, at least one. */
+async function ask(b: EdBuffer, kind: XrefKind): Promise<Xref[]> {
+  const { xs, foreign } = places(await askAt(b, kind.method, kind.cap, kind.what, kind === XREF_KINDS.references ? { context: { includeDeclaration: true } } : {}));
   if (!xs.length) return signal('user-error', foreign ? `No ${kind.what} in a file: the server names ${foreign} elsewhere` : `No ${kind.what} found`);
   return xs;
 }
@@ -725,6 +740,138 @@ Ed.MODE_NAMES['xref-mode'] = 'XREF';
 Ed.modeParents.set('xref-mode', 'special-mode');
 /* xref-mode's own keys, outside Evil and in Emacs state (scm/emacs.scm binds RET and o there). */
 L.set('xref-mode-map', new Ed.Keymap('xref-mode-map'));
+
+/* ---- hover and signature help ---- */
+
+/* A hover's text is cut at HOVER_MAX characters and a signature's at SIGNATURE_MAX, '…' marking the cut. */
+const HOVER_MAX = 4096, SIGNATURE_MAX = 500;
+const cut = (t: string, n: number) => {
+  if (t.length <= n) return t;
+  const k = isHigh(t.charCodeAt(n - 1)) ? n - 1 : n;
+  return t.slice(0, k) + '…';
+};
+/* A server's text made fit for the echo area: line ends as \n, every other control character (ESC above all: a
+   terminal frame draws the echo area) a blank. */
+const clean = (t: string) => t.replace(/\r\n?/g, '\n').replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, ' ');
+/* The text of a hover's contents: a MarkupContent or a MarkedString ({language, value} or a string), or a list
+   of MarkedStrings. */
+function markupText(c: unknown): string {
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) return c.map(markupText).filter(Boolean).join('\n\n');
+  const v = c && typeof c === 'object' ? (c as { value?: unknown }).value : undefined;
+  return typeof v === 'string' ? v : '';
+}
+/* What the echo area shows of a hover answer: its text cut, Markdown's code fences left out, a run of blank lines
+   one; '' for none. */
+function hoverText(res: unknown): string {
+  const c = res && typeof res === 'object' ? (res as { contents?: unknown }).contents : undefined;
+  const lines = clean(cut(markupText(c), HOVER_MAX)).split('\n').filter(l => !/^\s*(```|~~~)/.test(l)).map(l => l.trimEnd());
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+/* What the echo area shows of a signature help answer: the active signature's label on one line, its active
+   parameter between ‹ and ›; '' for none. A parameter's label is its [start, end) in the signature's label (UTF-16
+   units), or its text, found after the label's first '('. */
+function signatureText(res: unknown): string {
+  const h = res && typeof res === 'object' ? res as { signatures?: unknown; activeSignature?: unknown; activeParameter?: unknown } : null;
+  if (!h || !Array.isArray(h.signatures) || !h.signatures.length) return '';
+  const k = isCount(h.activeSignature) && h.activeSignature < h.signatures.length ? h.activeSignature : 0;
+  const sig = h.signatures[k] as { label?: unknown; parameters?: unknown; activeParameter?: unknown } | null;
+  if (!sig || typeof sig !== 'object' || typeof sig.label !== 'string') return '';
+  const lab = sig.label, ps = Array.isArray(sig.parameters) ? sig.parameters : [];
+  const ap = sig.activeParameter !== undefined ? sig.activeParameter : h.activeParameter;
+  let span: [number, number] | null = null;
+  const pl = isCount(ap) && ap < ps.length && ps[ap] && typeof ps[ap] === 'object' ? (ps[ap] as { label?: unknown }).label : undefined;
+  if (Array.isArray(pl) && isCount(pl[0]) && isCount(pl[1]) && pl[0] <= pl[1] && pl[1] <= lab.length) span = [pl[0], pl[1]];
+  else if (typeof pl === 'string' && pl) {
+    const i = lab.indexOf(pl, Math.max(0, lab.indexOf('(')));
+    if (i >= 0) span = [i, i + pl.length];
+  }
+  const text = span ? `${lab.slice(0, span[0])}‹${lab.slice(span[0], span[1])}›${lab.slice(span[1])}` : lab;
+  return cut(clean(text).replace(/\s+/g, ' ').trim(), SIGNATURE_MAX);
+}
+
+/* The signature in the echo area (and the buffer it is of), shown again after each command that leaves the echo
+   area empty until the next answer replaces it. */
+let shown: { b: EdBuffer; text: string } | null = null;
+/* The one signature request: where point was (buffer, offset, version) when it was scheduled, its timer while the
+   debounce runs, then its request. */
+interface SigAsk { b: EdBuffer; pt: number; ver: number; timer: ReturnType<typeof setTimeout> | null; req: LspRpcRequest | null }
+let sig: SigAsk | null = null;
+/* Where the last signature was asked, so a command that moves nothing asks nothing more. */
+let asked: { b: EdBuffer; pt: number; ver: number } | null = null;
+
+/* Whether B is being typed in: Insert, Replace or Emacs state (any, without Evil). */
+const typing = (b: EdBuffer) => !E.evil || b.evilState === 'insert' || b.evilState === 'replace' || b.evilState === 'emacs';
+/* Whether B gets signatures while typing: its server runs and gives signature help, and it is being typed in. */
+function signatures(b: EdBuffer) {
+  const s = ofBuffer.get(b);
+  return !!s && s.state === 'running' && !!(s.capabilities || {}).signatureHelpProvider && !b.minibuf && typing(b);
+}
+/* The echo area shows nothing of anyone else's: no minibuffer, prompt or search, and no message but an Evil
+   state's (-- INSERT --). */
+const STATE_ECHO = /^-- [A-Za-z() ]+ --$/;
+const echoFree = () => !E.mini && !E.isearch && (E.prompt === null || E.prompt === undefined) &&
+  (E.echo === '' || STATE_ECHO.test(E.echo) || (!!shown && E.echo === shown.text));
+function cancelSig() {
+  const a = sig;
+  sig = null;
+  if (!a) return;
+  if (a.timer) clearTimeout(a.timer);
+  if (a.req) a.req.cancel();
+}
+/* B no longer uses its server: nothing more asked or shown of it. */
+function forgetEldoc(b: EdBuffer) {
+  if (sig && sig.b === b) cancelSig();
+  if (asked && asked.b === b) asked = null;
+  if (shown && shown.b === b) shown = null;
+}
+/* The debounce of A ran out: ask for the signature at point, when point is still where A was scheduled. */
+function askSignature(a: SigAsk) {
+  a.timer = null;
+  const b = a.b;
+  if (sig !== a) return;
+  if (cur() !== b || b.pt !== a.pt || b.ver !== a.ver || !signatures(b)) { sig = null; return; }
+  flush(b);
+  const s = ofBuffer.get(b), conn = s && s.conn;
+  if (!s || !conn || conn.closed() !== null || !signatures(b)) { sig = null; return; }
+  asked = { b, pt: a.pt, ver: a.ver };
+  try { a.req = conn.request('textDocument/signatureHelp', docParams(b), { timeout: timing.request }); } catch (e) { sig = null; return; }
+  a.req.then(res => {
+    if (sig !== a) return;
+    sig = null;
+    if (cur() !== b || b.pt !== a.pt || b.ver !== a.ver || !echoFree()) return;
+    const text = signatureText(res);
+    if (text) { E.echo = text; shown = { b, text }; }
+    else if (shown) { E.echo = ''; shown = null; }
+    else return;
+    Ed.scheduleRender();
+  }, () => { if (sig === a) sig = null; });   // cancelled, timed out, an error answer, the session lost: nothing shown
+}
+/* After each command: a request that point moved away from (or out of the buffer, or out of typing) is cancelled;
+   while typing in a buffer whose server gives signature help, point's place, once it changed, is asked about
+   after timing.eldoc with no further command, one request at a time. */
+const prevPostEldoc = H.postCommand;
+H.postCommand = (def, b0, failed) => {
+  if (prevPostEldoc) prevPostEldoc(def, b0, failed);
+  if (E.depth > 0) return;
+  const b = cur(), want = !E.mini && signatures(b);
+  if (shown && (!want || shown.b !== b)) shown = null;
+  else if (shown && E.echo === '') E.echo = shown.text;
+  if (sig && (!want || sig.b !== b || sig.pt !== b.pt || sig.ver !== b.ver)) cancelSig();
+  if (!want) { asked = null; return; }
+  if (sig || (asked && asked.b === b && asked.pt === b.pt && asked.ver === b.ver)) return;
+  const a: SigAsk = { b, pt: b.pt, ver: b.ver, timer: null, req: null };
+  a.timer = setTimeout(() => askSignature(a), timing.eldoc);
+  sig = a;
+};
+CMD('eldoc', '', '', "Show the documentation of the identifier at point in the echo area (K where eglot-mode is on), from this buffer's language server (its hover).", async () => {
+  const b = cur(), pt = b.pt, ver = b.ver;
+  const text = hoverText(await askAt(b, 'textDocument/hover', 'hoverProvider', 'hover documentation'));
+  if (!E.buffers.includes(b) || cur() !== b || b.pt !== pt || b.ver !== ver) return false;
+  if (!text) return signal('user-error', 'No documentation here');
+  E.echo = text;
+  return false;
+});
 
 /* ---- Scheme and commands ---- */
 

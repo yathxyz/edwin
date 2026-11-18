@@ -1,7 +1,8 @@
 ;;; lsp.scm: the language servers, declared by define-language-server. The sessions that run them, the documents
 ;;; they are told of, eglot-mode, the commands eglot, eglot-shutdown, eglot-shutdown-all, eglot-reconnect and
 ;;; eglot-stderr-buffer, and the cross references (xref-find-definitions, xref-find-references, the eglot-find-*
-;;; commands, *xref* and xref-go-back) are src/lsp.ts's; their keys are in scm/evil.scm and scm/emacs.scm.
+;;; commands, *xref* and xref-go-back), eldoc (the hover at point) and the signatures shown while typing are
+;;; src/lsp.ts's; their keys are in scm/evil.scm and scm/emacs.scm.
 
 (define (define-language-server name . options)
   "(define-language-server NAME :modes MODES :command ARGV) declares the language server NAME (a symbol) for the

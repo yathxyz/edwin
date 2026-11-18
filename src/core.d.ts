@@ -2480,7 +2480,7 @@ interface LspSession {
 }
 interface EdLspApi {
   /* the bounds in ms (and restartMax, a count); the suites shorten them */
-  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number; request: number };
+  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number; change: number; request: number; eldoc: number };
   /* a file: URI for an absolute path */
   uri(path: string): string;
   /* declare a server; while the image replays it is skipped with a message and null is returned */
