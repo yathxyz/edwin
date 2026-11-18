@@ -12,6 +12,8 @@
 // one on lines of their own; ds( and cs( take the blanks inside, ds) and cs) keep them, and cs keeps the lines; f
 // wraps in a call of a function read from the minibuffer (B7). se-org-meta-return: Org M-RET leaves point on the new
 // item and adds no blank line after the last headline (B8); the subtree commands' docstrings name their keys (B12).
+// se-match-nonlisp: % in a programming language's buffer outside Lisp passes over the brackets in its strings and
+// comments (B11), by Ed.codeLexOf (src/editor-core.ts): the mode's quotes and its comment syntax.
 // One Edwin per process, so the cases run in order on fresh buffers.
 // Run: node --test test/structural.test.mts
 import { test } from 'node:test';
@@ -1049,4 +1051,104 @@ test('B12: the subtree commands\' docstrings name the keys that act on the subtr
   assert.equal(ed.text(), '* A\n** B\n');
   await ed.type('>>');
   assert.equal(ed.text(), '** A\n** B\n');
+});
+
+/* se-match-nonlisp: % in a programming language's buffer outside Lisp passes over a bracket in a string or a
+   comment (B11), by Ed.codeLexOf: the mode's quotes (Python's triple quotes, JavaScript's and TypeScript's
+   template strings, Nix's '' strings, their interpolations code again) and its comment syntax. MATCH_FAILED
+   failed at Edwin 73d9f03 (the audit's one case); MATCH_CASES are this package's reproductions in Python,
+   TypeScript, Nix and a few more languages, and the guards: text that is not a program counts every bracket. */
+const MATCH_FAILED: Case[] = [
+  ["pct-nix-string-brace", "nix", "{ a = \"}\"; }\n", ["%","iX","K:Escape"], "{ a = \"}\"; X}\n"],
+];
+const MATCH_CASES: Case[] = [
+  ["pct-py-string", "py", "f(\")\", x)\n", ["%","iX","K:Escape"], "f(\")\", xX)\n"],
+  ["pct-py-single-escaped", "py", "f('\\')', x)\n", ["%","iX","K:Escape"], "f('\\')', xX)\n"],
+  ["pct-py-comment", "py", "f(a,  # )\n  b)\n", ["%","iX","K:Escape"], "f(a,  # )\n  bX)\n"],
+  ["pct-py-triple", "py", "f(\"\"\"\n)\n\"\"\", b)\n", ["%","iX","K:Escape"], "f(\"\"\"\n)\n\"\"\", bX)\n"],
+  ["pct-py-close", "py", "x = [1, \"]\"]\n", ["$","%","iX","K:Escape"], "x = X[1, \"]\"]\n"],
+  ["pct-py-first-code-bracket", "py", "s = \"(\" + f(x)\n", ["%","iX","K:Escape"], "s = \"(\" + f(xX)\n"],
+  ["pct-ts-string", "ts", "f(\")\", x);\n", ["%","iX","K:Escape"], "f(\")\", xX);\n"],
+  ["pct-ts-line-comment", "ts", "f(a, // )\n  b);\n", ["%","iX","K:Escape"], "f(a, // )\n  bX);\n"],
+  ["pct-ts-block-comment", "ts", "f(a /* ) */, b);\n", ["%","iX","K:Escape"], "f(a /* ) */, bX);\n"],
+  ["pct-ts-template", "ts", "g(`)\n(`, y);\n", ["%","iX","K:Escape"], "g(`)\n(`, yX);\n"],
+  ["pct-ts-interpolation", "ts", "x = `${f(\")\")}`;\n", ["f(","%","iX","K:Escape"], "x = `${f(\")\"X)}`;\n"],
+  ["pct-ts-interpolation-braces", "ts", "x = `}${ {a: 1} }}`;\n", ["f{","%","iX","K:Escape"], "x = `}${ {a: 1X} }}`;\n"],
+  ["pct-nix-comment", "nix", "{ a = 1; # }\n}\n", ["%","iX","K:Escape"], "{ a = 1; # }\nX}\n"],
+  ["pct-nix-block-comment", "nix", "{ a = 1; /* } */ }\n", ["%","iX","K:Escape"], "{ a = 1; /* } */ X}\n"],
+  ["pct-nix-indented-string", "nix", "{ a = ''\n  }\n''; }\n", ["%","iX","K:Escape"], "{ a = ''\n  }\n''; X}\n"],
+  ["pct-nix-indented-escape", "nix", "{ a = ''x ''${ ''; }\n", ["%","iX","K:Escape"], "{ a = ''x ''${ ''; X}\n"],
+  ["pct-nix-interpolation", "nix", "{ a = \"${ {b = 1;} }\"; }\n", ["f$","%","iX","K:Escape"], "{ a = \"${ {b = 1;X} }\"; }\n"],
+  ["pct-c-char", "c", "if (c == ')') x;\n", ["%","iX","K:Escape"], "if (c == ')'X) x;\n"],
+  ["pct-sh-length", "sh", "n=${#a[@]}\n", ["%","iX","K:Escape"], "n=${#a[@]X}\n"],
+  ["pct-rs-char-dquote", "rs", "let q = '\"';\nf(x);\nlet s = \"a\";\n", ["j","%","iX","K:Escape"], "let q = '\"';\nf(xX);\nlet s = \"a\";\n"],
+  ["pct-sh-heredoc-quote", "sh", "cat <<EOF\ndon't\nEOF\nf() { :; }\n", ["3j","%","iX","K:Escape"], "cat <<EOF\ndon't\nEOF\nf(X) { :; }\n"],
+  ["pct-py-hash-after-word", "py", "f(a, b#)\n  c)\n", ["%","iX","K:Escape"], "f(a, b#)\n  cX)\n"],
+  ["pct-py-hash-after-brace", "py", "d = {# }\n  1: 2}\n", ["%","iX","K:Escape"], "d = {# }\n  1: 2X}\n"],
+  ["pct-py-triple-in-comment", "py", "f(x#\"\"\"\n)\n", ["%","iX","K:Escape"], "f(x#\"\"\"\nX)\n"],
+  ["pct-nix-hash-after-word", "nix", "{ a = b#}\n;}\n", ["%","iX","K:Escape"], "{ a = b#}\n;X}\n"],
+  ["pct-nix-primed-names", "nix", "{ a' = 1; a'' = 2; b = { c = 3; }; }\n", ["%","iX","K:Escape"], "{ a' = 1; a'' = 2; b = { c = 3; }; X}\n"],
+  ["pct-text-counts-every-bracket","txt", "(a \")\" b)\n", ["%","iX","K:Escape"], "(a \"X)\" b)\n"],
+];
+for (const [label, cases] of [['failed at 73d9f03', MATCH_FAILED], ['se-match-nonlisp', MATCH_CASES]] as const)
+  for (const [id, ext, input, keys, expected] of cases)
+    test(`B11 case ${id} (${label})`, async () => {
+      await buffer(ext, input);
+      await press(keys);
+      assert.equal(ed.text(), expected);
+    });
+
+test('B11: % on a line whose brackets are all in a comment or a string finds none, and point stays', async () => {
+  for (const [ext, input] of [['py', 'x = 1  # (a)\n'], ['ts', 'const s = "[x]";\n'], ['nix', "a = ''{'';\n"]] as const) {
+    await buffer(ext, input);
+    await press(['%']);
+    assert.equal(ed.point(), 0, `${ext}: ${input}`);
+    assert.equal(Ed.E.echo, 'No matching bracket on this line', `${ext}: ${input}`);
+  }
+});
+
+test('B11: the classes follow the buffer\'s mode and comment syntax, and are made again only after a change', async () => {
+  const b = await buffer('py', 'f("(")  # )\n');
+  const a = Ed.codeLexOf(b, '#', null, null);
+  assert.equal(Array.from(a as Uint8Array).join(''), '00' + '2'.repeat(3) + '000' + '1'.repeat(3) + '0');
+  assert.equal(Ed.codeLexOf(b, '#', null, null), a, 'kept for the version');
+  assert.notEqual(Ed.codeLexOf(b, '//', null, null), a, 'another comment syntax lexes again');
+  // A comment syntax declared again (set-comment-syntax!, as an init.scm may) is the one % reads.
+  await buffer('nix', '{ a = 1; // }\n}\n');
+  ed.eval('(set-comment-syntax! \'nix-mode "//" "/*" "*/")');
+  try {
+    await press(['%', 'iX', 'K:Escape']);
+    assert.equal(ed.text(), '{ a = 1; // }\nX}\n');
+  } finally { ed.eval('(set-comment-syntax! \'nix-mode "#" "/*" "*/")'); }
+});
+
+test('B11: % after a keystroke in a 10,000-line Python, TypeScript or Nix buffer within 2 ms (median of 50)', async () => {
+  const BLOCKS: [string, (i: number) => string][] = [
+    ['py', i => `def f${i}(x):\n    """Doc (${i}."""\n    s = "]" + '['  # )\n    return [x, {${i}: (s)}]\n\n`],
+    ['ts', i => `function f${i}(x: number) {\n  const s = "}" + '{'; // )\n  return \`\${x}(\${[${i}]}\`;\n}\n/* ( */\n`],
+    ['nix', i => `{ a${i} = "}\${toString ${i}}";\n  b = ''\n    { ''\${x} ]\n  ''; # (\n}\n`],
+  ];
+  for (const [ext, block] of BLOCKS) {
+    let text = ''; for (let i = 0; i < 2000; i++) text += block(i);
+    assert.equal(text.split('\n').length - 1, 10000, ext);
+    const b = await buffer(ext, text);
+    const one = block(1000), at = text.indexOf(one), end = at + one.length;
+    /* The first line's first bracket matches the ) of its parameters, or Nix's { the block's last }. */
+    const want = at + (ext === 'nix' ? one.length - 2 : one.indexOf(')'));
+    b.pt = at;
+    await ed.type('%');
+    assert.equal(ed.point(), want, `${ext}: % on the first line of a block`);
+    const times = [];
+    for (let i = 0; i < 50; i++) {
+      if (i % 2) Ed.replaceText(b, end - 1, end, ''); else Ed.replaceText(b, end - 1, end - 1, ' ');
+      b.pt = at;
+      const t0 = performance.now();
+      await ed.type('%');
+      times.push(performance.now() - t0);
+      assert.equal(ed.point(), want, `${ext}: % after keystroke ${i}`);
+    }
+    times.sort((x, y) => x - y);
+    console.log(`${ext}: % after a keystroke in 10,000 lines: median ${times[25].toFixed(3)} ms, max ${times[49].toFixed(3)} ms`);
+    assert.ok(times[25] <= 2, `${ext}: median ${times[25]} ms`);
+  }
 });

@@ -828,6 +828,10 @@ interface EdBuffer extends SchemeForeign {
   _ldb?: unknown;
   _llen?: number;
   _lexBusy?: boolean;
+  /* codeLexOf's cache: the version and the language it was made for, and its classes */
+  _cxv?: number;
+  _cxk?: string;
+  _cxc?: Uint8Array;
   /* a frame's minibuffer */
   minibuf?: boolean;
   /* the window start it was last shown at (setWindowBuffer) */
@@ -1520,6 +1524,9 @@ interface EdApi {
   lineStartOf(t: EdText, n: number): number;
   lex(t: string, info?: { dirty: boolean }): Uint8Array;
   lexOf(b: EdBuffer, soft?: boolean): Uint8Array | number[] | null;
+  /* outside Lisp: the classes of a programming language's buffer B (C.STR in a string, C.CMT in a comment,
+     C.PLAIN in code) by its mode's quotes and the comment syntax LINE OPEN CLOSE, kept for B's version */
+  codeLexOf(b: EdBuffer, line: string | null, open: string | null, close: string | null): Uint8Array;
   markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, base?: number): Uint8Array;
   forwardSexp(t: EdText, cls: ArrayLike<number>, p: number): number | null;
   backwardSexp(t: EdText, cls: ArrayLike<number>, p: number): number | null;

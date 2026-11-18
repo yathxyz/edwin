@@ -206,7 +206,9 @@ in
   # forms), against Emacs's output in test/fixtures/indent, and gg=G on every scm/*.scm changing only the forms listed;
   # gc, gcc and M-; sharing one comment rule in each mode's syntax, any run of a repeated opener a comment; ys, ds,
   # cs and Visual S: counts, . repeating ys, lines wrapped on lines of their own, the blanks inside, and f; Org M-RET
-  # leaving point on the new item and no blank line after the last headline, and the subtree commands' docstrings.
+  # leaving point on the new item and no blank line after the last headline, and the subtree commands' docstrings;
+  # % in other programming languages passing over the brackets in their strings and comments (Python's triple quotes,
+  # TypeScript's template strings, Nix's '' strings, interpolations as code), within 2 ms on 10,000 lines.
   edwin-structural = suite "structural" [ "structural.test.mts" ];
 
   # The tree-sitter grammar bundle (nix/grammars.nix, test/grammars.py): one grammar for each mode scm/prog.scm

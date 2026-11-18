@@ -918,6 +918,94 @@ function parenDepths(t: EdText, cls: ArrayLike<number>, from: number, to: number
   return ret ? depth : d;
 }
 
+/* ---------- strings and comments outside Lisp: what % passes over (se-match-nonlisp) ---------- */
+/* How a language writes its strings: each quote's opener and closer, whether a backslash escapes the next
+   character (BS; NIX: Nix's '' string, where ''$ ''' and ''\ are its escapes), whether it ends at the end of its
+   line (LINE: an unterminated one stops there instead of swallowing the file), and the opener of the code
+   interpolated into it (INTERP, closed by the } matching it), which is code again, and the characters it does not
+   open after (AFTER: Nix's '' after a name, which may end in ' as a' and a'' do). Longer openers first. A
+   language's mode, or the nearest mode it derives from, picks its entry; other programming modes take "…" on
+   one line. A quote goes over lines only where nothing else in the language holds it unpaired: Rust's char
+   literals ('"') and raw strings (r#"…"#) and shell's here-documents and $'…' are not read, so their quotes are
+   one-line ones, and a wrong guess there costs the rest of its line, not of the file. Not here either: Python's
+   f-string {…} and shell's $(…) (string, not code), JavaScript's regexp literals, C++'s raw strings, C#'s
+   verbatim strings. */
+type Quote = { open: string; close: string; esc: 'bs' | 'nix' | null; line: boolean; interp?: string; after?: RegExp };
+const Q = (open: string, close: string, esc: Quote['esc'], line: boolean, interp?: string, after?: RegExp): Quote => ({ open, close, esc, line, interp, after });
+const DQ_LINE = Q('"', '"', 'bs', true), SQ_LINE = Q("'", "'", 'bs', true);
+const C_LIKE = [DQ_LINE, SQ_LINE];
+const QUOTES: Record<string, Quote[]> = {
+  'python-mode': [Q('"""', '"""', 'bs', false), Q("'''", "'''", 'bs', false), DQ_LINE, SQ_LINE],
+  'js-mode': [DQ_LINE, SQ_LINE, Q('`', '`', 'bs', false, '${')],
+  'typescript-mode': [DQ_LINE, SQ_LINE, Q('`', '`', 'bs', false, '${')],
+  'tsx-mode': [DQ_LINE, SQ_LINE, Q('`', '`', 'bs', false, '${')],
+  'nix-mode': [Q("''", "''", 'nix', false, '${', /[A-Za-z0-9_'-]/),Q('"', '"', 'bs', false, '${')],
+  'c-mode': C_LIKE, 'c++-mode': C_LIKE, 'java-mode': C_LIKE, 'csharp-mode': C_LIKE,
+  'go-mode': [DQ_LINE, SQ_LINE, Q('`', '`', null, false)],
+  'sh-mode': [Q("'", "'", null, true), DQ_LINE],
+};
+/* The classes of text T for a language with QUOTES and comments LINE (a line comment's opener) and OPEN..CLOSE
+   (a block comment's), each null where it has none: C.STR in a string (its quotes, and an interpolation's ${ and
+   }), C.CMT in a comment, C.PLAIN in code, an interpolation's code too. In SHELL a # opens a comment only where it
+   does not follow $, { or a word character ($#, ${#a} and a#b are code); elsewhere every # in code does. */
+function codeLex(t: string, quotes: Quote[], line: string | null, open: string | null, close: string | null, shell = false) {
+  const n = t.length, cls = new Uint8Array(n);
+  /* The code units that can begin something in code (a comment, a string, an interpolation's { or }), and in each
+     quote's string (its escape, its closer, its interpolation, its line's end): the text between is skipped. */
+  const table = (ss: (string | null | undefined)[]) => { const u = new Uint8Array(65536); for (const x of ss) if (x) u[x.charCodeAt(0)] = 1; return u; };
+  const inCode = table([line, open, '{', '}', ...quotes.map(o => o.open)]);
+  const inString = new Map(quotes.map(o => [o, table([o.close, o.interp, o.esc === 'bs' ? '\\' : o.esc === 'nix' ? "''" : null, o.line ? '\n' : null])]));
+  /* The strings an interpolation is in, innermost last, each with the depth of { inside its code. */
+  const frames: { q: Quote; depth: number }[] = [];
+  let q: Quote | null = null, i = 0;
+  const lineAt = (k: number) => {
+    if (!line || !t.startsWith(line, k)) return false;
+    if (!shell || line !== '#' || k === 0) return true;
+    return !/[$\{\p{L}\p{N}_]/u.test(t[k - 1]);
+  };
+  while (i < n) {
+    if (q) {
+      const s: Quote = q, stop = inString.get(s)!;
+      let j = i; while (j < n && !stop[t.charCodeAt(j)]) j++;
+      cls.fill(C.STR, i, j); i = j;
+      if (i >= n) break;
+      if (s.esc === 'bs' && t.charCodeAt(i) === 92) { cls.fill(C.STR, i, Math.min(n, i + 2)); i += 2; continue; }
+      if (s.esc === 'nix' && t.startsWith("''", i) && (t[i + 2] === '$' || t[i + 2] === "'" || t[i + 2] === '\\')) { cls.fill(C.STR, i, Math.min(n, i + 3)); i += 3; continue; }
+      if (s.interp && t.startsWith(s.interp, i)) { cls.fill(C.STR, i, i + s.interp.length); i += s.interp.length; frames.push({ q: s, depth: 0 }); q = null; continue; }
+      if (t.startsWith(s.close, i)) { cls.fill(C.STR, i, i + s.close.length); i += s.close.length; q = null; continue; }
+      if (s.line && t.charCodeAt(i) === 10) { q = null; continue; }
+      cls[i++] = C.STR;
+      continue;
+    }
+    while (i < n && !inCode[t.charCodeAt(i)]) i++;
+    if (i >= n) break;
+    const ch = t[i];
+    if (lineAt(i)) { const e = t.indexOf('\n', i); const end = e < 0 ? n : e; cls.fill(C.CMT, i, end); i = end; continue; }
+    if (open && close && t.startsWith(open, i)) { const e = t.indexOf(close, i + open.length); const end = e < 0 ? n : e + close.length; cls.fill(C.CMT, i, end); i = end; continue; }
+    const f = frames.length ? frames[frames.length - 1] : null;
+    if (f && ch === '{') f.depth++;
+    else if (f && ch === '}') {
+      if (f.depth === 0) { cls[i++] = C.STR; q = f.q; frames.pop(); continue; }
+      f.depth--;
+    } else {
+      const s = quotes.find(o => t.startsWith(o.open, i) && !(o.after && i > 0 && o.after.test(t[i - 1])));
+      if (s) { cls.fill(C.STR, i, i + s.open.length); i += s.open.length; q = s; continue; }
+    }
+    i++;
+  }
+  return cls;
+}
+/* The classes codeLex gives buffer B, a programming language's (MODE's QUOTES or the plain "…"), with its comment
+   syntax LINE OPEN CLOSE: kept for B's version, so % again or after moving lexes nothing. */
+function codeLexOf(b: EdBuffer, line: string | null, open: string | null, close: string | null) {
+  const mode = modeChain(b.mode).find(m => Object.prototype.hasOwnProperty.call(QUOTES, m));
+  const key = `${mode}\u0000${line}\u0000${open}\u0000${close}`;
+  if (b._cxv === b.ver && b._cxk === key) return b._cxc as Uint8Array;
+  const cls = codeLex(b.rope.toString(), mode ? QUOTES[mode] : [DQ_LINE], line, open, close, mode === 'sh-mode');
+  b._cxv = b.ver; b._cxk = key; b._cxc = cls;
+  return cls;
+}
+
 /* ---------- Lisp lexer: syntax classes for highlighting and sexp motion ---------- */
 const C = { PLAIN: 0, CMT: 1, STR: 2, PAR: 3, NUM: 4, KW: 5, FN: 6, CONST: 7, QUO: 8, DOC: 9 };
 const KEYWORDS = new Set(('define define-syntax define-macro define-record-type define-command define-values lambda let let* letrec letrec* ' +
@@ -2747,7 +2835,7 @@ globalThis.Ed = {
   E, hooks, host, Frame, FrameState, makeFrame, selectFrame, deleteFrame, onFrameEvent, frameEvent, frameScale, withFrame, allWindows, allMinibufs, renderFrame, rectAt, scheduleRender, FRAME_CSS,
   Marker, shiftMarkers, editText, applyOps, applyLineDiff, diffLines: globalThis.Rope.diffLines, withOrigin, runHookSafely, removeHookEverywhere,
   localized, localize, makeLocal, localValue, defaultValue, setDefault, minorModes, minorOn, modeParents, modeChain, lighters, LEX_SOURCE, Store, Buffer, Keymap, PREFIX, C, SENTINEL, getBuffer, getBufferCreate, toBuffer, setWindowBuffer, otherBuffer, checkRO,
-  insertText, deleteText, replaceText, spanOf, changedSince, forgetLog, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, markDocstrings,
+  insertText, deleteText, replaceText, spanOf, changedSince, forgetLog, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, codeLexOf, markDocstrings,
   forwardSexp, backwardSexp, upList, matchParen, stringAt, inStringAt, inCommentAt, escapingAt, upListForward, downList, backwardDownList,
   nextListStart, prevListEnd, defunBefore, defunAfter, balancedLisp, balanceSpan, keepsBalance, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,
   normKey, kbd, defineKey, lookupIn, lookupKey, lookupWith, activeMaps, whereIs, keyName, keyChar, selfInsertable, message, ding,

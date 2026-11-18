@@ -5815,6 +5815,91 @@ named `<<` and `>>`, which act on the headline alone.
   and `edwin-scheme` (38), and `nix build .#edwin` (unit 30 and 1 ignored, `tests/gui.rs` 5 and 1 ignored,
   `tests/terminal.rs` 36). `nix flake check` was not run.
 
+## % outside Lisp passes over strings and comments (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `se-match-nonlisp`): B11 of the structural-editing audit
+(`docs/emacs-to-edwin/structural-editing-audit.md` in the fleet repository). Before, `%` outside Lisp counted every
+bracket. So `{ a = "}"; }` in Nix went from its first `{` to the `}` in the string, and a `)` in a Python comment
+or a TypeScript string ended a call.
+
+- **`Ed.codeLexOf`** (`src/editor-core.ts`) classes each character of a programming language's buffer as string,
+  comment or code. A buffer counts when its mode derives from `prog-mode`. Comments come from the mode's comment
+  syntax, the same `comment-syntax` that `gc` and `M-;` read, so a `set-comment-syntax!` in init.scm changes it
+  too. Strings come from a small table of quotes per mode, found by the mode or the nearest mode it derives
+  from:
+  - Python: `"""` and `'''` over lines; `"` and `'` ending at their line's end.
+  - JavaScript, TypeScript, TSX: `"` and `'` on one line, and `` ` `` over lines with `${…}` read as code.
+  - Nix: `"…"` and `''…''`, both over lines and both with `${…}` read as code. `''$`, `'''` and `''\` are the
+    `''` string's escapes.
+  - C, C++, Java, C#: `"` and `'` on one line. Go adds `` ` `` raw strings over lines. Shell: `'` with no escapes
+    and `"`, both on one line.
+  - Any other programming mode, Rust among them: `"` on one line.
+
+  A backslash escapes the next character except in shell's `'` and Go's `` ` ``. A string left open on a line
+  stops there when its quote is a one-line quote, so one stray quote does not hide the rest of the file. A quote
+  goes over lines only where the lexer reads every other use of its character. Rust's char literals (`'"'`) and
+  raw strings (`r#"…"#`) and shell's here-documents (a `don't` in one) are not read, so Rust and shell keep
+  one-line quotes: a wrong guess there costs the rest of its line, not the rest of the file. Nix's `''` opens a
+  string only where it does not follow a letter, digit, `_`, `-` or `'`, since a Nix name may end in primes
+  (`a'`, `a''`). In shell (`sh-mode` and any mode derived from it) a `#` opens a comment only where it does not
+  follow `$`, `{` or a word character, so `$#`, `${#a[@]}` and `a#b` stay code. In every other language whose
+  comment is `#` (Python, Nix, YAML, TOML, Terraform and the rest), every `#` in code opens a comment, so `b#)`
+  in Python or Nix is a comment. An interpolation's `${` and the `}` that closes it are string, and the code
+  between them is code, so `${f({})}` matches inside itself.
+- **`%`** (`evil--jump-item`, `matchBracket`, `src/evil-core.ts`): in such a buffer, the first bracket at or after
+  point on the line that is code is the one matched, and only brackets that are code count towards the match. A
+  line whose only brackets are in a string or a comment gives "No matching bracket on this line" and point
+  stays, as it does in Lisp. Lisp buffers still use the Lisp lexer, unchanged.
+- **Cost**: the classes are kept for the buffer's version. Typing pays nothing; the first `%` after a change lexes
+  the whole buffer once, and `%` again, or after moving, reuses that. On 10,000 lines of Python, TypeScript or
+  Nix, `%` after a one-character change took 0.9 to 1.4 ms (median of 50) on ex44; the test holds it to 2 ms.
+  Only the characters that can begin something are looked at one by one: an opener in code, and the escape,
+  closer, interpolation or line end inside a string.
+- **Choices** (where Edwin differs from Emacs and Evil):
+  - It uses Edwin's own lexer, not the tree-sitter tree: one path that works in a terminal frame, the window, a
+    web frame and edwind alike (the last two have no tree), and that the headless suite can prove.
+  - A bracket in a string or a comment is never matched, even with point on it. Vim's matchit matches inside the
+    string then; Edwin goes on to the next bracket of code on the line, as its Lisp `%` already did.
+  - Text that is not a program (Fundamental, Text, Org, Markdown) still counts every bracket, since quotes and
+    `#` mean nothing there.
+- **Not in it**: Python's f-string `{…}` and shell's `$(…)` inside `"…"` are string, not code. JavaScript's
+  regexp literals (`/\(/`) are code. Rust's raw strings and char literals are not read (Rust's `'` is not a quote,
+  because `'a` is a lifetime), nor are C++'s raw strings and C#'s verbatim strings, and Nix's `$${` is not taken
+  as an escape. Two one-line mislexes, each costing `%` the rest of its line: C++14's digit separators
+  (`1'000` opens a `'` string) and shell's backslash-escaped quote outside quotes (`it\'s` opens one). Only `%`
+  reads these classes: outside Lisp the pair text objects, `ds`/`cs` and expreg are as
+  before. The audit's `pct-clj-string` (`%` over a string in `.clj`) still fails: `.clj` has no mode yet and opens
+  in Fundamental (audit gap 10, not B11).
+- **Checked by**, on ex44: `nix build .#checks.x86_64-linux.edwin-structural`, where `test/structural.test.mts` now
+  has 219 tests (31 new):
+  - The audit's one B11 case, `pct-nix-string-brace`, which failed at 73d9f03.
+  - 27 reproductions driven by keys:
+    - Python: a string, an escaped `'`, a `#` comment, a `#` comment right after a word and right after `{`, a
+      triple-quoted string over lines, `%` from a closing `]`, and a bracket in a string before the first code
+      bracket.
+    - TypeScript: a string, `//`, `/* */`, a template string over lines, a call inside an interpolation, and the
+      braces inside an interpolation.
+    - Nix: `#`, a `#` right after a word, `/* */`, a `''` string over lines, a `''$` escape, and the braces inside
+      an interpolation.
+    - C: a char literal `')'`.
+    - Six guards: shell's `${#a[@]}`; a Rust char literal `'"'` and a shell here-document holding `don't`, each
+      leaving the lines after it code; a Python `"""` inside a `#` comment and Nix names ending in `'` and `''`,
+      neither opening a string; a `.txt` buffer that still counts the bracket in its quotes.
+  - A line whose brackets are all in a comment or a string, in Python, TypeScript and Nix: the message, and
+    point stays.
+  - The classes of a Python line, kept for the version and made again for another comment syntax; a Nix buffer
+    after `set-comment-syntax!`.
+  - The 2 ms budget: in 10,000 lines each of Python, TypeScript and Nix, `%` on a block's first line after each
+    of 50 one-character changes lands on the right bracket, with a median of at most 2 ms.
+
+  At 13413e9, the tip this package started from, 25 of the 31 new tests fail: all but the six guards. The 188
+  earlier tests pass there and still pass. The five tests a review added (`#` after a word or `{` in Python and
+  Nix, `"""` in a Python comment, Nix's primed names) each fail at 56d52ce, this package's first commit, where
+  every `#` after a word was code and `''` opened a string after a name. Also passed on the final code, each exit 0: `edwin-typecheck`,
+  `edwin-prog` (65), `edwin-headless` (21), `edit-lockdown` (6), `edit-security` (21) and `nix build .#edwin`
+  (unit 41 and 3 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37 and 1 ignored). `nix flake
+  check` was not run.
+
 ## Balanced brackets in Lisp buffers (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-lisp-brackets`): balanced insertion and deletion, the
