@@ -320,10 +320,16 @@ in
   # snippets as plain text, malformed items and the bounds left out; refused
   # with nothing changed: a range off point's line or not around point, other edits past the end, backwards or
   # overlapping, the text changed since the answer, read-only; the 2 ms keystroke budget with a request pending in a
-  # 10,000-line buffer; nil completing a builtin.
+  # 10,000-line buffer; nil completing a builtin. test/lsp-code-actions.test.mts, code actions: the actions at point
+  # or of the region asked with the diagnostics there as published, malformed, disabled and empty ones left out,
+  # titles cleaned and cut, the preferred first; the range following an edit while the server starts; quick fixes
+  # alone, a single one at once; an edit applied all or none, refused
+  # when the text changed since the request; a command run only when the server names it and the user says yes, the
+  # server's workspace/applyEdit applied only while it runs (another time, or another server's, answered applied
+  # false); answers dropped when the buffer is left or the server stops; nil rewriting a string.
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts
     touch $out
   '';
 

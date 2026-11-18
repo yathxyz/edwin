@@ -49,7 +49,14 @@
    with no further key, one request at a time, cancelled by the next key; the keys never wait for it. Its answer
    is filtered again as the word grows, asked again only when the server says it is incomplete. TAB and C-SPC ask
    and wait (C-g quits). An item goes in with its textEdit and additionalTextEdits, all or none, one undo step;
-   a snippet as its plain text. */
+   a snippet as its plain text.
+
+   Code actions (docs/steps.md, "Code actions"): eglot-code-actions asks the buffer's server for the actions at point
+   or of the region, with the diagnostics there, and carries out the one chosen; eglot-code-action-quickfix asks for
+   quick fixes alone and carries out a single one at once. An action's workspace edit is applied as a rename's is.
+   Its command is run by the server (workspace/executeCommand) only when the server names it among its own and the
+   user says yes; while it runs, and only then, the server's own edits (workspace/applyEdit) are applied, as any
+   workspace edit. Nothing a server names is run here. */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -183,6 +190,7 @@ function serverRequests(s: Session): Record<string, (params: unknown) => unknown
       return items.map(() => null);
     },
     'workspace/workspaceFolders': () => [{ uri: uri(s.root), name: s.root.split('/').pop() || s.root }],
+    'workspace/applyEdit': (p: unknown) => serverEdit(s, p),
     'client/registerCapability': () => null,
     'client/unregisterCapability': () => null,
     'window/workDoneProgress/create': () => null,
@@ -212,7 +220,7 @@ function initializeParams(s: Session) {
     workspaceFolders: [{ uri: uri(s.root), name }],
     capabilities: {
       general: { positionEncodings: ['utf-16'] },
-      workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true } },
+      workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true }, applyEdit: true, executeCommand: {} },
       textDocument: {
         synchronization: { didSave: true },
         definition: { linkSupport: true }, declaration: { linkSupport: true }, typeDefinition: { linkSupport: true },
@@ -221,6 +229,7 @@ function initializeParams(s: Session) {
         signatureHelp: { signatureInformation: { documentationFormat: ['plaintext', 'markdown'], parameterInformation: { labelOffsets: true }, activeParameterSupport: true } },
         publishDiagnostics: { versionSupport: true },
         completion: { completionItem: { snippetSupport: false }, contextSupport: true },
+        codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ACTION_KINDS } }, isPreferredSupport: true },
       },
       window: { workDoneProgress: false, showMessage: {} },
     },
@@ -910,8 +919,9 @@ const DIAG_FILE_MAX = 1000, DIAG_FILES_MAX = 2000, DIAG_MESSAGE_MAX = 2000, DIAG
 /* LSP's severities 1 to 4 as flymake names them: an information and a hint are both notes. */
 const SEVERITY = ['', 'error', 'warning', 'note', 'note'];
 /* A diagnostic as published: its range (from 0, UTF-16 units), severity (1 to 4, an absent one an error), message
-   and where it comes from (its source and code, '' for none). */
-interface Diag { line: number; character: number; endLine: number; endCharacter: number; severity: number; message: string; source: string }
+   and where it comes from (its source and code, '' for none); RAW is the diagnostic as published, given back to the
+   server in a code action request's context (its code and data are the server's own). */
+interface Diag { line: number; character: number; endLine: number; endCharacter: number; severity: number; message: string; source: string; raw: Record<string, unknown> }
 /* A buffer's diagnostics placed in its text: positions in buffer.temps that follow its edits until the next
    publish, and the counts of errors, warnings and notes. */
 interface Placed { s: Session; path: string; items: { d: Diag; start: EdTempMarker; end: EdTempMarker }[]; counts: [number, number, number] }
@@ -937,7 +947,7 @@ function diagOf(it: unknown): Diag | null {
   const backwards = en.line < st.line || (en.line === st.line && en.character < st.character);
   return {
     line: st.line, character: st.character, endLine: backwards ? st.line : en.line, endCharacter: backwards ? st.character : en.character,
-    severity, message: cut(clean(o.message).trim(), DIAG_MESSAGE_MAX), source,
+    severity, message: cut(clean(o.message).trim(), DIAG_MESSAGE_MAX), source, raw: o as Record<string, unknown>,
   };
 }
 const byPlace = (a: { line: number; character: number }, c: { line: number; character: number }) => a.line - c.line || a.character - c.character;
@@ -1287,7 +1297,7 @@ function opsOf(t: string, fe: FileEdit, nm: (p: string) => string): EdEditOp[] |
    the text the server held of each of its documents when the request was sent, by path (heldBy): a document whose
    text changed since (a didChange sent while the server worked), opened since, or closed since (its buffer killed,
    so the file would be visited afresh from the disk) is refused too, a version named or not. */
-function applyEdit(s: Session, edit: unknown, own: EdBuffer | null, held: Map<string, string> | null): { edits: number; files: number; opened: number } {
+function applyEdit(s: Session, edit: unknown, own: EdBuffer | null, held: Map<string, string> | null): { edits: number; files: number; opened: number; changed: EdBuffer[] } {
   /* Visiting a file asks every open buffer's true name (Ed.visit's same-file check), so a thousand files visited
      would ask a million: each path's true name is asked of the disk once while the edit is checked and applied,
      all of it in one turn of the loop. */
@@ -1310,7 +1320,7 @@ function heldBy(s: Session): Map<string, string> {
   }
   return m;
 }
-function applyEditNow(s: Session, edit: unknown, own: EdBuffer | null, held: Map<string, string> | null): { edits: number; files: number; opened: number } {
+function applyEditNow(s: Session, edit: unknown, own: EdBuffer | null, held: Map<string, string> | null): { edits: number; files: number; opened: number; changed: EdBuffer[] } {
   const f = Ed.host.files;
   if (!f) return refuse('there are no files here');
   const root = s.root.replace(/\/+$/, '') || '/', rootTrue = f.truename ? f.truename(root) : root;
@@ -1365,7 +1375,8 @@ function applyEditNow(s: Session, edit: unknown, own: EdBuffer | null, held: Map
     if (typeof ops === 'string') give(ops);
     batches.push({ b: p.b!, ops: ops as EdEditOp[] });
   }
-  let edits = 0, files = 0;
+  let edits = 0;
+  const changed: EdBuffer[] = [];
   for (const { b, ops } of batches) {
     if (!ops.length) continue;
     if (b !== own) {
@@ -1374,9 +1385,9 @@ function applyEditNow(s: Session, edit: unknown, own: EdBuffer | null, held: Map
     }
     Ed.applyOps(b, ops);
     b.modified = true;
-    edits += ops.length; files++;
+    edits += ops.length; changed.push(b);
   }
-  return { edits, files, opened: opened.length };
+  return { edits, files: changed.length, opened: opened.length, changed };
 }
 
 /* The identifier at point in B, offered as the new name's start: letters, digits, _ and $. */
@@ -1401,9 +1412,191 @@ CMD('eglot-rename', async () => {
   if (res === null || res === undefined) return signal('user-error', `${s.name} renames nothing here`);
   const r = applyEdit(s, res, b, held);
   if (!r.files) { Ed.message(`Nothing to rename: the server's edit changes nothing`); return false; }
-  Ed.message(`Renamed to ${cut(clean(name), 200)}: ${r.edits} edit${r.edits === 1 ? '' : 's'} in ${r.files} file${r.files === 1 ? '' : 's'}${r.opened ? ` (${r.opened} visited for it)` : ''}, not saved`);
+  Ed.message(`Renamed to ${cut(clean(name), 200)}: ${editCount(r)}, not saved`);
   return false;
 });
+const editCount = (r: { edits: number; files: number; opened: number }) =>
+  `${r.edits} edit${r.edits === 1 ? '' : 's'} in ${r.files} file${r.files === 1 ? '' : 's'}${r.opened ? ` (${r.opened} visited for it)` : ''}`;
+
+/* ---- code actions ---- */
+
+/* The kinds of code action initialize names (a server sends others too, shown as they are). An answer keeps at most
+   ACTION_MAX actions; a title is cut at LABEL_MAX characters and a kind at ANN_MAX. */
+const ACTION_KINDS = ['', 'quickfix', 'refactor', 'refactor.extract', 'refactor.inline', 'refactor.rewrite', 'source', 'source.organizeImports'];
+const ACTION_MAX = 500;
+/* A code action as kept: its title and kind made fit to show, whether the server prefers it, its workspace edit
+   (null: none) and its command (null: none): the name the server knows it by and its arguments, given back as they
+   came. A bare Command is an action with a command alone. */
+interface CodeAction { title: string; kind: string; preferred: boolean; edit: object | null; command: { name: string; args: unknown[] | undefined } | null }
+/* The command a server runs for a code action while it runs: the session, the buffer it was chosen in and what the
+   server's own edits (workspace/applyEdit) did meanwhile: their edits, the buffers they changed (one edited twice
+   counted once) and the files visited for them. One at a time: the command loop holds the keys while it waits. */
+let executing: { s: Session; b: EdBuffer; edits: number; changed: Set<EdBuffer>; opened: number; refused: string | null } | null = null;
+
+/* A Command ({title, command, arguments}) as code action requests give it, or null when it is malformed. */
+function commandOf(c: unknown): CodeAction['command'] {
+  const o = c && typeof c === 'object' ? c as { command?: unknown; arguments?: unknown } : null;
+  if (!o || typeof o.command !== 'string' || !o.command || (o.arguments !== undefined && !Array.isArray(o.arguments))) return null;
+  return { name: o.command, args: o.arguments as unknown[] | undefined };
+}
+/* One item of a code action answer, or null when it is malformed, disabled, or does nothing (an action whose edit
+   would come from codeAction/resolve, which initialize does not offer). */
+function actionOf(it: unknown): CodeAction | null {
+  if (!it || typeof it !== 'object') return null;
+  const o = it as { title?: unknown; kind?: unknown; isPreferred?: unknown; disabled?: unknown; edit?: unknown; command?: unknown };
+  if (typeof o.title !== 'string') return null;
+  const title = oneLine(o.title, LABEL_MAX);
+  if (!title) return null;
+  if (typeof o.command === 'string') {
+    const command = commandOf(o);
+    return command && { title, kind: '', preferred: false, edit: null, command };
+  }
+  if (o.disabled !== undefined && o.disabled !== null) return null;
+  const edit = o.edit === undefined || o.edit === null ? null : o.edit;
+  if (edit !== null && typeof edit !== 'object') return null;
+  let command: CodeAction['command'] = null;
+  if (o.command !== undefined && o.command !== null) { command = commandOf(o.command); if (!command) return null; }
+  if (!edit && !command) return null;
+  return { title, kind: typeof o.kind === 'string' ? oneLine(o.kind, ANN_MAX) : '', preferred: o.isPreferred === true, edit: edit as object | null, command };
+}
+
+/* The range code actions are asked about in B: Evil's visual selection, else the active region, else point. */
+function actionRange(b: EdBuffer): [number, number] {
+  if (EvilCore.stateOf(b) === 'visual' && b.mark !== null) { const [s, e] = EvilCore.visualRange(b, true); return [s, e]; }
+  if (b.markActive && b.mark !== null) return [Math.min(b.pt, b.mark), Math.max(b.pt, b.mark)];
+  return [b.pt, b.pt];
+}
+/* The diagnostics B's server published that its text holds from LO to HI (a diagnostic touching either end among them), as the
+   server published them but at their range now: the context of a code action request. */
+function diagnosticsIn(b: EdBuffer, lo: number, hi: number): Record<string, unknown>[] {
+  const p = placed.get(b), t = b.text;
+  if (!p) return [];
+  const at = (pos: number) => position(t, Math.min(pos, t.length));
+  return p.items.filter(it => it.start.pos <= hi && lo <= it.end.pos).map(it => ({ ...it.d.raw, range: { start: at(it.start.pos), end: at(it.end.pos) } }));
+}
+
+/* Ask B's server for the code actions of the range (ONLY: of those kinds alone), point or the region, with the
+   diagnostics there. Gives the session, the actions (malformed and disabled ones left out, at most ACTION_MAX) and
+   the text the server held of each document when it was asked (heldBy); null when the answer is dropped (the buffer
+   killed, no longer current, or out of its server, said). */
+async function askActions(b: EdBuffer, only: string[] | null) {
+  const [lo0, hi0] = actionRange(b);
+  /* kept as positions that follow edits while the server is waited for */
+  const lo = { pos: lo0 }, hi = { pos: hi0 };
+  b.temps.add(lo); b.temps.add(hi);
+  let held: Map<string, string> | null = null;
+  const params: Record<string, unknown> = { position: undefined };
+  let res: unknown;
+  try {
+    res = await askAt(b, 'textDocument/codeAction', 'codeActionProvider', 'code actions', params, s => {
+      held = heldBy(s);
+      params.range = { start: position(b.text, lo.pos), end: position(b.text, hi.pos) };
+      params.context = { diagnostics: diagnosticsIn(b, lo.pos, hi.pos), ...(only ? { only } : {}), triggerKind: 1 };
+    });
+  } finally { b.temps.delete(lo); b.temps.delete(hi); }
+  const s = ofBuffer.get(b);
+  if (!E.buffers.includes(b)) return null;
+  if (!s || cur() !== b) { Ed.message(`Code actions dropped: ${cut(clean(b.name), 200)} ${s ? 'is no longer the current buffer' : 'left its language server'}`); return null; }
+  const actions: CodeAction[] = [];
+  /* the kinds asked for alone, as LSP has the client filter them (a bare Command has no kind) */
+  const wanted = (a: CodeAction) => !only || only.some(k => a.kind === k || a.kind.startsWith(k + '.'));
+  for (const it of Array.isArray(res) ? res : []) { if (actions.length >= ACTION_MAX) break; const a = actionOf(it); if (a && wanted(a)) actions.push(a); }
+  return { s, actions, held: held as Map<string, string> | null };
+}
+
+/* Choose one of ACTIONS in the minibuffer, the server's preferred ones first (the first selected), each shown by its
+   title (a title given twice numbered) and kind. */
+async function pickAction(actions: CodeAction[]): Promise<CodeAction> {
+  const order = actions.filter(a => a.preferred).concat(actions.filter(a => !a.preferred));
+  const by = new Map<string, CodeAction>();
+  for (const a of order) {
+    let name = a.title;
+    for (let n = 2; by.has(name); n++) name = `${a.title} (${n})`;
+    by.set(name, a);
+  }
+  const name = await Ed.readMini('Code action: ', '', () => [...by.keys()], { require: true, keepOrder: true, kind: 'eglot-code-action', annotate: n => (by.get(n) || { kind: '' }).kind });
+  return by.get(name)!;   // require: one of them
+}
+
+/* Carry out A, chosen in B from S's answer (HELD: the text the server held of each document when it was asked): a
+   command the server does not name among its own (executeCommandProvider) is refused, and one it does is run only
+   once the user says yes. Then the edit, all or none (applyEdit, one undo step a buffer, the current buffer's the
+   command's), and then the command (workspace/executeCommand), during which the server's own edits are applied as
+   any workspace edit is (serverEdit). A refused edit runs no command. */
+async function runAction(s: Session, b: EdBuffer, a: CodeAction, held: Map<string, string> | null) {
+  const cmd = a.command, shown = cmd ? cut(clean(cmd.name), 200) : '';
+  /* after each wait for the user: B still current and on S, which runs */
+  const still = () => {
+    if (!E.buffers.includes(b) || cur() !== b || ofBuffer.get(b) !== s || s.state !== 'running')
+      signal('user-error', `${a.title}: dropped, as ${cut(clean(b.name), 200)} is no longer current or its server no longer runs`);
+  };
+  still();
+  if (cmd) {
+    const ec = (s.capabilities || {}).executeCommandProvider as { commands?: unknown } | undefined;
+    if (!ec || typeof ec !== 'object' || !Array.isArray(ec.commands) || !ec.commands.includes(cmd.name))
+      return signal('user-error', `${a.title}: ${shown} is not a command ${s.name} runs, and Edwin runs none of a server's commands itself`);
+    if (!await Ed.yesOrNo(`${a.title}: let ${s.name} run its command ${shown}?`)) { Ed.message(`${a.title}: nothing done`); return false; }
+    still();
+  }
+  const done: string[] = [];
+  let changed = false, touched: EdBuffer[] = [];
+  if (a.edit) {
+    const r = applyEdit(s, a.edit, b, held);
+    done.push(r.files ? editCount(r) : 'its edit changes nothing');
+    changed = r.files > 0;
+    touched = r.changed;
+  }
+  if (cmd) {
+    /* the command runs on the text as it now is: this buffer and every buffer the edit changed sent first */
+    for (const c of new Set([b, ...touched])) flush(c);
+    /* S runs: nothing has waited since still() */
+    const conn = s.conn!;
+    const x = executing = { s, b, edits: 0, changed: new Set<EdBuffer>(), opened: 0, refused: null as string | null };
+    try { await quittable(conn.request('workspace/executeCommand', { command: cmd.name, ...(cmd.args ? { arguments: cmd.args } : {}) }, { timeout: timing.request })); }
+    finally { if (executing === x) executing = null; }
+    const files = x.changed.size;
+    done.push(`${shown} run${files ? `, its edits ${editCount({ edits: x.edits, files, opened: x.opened })}` : ''}${x.refused ? `; an edit of it refused: ${x.refused}` : ''}`);
+    changed = changed || files > 0;
+  }
+  Ed.message(`${a.title}: ${done.join('; ')}${changed ? ', not saved' : ''}`);
+  return false;
+}
+
+/* workspace/applyEdit, a server asking for an edit: applied, all or none, only while a command the user let the
+   server run is running; any other edit is refused, the server told why. Each buffer's part is one undo step: the
+   command's own buffer's is the command's while it is still current. */
+function serverEdit(s: Session, params: unknown) {
+  const x = executing;
+  if (!x || x.s !== s) return { applied: false, failureReason: 'Edwin applies a server\'s edit only while it runs a command the user chose' };
+  const edit = params && typeof params === 'object' ? (params as { edit?: unknown }).edit : undefined;
+  try {
+    const r = applyEdit(s, edit, cur() === x.b ? x.b : null, null);
+    x.edits += r.edits; x.opened += r.opened;
+    for (const c of r.changed) x.changed.add(c);
+    /* sent before the answer, so the server's next edit is of the text it now holds */
+    for (const c of r.changed) flush(c);
+    Ed.scheduleRender();
+    return { applied: true };
+  } catch (e) {
+    const why = Ed.errorText(e);
+    x.refused = why;
+    Ed.message(why);
+    return { applied: false, failureReason: why };
+  }
+}
+
+/* The code actions at point or of the region, ONLY those kinds when given: one chosen and carried out; with SOLE,
+   a single action is carried out without being chosen. */
+async function codeActions(only: string[] | null, sole: boolean) {
+  const b = cur(), got = await askActions(b, only);
+  if (!got) return false;
+  const { s, actions, held } = got;
+  if (!actions.length) return signal('user-error', only ? `No ${only.join(', ')} code actions here` : 'No code actions here');
+  const a = sole && actions.length === 1 ? actions[0] : await pickAction(actions);
+  return runAction(s, b, a, held);
+}
+CMD('eglot-code-actions', '', '', "Choose one of the code actions this buffer's language server offers at point (or for the region) and carry it out: its edit applied to every file it names or to none, each buffer's part one undo step, nothing saved; a command of the server's run only once you say yes.", () => codeActions(null, false));
+CMD('eglot-code-action-quickfix', '', '', 'Carry out the quick fix this buffer\'s language server offers for the diagnostics at point (or in the region): a single one at once, else the one chosen; as eglot-code-actions does.', () => codeActions(['quickfix'], true));
 
 /* ---- completion ---- */
 

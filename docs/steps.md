@@ -4839,8 +4839,9 @@ named: partial application across files.
 - **Differences from eglot:** no `eglot-confirm-server-edits` prompt or diff preview (the rename is applied, then
   shown by the buffers, unsaved, and undone by `u` in each); no files created, renamed or deleted (eglot does them
   when a server sends them); no `prepareRename` placeholder; no change annotations; the name's minibuffer starts
-  with the identifier rather than offering it as the default. The server's own `workspace/applyEdit` request is not
-  answered (lsp-rpc's `-32601`): it is lsp-code-actions', with `workspace/executeCommand`.
+  with the identifier rather than offering it as the default. The server's own `workspace/applyEdit` request was not
+  answered here (lsp-rpc's `-32601`); lsp-code-actions answers it, applying it only while a command the user let
+  the server run waits ("Code actions").
 - **Not in it:** code actions and their commands (lsp-code-actions); `workspace/applyEdit`; renaming files;
   saving the edited buffers; a web frame or edwind (no processes there, so no server).
 - **Checked by**, on ex44 (the build host), on the final tree (on se-match-nonlisp): `edwin-lsp` (75: 11 new; nil
@@ -4976,7 +4977,8 @@ inserted as plain text.
 - **Differences from eglot and corfu:** no snippet expansion (yasnippet) or fields; no resolve, so no lazy
   documentation or edits; no auto-open after a trigger character (only TAB and `C-SPC` ask there); no `labelDetails` shown;
   the `insert` range of an InsertReplaceEdit, never
-  `replace`; no `commitCharacters`; no `command` run after an item (lsp-code-actions owns commands).
+  `replace`; no `commitCharacters`; no `command` run after an item (lsp-code-actions runs a code action's command
+  only, "Code actions").
 - **Not in it:** snippets, resolve, item commands, documentation popups, orderless matching, a web frame or
   edwind (no processes there, so no server).
 - **Checked by**, on ex44 (the build host), on the tree after the third review (the error answer's fallback,
@@ -5031,6 +5033,139 @@ inserted as plain text.
   the third review: with the corfu-auto path's fallback on an error taken out of lsp.ts the error-while-typing
   test failed (no popup), and with atPoint's rejection handler taken out of complete.ts the C-SPC error test
   failed (`the words`).
+
+## Code actions (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lsp-code-actions`, on lsp-completion; owner decision 2: the
+client in the frame, the other LSP details the plan's defaults): list and apply actions and quick fixes; proved by
+edwin-lsp. Risk named: server commands; only workspace edits are applied, and executeCommand asks.
+
+- **`src/lsp.ts`** holds it, beside the workspace edits (no new file). initialize now also says
+  `textDocument.codeAction` with `codeActionLiteralSupport` (the kinds `''`, `quickfix`, `refactor`,
+  `refactor.extract`, `refactor.inline`, `refactor.rewrite`, `source`, `source.organizeImports`) and
+  `isPreferredSupport`, and `workspace.applyEdit` and `workspace.executeCommand`. No `resolveSupport`,
+  `dataSupport` or `disabledSupport`: a server then puts each action's edit in its answer. A published diagnostic
+  now keeps the object the server sent beside what is shown of it, to give it back.
+- **`eglot-code-actions`** (`M-x`; no key, as in the owner's Emacs, where no key is bound to it) asks
+  `textDocument/codeAction` as the finds ask (the pending change sent first, UTF-16 positions, C-g quits and
+  cancels, `timing.request` bounds the wait for a starting server and for the answer). The range is Evil's visual
+  selection, else the active region, else point (an empty range); its ends follow edits while a starting server is
+  waited for. `context.diagnostics` holds the diagnostics the server published that touch the range, each as the
+  server sent it (its `code`, `source`, `data`, `tags`: quick fixes are matched by them) at its range now;
+  `triggerKind` 1. A server whose capabilities lack `codeActionProvider` is not asked: `NAME gives no code
+  actions`; a null or empty answer: `No code actions here`; an error answer is signalled as lsp-rpc gives it. The
+  answer to a buffer killed meanwhile is dropped; to one no longer current or out of its server, dropped with a
+  message (`Code actions dropped: BUFFER is no longer the current buffer`).
+- **The list** (`Code action: `, a completing read that takes only one of them): the server's preferred actions
+  first (the first selected, so RET takes it), then the rest in the server's order, each by its title, its kind as
+  the annotation. A title given twice is numbered (`Inline thing (2)`). Titles and kinds are cleaned of control
+  characters and put on one line, cut at 200 and 80. Left out: an item that is not an object, has no title or a
+  blank one, an action with `disabled`, a malformed `edit` (not an object) or `command` (no name, `arguments` not a
+  list), an action with neither edit nor command (one to be resolved, which is not offered); past 500, the rest.
+- **`eglot-code-action-quickfix`** asks with `context.only` `["quickfix"]` and keeps the actions of that kind (or a
+  kind under it, `quickfix.x`) alone, as LSP has the client filter them: a bare Command has no kind and is left
+  out. A single one is carried out at once; several are listed; none: `No quickfix code actions here`.
+- **Carrying an action out.** After the choice, the buffer must still be current and on its server, which must run
+  (else `TITLE: dropped, as BUFFER is no longer current or its server no longer runs`, nothing done). Its edit is
+  applied as a rename's (see "Workspace edits and rename"): all of it or none, every file checked first, the text
+  each of the server's documents had when the actions were asked compared (one changed while the list was open is
+  refused), one undo step a buffer, files not open visited unshown, nothing saved. Done: `TITLE: N edits in M
+  files (K visited for it), not saved`.
+- **A command** (a bare Command, or an action's `command`) is run only by its server, through
+  `workspace/executeCommand`, and only:
+  - when the server names it among its own (`executeCommandProvider.commands`); any other name (a client-side
+    command, `editor.action.*`) is refused before anything is asked or done: `TITLE: NAME is not a command SERVER
+    runs, and Edwin runs none of a server's commands itself`;
+  - once the user says yes to `TITLE: let SERVER run its command NAME? (y or n)`, asked before the action's edit
+    too, so `n` leaves everything as it was (`TITLE: nothing done`) and sends nothing; after it the buffer and
+    server are checked again as after the choice.
+  The edit goes first, then the pending change of the current buffer and of every buffer the edit changed is sent
+  (so the command runs on the text as it now is), and the command is asked with its `arguments` as the server
+  gave them, waiting at most `timing.request` (C-g quits and cancels). A refused edit runs no command. An error
+  answer is signalled.
+- **The server's own edits** (`workspace/applyEdit`) are applied only while a command of its own that the user let
+  it run is waiting for its answer, and only from that server: at any other time, or from another server, the
+  answer is `{applied: false, failureReason: "Edwin applies a server's edit only while it runs a command the user
+  chose"}` and nothing changes. Applied, it is checked and applied as any workspace edit (not against the text at
+  the request: the server makes it now); the command's buffer's part joins the command's undo step while it is
+  current, every other buffer's is a step of its own; each buffer it changed is sent to the server before the answer
+  `{applied: true}`, so the server's next edit of the same file is checked against the text it now holds. A refused one is answered
+  `{applied: false, failureReason: WHY}` and said; the command goes on. Done: `TITLE: N edits in M files; NAME
+  run, its edits N edits in M files, not saved` (with `; an edit of it refused: WHY` when one was), the command's
+  N the edits of all its server edits and M the files they changed, a file edited more than once counted once.
+- **Choices**, each reversible:
+  - No keys: the owner's Emacs binds none to code actions (`M-x eglot-code-actions` there too).
+  - A command the server does not name among its own is refused rather than sent: Edwin runs no command a server
+    names, and a server is asked to run only what it says it runs.
+  - The question about a command comes before any of the action is done, so declining it leaves the action whole
+    undone rather than half applied.
+  - No `codeAction/resolve`: initialize does not offer it, so servers send each edit in the answer (nil does); an
+    action that would still need one is left out.
+- **Differences from eglot:** commands asked about, and only the server's own run (eglot sends any); the server's
+  edits refused outside a command (eglot applies them whenever they come, asking as
+  `eglot-confirm-server-edits` says); no resolve; no
+  `eglot-code-action-organize-imports`, `-extract`, `-inline` or `-rewrite` (`eglot-code-actions` lists those
+  kinds with the rest); no code action hints in the margin or mode line; disabled actions left out;
+  a single action from `eglot-code-actions` is still listed (as eglot does), from the quick fix command
+  carried out at once (as eglot's `eglot-code-action-quickfix`).
+- **Not in it:** commands of completion items (still not run, see "Completion"); resolve; the other per-kind
+  commands; a web frame or edwind (no processes there, so no server).
+- **Checked by**, on ex44 (the build host), on the final tree (this entry's Checked by is the only change after
+  the checks ran): `edwin-lsp` (106 passed, none skipped: 13 of them test/lsp-code-actions.test.mts, nil from
+  nixpkgs run in it) and `edwin-typecheck`; `nix flake check --max-jobs 2` (all checks passed, load average 0.9
+  as it started and 5.4 as it ended), among them `edit-lockdown` and `edit-security`, since src/lsp.ts loads in
+  edwind, and `.#edwin`'s cargo tests (unit 41 and 3 ignored, `tests/gui.rs` 5 and 1 ignored,
+  `tests/terminal.rs` 37 and 1 ignored). `edwin-lsp` rebuilt fails now and then in test/lsp.test.mts (`a broken
+  stream and an initialize past its time`, the known race, and `Ed.lsp.shutdownAll (quitting) while
+  eglot-reconnect waits`, one spawn more than counted); the base commit rebuilt three times failed once too. The
+  new test fails with either send removed (the server's second edit of a file refused; the other file's change not
+  sent before the command). A review found the command's file count summed over its server edits (a file edited
+  twice counted twice, `5 edits in 5 files` for three files); it is now the set of buffers they changed, and that
+  test fails (`in 5 files`) with the count put back to one a server edit. test/lsp-code-actions.test.mts (13), against a stand-in (node) that answers each request
+  with what the test wrote (a delay, `hang`, an error), first sending the requests written beside it
+  (`workspace/applyEdit`), each once the one before is answered, publishes the diagnostics written for each
+  document it is told of, sends requests when told of a change, can answer initialize late, and logs every
+  message, the client's answers to its requests among them:
+  - initialize's `codeAction`, `applyEdit` and `executeCommand`.
+  - A list at point: the pending edit sent first, the range point's, no diagnostics; preferred first; an item
+    that is no object, has no title or a blank one, is disabled, does nothing, has a malformed edit or command
+    arguments left out; a title with ESC and a newline cleaned, a kind with BEL; two titles alike numbered; the
+    one chosen applied across two files (one visited for it), nothing saved, one `u` a buffer; the second of two
+    titles alike applied.
+  - The region: Evil's selection (`v j`) and the diagnostics touching it given back with `code`, `source`,
+    `data` and `tags` at their range after an edit above them; one outside left out; then the active region.
+  - Quick fixes: `only` `["quickfix"]`, a refactor and a bare Command left out, a single one applied at once,
+    several listed with the preferred selected (RET takes it), `quickfix.sub` kept, none said.
+  - A command: one the server does not name refused, nothing asked; `n` sends nothing and applies nothing; `y`
+    applies the edit, sends it before `workspace/executeCommand` with its arguments, the server's two edits
+    during it applied (`applied: true`), one `u` undoing the edit and the command's edit in the current buffer
+    (a second `u` at the oldest change), the other buffer's step its own.
+  - The changes sent on time: the action's edit of an open file other than the current one sent before the
+    command; during the command the server's edit of that file, then two edits of the current file and two of a
+    file not open (visited for it), each `applied: true`, each later one checked against the text the earlier
+    one left; said as `its edits 5 edits in 3 files (1 visited for it)`.
+  - The server's edit with a codeAction answer (no command running): `applied: false`, nothing changed; during a
+    command, one of a file outside the project refused, answered and said; after an error answer to a command and
+    after C-g on one that hangs, an edit is refused again.
+  - An edit refused as a buffer was changed and sent while the list was open, its command (said yes to) not run;
+    the same edit applied once the text is back.
+  - Dropped: the answer to a buffer no longer current (said), killed (nothing said), out of its server (said);
+    the server shut down while the list was open; the buffer left while the command was asked about (not run);
+    another project's server asking for an edit while this one's command runs: `applied: false`.
+  - An error answer, a null answer, 501 actions (500 listed), a server with no `codeActionProvider` (not asked).
+  - Titles cut at 200 and kinds at 80; a command with an empty name, bare or in an action, left out.
+  - Asked while the server starts: the range follows an edit made before point meanwhile.
+  - nil: `Rewrite to indented string` on `"foo"`, one `u`.
+  Each check was also taken out of src/lsp.ts and the suite run: every one made a test fail (32 removals: the
+  session of the server's edit, edits only during a command, the commands the server names, the question, the
+  checks after the choice and after the question, each of the three drops of the answer, disabled actions,
+  actions that do nothing, the `only` filter, the bound of 500, the title's and the kind's cleaning and cuts, the
+  empty command name, command arguments, the text held at the request, `executing` cleared after the command,
+  the command's buffer's undo step, a refused server edit answered rather than thrown, the diagnostics' range
+  filter, the diagnostics as published, the numbering, the preferred first, a single quick fix at once, Evil's
+  selection, the region, the range's ends following edits, the change sent before the command). The undo test
+  was strengthened after "the command's buffer's undo step" first survived (it now checks that a second `u` is at
+  the oldest change).
 
 ## Backends declared in init.scm reach edwind's models (done)
 
