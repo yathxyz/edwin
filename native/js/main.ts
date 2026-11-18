@@ -246,6 +246,9 @@ async function quit(code: number) {
     Ed.message(`${refused[0].name}: ${refused[0].saveError}; not quitting`); Ed.scheduleRender();
     return;
   }
+  /* The language servers are told to shut down and exit, each KILLed past its bounds (under 2 s together);
+     main.rs ends any child still left. */
+  try { await Ed.lsp.shutdownAll(); } catch (e) { console.error(e); }
   try { host.suspend!(); } catch (e) { console.error(e); }
   leaveTerminal();
   if (attached && attached.unconfirmed) N.eprint(`edwinclient: edwind had not confirmed ${attached.unconfirmed} edit(s) when edwinclient quit\n`);

@@ -1599,3 +1599,83 @@ fn an_org_https_link_goes_to_xdg_open_on_path() {
     t.keys(":qa!\r");
     assert_eq!(t.exit(), 0, "screen tail: {:?}", tail(&t.out));
 }
+
+/// A language server M-x eglot started (here by -f) is told shutdown and exit when edwin quits, and has ended by
+/// the time edwin has: the stand-in server logs each message it gets, with its pid.
+#[test]
+fn quitting_shuts_the_language_servers_down() {
+    if !have_node() {
+        return;
+    }
+    let d = workdir("lsp-quit");
+    std::fs::create_dir_all(d.join("config/edwin")).unwrap();
+    std::fs::create_dir_all(d.join("proj/.git")).unwrap();
+    std::fs::write(d.join("proj/x.nix"), "1\n").unwrap();
+    let server = d.join("server.cjs");
+    let log = d.join("log");
+    std::fs::write(
+        &server,
+        r#"const fs = require('fs'), log = process.argv[2];
+const note = s => fs.appendFileSync(log, process.pid + ' ' + s + '\n');
+const send = m => { const b = Buffer.from(JSON.stringify(m)); process.stdout.write('Content-Length: ' + b.length + '\r\n\r\n'); process.stdout.write(b); };
+let buf = Buffer.alloc(0);
+process.stdin.on('data', d => {
+  buf = Buffer.concat([buf, d]);
+  for (;;) {
+    const end = buf.indexOf('\r\n\r\n');
+    if (end < 0) return;
+    const n = Number(/Content-Length: (\d+)/i.exec(buf.subarray(0, end).toString('latin1'))[1]);
+    if (buf.length < end + 4 + n) return;
+    const m = JSON.parse(buf.subarray(end + 4, end + 4 + n).toString('utf8'));
+    buf = buf.subarray(end + 4 + n);
+    note(m.method);
+    if (m.method === 'initialize') send({ jsonrpc: '2.0', id: m.id, result: { capabilities: {} } });
+    else if (m.method === 'shutdown') send({ jsonrpc: '2.0', id: m.id, result: null });
+    else if (m.method === 'exit') process.exit(0);
+  }
+});
+setInterval(() => {}, 1000);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("config/edwin/init.scm"),
+        format!(
+            "(define-language-server 'fake :modes '(nix-mode) :command '(\"node\" {:?} {:?}))\n",
+            server.display().to_string(),
+            log.display().to_string()
+        ),
+    )
+    .unwrap();
+    let mut t = Pty::spawn(&d, &["-f", "eglot", "proj/x.nix"], &[]);
+    t.ready();
+    let end = Instant::now() + Duration::from_secs(10);
+    while !(log.exists() && read(&log).contains(" initialized\n")) {
+        assert!(
+            Instant::now() < end,
+            "the server was never initialized; screen tail: {:?}",
+            tail(&t.out)
+        );
+        t.pump(20);
+    }
+    t.keys(":q\r");
+    assert_eq!(t.exit(), 0, "screen tail: {:?}", tail(&t.out));
+    let got = read(&log);
+    let methods: Vec<&str> = got
+        .lines()
+        .map(|l| l.split_once(' ').unwrap().1)
+        .collect();
+    assert_eq!(methods, ["initialize", "initialized", "shutdown", "exit"]);
+    let pid: libc::pid_t = got.split_once(' ').unwrap().0.parse().unwrap();
+    // Ended: gone, or a zombie its new parent has not reaped yet.
+    let running = || {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| !s.rsplit_once(") ").is_some_and(|(_, r)| r.starts_with('Z')))
+            .unwrap_or(false)
+    };
+    let end = Instant::now() + Duration::from_secs(2);
+    while running() {
+        assert!(Instant::now() < end, "the server {pid} is still running");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

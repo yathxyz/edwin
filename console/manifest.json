@@ -28,6 +28,7 @@
   "src/syntax.js",
   "src/editorconfig.js",
   "src/format.js",
+  "src/lsp.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"
@@ -45,6 +46,7 @@
   "scm/pi.scm",
   "scm/gptel.scm",
   "scm/prog.scm",
-  "scm/next-error.scm"
+  "scm/next-error.scm",
+  "scm/lsp.scm"
  ]
 }

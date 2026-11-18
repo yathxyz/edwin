@@ -1477,7 +1477,7 @@ CMD('describe-browser-keys', '', '', 'List the keys the browser keeps for itself
 /* A lazy config (org.scm) is evaluated at boot without a buffer; :e org.scm then shows the shipped text.
    The host reads the shipped files (R4.1): the page's Scheme blocks in a browser, scm/ under Node. */
 /* markdown.scm is loaded when the host has it (package E of E3); the standalone page may not carry it. */
-const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['prog.scm', 'lazy'], ['next-error.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
+const CONFIG = [['emacs.scm'], ['evil.scm'], ['org.scm', 'lazy'], ['markdown.scm', 'lazy'], ['prog.scm', 'lazy'], ['next-error.scm', 'lazy'], ['lsp.scm', 'lazy'], ['ai.scm', 'lazy'], ['init.scm']];
 const shipped = (name: string) => host.config(name);
 /* In served mode (Ed.bootServed) every shipped file is evaluated lazily: the sources are edwind's files, not
    buffers of this runtime, so the buffer list and the completion word set hold only what the page opened. */

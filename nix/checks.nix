@@ -264,15 +264,18 @@ in
   # replays, in a web frame or with no host.proc.
   edwin-shell-command = suite "shell-command" [ "shell-command.test.mts" ];
 
-  # The language client (src/lsp-rpc.ts so far): JSON-RPC's Content-Length framing under fast-check, any chunking
-  # of a random message stream decoding as the whole does and a broken one failing at the same place; the
-  # framing's refusals (a header past 4096 bytes, a body past 64 MiB, a bad, missing or doubled length, one ending
-  # inside a character); requests by id, error answers, cancellation and timeouts sending $/cancelRequest, the
-  # server's requests answered; and a stand-in server as a real child through Ed.proc (test/fake-proc.mts).
-  # LSPRPC_RUNS raises the run count.
+  # The language client: src/lsp-rpc.ts, JSON-RPC's Content-Length framing under fast-check, any chunking of a
+  # random message stream decoding as the whole does and a broken one failing at the same place; the framing's
+  # refusals (a header past 4096 bytes, a body past 64 MiB, a bad, missing or doubled length, one ending inside a
+  # character); requests by id, error answers, cancellation and timeouts sending $/cancelRequest, the server's
+  # requests answered; and a stand-in server as a real child through Ed.proc (test/fake-proc.mts). LSPRPC_RUNS
+  # raises the run count. src/lsp.ts and scm/lsp.scm, the sessions: start and initialize, one process per root
+  # and server, a crash started again with a doubling delay and given up past its bound, the KILL past the
+  # shutdown bounds, the idle stop, the refusals (the image's replay, a web frame, a file not on this machine),
+  # no child left; against a scripted stand-in server and nil, a real Nix language server (EDWIN_LSP_REAL).
   edwin-lsp = pkgs.runCommand "edwin-lsp" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
-    export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules
-    node --test ${edwin}/edwin/test/lsp-rpc.test.mts
+    export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil}
+    node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts
     touch $out
   '';
 

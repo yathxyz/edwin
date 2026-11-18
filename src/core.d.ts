@@ -1681,6 +1681,8 @@ interface EdApi {
   compile: EdCompileApi;
   /* set by syntax.ts */
   syntax: EdSyntaxApi;
+  /* set by lsp.ts */
+  lsp: EdLspApi;
 }
 
 /* ---------- editor: compile (compile.ts) ---------- */
@@ -2426,6 +2428,51 @@ interface EditorConfigApi {
   readonly MAX_FILE: number;
   readonly MAX_GLOBS: number;
   readonly SECTION_COST: number;
+}
+
+/* ---------- editor: language server sessions (lsp.ts) ---------- */
+
+/* A declared server: its name, the major modes it serves, its argv. */
+interface LspServer { name: string; modes: string[]; argv: string[] }
+/* One server process for a root: starting (initialize sent), running, restarting (waiting to start again after
+   it ended), stopping, stopped, failed (ended too often in a row). */
+interface LspSession {
+  readonly name: string;
+  readonly root: string;
+  readonly state: 'starting' | 'running' | 'restarting' | 'stopping' | 'stopped' | 'failed';
+  readonly proc: EdProc | null;
+  readonly conn: LspRpcConnection | null;
+  /* the server's capabilities from its initialize answer, while it runs */
+  readonly capabilities: Record<string, unknown> | null;
+  readonly buffers: Set<EdBuffer>;
+  /* starts again since the last start by the user, or since it last ran for timing.healthy */
+  readonly restarts: number;
+  /* how it last ended */
+  readonly why: string | null;
+}
+interface EdLspApi {
+  /* the bounds in ms (and restartMax, a count); the suites shorten them */
+  timing: { connect: number; shutdown: number; exitWait: number; killWait: number; restartDelay: number; restartMax: number; healthy: number; idle: number };
+  /* a file: URI for an absolute path */
+  uri(path: string): string;
+  /* declare a server; while the image replays it is skipped with a message and null is returned */
+  define(name: string, modes: string[], argv: string[]): LspServer | null;
+  servers(): LspServer[];
+  serverFor(b: EdBuffer): LspServer | null;
+  /* where B's server runs: its project, else its file's directory; null when its file is not on this machine */
+  rootOf(b: EdBuffer): string | null;
+  /* B's server's session in its root, started when there is none (or it had failed), B attached to it */
+  start(b: EdBuffer): LspSession;
+  /* settles once the session's server is initialized; rejects when it is shut down or fails */
+  ready(s: LspSession): Promise<void>;
+  shutdown(s: LspSession): Promise<void>;
+  shutdownAll(): Promise<void>;
+  /* null when every server was shut down while S shut down: nothing is started */
+  reconnect(s: LspSession): Promise<LspSession | null>;
+  sessions(): LspSession[];
+  sessionOf(b: EdBuffer): LspSession | null;
+  /* the last of the server's error output */
+  stderr(s: LspSession): string;
 }
 
 /* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is

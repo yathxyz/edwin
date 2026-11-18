@@ -4156,6 +4156,163 @@ oversize header refused.
     `Content-Length: 1` in it), the server asking `workspace/configuration` and reporting the answer in a
     notification, `exit` ending it with 0 and no child left.
 
+## Language server sessions (done)
+
+Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lsp-sessions`, on lsp-rpc; owner decision 2: the client in the
+frame over real pipes, no hub, the other LSP details the plan's defaults): one server process per project root and
+server kind over Ed.proc pipes, initialize, shutdown, restart on crash with backoff, idle stop; in standalone edwin
+and edwinclient, none in web frames; proved by edwin-lsp with a scripted stand-in server: start, crash-restart
+capped, clean shutdown on exit, no child left.
+
+- **`src/lsp.ts`** (new, `Ed.lsp`, through the seven places of the touch list, after `lsp-rpc`) runs the sessions;
+  **`scm/lsp.scm`** (new; sources.rs SCM, console/manifest.json, both pages' SCM lists, and CONFIG as a lazy file
+  after `next-error.scm` and before `init.scm`, so a user's init.scm can declare a server) holds the declaration
+  form. The server table itself is lsp-servers'.
+- **`(define-language-server NAME :modes MODES :command ARGV)`** declares server NAME (a symbol: letters, digits and
+  `+._-`) for the major modes MODES (a non-empty list) run as ARGV (a non-empty list of strings, the program first,
+  looked up on PATH by the host). Declaring NAME again replaces it; of two servers for one mode the one declared
+  last serves it. Refused, with `lsp-error`: no `:modes` or `:command`, an unknown option and a keyword with no
+  value (signalled by the form in scm/lsp.scm), an empty or non-string one and a name that is not a plain symbol
+  (by `%lsp-declare`, src/lsp.ts). **A declaration while the image replays** (`Ed.proc.replaying()`, which
+  format-buffer added to src/proc.ts) is skipped: an argv the image declared would otherwise run the next time the user starts a server,
+  which is the image reaching a process (R16.15). It is skipped with a message (`define-language-server: NAME is not
+  declared while the image replays`), not an error, because a served frame evaluates edwind's init.scm the same way
+  inside one handler (src/sync.ts): an error would stop every later form of that file. The limit is Ed.proc's
+  (above): a procedure the image defines that runs later, outside the replay (a hook, a timer), and declares a
+  server is not told from the user's own. A session copies its argv when it is made, so a later declaration (from
+  anywhere) never changes what a running session starts again; `eglot-reconnect` takes the declaration as it is then.
+- **Where a server runs.** The root of a buffer is the nearest directory up from its file's with a `.git` or a
+  `.jj` (compile's project), else the file's directory. A buffer with no file, a shared buffer, a file edwind
+  serves (a note: not on this machine) and a host with no file system get no server (`lsp-error`). One session per
+  server and root: a second buffer of the root uses the running process. Every session is made by one function that
+  first looks for the root's, so `eglot-reconnect` uses a session `eglot` (or a second reconnect) made for the root
+  while the old server was shutting down, rather than making a second process. The old session's buffers go on
+  the new one only if they are still live: a buffer killed while the old server shut down was detached by then,
+  so its `kill-buffer-hook` found no session, and the reconnect skips it; when none is left the new session gets
+  its idle stop like any other, instead of running until quit. `eglot-shutdown-all` or quitting while a reconnect
+  waits for its old server ends that reconnect: nothing is started, the echo area says `NAME in ROOT: not started
+  again: every language server was shut down`, and `Ed.lsp.reconnect` gives null. Each shutdown of every server
+  counts one more, and a reconnect that sees the count changed across its wait starts nothing; a later `eglot`
+  starts a server as ever.
+- **The child** is `Ed.proc.spawn(ARGV, {cwd: ROOT})`: no output bound and no timeout (a server lives long and a
+  workspace's answers are large; lsp-rpc bounds a message at 64 MiB), output and error apart. Its output goes to
+  an `LspRpc` connection, which writes to its input. Its error output is the server's own log: the last 64 KiB are
+  kept on the session and shown by `eglot-stderr-buffer`, never in the echo area or `*Messages*` (it may hold file
+  text). The image never reaches it: every start goes through `Ed.proc`, refused while the image replays, in a web
+  frame and on edwind's Node host (`process-error`, before anything is spawned).
+- **Initialize.** `initialize` with `processId` null, `clientInfo` Edwin, `rootPath`, `rootUri` and one workspace
+  folder (a `file://` URI, each path segment percent-encoded as UTF-8: a root `one two #3 %20 é` is
+  `.../one%20two%20%233%20%2520%20%C3%A9`), the client capabilities `general.positionEncodings: ["utf-16"]`,
+  `workspace.configuration` and `workspaceFolders`; 30 s for its answer (eglot's `eglot-connect-timeout`). Then
+  `initialized`; the server's capabilities are kept on the session (`capabilities`), and the echo area says
+  `NAME in ROOT: ready`. The command that starts a server returns once the child runs: no key waits on
+  initialize. `Ed.lsp.ready(session)` settles when it has been initialized and rejects when it is shut down or
+  given up.
+- **The server's requests** answered: `workspace/configuration` with null for each item (the server's defaults;
+  settings are lsp-servers'), `workspace/workspaceFolders` with the root, `client/registerCapability`,
+  `client/unregisterCapability`, `window/workDoneProgress/create` and `window/showMessageRequest` with null; any
+  other `-32601` (lsp-rpc). `window/showMessage` of an error or a warning goes to the echo area as `NAME: error:
+  TEXT` (cut at 500 characters); info and log messages, `window/logMessage` and every other notification are
+  dropped until a package needs them.
+- **A crash** is the child ending, its stream breaking its framing, its input closing, or initialize failing (an
+  error answer or no answer in 30 s), when nobody asked it to stop: the child is KILLed if it still runs, every
+  request waiting on it rejects, and it is started again after 1 s, then 2, 4, 8 and 16 s. After 5 starts again in
+  a row it is given up: the session is `failed`, the echo area says `NAME in ROOT: WHY; it ended 6 times in a row,
+  so it is not started again (M-x eglot-reconnect starts it)`, and nothing is scheduled. A server that ran 60 s
+  before it ended starts the count again. A start again that is refused (the program gone from PATH, or the image's
+  replay window open in that turn) counts as one more end, and as no run, so a program gone from PATH is given up even
+  after a healthy run. `eglot` on a failed session starts it again with the
+  count at 0.
+- **Shutdown** (`eglot-shutdown`, `eglot-shutdown-all`, the idle stop, quitting): the session is forgotten at once
+  (a start after it makes a new one); a running server gets `shutdown` (1 s for its answer, then `$/cancelRequest`
+  as for any request past its time), then `exit` and its input closed; a child not ended 400 ms later is KILLed
+  and given 200 ms more. A server still initializing gets `exit` alone. **On quitting** (native/js/main.ts's
+  `quit`, after edwind has confirmed the edits) every session is shut down this way in parallel before the
+  program exits, so within about 1.6 s; main.rs's `proc::kill_all` still ends any child left.
+- **Idle stop.** `eglot` attaches the buffer to its session; `kill-buffer-hook` detaches it. A session no buffer
+  uses is shut down after 5 minutes; a buffer attached in that time keeps it.
+- **Commands** (eglot's names, decision 2's default; no keys yet): `eglot` (start this buffer's server, or say
+  `already running` or how it is), `eglot-shutdown` (this buffer's server), `eglot-shutdown-all`, `eglot-reconnect`
+  (shut down and start afresh, its buffers kept), `eglot-stderr-buffer` (`*EGLOT NAME stderr*`, read-only). They
+  are frame commands (TypeScript `CMD`), so in edwinclient they run in the frame, on its machine.
+- **Choices**, each reversible:
+  - Auto-start trust per project (decision 2): servers start only by `eglot` in this package; starting them on
+    visiting a file is lsp-frame-docs's eglot-mode.
+  - Idle stop after 5 minutes with no buffer (decision 2's "idle shutdown"); eglot's `eglot-autoshutdown` stops at
+    once when the last buffer goes, and is off by default.
+  - Starts again with a doubling delay from 1 s, at most 5 in a row, a 60 s run counting as healthy: eglot's
+    `eglot-autoreconnect` reconnects only a server that ran 3 s, once per end, with no bound.
+  - The bounds on quitting (1 s, 400 ms, 200 ms) keep a quit under the 2 s a frame may block.
+  - Only UTF-16 positions are offered (lsp-frame-docs converts).
+- **Differences from eglot:** no events buffer (`eglot-events-buffer`): the error output only. The root is the
+  `.git`/`.jj` directory, not project.el's (no `.project` markers, no per-server root files). A server is an argv
+  (no TCP contact, no function). `processId` is null: the desktop program does not give its pid, and a server whose
+  parent dies sees its input close. `window/showMessageRequest` is answered null, not offered as a choice.
+  `eglot-shutdown` acts on the current buffer's server and does not ask which. In edwinclient, a server declared in
+  edwind's init.scm is skipped (that file is evaluated as the image is) and the rest of the file runs; the standalone
+  program's init.scm declares them. Until lsp-servers ships the table in scm/lsp.scm, an edwinclient frame has no
+  way to declare a server (its init.scm is replayed, its M-: evaluates on edwind), so there `eglot` answers that no
+  server is declared: the edwinclient half is not exercised by any test in this package.
+- **Not in it:** documents (didOpen, didChange, didSave, didClose: lsp-frame-docs) and eglot-mode; the server
+  table and settings (lsp-servers); direnv's environment (lsp-direnv); watched files; any request past initialize
+  and shutdown; a mode-line indicator; a list of the running servers. src/proc.ts is not changed.
+- **Checked by**, on ex44 (the build host): `nix build .#checks.x86_64-linux.edwin-lsp` (27 passed, 0 failed:
+  test/lsp-rpc.test.mts's 10 and test/lsp.test.mts's 17, nil from nixpkgs run in the sandbox, not skipped),
+  `edwin-typecheck`, `edwin-headless` (21; the pages' and the manifest's file and Scheme lists), `edwin-native`
+  (31; boot.ts's FILES equal host-node.cts's), `edwin-proc` (13), `edwin-compile` (39), `edwin-prog` (41),
+  `edit-console` (4), `edit-front` (9), `edit-lockdown` (6) and `edit-security` (21), since scm/lsp.scm and
+  src/lsp.ts also load in edwind; `nix build .#edwin` (unit 32 and 2 ignored, `tests/gui.rs` 5 and 1
+  ignored, `tests/terminal.rs` 37); `nix flake check path:$PWD`: all checks passed, after edwin-bench, a timing
+  bound, failed once on a loaded host (the shadow stack 10.5% over its 10% limit) and passed built again alone
+  (6.9%). test/lsp.test.mts (17), each against the stand-in server
+  (node, its behaviour chosen by its argv) unless named, every test starting with no child left:
+  - `eglot` returns with the session `starting`; the argv, the root as cwd, no output bound or timeout; then
+    `running` with the server's capabilities, `ready` in the echo area; initialize's `rootUri`, `rootPath`,
+    workspace folder, null `processId` and UTF-16 for a root `one two #3 %20 é`; `workspace/configuration`
+    answered `[null,null]`; the error output kept; a second buffer of the root on the same process (`already
+    running`), another root and another server one process each (3); `eglot-stderr-buffer`.
+  - `eglot-shutdown`: shutdown, then exit, the child's code 0, the buffer without a server at once, a second
+    `eglot-shutdown` a user-error; `shutdown-all` of two servers within 1.5 s, no child left.
+  - A server that ignores exit, and one that answers nothing after initialize: KILLed within the bounds, shutdown
+    waited for only when not answered.
+  - Ending after each initialize with 3 starts again allowed: 4 processes, `failed`, the message, nothing started
+    in the time after; `eglot` starts it again with the count at 0.
+  - The delays at 100 ms: gaps of at least 100, 200 and 400 ms between the 4 starts; a wait on it rejected when
+    it gives up.
+  - A crash once: started again, initialized again by a new process; KILLed after a healthy run, the count starts
+    again.
+  - A broken Content-Length: the child killed, started again, given up with the framing's reason; an unanswered
+    initialize (1.5 s): given up, the child killed.
+  - Idle stop at 150 ms: the last buffer killed, another attached in time keeps the session; killed again, it is
+    shut down (shutdown, exit) only after its time.
+  - `eglot-reconnect`: refused while the image replays with the server left running; then a new process, both
+    buffers on it.
+  - `eglot-reconnect` racing `eglot` in the root's other buffer, and two reconnects at once: one session, both
+    buffers on it, one process, none left after `shutdown-all` (fails with reconnect making its session
+    unconditionally: two processes, one in no session, still running after `shutdown-all`).
+  - A buffer killed while `eglot-reconnect` waits for the old server, idle at 150 ms: the new session holds only
+    the root's other buffer, and stops (shutdown, exit) after that one is killed too; then the root's only buffer
+    killed while a reconnect waits: the new session has no buffer and stops after its time, none left (fails with
+    the buffers attached unchecked: the dead buffer stays on the session and it runs on).
+  - `Ed.lsp.shutdownAll` (as quitting calls it), and in a second test `eglot-shutdown-all`, run while
+    `eglot-reconnect` waits for the old server: no spawn after it, no child, no session, the buffer on none, the
+    old server's log `initialize, initialized, answer, shutdown, exit`, the message; then `eglot` starts a server
+    (both fail without the count: the reconnect starts a server after the shutdown-all, the buffer attached to it,
+    still running).
+  - The refusals, nothing spawned: `eglot` while the image replays; two declarations there, evaluated as a served
+    frame evaluates edwind's init.scm, skipped with the message (the declaration before kept) and the form after
+    them run, a web frame, no `host.proc`, a buffer with no file, a shared buffer, a mode with no server; a missing
+    program a `process-error` with no session kept; the declaration's own refusals, each an `lsp-error` (fails with
+    scm/lsp.scm's `error`: a plain `error` condition).
+  - A session started again keeps its argv after the server is declared again.
+  - nil: initialize gives `definitionProvider`, a KILL started again with a new process, shutdown and exit end it
+    with code 0.
+  - A program gone from PATH after a healthy run: each start again refused, given up after the bound (fails with
+    the `started` reset before a start again taken out: it retried forever).
+  - In the built program (`tests/terminal.rs`, `quitting_shuts_the_language_servers_down`): `edwin -f eglot
+    proj/x.nix` with the server declared in init.scm, `:q`, the server's log `initialize, initialized, shutdown,
+    exit` and its process ended.
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's
