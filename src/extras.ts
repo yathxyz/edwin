@@ -95,20 +95,21 @@ H.postCommand = (def, b, failed) => {
 
 /* ---------- electric pairs in Insert state, and balanced brackets in Lisp buffers ---------- */
 const PAIRS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"' };
-/* A buffer of Lisp code that keeps its brackets balanced: a Scheme or Emacs Lisp buffer, not a minibuffer, with
+/* A buffer of Lisp code that keeps its brackets balanced: a buffer of a Lisp dialect, not a minibuffer, with
    electric-pair-mode on (SPC t e turns it all off). */
 const lispBrackets = (b: EdBuffer) => Ed.isLisp(b) && !b.minibuf && !b.readOnly && truthy(L.get('electric-pair-enabled'));
+const dia = (b: EdBuffer) => Ed.lispDialect(b) || 'scheme';
 const unbalanced = () => signal('user-error', 'That would unbalance the brackets');
 /* Replace FROM..TO with TEXT and put point at PT, or refuse when that leaves the brackets unbalanced. SPAN is
    balanceSpan's. */
 function balancedEdit(b: EdBuffer, span: [number, number], from: number, to: number, text: string, pt: number) {
-  if (!Ed.keepsBalance(b.rope, Ed.lexOf(b)!, span, from, to, text)) unbalanced();
+  if (!Ed.keepsBalance(b.rope, Ed.lexOf(b)!, span, from, to, text, dia(b))) unbalanced();
   Ed.replaceText(b, from, to, text); b.pt = pt;
 }
 /* Type CH at point in a Lisp buffer (ESC the character read after a backslash), keeping the brackets balanced;
    false when the text around point is not balanced to begin with, for the caller to insert CH as typed.
-   In code ( and [ insert a pair, with a blank between it and an atom next to it; ) and ] move out of the list
-   around point; " inserts an empty string; ; before more code on the line puts that code on a line of its own;
+   In code ( and [ (and { in Clojure) insert a pair, with a blank between it and an atom next to it; ) and ] (and })
+   move out of the list around point; " inserts an empty string; ; before more code on the line puts that code on a line of its own;
    | after # opens and closes a #| |# comment. In a string " inserts \", or steps over the closing quote. A
    backslash comes with the character after it. Anything else is inserted as typed, if that keeps the brackets
    balanced. Point between a backslash and the character it escapes is taken past that character first. */
@@ -116,7 +117,7 @@ function lispSelfInsert(b: EdBuffer, ch: string, esc: string | null) {
   const t = b.rope, cls = Ed.lexOf(b)!, n = t.length;
   let p = b.pt;
   if (p > 0 && p < n && Ed.escapingAt(t, cls, p - 1)) p++;
-  const span = Ed.balanceSpan(t, cls, p, p);
+  const span = Ed.balanceSpan(t, cls, p, p, dia(b));
   if (!span) return false;
   const put = (text: string, at = text.length) => balancedEdit(b, span, p, p, text, p + at);
   const prev = p > 0 ? t.charAt(p - 1) : '', next = p < n ? t.charAt(p) : '';
@@ -128,14 +129,15 @@ function lispSelfInsert(b: EdBuffer, ch: string, esc: string | null) {
     return true;
   }
   if (Ed.inCommentAt(t, cls, p)) return put(ch), true;
-  if (ch === '(' || ch === '[') {
-    let q = p; while (q > 0 && !/[\s()[\]";'`,]/.test(t.charAt(q - 1))) q--;
-    /* No blank after a # prefix (#( #u8( #s(), as the reader takes it with its list. */
+  const braces = dia(b) === 'clojure';
+  if (ch === '(' || ch === '[' || (braces && ch === '{')) {
+    let q = p; while (q > 0 && !/[\s()[\]{}";'`,]/.test(t.charAt(q - 1))) q--;
+    /* No blank after a # prefix (#( #u8( #s(, Clojure's #{ and #?( ), as the reader takes it with its list. */
     const hash = q < p && t.charAt(q) === '#' && !t.slice(q, p).includes('\\');
-    const pre = prev && !/[\s([`',@]/.test(prev) && !hash ? ' ' : '';
-    const post = next && !/[\s)\]]/.test(next) ? ' ' : '';
+    const pre = prev && !/[\s([{`',@~]/.test(prev) && !hash ? ' ' : '';
+    const post = next && !/[\s)\]}]/.test(next) ? ' ' : '';
     put(pre + ch + PAIRS[ch] + post, pre.length + 1);
-  } else if (ch === ')' || ch === ']') {
+  } else if (ch === ')' || ch === ']' || (braces && ch === '}')) {
     const e = Ed.upListForward(t, cls, p);
     if (e === null) signal('user-error', 'No list to close here');
     b.pt = e!;
@@ -174,8 +176,8 @@ function lispSelfInsert(b: EdBuffer, ch: string, esc: string | null) {
       for (let k = 0; k < count; k++) {
         const t = b.rope, cls = Ed.lexOf(b)!, p = b.pt;
         const to = p < t.length && t.charAt(p) !== '\n' && ch !== '\n' ? p + 1 : p;
-        const span = Ed.balanceSpan(t, cls, p, to);
-        if (span && !Ed.keepsBalance(t, cls, span, p, to, ch)) unbalanced();
+        const span = Ed.balanceSpan(t, cls, p, to, dia(b));
+        if (span && !Ed.keepsBalance(t, cls, span, p, to, ch, dia(b))) unbalanced();
         sic([1]);
       }
       return false;
@@ -210,8 +212,8 @@ function lispSelfInsert(b: EdBuffer, ch: string, esc: string | null) {
     const b = cur(), replaced = E.ins ? E.ins.replaced : [];
     if (lispBrackets(b) && b.pt > 0 && replaced.length) {
       const t = b.rope, cls = Ed.lexOf(b)!, p = b.pt, old = replaced[replaced.length - 1];
-      const span = Ed.balanceSpan(t, cls, p - 1, p);
-      if (span && !Ed.keepsBalance(t, cls, span, p - 1, p, old ?? '')) unbalanced();
+      const span = Ed.balanceSpan(t, cls, p - 1, p, dia(b));
+      if (span && !Ed.keepsBalance(t, cls, span, p - 1, p, old ?? '', dia(b))) unbalanced();
     }
     return rb([]);
   });
@@ -244,7 +246,7 @@ function lispDeletion(t: EdText, cls: ArrayLike<number>, p: number, forward: boo
   if (Ed.escapingAt(t, cls, k)) return escape(k);
   if (Ed.escapingAt(t, cls, k - 1)) return escape(k - 1);
   if (cls[k] === Ed.C.PAR) {
-    if (c === '(' || c === '[') {
+    if (c === '(' || c === '[' || c === '{') {
       const e = Ed.forwardSexp(t, cls, k);
       if (e !== null) { let s = k; while (s > 0 && cls[s - 1] === Ed.C.QUO) s--; return [forward ? k : s, e]; }
     } else if (forward) {
@@ -279,7 +281,7 @@ Elsewhere, DEL between an empty pair of brackets or quotes deletes both.`, ([n, 
       const t = b.rope, cls = Ed.lexOf(b)!, p = b.pt;
       if (forward ? p >= t.length : p <= 0) signal(forward ? 'end-of-buffer' : 'beginning-of-buffer');
       const d = lispDeletion(t, cls, p, forward);
-      const span = typeof d === 'number' ? Ed.balanceSpan(t, cls, p, p) : Ed.balanceSpan(t, cls, d[0], d[1]);
+      const span = typeof d === 'number' ? Ed.balanceSpan(t, cls, p, p, dia(b)) : Ed.balanceSpan(t, cls, d[0], d[1], dia(b));
       if (!span) { if (k === 0) return false; Ed.deleteText(b, forward ? p : p - 1, forward ? p + 1 : p); continue; }
       if (typeof d === 'number') { b.pt = d; break; }
       balancedEdit(b, span, d[0], d[1], '', d[0]);
@@ -306,8 +308,8 @@ D('lisp-newline-prefix', '', 'The text RET puts after the new line\'s indentatio
     const m = /^;+/.exec(t.slice(s, p));
     if (m) prefix = m[0] + ' ';
   }
-  const span = Ed.balanceSpan(t, cls, p, p);
-  if (span && !Ed.keepsBalance(t, cls, span, p, p, '\n' + prefix)) unbalanced();
+  const span = Ed.balanceSpan(t, cls, p, p, dia(b));
+  if (span && !Ed.keepsBalance(t, cls, span, p, p, '\n' + prefix, dia(b))) unbalanced();
   return prefix;
 });
 

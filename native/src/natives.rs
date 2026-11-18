@@ -1320,7 +1320,7 @@ mod tests {
     /// bundle: the classes of Ed.renderBuffer's runs for each fixture of test/syntax-faces.txt are its golden
     /// runs; each line drawn alone (a window whose first line is inside a comment or string begun above it) has
     /// the classes it has in the whole; and after edits, the classes are those of a fresh buffer of the same text
-    /// (the tree kept in step through the edit log). Every mode scm/prog.scm declares has a fixture.
+    /// (the tree kept in step through the edit log). Every mode scm/prog.scm declares but the Lisp modes has a fixture.
     #[test]
     fn the_core_highlights_each_language_as_its_golden_runs() {
         let golden = include_str!("../../test/syntax-faces.txt");
@@ -1430,7 +1430,8 @@ mod tests {
         const want = rest.slice(sep + 5).split('\n').filter(l => l && !l.startsWith('#'));
         fixtures.push({ mode, text: rest.slice(0, sep + 1), want });
       }
-      const modes = [...PROG.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]);
+      /* The Lisp modes have no grammar: the Lisp lexer reads them (Ed.lispDialect). */
+      const modes = [...PROG.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]).filter(m => !Ed.lispDialect({ mode: m }));
       const have = fixtures.map(f => f.mode);
       if (JSON.stringify([...modes].sort()) !== JSON.stringify([...have].sort()))
         throw new Error(`modes ${modes} but fixtures for ${have}`);
@@ -1634,8 +1635,9 @@ mod tests {
         const want = rest.slice(sep + 5).split('\n').filter(l => l && !l.startsWith('#'));
         fixtures.push({ mode, text: rest.slice(0, sep + 1), want });
       }
+      /* The Lisp modes have no grammar: the Lisp lexer reads them (Ed.lispDialect). */
       const modes = [...PROG.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1])
-        .filter(m => globalThis.__n.synLoad(Ed.syntax.grammarOf(m)).includes('tags'));
+        .filter(m => !Ed.lispDialect({ mode: m }) && globalThis.__n.synLoad(Ed.syntax.grammarOf(m)).includes('tags'));
       const have = fixtures.map(f => f.mode);
       if (JSON.stringify([...modes].sort()) !== JSON.stringify([...have].sort()))
         throw new Error(`modes with tags ${modes} but fixtures for ${have}`);

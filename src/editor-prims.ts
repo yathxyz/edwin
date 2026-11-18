@@ -1044,14 +1044,18 @@ CMD('consult-line', async () => {
 }, 'line', 'Jump to a line chosen by searching its text, with live preview (SPC s s).', ([n]) => {
   const b = cur(); EvilCore.pushJump(b, b.pt); b.pt = Ed.lineStartOf(b.rope, n as number); b.pt = EvilCore.firstNonBlank(b.rope, b.pt); E.recenter = 'center'; return false;
 });
-/* The definitions of B for consult-imenu: its grammar's, from the tree (syntax.ts), else what these patterns find. */
+/* The definitions of B for consult-imenu: its grammar's, from the tree (syntax.ts), else what these patterns find.
+   A Lisp buffer's items are its definitions: the column-0 forms whose head is one of its dialect's defining words
+   (Ed.lispDefiners), each by the name after it, past a ' (defalias 'f), a Clojure metadata ^:private and the ( of a
+   curried define or a defstruct with options. */
 function imenuItems(b: EdBuffer) {
   const tagged = Ed.syntax ? Ed.syntax.imenu(b) : null;
   if (tagged) return tagged;
-  const t = b.text, out: { name: string; kind: string; pos: number }[] = [];
-  if (Ed.isLisp(b)) {
-    const re = /^\((?:define(?:-command|-syntax|-macro|-record-type)?|evil-define-(?:motion|operator|text-object|command))\s+\(?([^\s()]+)/gm; let m: RegExpExecArray | null;
-    while ((m = re.exec(t))) out.push({ name: m[1], kind: m[0].slice(1).split(/\s/)[0], pos: m.index });
+  const t = b.text, out: { name: string; kind: string; pos: number }[] = [], dialect = Ed.lispDialect(b);
+  if (dialect) {
+    const heads = Ed.lispDefiners[dialect].map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const re = new RegExp(`^\\((${heads})\\s+(?:'|\\^[^\\s()[\\]{}"]+\\s+)*\\(?([^\\s()[\\]{}"']+)`, 'gm'); let m: RegExpExecArray | null;
+    while ((m = re.exec(t))) out.push({ name: m[2], kind: m[1], pos: m.index });
   } else if (b.mode === 'org-mode') {
     const re = /^(\*+)\s+(.*)$/gm; let m: RegExpExecArray | null;
     while ((m = re.exec(t))) out.push({ name: '  '.repeat(m[1].length - 1) + m[2], kind: 'heading', pos: m.index });
@@ -1441,6 +1445,7 @@ D('%define-derived-mode', 'child parent name body', 'define-derived-mode: CHILD 
   return c;
 });
 D('derived-mode-all-parents', 'mode', 'MODE and the modes it derives from, nearest first.', ([m]) => listOf(Ed.modeChain(symName(m, 'derived-mode-all-parents')).map(n => intern(n))));
+D('lisp-dialect', '[buffer]', 'The Lisp dialect BUFFER\'s major mode reads its text in: scheme, elisp, cl or clojure, or #f for none.', ([bb]) => { const d = Ed.lispDialect(Ed.toBuffer(bb === undefined ? false : bb)); return d ? intern(d) : false; });
 D('derived-mode-p', '. modes', 'The first of MODES the current major mode is or derives from, or #f.', ms => { const chain = Ed.modeChain(cur().mode); for (const m of ms) if (m instanceof Sym && chain.includes(m.name)) return m; return false; });
 
 /* The Scheme side of the forms above. */

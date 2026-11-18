@@ -6247,6 +6247,193 @@ with `electric-pair-mode` on.
   times `src/scheme.ts` alone, which this package does not change, and passed at 7.9% built again at a lower load,
   after which `nix flake check --keep-going` exited 0.
 
+## Lisp modes: Emacs Lisp, Common Lisp, Clojure and Racket (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-lisp-modes`): Lisp modes with each dialect's indentation
+rules and definition forms. Before, only `scheme-mode` and `scheme-interaction-mode` were Lisp buffers, `.el` files
+opened in `scheme-mode` (indented as Emacs Lisp by their file name), and `.clj`, `.rkt` and `.lisp` files opened in
+`fundamental-mode`: no brackets, no `=` ("No indentation rules for fundamental-mode"), no `%` past a bracket in a
+string (the audit's item 71 and its cases `pct-clj-string` and `=G-rkt`). The owner's Emacs (`init-prog.el`) edits
+`lisp-mode`, `emacs-lisp-mode`, `scheme-mode`, `racket-mode` and the three Clojure modes with lispy; it has no SLY,
+SLIME or geiser, so no mode here evaluates code.
+
+- **The modes** (`scm/prog.scm`, `define-language`, each derived from `prog-mode`, `;;` comments):
+  `emacs-lisp-mode` (`.el`), `lisp-mode` (`.lisp`, `.lsp`, `.cl`, `.asd`; `#| |#` block comments), `clojure-mode`
+  (`.clj`, `.cljs`, `.cljc`, `.edn`) and `racket-mode` (`.rkt`, `#| |#`). No `:indent`: the Lisp indenter decides
+  the columns, and `tab-width` stays 8. `.scm`, `.ss` and `.sld` stay `scheme-mode`.
+- **One dialect per buffer** (`lispDialect`, `src/editor-core.ts`, and the `lisp-dialect` primitive): the first
+  mode of the buffer's mode chain in a table gives `scheme` (`scheme-mode`, `scheme-interaction-mode`, the
+  minibuffer, `racket-mode`), `elisp`, `cl` or `clojure`; anything else is no Lisp. `isLisp` is that, so the lexer,
+  the bracket guard, `%`, the sexp and list motions, `=`, show-paren, symbol completion and snippets treat every
+  Lisp mode alike; `lisp-buffer?` (`scm/emacs.scm`) is the same test without the minibuffer.
+- **The lexer reads each dialect** (`lex`, `markDocstrings`, given the dialect; the buffer's cached classes are
+  dropped when its dialect changes, and the worker pool's and edwind's lex jobs (`src/pool.ts`, `server/jobs.mts`)
+  are sent it; a dialect that is none of the four, as a job's argument could be, reads as Scheme, the tables having
+  no prototype):
+  - character literals: `#\c` in Scheme and Common Lisp, `?c` and `?\c` in Emacs Lisp, `\c` in Clojure, so `?\(`
+    and `\(` are no brackets;
+  - Clojure: `{ }` are brackets beside `( )` and `[ ]` (`#{` a set's prefix, `#?(` a reader conditional's), `,` is a
+    blank, `~` and `~@` are quote prefixes, `#"..."` is a string (a regexp), `#_` is the datum comment (`#;`
+    elsewhere), and a `^meta` after `defn` does not take the place of the name;
+  - a `#` dispatch prefix goes with the list after it, where Emacs's syntax tables read it as an expression prefix
+    too: a `#` alone before a bracket (`#(` in every dialect, Emacs Lisp's `#[`, Clojure's `#{`), Clojure's `#?(`
+    and `#?@(` and Emacs Lisp's `#s(`. The lexer classes the prefix a quote prefix, so `forward-sexp` and `backward-sexp` cross it with the
+    list (`(#(foo %) 1)`: `C-M-f` from after the `(` stops after `%)`, not after `#`) and the indenter counts it as
+    one argument (`(when #(x)` then `y` at 2, as clojure-mode, scheme-mode, lisp-mode and emacs-lisp-mode give;
+    it was 6). This was the same bug in Scheme, Common Lisp and Emacs Lisp, where Emacs also gives 2, so the fix
+    is in every dialect. `#u8(` and Common Lisp's `#2A(` stay a sexp before the list, as Emacs reads them (`(when
+    #u8(1)` then `y` at 6), though the datum comment still takes them whole. In Common Lisp the line after a head
+    with a prefix goes under the head past it, as cl-indent puts it (`(#(a)` then `1` at 2, `(#'(a)` then `1` at
+    3; Scheme and Emacs Lisp 1);
+  - each dialect's keywords and defining words (`LISP_KEYWORDS`, `LISP_DEFINERS`): the definers' names get the
+    function face, and a docstring after a `defun`, `defmacro`, `defgeneric` (Emacs and Common Lisp), `cl-defun`,
+    `defn`, `defmacro`, `defmulti` or `defprotocol` (Clojure) the docstring face.
+- **Clojure's `{ }`** (`src/extras.ts`, `src/evil-core.ts`): `{` pairs and `}` leaves the map as `(` and `)` do, a
+  `}` that would close a list early is refused, and `%` and `C-M-f` pair braces by the lexer. In the other dialects
+  `{` stays a plain character to type (lang-lisp-brackets' choice) and `%` still pairs `{ }` by their text, as before.
+- **Indentation by dialect** (`lispIndentFor(t, cls, ls, dialect)`):
+  - Scheme and Emacs Lisp: unchanged (se-indent's `scheme-indent-function` and `lisp-indent-function`), now chosen
+    by the mode, not the file name.
+  - Common Lisp: `common-lisp-indent-function` (Emacs 31.1's `cl-indent.el`) with its specs reduced to a count of
+    distinguished arguments (`CL_INDENT`, 70 forms): up to that many at +4, the first body form at +2, the rest under
+    the line before. A first argument whose spec gives it an offset of its own takes that when it starts its line
+    (`CL_FIRST`): `unwind-protect`'s protected form, `(5 &body)`, at +5 (`(unwind-protect` then `(foo)` at 5, `(bar)`
+    at 2), and the `(&whole 6 ...)` or `6` of `multiple-value-bind`, `destructuring-bind`, `with-slots`,
+    `with-accessors`, `with-condition-restarts`, `defclass` and `define-condition` at +6 (`(multiple-value-bind` then
+    `(a b)` at 6, `(f)` at 4, `x` at 2). The forms with a tagbody (`lisp-indent-tagbody`, `CL_TAGS`): a line among
+    `tagbody`'s arguments or after `prog`'s or `prog*`'s lambda list is a tag at +1 when it starts with a symbol or
+    word character (`tag`, `:kw`, `1`; not `#'f`, `'x` or `"s"`), else a statement at +3 (`(prog (a)` then `(foo)` at
+    3, `tag` at 1); after `do`'s or `do*`'s end test, a tag at +1 and a statement at +2 (`lisp-indent-do`). `cond`'s
+    spec, `(&rest (&whole 2 &rest 1))`, is 0 (its first clause at +2, the rest under the
+    line before); `ignore-errors` is 0, the Emacs Lisp indent property cl-indent falls back to; `if`'s spec,
+    `(&rest nil)`, puts every argument under the line before (its branches align), as no entry does. A head of no
+    entry that starts with `def` is a defun, one that starts with `with-`, `without-` or `do-` has one; a package
+    prefix is dropped (`cl:defun`); a `defmethod`'s qualifiers, the atoms after its name, are distinguished arguments
+    of their own, so its body goes at +2 (`(defmethod f :before ((x a))` then `x` at 2). Walking out through up to
+    three lists, as cl-indent does: a list quoted with `'` or written `#(` holds data (its elements under the
+    first), the local functions of `flet`, `labels` and `macrolet` and the clauses of `handler-case` and
+    `restart-case` are defun-like (`CL_INNER`).
+  - Common Lisp lambda lists (`lisp-indent-lambda-list`), in the argument cl-indent's spec marks `&lambda`
+    (`CL_LAMBDA`): the second of `defun`, `defmacro`, `defgeneric`, `defsubst`, `deftype`, `define-setf-method`,
+    `define-setf-expander`, `define-modify-macro` and `defsetf`, a `defmethod`'s after its qualifiers, the first of
+    `lambda`, `:method`, `prog`, `prog*` and `with-compilation-unit`, and the first of a `handler-case` or
+    `restart-case` clause. A line there that starts with a lambda-list keyword (`&optional`, `&rest`, `&key`,
+    `&allow-other-keys`, `&aux`, `&whole`, `&body`, `&environment`, case folded) goes under the first parameter; any
+    other goes at the last keyword before it + 2 (`(defun g (&key (a 1)` then `(key-b 2))` at 12), or under the
+    first parameter when there is none (`(defun f (a b` then `c d)` at 10). The keyword is searched for in the text
+    of the list before the line, comments too, as Emacs does. A lambda list deeper than three lists (an `flet`
+    local function's) and those of a `def` or `with-` head of no entry are not lambda lists to cl-indent, nor here.
+  - Common Lisp `loop`, cl-indent's own case (`common-lisp-loop-part-indentation`, before its specs): each line
+    directly in an extended loop (one whose first argument starts with a keyword or a word character, or that has
+    none) at +6 (`(loop` then `for x in y` at 6), each in a simple loop (`(loop (foo)` then `(bar))`) at +1.
+  - Clojure: `clojure-indent-function` (clojure-mode 5.23.0, its default `always-align` style), with its table in
+    the legacy spec form its backtracking engine reads (`CLJ_INDENT`, 64 forms): a vector, a map, a set, a reader
+    conditional or a list whose head is no symbol holds data, its elements under the first; a number spec N puts
+    N special arguments at +4 and the body at +2; `:defn` the body at +2; a list spec one spec per argument, a nested
+    list one for the forms inside it, found by walking out through up to three lists
+    (`clojure--find-indent-spec-backtracking`), so `deftype`'s, `defrecord`'s, `reify`'s, `letfn`'s and
+    `extend-protocol`'s method bodies go at +2. A namespaced name takes its name's spec (`s/when`), an `if-`,
+    `when-`, `let-` or `while-` name the spec of `if`, `when`, `let` or `while`; with no spec a head that starts with
+    `def` (not `default`) or `with-`, after any namespace, takes the body at +2, a keyword head is a call.
+- **Definitions** (`consult-imenu`, `src/editor-prims.ts`): a Lisp buffer's items are its column-0 forms whose head
+  is one of its dialect's defining words, by the name after it, past a `'` (`defalias 'f`), a Clojure `^:private`
+  and the `(` of a curried `define` or a `defstruct` with options. Scheme's list is the one before.
+- **Choices** (where Edwin differs from Emacs):
+  - One `clojure-mode` for `.clj`, `.cljs`, `.cljc` and `.edn`; clojure-mode has `clojurescript-mode`,
+    `clojurec-mode` and `edn-mode` for the last three. They indent alike there.
+  - `racket-mode` is read and indented as Scheme, as Emacs's `scheme-mode` indents a `.rkt` file (the fixture is
+    that): the racket-mode package's own table (`for` and `struct` at +2, `module+` as a defun) is not followed.
+  - The new modes have no evaluation keys: `C-M-x` and `C-c C-b` stay `scheme-mode-map`'s, so a `.el` buffer, which
+    evaluated its text as Edwin Scheme with them before, no longer does.
+  - Edwin's global names complete only in Edwin's own Scheme (`scheme-mode`, `scheme-interaction-mode`, the
+    minibuffer); a `.rkt` or `.clj` buffer completes from the buffers' words.
+  - `.emacs` is not mapped to `emacs-lisp-mode`, and `.bb` (Babashka) not to `clojure-mode`.
+  - Common Lisp `loop`: the rule is for the head `loop` alone, and a quoted list stays data. Emacs's test is a
+    prefix match on the text `(loop`, made before its quoted-list test, so there `(loop-finish` then `a` goes at 6
+    (Edwin 1, a call) and `'(loop` then `for` at 7 (Edwin 2, data).
+  - Common Lisp `defmethod` qualifiers: Edwin counts the method's own. Emacs 31.1 counts those of the top-level
+    form around the line (`lisp-indent-defmethod` calls `beginning-of-defun`), so the body of a method with
+    qualifiers inside a `progn` or `eval-when` goes under the line before there (`(defmethod f :before ((x a))` at
+    column 2, then `x` at 13; Edwin 4). And Emacs signals a scan error ("Containing expression ends prematurely")
+    on a qualified method's body line that starts with a list (`(defmethod area :around ((s square))` then
+    `(call-next-method))`), so it cannot indent that line at all; Edwin puts it at +2. The fixture's qualified
+    methods have atoms for bodies, which Emacs indents.
+  - Common Lisp, not modelled: the parts of the specs past their count of distinguished arguments and their first
+    argument's offset (the `&whole` and `&rest` offsets inside a clause or a binding list, and `do`'s `(&whole nil
+    &rest 1)` for its bindings and end test, which puts each under the line before where Edwin puts them at +4: only
+    when they start their own lines, `(do` then `((i 0))` at 1 in Emacs, 4 here), and the Emacs Lisp indent
+    properties other than `ignore-errors`'s that
+    Emacs applies in a `lisp-mode` buffer through the same fallback (`when-let`, `if-let`, `while`: none of them is
+    standard Common Lisp, so they are calls here).
+  - Clojure: a line that starts inside a `#_` datum is left where it is, as one inside `#;` is in Scheme, and the
+    line after the datum goes under that line's first datum (column 9 where Emacs gives 3). A `#_` datum is no
+    argument to the indenter, where clojure-mode counts it (`(when #_(x)` then `y` at 4, Emacs 6). Metadata `^:x` is a
+    sexp of its own to the motions, where clojure-mode's indentation sees it with the form after it. Only the
+    `always-align` style is modelled, and `clojure-indent-function`'s user table (`put-clojure-indent`) has no
+    Scheme form here.
+  - The tree-sitter grammar bundle has no grammar for the Lisp modes, which the Lisp lexer reads: `test/grammars.py`
+    (by a list of the four), `edwin-syntax`'s mode-table test and the native golden-faces and golden-imenu tests
+    (`native/src/natives.rs`, all by `Ed.lispDialect`) leave them out, and `Ed.syntax.grammarOf` gives none.
+- **Not in it**: evaluating Emacs Lisp, Common Lisp or Clojure (no SLY, CIDER or ielm); `put-clojure-indent` and
+  `lisp-indent-function` properties set from Scheme; `clojurescript-mode`, `clojurec-mode` and `edn-mode` as modes
+  of their own; Clojure's `fixed` and `align-arguments` styles; lispy's commands in the new modes
+  (lang-lispy-structural, -motions, -operators).
+- **Checked by**, on ex44, on the final code (this one commit on `emacs-to-edwin` at 7a5f43f), on 2026-11-18:
+  `nix build .#checks.x86_64-linux.edwin-prog` (76 tests, 76 passed: `test/prog.test.mts` 60, 11 new, and
+  `test/editorconfig.test.mts` 16):
+  - The fixtures (`test/fixtures/indent/lisp-modes.lisp`, 213 lines, `.clj` 134 and `.rkt` 32), each GNU Emacs
+    31.1's `indent-region` output in `lisp-mode`, `clojure-mode` 5.23.0 and `scheme-mode` (`indent-tabs-mode` nil),
+    and Emacs's fixed point too (indenting each again, whole and from its lines unindented, gives it back byte for
+    byte): `gg=G` on each fixture changes no line, and `gg=G` on it with every line's leading blanks taken away
+    gives it back, but for the lines written in `LISP_DIFFERS`, each with the column Edwin gives it (the `#_` lines
+    in `.clj`, one whole and one unindented; none in `.lisp` or `.rkt`). The `.lisp` fixture has qualified methods
+    (one and two qualifiers), lambda lists with and without keywords (`&optional`, `&key`, `&rest`, `&whole`, a
+    specialized `defmethod`'s, a `handler-case` clause's), an extended and a simple `loop`, `cond` and
+    `ignore-errors` with their first argument on a line of its own, `unwind-protect` (alone and in a `defun`),
+    `multiple-value-bind`, `destructuring-bind`, `with-slots`, `defclass` and `define-condition` with their first
+    argument on a line of its own, `prog`, `tagbody` and `do` with statements and tags (`tag`, `:kw`, `1`, and
+    `#'foo` and `'x` as statements).
+  - The audit's cases `pct-clj-string` (`%` from the start of `(a ")" b)` to its last `)`, `iX`) and `=G-rkt`.
+  - Each extension's mode, dialect, `lisp-buffer?`, `prog-mode` parent and `gcc` comment, a Markdown buffer and
+    the minibuffer; the sample table of `define-language`'s test with the new modes, and `.ss` and `.sld` in
+    `scheme-mode`.
+  - `if` and an unknown `define-foo` in each dialect, Clojure's maps, keyword heads, `s/when` and `defn` arities,
+    Common Lisp's quoted list and `flet`; a qualified `defmethod` with a list for its body and one inside a
+    `progn` (body at +2), `(loop-finish` and `'(loop` (no loop); `unwind-protect` (alone and in a `defun`) and
+    `multiple-value-bind` with their first argument on its own line, `prog`, `tagbody` and `do` with a tag among
+    their statements, `(do` with its bindings on the next line (+4).
+  - The `#` dispatch prefix, each column checked against `emacs --batch -Q` (31.1; clojure-mode 5.23.0): `(when
+    #(x)` then `y` at 2 in Clojure, Scheme and Common Lisp, `(when #{x}`, `(when #?(:clj x)` and `(when #?@(:clj
+    [x])` at 2, `(#(foo %)` then `1` at 1 and `(#(foo %) a` then `b` at 10 in Clojure; `(#(a)` then `1` at 1 in
+    Scheme and Emacs Lisp, at 2 in Common Lisp, `(#'(a)` at 3 and `(#(a) b` then `c` at 2 there, `'(#(a)` at 2;
+    Emacs Lisp's `#s(` and `#[` at 2; `(when #u8(1)` and Common Lisp's `(when #2A((1))` at 6, as before; `(when
+    #_(x)` at 4 (Emacs 6, written down above). `forward-sexp` from after the `(` of `(#(foo %) 1)`, `(#{a b} 1)`,
+    `(#?(:clj x) 1)`, `(#?@(:clj [x]) 1)`, Scheme's and Common Lisp's `(#(a b) 1)` and Emacs Lisp's `(#s(a b) 1)`
+    and `(#[a b] 1)` stops after the list, and `backward-sexp` from there comes back, both by `Ed.forwardSexp` and
+    `Ed.backwardSexp` and by the commands; in `(#u8(1 2) 1)` after `#u8`. On the code before the fix (the
+    branch's previous version, probed with `Ed.lex`, `Ed.forwardSexp` and `Ed.lispIndentFor`) `(when #(x)` then `y`
+    was 6 in all four dialects and `forward-sexp` in `(#(foo %)` stopped at 2, after the `#`.
+  - Clojure's braces: `%` on `{` and `}`, `C-M-f` over a map, `{` pairing, `}` leaving the map, `}` at the end of a
+    list refused, `%` on `#{`; `{` in Scheme typed alone and `%` there by text; a `.scm` buffer switched to
+    `clojure-mode` lexed again.
+  - `?\(` and `?\)` in Emacs Lisp, `\(`, `\)` and `#"("` in Clojure, `#\(` in Scheme and Common Lisp, by `%`; `,`
+    as a blank to `forward-sexp`.
+  - `consult-imenu` in each dialect: `defalias 'g`, `defstruct (point ...)`, `defn ^:private helper`, Racket's
+    `define-syntax`.
+  - A dialect that is none of the four (`constructor`, `__proto__`, `toString`) lexes as Scheme.
+
+  A first `nix build` of these four checks together (load average 2.2): `edwin-structural` (219 tests) failed only its
+  B11 budget, `%` in 10,000 lines of Python at a median of 2.13 ms beside the other three builds, and passed rebuilt
+  alone (219 passed, exit 0; Python's median 1.27 ms, TypeScript's 1.29, Nix's 0.93); the same four built again
+  then exit 0: `edwin-prog` (76 above), `edwin-syntax` (34 tests, 34 passed), `edwin-structural` (219) and
+  `edwin-typecheck`. Then `nix flake check -L --keep-going --max-jobs 2 path:$PWD`: exit 0, "all checks passed!".
+  Of its 46 checks 44 were built by these runs (`edwin-grammars` and `edwin-module` came from the store, the same
+  derivations already built and passed), among them `edwin-lsp` (75),
+  `edwin-headless` (21), `edwin-pool` (21), `edwin-scheme` (38), `edwin-native` (31), `edit-crash` (7),
+  `edit-security` (21), `edit-lockdown` (6), `edwin-bench` (shadow stack 6.5%, limit 10%) and `edwin` (the
+  package's cargo tests: unit 41 passed and 3 ignored, `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 37 and
+  1 ignored).
+
 ## Incremental reparse (done)
 
 Asked 2026-11-17 (the Emacs-to-Edwin plan, package `lang-syntax-incremental`): edits fed to the tree, so that a

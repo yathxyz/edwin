@@ -827,6 +827,8 @@ interface EdBuffer extends SchemeForeign {
   _lcb?: Uint8Array | number[] | null;
   _ldb?: unknown;
   _llen?: number;
+  /* the Lisp dialect _lc was lexed in */
+  _ldia?: string;
   _lexBusy?: boolean;
   /* codeLexOf's cache: the version and the language it was made for, and its classes */
   _cxv?: number;
@@ -1511,7 +1513,7 @@ interface EdApi {
   spanOf(b: EdBuffer, old: number): { pre: number; suf: number } | null;
   changedSince(b: EdBuffer, ver: number): boolean;
   forgetLog(b: EdBuffer): void;
-  installLex(b: EdBuffer, ver: number, cls: Uint8Array | number[], d: unknown): void;
+  installLex(b: EdBuffer, ver: number, cls: Uint8Array | number[], d: unknown, dialect: string): void;
   metrics(w: EdWindow): EdMetrics;
   lastMatch(str: string, re: RegExp, from: number, len: number, win?: number): number;
   /* text helpers: T is a string or a rope */
@@ -1522,12 +1524,12 @@ interface EdApi {
   posAtColumn(t: EdText, ls: number, col: number): number;
   lastLineStart(t: EdText): number;
   lineStartOf(t: EdText, n: number): number;
-  lex(t: string, info?: { dirty: boolean }): Uint8Array;
+  lex(t: string, info?: { dirty: boolean }, dialect?: string): Uint8Array;
   lexOf(b: EdBuffer, soft?: boolean): Uint8Array | number[] | null;
   /* outside Lisp: the classes of a programming language's buffer B (C.STR in a string, C.CMT in a comment,
      C.PLAIN in code) by its mode's quotes and the comment syntax LINE OPEN CLOSE, kept for B's version */
   codeLexOf(b: EdBuffer, line: string | null, open: string | null, close: string | null): Uint8Array;
-  markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, base?: number): Uint8Array;
+  markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, base?: number, dialect?: string): Uint8Array;
   forwardSexp(t: EdText, cls: ArrayLike<number>, p: number): number | null;
   backwardSexp(t: EdText, cls: ArrayLike<number>, p: number): number | null;
   upList(t: EdText, cls: ArrayLike<number>, p: number): number | null;
@@ -1547,14 +1549,18 @@ interface EdApi {
   /* the line start of the top-level form at or before P, or after P; -1 for none */
   defunBefore(t: EdText, cls: ArrayLike<number>, p: number): number;
   defunAfter(t: EdText, cls: ArrayLike<number>, p: number): number;
-  balancedLisp(s: string): boolean;
+  balancedLisp(s: string, closed?: boolean, dialect?: string): boolean;
   /* the span an edit of FROM..TO is judged on, null when it was not balanced */
-  balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number): [number, number] | null;
-  keepsBalance(t: EdText, cls: ArrayLike<number>, span: [number, number], from: number, to: number, text: string): boolean;
+  balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number, dialect?: string): [number, number] | null;
+  keepsBalance(t: EdText, cls: ArrayLike<number>, span: [number, number], from: number, to: number, text: string, dialect?: string): boolean;
   indentLine(b: EdBuffer): void;
   /* null inside a string: leave the line alone */
-  lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp?: boolean): number | null;
+  lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, dialect?: string): number | null;
   isLisp(b: EdBuffer): boolean;
+  /* the buffer's Lisp dialect by its major mode, or null in a buffer of no Lisp */
+  lispDialect(b: EdBuffer): 'scheme' | 'elisp' | 'cl' | 'clojure' | null;
+  /* each dialect's defining words (define, defun, defn ...) */
+  lispDefiners: Record<string, string[]>;
   modeFor(name: string): string;
   MODE_NAMES: Record<string, string>;
   /* keys */

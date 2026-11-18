@@ -785,7 +785,7 @@ function codeClasses(b: EdBuffer): Uint8Array | null {
 /* The bracket matching the bracket at K, counting only the brackets CODE (codeClasses) classes as code. */
 function matchBracket(b: EdBuffer, k: number, code: Uint8Array | null): number | null {
   const t = b.rope, ch = t.at(k)!;
-  if (Ed.isLisp(b) && (ch === '(' || ch === ')' || ch === '[' || ch === ']')) { const cls = Ed.lexOf(b)!; if (cls[k] === Ed.C.PAR) { const o = Ed.matchParen(t, cls, k); return o === null || o === undefined ? null : o; } }
+  if (Ed.isLisp(b) && (PAIRS[ch] || CLOSE[ch])) { const cls = Ed.lexOf(b)!; if (cls[k] === Ed.C.PAR) { const o = Ed.matchParen(t, cls, k); return o === null || o === undefined ? null : o; } }
   const counts = (j: number) => !code || code[j] === Ed.C.PLAIN;
   if (PAIRS[ch]) { let d = 0; for (let j = k; j < t.length; j++) { if (!counts(j)) continue; if (t.at(j) === ch) d++; else if (t.at(j) === PAIRS[ch] && --d === 0) return j; } return null; }
   if (CLOSE[ch]) { let d = 0; for (let j = k; j >= 0; j--) { if (!counts(j)) continue; if (t.at(j) === ch) d++; else if (t.at(j) === CLOSE[ch] && --d === 0) return j; } return null; }
@@ -835,10 +835,10 @@ D('evil-select-region', 'BEG END', 'Select the text from BEG to END in character
 });
 D('evil--jump-item', '', 'Position of the bracket matching the first bracket at or after point on this line, or nil.', () => {
   const b = cur(), t = b.rope, le = eol(t, b.pt);
-  /* In Lisp a ( ) [ or ] in a string, a comment or a character literal (#\() is not a bracket; in another
-     programming language no bracket in a string or a comment is one. */
-  const cls = Ed.isLisp(b) ? Ed.lexOf(b)! : null, code = codeClasses(b);
-  const bracket = (k: number) => { const c = t.at(k)!; return (PAIRS[c] || CLOSE[c]) && (!cls || c === '{' || c === '}' || cls[k] === Ed.C.PAR) && (!code || code[k] === Ed.C.PLAIN); };
+  /* In Lisp a ( ) [ or ] in a string, a comment or a character literal (#\() is not a bracket, nor in Clojure a { or };
+     in another programming language no bracket in a string or a comment is one. */
+  const cls = Ed.isLisp(b) ? Ed.lexOf(b)! : null, braces = !cls || Ed.lispDialect(b) !== 'clojure', code = codeClasses(b);
+  const bracket = (k: number) => { const c = t.at(k)!; return (PAIRS[c] || CLOSE[c]) && (!cls || (braces && (c === '{' || c === '}')) || cls[k] === Ed.C.PAR) && (!code || code[k] === Ed.C.PLAIN); };
   let k = b.pt; while (k < le && !bracket(k)) k++;
   if (k >= le) return false;
   const m = matchBracket(b, k, code); return m === null ? false : m + 1;

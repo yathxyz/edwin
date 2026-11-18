@@ -78,8 +78,9 @@
   (and (char? c) (or (char-alphabetic? c) (char-numeric? c) (char=? c #\_))))
 
 (define (lisp-buffer?)
-  "#t if the current buffer holds Scheme code."
-  (memq (major-mode) '(scheme-mode scheme-interaction-mode)))
+  "#t if the current buffer holds Lisp code (Scheme, Emacs Lisp, Common Lisp or Clojure: lisp-dialect), the
+minibuffer aside."
+  (and (lisp-dialect) (not (eq? (major-mode) 'minibuffer-mode))))
 
 (define (region-or-line)
   "The active region, or the current line, as two values."

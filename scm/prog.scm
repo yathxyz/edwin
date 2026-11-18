@@ -116,6 +116,15 @@ prog-mode's. The option values are evaluated. Declaring MODE again replaces all 
 (define-language nginx-mode "Nginx" :files '("(^|/)nginx\\.conf$" "/nginx/.+\\.conf$") :comment '("#") :indent 4)
 (define-language typst-mode "Typst" :files '("\\.typ$") :comment '("//" "/*" "*/") :indent 2)
 
+;; The Lisps besides Edwin's own Scheme (scheme-mode, .scm .ss .sld): each mode is read as its dialect (lisp-dialect)
+;; by the lexer, the bracket guard, the list motions, = and consult-imenu, its indentation that of its Emacs mode
+;; (src/editor-core.ts, lispIndentFor), so no :indent. Racket is read as Scheme; .edn as Clojure; ClojureScript and
+;; .cljc are Clojure too. None evaluates its code: C-M-x and C-c C-b stay Edwin Scheme's (scheme-mode-map).
+(define-language emacs-lisp-mode "ELisp" :files '("\\.el$") :comment '(";;"))
+(define-language lisp-mode "Lisp" :files '("\\.(lisp|lsp|cl|asd)$") :comment '(";;" "#|" "|#"))
+(define-language clojure-mode "Clojure" :files '("\\.(clj|cljs|cljc|edn)$") :comment '(";;"))
+(define-language racket-mode "Racket" :files '("\\.rkt$") :comment '(";;" "#|" "|#"))
+
 ;;;; Formatters: format-buffer (SPC b f, src/format.ts) runs the buffer's mode's formatter
 
 (define (define-formatter modes command)

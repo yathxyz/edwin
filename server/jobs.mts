@@ -71,19 +71,19 @@ export function list(a: { key: string; items: string[] }, ctx: JobCtx): boolean 
 export function unlist(a: { key: string }, ctx: JobCtx): boolean { ctx.state.delete('list:' + a.key); return true; }
 /* Indices of the items of list A.key matching every term of A.terms ([source, flags] pairs). */
 export function filter(a: { key: string; terms: [string, string][] }, ctx: JobCtx): Int32Array { return filterItems((ctx.state.get('list:' + a.key) as string[] | undefined) || [], a.terms); }
-/* Syntax classes and paren depths of the Lisp buffer A.id. The lexer (lex, markDocstrings, parenDepths)
+/* Syntax classes and paren depths of the Lisp buffer A.id, read in the Lisp dialect A.dialect. The lexer (lex, markDocstrings, parenDepths)
    is editor-core.ts's, which worker.mts installs in the thread's global scope from Ed.LEX_SOURCE; the
    main thread runs pool.ts's own version of this job against Ed.lex. */
 /* The lexer's functions as worker.mts installs them in the thread's global scope. */
 interface LexRealm {
-  markDocstrings?: (t: string, cls: unknown) => unknown;
-  lex?: (t: string) => unknown;
+  markDocstrings?: (t: string, cls: unknown, from: number, to: undefined, base: number, dialect?: string) => unknown;
+  lex?: (t: string, info: undefined, dialect?: string) => unknown;
   parenDepths?: (t: string, cls: unknown, from: number, to: number, depth: number) => unknown;
 }
-export function lex(a: { id: string }, ctx: JobCtx): { cls: unknown; d: unknown } {
+export function lex(a: { id: string; dialect?: string }, ctx: JobCtx): { cls: unknown; d: unknown } {
   const g = globalThis as typeof globalThis & LexRealm;
   if (typeof g.markDocstrings !== 'function' || typeof g.lex !== 'function' || typeof g.parenDepths !== 'function') throw new Error('lex: the lexer is not loaded in this thread');
-  const t = ctx.buffer(a.id), cls = g.markDocstrings(t, g.lex(t));
+  const t = ctx.buffer(a.id), cls = g.markDocstrings(t, g.lex(t, undefined, a.dialect), 0, undefined, 0, a.dialect);
   return { cls, d: g.parenDepths(t, cls, 0, t.length, 0) };
 }
 /* Matches of a regexp (ctx.args: source, flags, max) in a buffer, a shard of one, or a text: five numbers

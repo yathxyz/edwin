@@ -100,7 +100,8 @@ function candidates(b: EdBuffer, prefix: string) {
     P.wordsWithPrefix(P.wordsIn(buf, symbolChar(buf).source), lower, (w: string) => { if (!seen.has(w)) seen.set(w, d); });
   }
   for (const [w, d] of seen) if (w !== prefix && w.toLowerCase().startsWith(lower)) out.push({ text: w, score: d, ann: '' });
-  if (Ed.isLisp(b)) {
+  /* Edwin's own Scheme (not another Lisp, Racket's Scheme included) completes Edwin's global names too. */
+  if (Ed.modeChain(b.mode).some(m => m === 'scheme-mode' || m === 'scheme-interaction-mode' || m === 'minibuffer-mode')) {
     for (const [n, nl, box] of globalNames()) {
       if (n === prefix || !nl.startsWith(lower)) continue;
       let v: SchemeValue; try { v = box.value; } catch (e) { continue; }

@@ -309,8 +309,12 @@ test('without host.syntax, in a mode with no grammar, after a failure and past t
 test('the mode table is the grammar bundle\'s (grammars.json\'s modes)', { skip: !process.env.EDWIN_GRAMMARS && 'EDWIN_GRAMMARS names no bundle' }, () => {
   const manifest = JSON.parse(readFileSync(`${process.env.EDWIN_GRAMMARS}/grammars.json`, 'utf8')) as Record<string, { mode: string }>;
   const prog = readFileSync(new URL('../scm/prog.scm', import.meta.url), 'utf8');
-  const modes = [...prog.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]);
+  // The Lisp modes, which the Lisp lexer reads (lispDialect), have no grammar.
+  const declared = [...prog.matchAll(/^\(define-language (\S+) /gm)].map(m => m[1]);
+  const isLisp = (mode: string) => Ed.lispDialect({ mode }) !== null, modes = declared.filter(m => !isLisp(m));
   assert.equal(modes.length, Object.keys(manifest).length);
+  assert.equal(declared.length - modes.length, 4);
+  for (const mode of declared.filter(isLisp)) assert.equal(Ed.syntax.grammarOf(mode), null, mode);
   for (const [name, m] of Object.entries(manifest)) assert.equal(Ed.syntax.grammarOf(m.mode), name, m.mode);
   for (const mode of modes) assert.ok(Ed.syntax.grammarOf(mode), mode);
   assert.equal(Ed.syntax.grammarOf('text-mode'), null);

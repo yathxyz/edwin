@@ -1423,10 +1423,10 @@ const C = Ed.C, lex = Ed.lex, markDocstrings = Ed.markDocstrings;
 function parenDepths(t: string, cls: Uint8Array | number[], from: number, to: number, depth: number, d?: Uint8Array) {
   const ret = arguments.length > 5;
   d = d || new Uint8Array(t.length);
-  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 40 || t.charCodeAt(k) === 91) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
+  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { const c = t.charCodeAt(k); if (c === 40 || c === 91 || c === 123) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
   return ret ? depth : d;
 }
-define('lex', (a, ctx) => { const t = ctx.buffer(a.id), cls = markDocstrings(t, lex(t)); return { cls, d: parenDepths(t, cls, 0, t.length, 0) }; });
+define('lex', (a, ctx) => { const t = ctx.buffer(a.id), cls = markDocstrings(t, lex(t, undefined, a.dialect), 0, undefined, 0, a.dialect); return { cls, d: parenDepths(t, cls, 0, t.length, 0) }; });
 /* Matches of a regexp in a buffer, a shard of one, or a text: five numbers per hit (index, line, column, line start, line end). */
 define('grep', (it, ctx) => {
   const t = it.text !== undefined ? it.text : ctx.buffer(it.id), re = new RegExp(ctx.args.source, ctx.args.flags.includes('g') ? ctx.args.flags : ctx.args.flags + 'g');
@@ -1531,12 +1531,12 @@ const LEX_KEY = Symbol('lex');
 function lexAsync(b: EdBuffer) {
   if (!isOk() || b._lexBusy) return false;
   b._lexBusy = true;
-  const ver = b.ver;
+  const ver = b.ver, dialect = Ed.lispDialect(b) || 'scheme';
   jobsOf(b).set(LEX_KEY, ver);   /* keeps the log back to VER until the lex is installed */
-  run('lex', { id: b.id }, { buffers: [b], affinity: b.id }).then(m => {
+  run('lex', { id: b.id, dialect }, { buffers: [b], affinity: b.id }).then(m => {
     b._lexBusy = false; jobsOf(b).delete(LEX_KEY);
     /* Install the result at the version it was made for; lexOf brings it up to date from the log. */
-    if (b._lv! < ver || !b._lc) Ed.installLex(b, ver, m.cls, m.d);
+    if (b._lv! < ver || !b._lc) Ed.installLex(b, ver, m.cls, m.d, dialect);
     Ed.render();
   }, () => { b._lexBusy = false; jobsOf(b).delete(LEX_KEY); });
   return true;

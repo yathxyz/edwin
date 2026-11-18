@@ -177,7 +177,10 @@ in
   # would unbalance them refused; a property test of random keys at random points of random balanced text in Insert,
   # Emacs and Replace state, and one of the guard's soundness, every edit it accepts at every point of such text
   # leaving the whole text balanced; the list motions (C-M-d C-M-n C-M-p C-M-a C-M-e C-M-t, up-list), the audit's
-  # cases for all of them, and the 2 ms keystroke budget in a 10,000-line buffer.
+  # cases for all of them, and the 2 ms keystroke budget in a 10,000-line buffer. The Lisp modes (lang-lisp-modes):
+  # .el, .lisp, .clj and .rkt files in emacs-lisp-mode, lisp-mode, clojure-mode and racket-mode, each read as its
+  # dialect (character syntax, Clojure's { }, imenu), and test/fixtures/indent's lisp-modes files, Emacs 31.1's own
+  # indent-region output, re-indenting to themselves, whole and from their lines unindented.
   edwin-prog = pkgs.runCommand "edwin-prog" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR EDITORCONFIG_CORE_TESTS=${pkgs.editorconfig-core-c.src}/tests
     node --test ${edwin}/edwin/test/prog.test.mts ${edwin}/edwin/test/editorconfig.test.mts

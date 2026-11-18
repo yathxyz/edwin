@@ -119,12 +119,24 @@ function marksView(b: Buffer): Record<string, number | undefined> {
 function modeFor(name: string): string {
   if (hooks.modeFor) { const m = hooks.modeFor(name); if (m) return m; }
   if (name === '*scratch*') return 'scheme-interaction-mode';
-  if (/\.(scm|ss|sld|el)$/.test(name)) return 'scheme-mode';
+  if (/\.(scm|ss|sld)$/.test(name)) return 'scheme-mode';
   if (/^\*(Help|Buffer List|Messages|Registers|Marks)\*$/.test(name)) return 'special-mode';
   return 'fundamental-mode';
 }
 const MODE_NAMES: Record<string, string> = { 'scheme-interaction-mode': 'Scheme Interaction', 'scheme-mode': 'Scheme', 'fundamental-mode': 'Fundamental', 'special-mode': 'Special', 'minibuffer-mode': 'Minibuffer', 'org-mode': 'Org', 'text-mode': 'Text' };
-const isLisp = (b: EdBuffer) => b.mode === 'scheme-mode' || b.mode === 'scheme-interaction-mode' || b.mode === 'minibuffer-mode';
+/* The Lisp dialect of a buffer, by its major mode or the nearest mode it derives from: the lexer, the bracket
+   guard, the list motions and the indenter read Lisp code in these and in no other buffer. Racket is read as Scheme.
+   The modes besides Scheme's are scm/prog.scm's. */
+type LispDialect = 'scheme' | 'elisp' | 'cl' | 'clojure';
+const LISP_DIALECTS: Record<string, LispDialect> = {
+  'scheme-mode': 'scheme', 'scheme-interaction-mode': 'scheme', 'minibuffer-mode': 'scheme', 'racket-mode': 'scheme',
+  'emacs-lisp-mode': 'elisp', 'lisp-mode': 'cl', 'clojure-mode': 'clojure' };
+function lispDialect(b: EdBuffer): LispDialect | null {
+  for (let m: string | undefined = b.mode, n = 0; m && n < 33; m = modeParents.get(m), n++)
+    if (Object.prototype.hasOwnProperty.call(LISP_DIALECTS, m)) return LISP_DIALECTS[m];
+  return null;
+}
+const isLisp = (b: EdBuffer) => lispDialect(b) !== null;
 
 /* E.headless: no page to draw on (edwind, tests), as the host says. Redisplay and the browser wiring are
    then skipped, and everything else runs as in the page. */
@@ -857,8 +869,11 @@ function lineIndex(b: EdBuffer) { const r = b.rope, out = [0]; for (let k = r.in
 /* Syntax classes and paren depths, cached per text version and updated incrementally: an edit
    re-lexes only from the top-level form (a paren in column 0, as Emacs assumes) before the change
    to the one after it, and the untouched classes on both sides are kept. The class and depth arrays
-   are updated in place (with spare capacity), so an edit moves the tail instead of copying both. */
+   are updated in place (with spare capacity), so an edit moves the tail instead of copying both. The lex
+   is of the buffer's Lisp dialect (Scheme's in a buffer of none); a change of dialect lexes it all again. */
 function lexOf(b: EdBuffer, soft?: boolean) {
+  const dia = lispDialect(b) || 'scheme';
+  if (b._ldia !== dia) { b._lc = null; b._ldia = dia; }
   if (b._lv === b.ver && b._lc) return b._lc;
   /* Redisplay (SOFT) does not wait for the lex of a big buffer when most of it must be lexed (the
      first time, or after a change of more than 1MB): the worker pool makes it and the text shows
@@ -872,7 +887,7 @@ function lexOf(b: EdBuffer, soft?: boolean) {
   const span = b._lc ? spanOf(b, b._lv!) : null;
   if (!span || Math.abs(n - b._llen!) > 100000) {
     const t = r.toString();
-    b._lcb = b._lc = markDocstrings(t, lex(t)); b._ldb = b._ld = parenDepths(t, b._lc, 0, n, 0); b._lv = b.ver; b._llen = n;
+    b._lcb = b._lc = markDocstrings(t, lex(t, undefined, dia), 0, undefined, 0, dia); b._ldb = b._ld = parenDepths(t, b._lc, 0, n, 0); b._lv = b.ver; b._llen = n;
     return b._lc;
   }
   /* _lc and _ld are views of length n on buffers with spare capacity (_lcb, _ldb), so reads past
@@ -884,8 +899,8 @@ function lexOf(b: EdBuffer, soft?: boolean) {
   let e = n - span.suf;
   for (;;) { e = r.indexOf('\n(', e); if (e < 0) { e = n; break; } e++; if (oc[e - shift] === C.PAR) break; }
   const info: EcLexInfo = {};
-  let mid = lex(r.slice(s, e), info);
-  if (info.dirty && e < n) { e = n; mid = lex(r.slice(s), info); }
+  let mid = lex(r.slice(s, e), info, dia);
+  if (info.dirty && e < n) { e = n; mid = lex(r.slice(s), info, dia); }
   const startDepth = s < n && r.charCodeAt(s) === 40 ? od[s] : 0;
   let cls = oc, d = od;
   if (cls.length < n) {
@@ -895,15 +910,18 @@ function lexOf(b: EdBuffer, soft?: boolean) {
   } else if (e < n && shift) { cls.copyWithin(e, e - shift, oldN); d.copyWithin(e, e - shift, oldN); }
   cls.set(mid, s);
   const base = Math.max(0, s - 1);
-  markDocstrings(r.slice(base, Math.min(n, e + 65536)), cls, Math.max(0, s - 1), e, base);
+  markDocstrings(r.slice(base, Math.min(n, e + 65536)), cls, Math.max(0, s - 1), e, base, dia);
   d.fill(0, s, e);
   const end = parenDepths(r, cls, s, e, startDepth, d) as number;
   if (e < n && ((end % 6) + 6) % 6 !== d[e]) parenDepths(r, cls, e, n, end, d);
   b._lcb = cls; b._ldb = d; b._lc = cls.subarray(0, n); b._ld = d.subarray(0, n); b._lv = b.ver; b._llen = n;
   return b._lc;
 }
-/* A lex made elsewhere (the worker pool) for version VER of B. */
-function installLex(b: EdBuffer, ver: number, cls: Uint8Array | number[], d: unknown) { b._lcb = b._lc = cls; b._ldb = b._ld = d; b._lv = ver; b._llen = cls.length; }
+/* A lex made elsewhere (the worker pool) for version VER of B in dialect DIA: kept only while B is still read in it. */
+function installLex(b: EdBuffer, ver: number, cls: Uint8Array | number[], d: unknown, dia: string) {
+  if ((lispDialect(b) || 'scheme') !== dia) return;
+  b._lcb = b._lc = cls; b._ldb = b._ld = d; b._lv = ver; b._llen = cls.length; b._ldia = dia;
+}
 /* Lengths of the common prefix and suffix of two texts (the suffix never overlaps the prefix). */
 function diffSpan(a: string, b: string) {
   const n = Math.min(a.length, b.length);
@@ -914,7 +932,7 @@ function diffSpan(a: string, b: string) {
 function parenDepths(t: EdText, cls: ArrayLike<number>, from: number, to: number, depth: number, d?: Uint8Array): number | Uint8Array {
   const ret = arguments.length > 5;
   d = d || new Uint8Array(t.length);
-  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (t.charCodeAt(k) === 40 || t.charCodeAt(k) === 91) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
+  for (let k = from; k < to; k++) if (cls[k] === C.PAR) { if (openAt(t, k)) { d[k] = ((depth % 6) + 6) % 6; depth++; } else { depth--; d[k] = ((depth % 6) + 6) % 6; } }
   return ret ? depth : d;
 }
 
@@ -1008,30 +1026,74 @@ function codeLexOf(b: EdBuffer, line: string | null, open: string | null, close:
 
 /* ---------- Lisp lexer: syntax classes for highlighting and sexp motion ---------- */
 const C = { PLAIN: 0, CMT: 1, STR: 2, PAR: 3, NUM: 4, KW: 5, FN: 6, CONST: 7, QUO: 8, DOC: 9 };
-const KEYWORDS = new Set(('define define-syntax define-macro define-record-type define-command define-values lambda let let* letrec letrec* ' +
-  'named-lambda if when unless cond case and or not do while until dolist dotimes begin set! quote quasiquote syntax-rules ' +
-  'parameterize guard dynamic-wind call/ec catch throw unwind-protect ignore-errors save-excursion with-current-buffer interactive ' +
-  'let-values receive assert delay push! pop! inc! dec! when-let if-let and-let* -> ->> evil-define-motion evil-define-operator ' +
-  'evil-define-text-object evil-define-key evil-ex-define-cmd define-key global-set-key').split(' '));
+/* The words highlighted as keywords after an open paren, and those that define a name (the next token is
+   highlighted as one, and a column-0 form that starts with one is a definition for consult-imenu), per dialect. */
+const words = (s: string) => s.trim().split(/\s+/);
+const LISP_DEFINERS: Record<string, string[]> = {
+  scheme: words('define define-syntax define-macro define-record-type define-command evil-define-motion evil-define-operator evil-define-text-object evil-define-command'),
+  elisp: words(`defun defmacro defsubst defvar defvar-local defconst defcustom defface defgroup defalias define-minor-mode
+    define-derived-mode define-globalized-minor-mode cl-defun cl-defmacro cl-defsubst cl-defmethod cl-defgeneric cl-defstruct ert-deftest
+    transient-define-prefix transient-define-suffix transient-define-infix transient-define-argument`),
+  cl: words(`defun defmacro defvar defparameter defconstant defgeneric defmethod defclass defstruct deftype define-condition
+    defpackage defsetf define-compiler-macro define-modify-macro define-setf-expander`),
+  clojure: words('def defn defn- defmacro defmulti defmethod defonce defprotocol defrecord deftype definterface defstruct ns deftest'),
+};
+const LISP_KEYWORDS: Record<string, string[]> = {
+  scheme: words(`define define-syntax define-macro define-record-type define-command define-values lambda let let* letrec letrec*
+    named-lambda if when unless cond case and or not do while until dolist dotimes begin set! quote quasiquote syntax-rules
+    parameterize guard dynamic-wind call/ec catch throw unwind-protect ignore-errors save-excursion with-current-buffer interactive
+    let-values receive assert delay push! pop! inc! dec! when-let if-let and-let* -> ->> evil-define-motion evil-define-operator
+    evil-define-text-object evil-define-key evil-ex-define-cmd define-key global-set-key`),
+  elisp: words(`lambda let let* letrec if when unless cond and or not progn prog1 prog2 while dolist dotimes catch throw
+    unwind-protect condition-case ignore-errors save-excursion save-restriction save-match-data with-current-buffer
+    with-temp-buffer with-eval-after-load interactive pcase pcase-let pcase-dolist when-let when-let* if-let if-let* and-let*
+    setq setq-local setq-default quote function require provide use-package cl-loop cl-case cl-flet cl-labels cl-letf
+    declare`),
+  cl: words(`lambda let let* flet labels macrolet symbol-macrolet if when unless cond case ecase ccase typecase etypecase and
+    or not progn prog1 prog2 loop do do* dolist dotimes block return return-from catch throw unwind-protect handler-case
+    handler-bind restart-case ignore-errors multiple-value-bind destructuring-bind setf setq declare declaim eval-when
+    tagbody go in-package quote function the locally`),
+  clojure: words(`fn fn* let letfn loop recur if if-not if-let if-some when when-not when-let when-some when-first cond condp case
+    do doto doseq dotimes for while try catch finally throw quote var new set! binding -> ->> as-> some-> some->> cond->
+    cond->> and or not comment reify proxy extend-type extend-protocol`),
+};
+for (const d in LISP_DEFINERS) LISP_KEYWORDS[d].push(...LISP_DEFINERS[d]);
+/* With no prototype, so a dialect that is none of these (constructor, __proto__) finds nothing and lex reads Scheme. */
+const KEYWORDS_OF: Record<string, Set<string>> = Object.create(null), DEFINERS_OF: Record<string, Set<string>> = Object.create(null);
+for (const d in LISP_KEYWORDS) { KEYWORDS_OF[d] = new Set(LISP_KEYWORDS[d]); DEFINERS_OF[d] = new Set(LISP_DEFINERS[d]); }
 const isWS = (c: string) => c === ' ' || c === '\n' || c === '\t' || c === '\r' || c === '\f';
 const isDelim = (c: string | undefined) => c === undefined || isWS(c) || '()";\'`,[]'.includes(c);
-/* Brackets are ( ) and [ ] (Emacs Lisp vectors, R7RS's other parentheses), one depth for both kinds as in
-   Emacs's scan-lists. A datum comment #; comments out the next datum: PEND holds the start and the depth of
-   each #; still waiting, and the first datum that ends at that depth (an atom, a string, a character literal,
-   a list once closed) is classed CMT back to its #;, so #;#;a b comments out both, as R7RS reads it. A close
-   bracket before any datum drops the #; waiting inside the list it closes. A #; whose datum the text ends
+/* Brackets are ( ) and [ ] (Emacs Lisp vectors, R7RS's other parentheses), and in Clojure { } too, one depth for
+   every kind as in Emacs's scan-lists. A datum comment #; (#_ in Clojure) comments out the next datum: PEND holds the
+   start and the depth of each one still waiting, and the first datum that ends at that depth (an atom, a string, a
+   character literal, a list once closed) is classed CMT back to its #;, so #;#;a b comments out both, as R7RS reads
+   it. A close bracket before any datum drops the #; waiting inside the list it closes. A #; whose datum the text ends
    inside (an open list) comments out the rest, as an unterminated string or #| does: the classes before an
    edit then never depend on a bracket after it, so lexOf can restart at a column-0 paren. A slice that ends
    with a #; still waiting is dirty, and lexOf lexes on to the end. A # prefix right before a bracket (#( #u8(
-   #s() belongs to the list's datum, as the reader takes #( whole, and is no datum of its own. The CMT fills are
-   made at the end, latest first, each up to the lowest start filled so far, so a run of #; fills each character
-   once. */
-function lex(t: string, info?: EcLexInfo) {
+   #s(, Clojure's #{, #?( and #?@( ) belongs to the list's datum, as the reader takes #( whole, and is no datum of its
+   own. Where Emacs reads it as a prefix too (a # alone, # being an expression prefix in its syntax tables, Clojure's
+   #? and #?@, Emacs Lisp's #s) it is classed a quote prefix, so the sexp motions and the indenter take it with its
+   list; #u8 and Common Lisp's #2A stay a sexp of their own to them, as to Emacs.
+   The CMT fills are made at the end, latest first, each up to the lowest start filled so far, so a run of #; fills
+   each character once. DIALECT (lispDialect's) changes what the reader takes: a character literal is #\c in Scheme
+   and Common Lisp, ?c or ?\c in Emacs Lisp and \c in Clojure, the character after it whatever it is; in Clojure a
+   comma is a blank, ~ unquotes and #"..." is a regexp, read as a string. */
+function lex(t: string, info?: EcLexInfo, dialect = 'scheme') {
   const n = t.length, cls = new Uint8Array(n), pend: number[] = [], fills: number[] = [];
+  const clj = dialect === 'clojure', el = dialect === 'elisp';
+  const kws = KEYWORDS_OF[dialect] || KEYWORDS_OF.scheme, defs = DEFINERS_OF[dialect] || DEFINERS_OF.scheme;
+  const delim = clj ? (c: string | undefined) => isDelim(c) || c === '{' || c === '}' : isDelim;
   if (info) info.dirty = false;
   let i = 0, quoted = false, afterParen = false, defName = false, depth = 0;
   const datum = () => {
     if (pend.length && pend[pend.length - 1] === depth) { pend.pop(); fills.push(pend.pop()!, i); quoted = false; defName = false; }
+  };
+  /* A character literal from I, its character starting at J: that character whatever it is, then a name (#\space,
+     ?\C-a, \newline) on to the next delimiter when the character is not one. */
+  const charLit = (j: number) => {
+    if (j < n) { if (el && t[j] === '\\' && j + 1 < n) j++; if (!delim(t[j++])) while (j < n && !delim(t[j])) { if (el && t[j] === '\\') j++; j++; } }
+    j = Math.min(j, n); cls.fill(C.NUM, i, j); i = j; quoted = false; afterParen = false; datum();
   };
   while (i < n) {
     const ch = t[i];
@@ -1042,104 +1104,114 @@ function lex(t: string, info?: EcLexInfo) {
       if (i < n) cls[i++] = C.STR; else if (info) info.dirty = true;
       quoted = false; afterParen = false; datum(); continue;
     }
-    if (ch === '(' || ch === '[') { if (ch === '(' && i > 0 && t[i - 1] === '\n') { quoted = false; defName = false; } cls[i++] = C.PAR; afterParen = ch === '('; depth++; continue; }
-    if (ch === ')' || ch === ']') {
+    if (ch === '(' || ch === '[' || (clj && ch === '{')) { if (ch === '(' && i > 0 && t[i - 1] === '\n') { quoted = false; defName = false; } cls[i++] = C.PAR; afterParen = ch === '('; depth++; continue; }
+    if (ch === ')' || ch === ']' || (clj && ch === '}')) {
       cls[i++] = C.PAR; afterParen = false; depth--;
       while (pend.length && pend[pend.length - 1] > depth) pend.length -= 2;
       datum(); continue;
     }
-    if (isWS(ch)) { i++; continue; }
-    if (ch === "'" || ch === '`' || ch === ',' || ch === '@' || (ch === '#' && t[i + 1] === "'")) {
-      cls[i++] = C.QUO; if (ch === '#') cls[i++] = C.QUO; quoted = ch !== ',' && ch !== '@'; afterParen = false; continue;
+    if (isWS(ch) || (clj && ch === ',')) { i++; continue; }
+    if (ch === "'" || ch === '`' || ch === ',' || ch === '@' || (clj && ch === '~') || (ch === '#' && t[i + 1] === "'")) {
+      cls[i++] = C.QUO; if (ch === '#') cls[i++] = C.QUO; quoted = ch !== ',' && ch !== '@' && ch !== '~'; afterParen = false; continue;
     }
-    /* A character literal: the character after #\ belongs to it whatever it is (#\( #\" #\;), and a name
-       (#\space, #\x41) runs on to the next delimiter only when that first character is not one. */
-    if (ch === '#' && t[i + 1] === '\\') {
-      let j = i + 2;
-      if (j < n && !isDelim(t[j++])) while (j < n && !isDelim(t[j])) j++;
-      cls.fill(C.NUM, i, j); i = j; quoted = false; afterParen = false; datum(); continue;
-    }
-    if (ch === '#' && t[i + 1] === ';') { cls[i] = cls[i + 1] = C.CMT; pend.push(i, depth); i += 2; continue; }
-    if (ch === '#' && (t[i + 1] === 't' || t[i + 1] === 'f') && isDelim(t[i + 2])) { cls[i++] = C.CONST; cls[i++] = C.CONST; afterParen = false; datum(); continue; }
-    if (ch === '#' && t[i + 1] === ':') { let j = i + 2; while (j < n && !isDelim(t[j])) j++; for (let m = i; m < j; m++) cls[m] = C.CONST; i = j; afterParen = false; datum(); continue; }
+    if (clj ? ch === '\\' : el ? ch === '?' : ch === '#' && t[i + 1] === '\\') { charLit(i + (clj || el ? 1 : 2)); continue; }
+    if (clj && ch === '#' && t[i + 1] === '"') { cls[i++] = C.QUO; afterParen = false; continue; }
+    if (ch === '#' && t[i + 1] === (clj ? '_' : ';')) { cls[i] = cls[i + 1] = C.CMT; pend.push(i, depth); i += 2; continue; }
+    if (ch === '#' && (t[i + 1] === 't' || t[i + 1] === 'f') && delim(t[i + 2])) { cls[i++] = C.CONST; cls[i++] = C.CONST; afterParen = false; datum(); continue; }
+    if (ch === '#' && t[i + 1] === ':') { let j = i + 2; while (j < n && !delim(t[j])) j++; for (let m = i; m < j; m++) cls[m] = C.CONST; i = j; afterParen = false; datum(); continue; }
     if (ch === '#' && t[i + 1] === '|') { let j = t.indexOf('|#', i + 2); if (j < 0 && info) info.dirty = true; j = j < 0 ? n : j + 2; for (let m = i; m < j; m++) cls[m] = C.CMT; i = j; continue; }
-    let j = i; while (j < n && !isDelim(t[j])) { if (t[j] === '\\') j++; j++; }
+    let j = i; while (j < n && !delim(t[j])) { if (t[j] === '\\') j++; j++; }
     if (j === i) { i++; continue; }
     const tok = t.slice(i, j);
     let k = C.PLAIN;
-    if (defName) { k = C.FN; defName = false; }
+    if (defName && clj && tok[0] === '^') k = C.CONST;
+    else if (defName) { k = C.FN; defName = false; }
     else if (quoted || tok[0] === ':' || tok[tok.length - 1] === ':' || tok === '#t' || tok === '#f') k = C.CONST;
     else if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(tok)) k = C.NUM;
-    else if (afterParen && KEYWORDS.has(tok)) { k = C.KW; defName = /^(define|define-syntax|define-macro|define-record-type|define-command|evil-define-(motion|operator|text-object|command))$/.test(tok); }
-    for (let m = i; m < Math.min(j, n); m++) cls[m] = k;
-    i = Math.min(j, n); afterParen = false;
-    if (tok[0] === '#' && (t[i] === '(' || t[i] === '[')) continue;
+    else if (afterParen && kws.has(tok)) { k = C.KW; defName = defs.has(tok); }
+    const end = Math.min(j, n), list = tok[0] === '#' && (t[end] === '(' || t[end] === '[' || (clj && t[end] === '{'));
+    cls.fill(list && (tok === '#' || (clj && (tok === '#?' || tok === '#?@')) || (el && tok === '#s')) ? C.QUO : k, i, end);
+    i = end; afterParen = false;
+    if (list) continue;
     quoted = false; datum();
   }
   if (pend.length) { fills.push(pend[0], n); if (info) info.dirty = true; }
   for (let f = fills.length - 2, low = n; f >= 0; f -= 2) if (fills[f] < low) { cls.fill(C.CMT, fills[f], Math.min(fills[f + 1], low)); low = fills[f]; }
   return cls;
 }
-/* Docstrings: a string that directly follows the argument list of a defun/defmacro.
+/* Docstrings: a string that directly follows the argument list of a defun/defmacro, (define (f x) "doc" ...) in
+   Scheme, (defun f (x) "doc" ...) in Emacs and Common Lisp, and in Clojure the one after the name, (defn f "doc" [x]).
    T may be a piece of the text that starts at BASE; FROM and TO are positions in the whole text. */
-function markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, base?: number) {
+function markDocstrings(t: string, cls: Uint8Array, from?: number, to?: number, base?: number, dialect = 'scheme') {
   base = base || 0;
   const view = base ? cls.subarray(base) : cls;
-  const re = /\((?:define|define-command|evil-define-(?:motion|operator|text-object|command))\s+\(/g;
+  const res: Record<string, RegExp> = {
+    scheme: /\((?:define|define-command|evil-define-(?:motion|operator|text-object|command))\s+\(/g,
+    elisp: /\((?:defun|defmacro|defsubst|cl-defun|cl-defmacro|cl-defsubst|cl-defgeneric)\s+[^\s()";']+\s+\(/g,
+    cl: /\((?:defun|defmacro|defgeneric|deftype|define-compiler-macro)\s+[^\s()";']+\s+\(/g,
+    clojure: /\((?:defn-?|defmacro|defmulti|defprotocol)\s+(?:\^[^\s()[\]{}"]+\s+)*[^\s()[\]{}";^]+\s+(?=")/g,
+  };
+  const re = Object.prototype.hasOwnProperty.call(res, dialect) ? res[dialect] : res.scheme, after = dialect === 'clojure';
   let m: RegExpExecArray | null;
   re.lastIndex = from ? from - base : 0;
   while ((m = re.exec(t))) {
     if (to !== undefined && m.index + base >= to) break;
-    const open = m.index + m[0].length - 1;
-    if (view[open] !== C.PAR) continue;
-    const close = forwardSexp(t, view, open); if (close === null) continue;
-    let k = close; while (k < t.length && isWS(t[k])) k++;
+    let k = m.index + m[0].length;
+    if (!after) {
+      const open = k - 1;
+      if (view[open] !== C.PAR) continue;
+      const close = forwardSexp(t, view, open); if (close === null) continue;
+      k = close; while (k < t.length && isWS(t[k])) k++;
+    }
     if (t[k] === '"' && view[k] === C.STR) { const e = forwardSexp(t, view, k)!; for (let q = k; q < e; q++) view[q] = C.DOC; }
   }
   return cls;
 }
-/* The sexp scanners read characters with charAt, so they work on a string or on the buffer's rope. */
+/* The sexp scanners read characters with charAt, so they work on a string or on the buffer's rope. They read the
+   kinds of bracket off the classes, ( [ { and ) ] } each classed as a bracket only in the dialects that have them,
+   and a comma classed plain (Clojure's) as a blank. */
 const inStr = (c: number) => c === C.STR || c === C.DOC;
+const openAt = (t: EdText, k: number) => { const c = t.charCodeAt(k); return c === 40 || c === 91 || c === 123; };
+const blankAt = (t: EdText, cls: ArrayLike<number>, k: number) => { const c = t.charAt(k); return isWS(c) || (c === ',' && cls[k] === C.PLAIN); };
 function forwardSexp(t: EdText, cls: ArrayLike<number>, p: number) {
   const n = t.length;
-  for (;;) { while (p < n && isWS(t.charAt(p))) p++; if (p < n && cls[p] === C.CMT) { while (p < n && cls[p] === C.CMT) p++; continue; } break; }
+  for (;;) { while (p < n && blankAt(t, cls, p)) p++; if (p < n && cls[p] === C.CMT) { while (p < n && cls[p] === C.CMT) p++; continue; } break; }
   while (p < n && cls[p] === C.QUO) p++;
   if (p >= n) return null;
   const c = t.charAt(p);
   if (c === '"' && inStr(cls[p])) { let k = p + 1; while (k < n && t.charCodeAt(k) !== 34) { if (t.charCodeAt(k) === 92) k++; k++; } return Math.min(n, k + 1); }
-  if ((c === ')' || c === ']') && cls[p] === C.PAR) return null;
   if (cls[p] === C.PAR) {
+    if (!openAt(t, p)) return null;
     let d = 0;
-    for (; p < n; p++) if (cls[p] === C.PAR) { const k = t.charCodeAt(p); if (k === 40 || k === 91) d++; else if (--d === 0) return p + 1; }
+    for (; p < n; p++) if (cls[p] === C.PAR) { if (openAt(t, p)) d++; else if (--d === 0) return p + 1; }
     return null;
   }
-  while (p < n && (cls[p] === C.NUM || !isDelim(t.charAt(p)))) p++;
+  while (p < n && (cls[p] === C.NUM || (!isDelim(t.charAt(p)) && cls[p] !== C.PAR))) p++;
   return p;
 }
 function backwardSexp(t: EdText, cls: ArrayLike<number>, p: number) {
-  for (;;) { while (p > 0 && isWS(t.charAt(p - 1))) p--; if (p > 0 && cls[p - 1] === C.CMT) { while (p > 0 && cls[p - 1] === C.CMT) p--; continue; } break; }
+  for (;;) { while (p > 0 && blankAt(t, cls, p - 1)) p--; if (p > 0 && cls[p - 1] === C.CMT) { while (p > 0 && cls[p - 1] === C.CMT) p--; continue; } break; }
   if (p <= 0) return null;
-  const c = t.charAt(p - 1);
   if (inStr(cls[p - 1])) { p--; while (p > 0 && inStr(cls[p - 1])) p--; }
-  else if ((c === '(' || c === '[') && cls[p - 1] === C.PAR) return null;
+  else if (cls[p - 1] === C.PAR && openAt(t, p - 1)) return null;
   else if (cls[p - 1] === C.PAR) {
     let d = 0;
-    for (p = p - 1; p >= 0; p--) if (cls[p] === C.PAR) { const k = t.charCodeAt(p); if (k === 41 || k === 93) d++; else if (--d === 0) break; }
+    for (p = p - 1; p >= 0; p--) if (cls[p] === C.PAR) { if (!openAt(t, p)) d++; else if (--d === 0) break; }
     if (p < 0) return null;
   } else {
-    while (p > 0 && (cls[p - 1] === C.NUM || !isDelim(t.charAt(p - 1)))) p--;
+    while (p > 0 && (cls[p - 1] === C.NUM || (!isDelim(t.charAt(p - 1)) && cls[p - 1] !== C.PAR))) p--;
   }
   while (p > 0 && cls[p - 1] === C.QUO) p--;
   return p;
 }
-function upList(t: EdText, cls: ArrayLike<number>, p: number) { let d = 0; for (let k = p - 1; k >= 0; k--) if (cls[k] === C.PAR) { const c = t.charCodeAt(k); if (c === 41 || c === 93) d++; else if (d-- === 0) return k; } return null; }
+function upList(t: EdText, cls: ArrayLike<number>, p: number) { let d = 0; for (let k = p - 1; k >= 0; k--) if (cls[k] === C.PAR) { if (!openAt(t, k)) d++; else if (d-- === 0) return k; } return null; }
 function matchParen(t: EdText, cls: ArrayLike<number>, k: number) {
-  if (t.charAt(k) === '(' || t.charAt(k) === '[') { const e = forwardSexp(t, cls, k); return e === null ? null : e - 1; }
+  if (openAt(t, k)) { const e = forwardSexp(t, cls, k); return e === null ? null : e - 1; }
   return backwardSexp(t, cls, k + 1);
 }
 
 /* ---------- Lisp brackets: where a position stands, and whether an edit keeps the brackets balanced ---------- */
-const isOpen = (c: string) => c === '(' || c === '[';
+const isOpen = (c: string) => c === '(' || c === '[' || c === '{';
 /* The string that holds the character at K, as [START, END, CLOSED]: START its opening quote, END past its closing
    one (the text's end when it has none, CLOSED #f). A run of string classes can hold more than one string ("a""b"),
    so the run is read from its start, string by string, as the lexer reads it. */
@@ -1218,8 +1290,8 @@ function defunAfter(t: EdText, cls: ArrayLike<number>, p: number) {
    string, #| comment or #; datum runs on to its end. With CLOSED, S is a piece of a larger text that ends at a
    list's closing bracket, so that bracket must still be read as one: a ; comment open at the piece's end would run
    on past it, through the line's rest outside the piece. */
-function balancedLisp(s: string, closed = false) {
-  const info = { dirty: false }, cls = lex(s, info);
+function balancedLisp(s: string, closed = false, dialect = 'scheme') {
+  const info = { dirty: false }, cls = lex(s, info, dialect);
   let d = 0;
   for (let k = 0; k < s.length; k++) if (cls[k] === C.PAR) { if (isOpen(s[k])) d++; else if (--d < 0) return false; }
   return d === 0 && !info.dirty && (!closed || cls[s.length - 1] === C.PAR);
@@ -1228,15 +1300,15 @@ function balancedLisp(s: string, closed = false) {
    S is where the lexer is in its first state (the text's start or a bracket classed as one); E is a bracket classed
    as one, the position after one, or the text's end. Before a bracket or after one nothing is left open; at the
    text's end only a string, a #| comment or a #; still waiting can be, so the last of those is lexed again. */
-function balancedRange(t: EdText, cls: ArrayLike<number>, s: number, e: number) {
+function balancedRange(t: EdText, cls: ArrayLike<number>, s: number, e: number, dialect = 'scheme') {
   let d = 0;
-  for (let k = s; k < e; k++) if (cls[k] === C.PAR) { const c = t.charCodeAt(k); if (c === 40 || c === 91) d++; else if (--d < 0) return false; }
+  for (let k = s; k < e; k++) if (cls[k] === C.PAR) { if (openAt(t, k)) d++; else if (--d < 0) return false; }
   if (d !== 0 || e < t.length) return d === 0;
   let k = e - 1; while (k >= s && isWS(t.charAt(k))) k--;
   if (k < s || (!inStr(cls[k]) && cls[k] !== C.CMT)) return true;
   if (inStr(cls[k])) { const r = stringAt(t, cls, k); return !!r && r[2] && k === r[1] - 1; }
   let c = k; while (c > s && cls[c - 1] === C.CMT) c--;
-  return balancedLisp(t.slice(c, e));
+  return balancedLisp(t.slice(c, e), false, dialect);
 }
 /* The span of text an edit of FROM..TO is judged on, as [START, END], or null when that text was not balanced to
    begin with (a buffer being repaired, which is edited as typed). The span is first the text from the last line
@@ -1244,10 +1316,10 @@ function balancedRange(t: EdText, cls: ArrayLike<number>, s: number, e: number) 
    a list written in column 0. When that is not balanced, and the whole text is, the span is the innermost list
    around FROM that holds TO before its closing bracket, or at top level the whole text. Each is judged on the
    buffer's classes, with no lexing. */
-function balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number): [number, number] | null {
+function balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number, dialect = 'scheme'): [number, number] | null {
   const n = t.length, s = Math.max(0, defunBefore(t, cls, from)), a = defunAfter(t, cls, to), e = a < 0 ? n : a;
-  if (balancedRange(t, cls, s, e)) return [s, e];
-  if (!balancedRange(t, cls, 0, n)) return null;
+  if (balancedRange(t, cls, s, e, dialect)) return [s, e];
+  if (!balancedRange(t, cls, 0, n, dialect)) return null;
   for (let o = upList(t, cls, from); o !== null; o = upList(t, cls, o)) {
     const z = forwardSexp(t, cls, o);
     if (z !== null && to < z) return [o, z];
@@ -1262,18 +1334,18 @@ function balanceSpan(t: EdText, cls: ArrayLike<number>, from: number, to: number
    the next datum, an edit refused) is judged on the whole span, lexed again; a span that ends at a list's closing
    bracket (the innermost list around the edit) must still end with that bracket, else a ; comment opened in the
    span runs on past it (typing ) between the # and ; of a #; datum: #); comments out the line's rest). */
-function keepsBalance(t: EdText, cls: ArrayLike<number>, span: [number, number], from: number, to: number, text: string) {
+function keepsBalance(t: EdText, cls: ArrayLike<number>, span: [number, number], from: number, to: number, text: string, dialect = 'scheme') {
   const [s, e] = span;
   let a = from; while (a > s && cls[a - 1] !== C.PAR) a--;
   let z = to; while (z < e && cls[z] !== C.PAR) z++;
   const bracket = z < e; if (bracket) z++;
   let d = 0, low = 0;
   for (let k = a; k < z; k++) if (cls[k] === C.PAR) { d += isOpen(t.charAt(k)) ? 1 : -1; low = Math.min(low, d); }
-  const piece = t.slice(a, from) + text + t.slice(to, z), info = { dirty: false }, pc = lex(piece, info);
+  const piece = t.slice(a, from) + text + t.slice(to, z), info = { dirty: false }, pc = lex(piece, info, dialect);
   let nd = 0, nlow = 0;
   for (let k = 0; k < piece.length; k++) if (pc[k] === C.PAR) { nd += isOpen(piece[k]) ? 1 : -1; nlow = Math.min(nlow, nd); }
   if (!info.dirty && nd === d && nlow >= low && (!bracket || pc[piece.length - 1] === C.PAR)) return true;
-  return balancedLisp(t.slice(s, from) + text + t.slice(to, e), e < t.length && cls[e - 1] === C.PAR);
+  return balancedLisp(t.slice(s, from) + text + t.slice(to, e), e < t.length && cls[e - 1] === C.PAR, dialect);
 }
 
 /* ---------- Lisp indentation ---------- */
@@ -1321,6 +1393,70 @@ const ELISP_INDENT: Record<string, IndentMethod> = {
   'transient-define-prefix': 'defun', 'transient-define-suffix': 'defun', 'transient-define-infix': 'defun',
   'transient-define-argument': 'defun', 'general-def': 'defun', 'evil-with-state': 'defun', 'gptel-make-openai': 1,
   'gptel-make-preset': 1, 'org-with-remote-undo': 1 };
+/* Common Lisp's forms as Emacs 31's lisp-mode indents them (common-lisp-indent-function, cl-indent.el), each spec
+   reduced to its number of distinguished arguments: cl-indent puts each of those at +4 and the first body form at +2,
+   and the rest under the line before. cond's spec, (&rest (&whole 2 &rest 1)), is 0 here: its first clause at +2 and
+   the rest under the line before. ignore-errors has no spec of cl-indent's own: Emacs takes its Emacs Lisp indent
+   property, 0. if's spec, (&rest nil), puts every argument under the line before, as no entry does. A head with no
+   entry that starts with def is a defun (two: the name and the lambda list), one that starts with with-, without- or
+   do- has one. CL_INNER names the forms whose subforms are defun-like in their turn: a local function of flet, labels
+   and macrolet (in its first argument's list) and a clause of handler-case and restart-case (each argument after the
+   first), each with one distinguished argument (its lambda list). CL_LAMBDA names the forms whose spec has &lambda,
+   by the argument that is a lambda list (defmethod's comes after its qualifiers). CL_FIRST names the forms whose
+   spec gives their first argument an offset of its own, not 4: unwind-protect's (5 &body), and (&whole 6 ...) or 6
+   for multiple-value-bind's and defclass's first argument and the forms whose spec is theirs. CL_TAGS names the forms
+   whose later arguments are a tagbody (lisp-indent-tagbody), by the index of the first and the offset of a statement:
+   tagbody's from the first argument, prog's and prog*'s after the lambda list, each statement at +3; do's and do*'s
+   after the end test (lisp-indent-do), each statement at +2; a tag, a line that starts with a symbol or word
+   character, at +1 in all of them. */
+const CL_INDENT: Record<string, number> = {
+  block: 1, case: 1, ccase: 1, ecase: 1, typecase: 1, etypecase: 1, ctypecase: 1, catch: 1, cond: 0, defvar: 1,
+  defconstant: 1, defparameter: 1, defclass: 2, 'define-condition': 2, 'define-modify-macro': 2, defsetf: 3, defun: 2,
+  defgeneric: 2, defmethod: 2, 'define-setf-method': 2, 'define-setf-expander': 2, defmacro: 2, defsubst: 2, deftype: 2,
+  defpackage: 1, defstruct: 1, 'destructuring-bind': 2, do: 2, 'do*': 2, dolist: 1, dotimes: 1, 'eval-when': 1, flet: 1,
+  labels: 1, macrolet: 1, 'handler-case': 1, 'restart-case': 1, 'ignore-errors': 0, lambda: 1, let: 1, 'let*': 1,
+  'handler-bind': 1, 'restart-bind': 1, 'symbol-macrolet': 1, locally: 1, ':method': 1, 'multiple-value-bind': 2,
+  'multiple-value-call': 1, 'multiple-value-prog1': 1, 'multiple-value-setq': 1, 'pprint-logical-block': 1,
+  'print-unreadable-object': 1, prog: 1, 'prog*': 1, prog1: 1, prog2: 2, progn: 0, progv: 2, return: 0, 'return-from': 1,
+  throw: 1, unless: 1, 'unwind-protect': 1, when: 1, 'with-accessors': 2, 'with-condition-restarts': 2,
+  'with-compilation-unit': 1, 'with-output-to-string': 1, 'with-slots': 2, 'with-standard-io-syntax': 0 };
+const CL_INNER: Record<string, [depth: number, from: number, to: number]> = {
+  flet: [2, 1, 1], labels: [2, 1, 1], macrolet: [2, 1, 1], 'handler-case': [1, 2, Infinity], 'restart-case': [1, 2, Infinity] };
+const CL_LAMBDA: Record<string, number> = {
+  defun: 2, defmacro: 2, defgeneric: 2, defsubst: 2, deftype: 2, 'define-setf-method': 2, 'define-setf-expander': 2,
+  'define-modify-macro': 2, defsetf: 2, lambda: 1, ':method': 1, prog: 1, 'prog*': 1, 'with-compilation-unit': 1 };
+const CL_FIRST: Record<string, number> = {
+  'unwind-protect': 5, 'multiple-value-bind': 6, 'destructuring-bind': 6, 'with-slots': 6, 'with-accessors': 6,
+  'with-condition-restarts': 6, defclass: 6, 'define-condition': 6 };
+const CL_TAGS: Record<string, [from: number, statement: number]> = { tagbody: [1, 3], prog: [2, 3], 'prog*': [2, 3], do: [3, 2], 'do*': [3, 2] };
+/* A tagbody tag: a line that starts with a symbol or word character, as lisp-mode's syntax table has them. */
+const CL_TAG = /^[\p{L}\p{N}_\-+*/<>=!?$%&~^:@.]/u;
+/* A lambda-list keyword, as cl-indent's lisp-indent-lambda-list-keywords-regexp (case folded, as Emacs searches):
+   anywhere in a text, and at the start of one. */
+const LAMBDA_WORD = '&(?:optional|rest|key|allow-other-keys|aux|whole|body|environment)(?:[ \\t]|$)';
+const LAMBDA_KEY = new RegExp(LAMBDA_WORD, 'gim'), LAMBDA_LEAD = new RegExp('^' + LAMBDA_WORD, 'i');
+/* Clojure's forms as clojure-mode 5.23 indents them (clojure-indent-function, its define-clojure-indent table in the
+   legacy form its backtracking engine reads): N, N special arguments at +4 and the body at +2; defn, the body at +2;
+   a list, a spec for each argument (the last for the rest), a nested list a spec for the forms inside that argument. */
+type CljSpec = number | 'defn' | null | CljSpec[];
+const CLJ_INDENT: Record<string, CljSpec> = {
+  ns: 1, fn: 'defn', def: 'defn', defn: 'defn', 'bound-fn': 'defn', if: 1, 'if-not': 1, case: 1, cond: 0, condp: 2,
+  'cond->': 1, 'cond->>': 1, when: 1, while: 1, 'when-not': 1, 'when-first': 1, do: 0, delay: 0, future: 0, comment: 0,
+  doto: 1, locking: 1, proxy: [2, ['defn']], 'as->': 2, fdef: 1, reify: ['defn', ['defn']], deftype: [2, ['defn']],
+  defrecord: [2, ['defn']], defprotocol: [1, ['defn']], definterface: [1, ['defn']], extend: 1, 'extend-protocol': [1, 'defn'],
+  'extend-type': [1, 'defn'], specify: [1, 'defn'], 'specify!': [1, 'defn'], try: 0, catch: 2, finally: 0, let: 1,
+  letfn: [1, [['defn']], null], binding: 1, loop: 1, for: 1, doseq: 1, dotimes: 1, 'when-let': 1, 'if-let': 1, 'when-some': 1,
+  'if-some': 1, 'this-as': 1, defmethod: 'defn', testing: 1, deftest: 'defn', are: 2, 'use-fixtures': 'defn', async: 1,
+  run: 'defn', 'run*': 'defn', fresh: 'defn', 'alt!': 0, 'alt!!': 0, go: 0, 'go-loop': 1, thread: 0 };
+const own = <T,>(o: Record<string, T>, k: string) => Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined;
+/* clojure--get-indent-method: NAME's spec, or that of its part after a / (str/join), or that of if, when, let or
+   while for a name that goes on from one of them with a symbol character (if-let*, when-foo). */
+function cljMethod(name: string): CljSpec | undefined {
+  let m = own(CLJ_INDENT, name);
+  if (m === undefined && name.includes('/')) m = own(CLJ_INDENT, name.slice(name.lastIndexOf('/') + 1));
+  if (m === undefined) { const w = /^(if|when|let|while)[^\p{L}\p{N}]/u.exec(name); if (w) m = own(CLJ_INDENT, w[1]); }
+  return m;
+}
 /* Whether the text from FROM to P on P's line is blanks only. */
 function blankTo(t: EdText, from: number, p: number) { for (let k = from; k < p; k++) { const c = t.charAt(k); if (c !== ' ' && c !== '\t') return false; } return true; }
 /* The first sexp that starts on P's line, before P: Emacs parses the line from its start, so it may be inside a
@@ -1330,14 +1466,31 @@ function firstSexpOnLine(t: EdText, cls: ArrayLike<number>, p: number) {
   if (k > 0 && inStr(cls[k - 1]) && inStr(cls[k])) while (k < p && inStr(cls[k])) k++;
   for (; k < p; k++) {
     const c = t.charAt(k);
-    if (c === ' ' || c === '\t' || cls[k] === C.CMT || ((c === ')' || c === ']') && cls[k] === C.PAR)) continue;
+    if (c === ' ' || c === '\t' || cls[k] === C.CMT || (cls[k] === C.PAR && !openAt(t, k))) continue;
     break;
   }
   return k;
 }
+/* The number of sexps from P that end before the line that starts at LS, counted up to MAX. */
+function sexpsBefore(t: EdText, cls: ArrayLike<number>, p: number, ls: number, max: number) {
+  let n = 0;
+  while (n < max) { const e = forwardSexp(t, cls, p); if (e === null || e > ls || e <= p) break; n++; p = e; }
+  return n;
+}
+/* The head of the list that opens at OPEN, as [START, END, NAME], NAME past its prefix characters (' ` , @ #),
+   which Emacs passes over to read it, or null for an empty list. */
+function listHead(t: EdText, cls: ArrayLike<number>, open: number): [number, number, string] | null {
+  const fe = forwardSexp(t, cls, open + 1); if (fe === null) return null;
+  const f = backwardSexp(t, cls, fe)!;
+  let h = f; while (h < fe && (cls[h] === C.QUO || t.charAt(h) === '#')) h++;
+  return [f, fe, t.slice(h, fe)];
+}
 /* The column for the line that starts at LS in a Lisp text, or null to leave it: it starts in a string or a
-   comment over lines (#| |#, a #; datum), or with ;;; (Emacs leaves those). ELISP: the text is Emacs Lisp. */
-function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp = false) {
+   comment over lines (#| |#, a #; datum), or with ;;; (Emacs leaves those). DIALECT is the text's (lispDialect's):
+   Scheme and Emacs Lisp as Emacs's calculate-lisp-indent with scheme-mode's scheme-indent-function or
+   emacs-lisp-mode's lisp-indent-function, Common Lisp with lisp-mode's common-lisp-indent-function, Clojure with
+   clojure-mode's clojure-indent-function. */
+function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, dialect = 'scheme') {
   if (ls > 0 && (inStr(cls[ls - 1]) || cls[ls - 1] === C.CMT) && (inStr(cls[ls]) || cls[ls] === C.CMT)) return null;
   let ie = ls; while (ie < t.length && (t.charAt(ie) === ' ' || t.charAt(ie) === '\t')) ie++;
   if (t.charAt(ie) === ';' && t.charAt(ie + 1) === ';' && t.charAt(ie + 2) === ';') return null;
@@ -1352,17 +1505,23 @@ function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp = fa
   /* The head past its prefix characters (' ` , @ #), which Emacs passes over to read it. */
   let h = f; while (h < fe && (cls[h] === C.QUO || t.charAt(h) === '#')) h++;
   const fc = t.charAt(h);
-  /* The head is no symbol (a list, a vector, a string): under it, or under the line before's first sexp. */
-  if (fc === '(' || fc === '[' || fc === '"')
-    return column(t, fLine ? f : firstSexpOnLine(t, cls, last));
   /* normal-indent: on the head's line under the first argument, but under the head when it is alone there or the
      open paren is followed by a blank; on later lines under the line before's first sexp. */
   let normal: number;
   if (!fLine) normal = column(t, firstSexpOnLine(t, cls, last));
   else if (f === last || /\s/.test(t.charAt(open + 1))) normal = column(t, f);
   else normal = column(t, backwardSexp(t, cls, forwardSexp(t, cls, fe)!)!);
-  const head = t.slice(h, fe), table = elisp ? ELISP_INDENT : SCHEME_INDENT;
-  let method: IndentMethod | undefined = Object.prototype.hasOwnProperty.call(table, head) ? table[head] : undefined;
+  if (dialect === 'clojure') return cljIndentFor(t, cls, ls, open, oc, f, fe, normal);
+  /* The head is no symbol (a list, a vector, a string): under it, or under the line before's first sexp; in Common
+     Lisp under it past its prefix (cl-indent puts the line after (#(a) at 2, after (#'(a) at 3), and the lists around
+     may still decide (a lambda list that starts with a specialized parameter). */
+  if (fc === '(' || fc === '[' || fc === '"') {
+    const under = column(t, fLine ? (dialect === 'cl' ? h : f) : firstSexpOnLine(t, cls, last));
+    return dialect === 'cl' ? clIndentFor(t, cls, ls, open, oc, under) : under;
+  }
+  if (dialect === 'cl') return clIndentFor(t, cls, ls, open, oc, normal);
+  const head = t.slice(h, fe), elisp = dialect === 'elisp', table = elisp ? ELISP_INDENT : SCHEME_INDENT;
+  let method: IndentMethod | undefined = own(table, head);
   if (method === undefined && !elisp && head.length > 3 && head.startsWith('def')) method = 'defun';
   if (method === 'let') {
     let a = fe; while (t.charAt(a) === ' ' || t.charAt(a) === '\t') a++;
@@ -1372,9 +1531,7 @@ function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp = fa
   if (method === 'defun') { if (last < eol(t, open) + 1) want = oc + 2; }
   else if (typeof method === 'number') {
     /* The arguments that start before the line, counted up to one past the distinguished ones. */
-    let n = 0, p = fe;
-    while (n <= method) { const e = forwardSexp(t, cls, p); if (e === null || e > ls || e <= p) break; n++; p = e; }
-    const count = method - n;
+    const n = sexpsBefore(t, cls, fe, ls, method + 1), count = method - n;
     if (count > 0) want = n <= 1 ? oc + 4 : normal;
     else if (count === 0 && (method === 0 || oc + 2 <= normal)) want = oc + 2;
     else want = normal;
@@ -1388,10 +1545,129 @@ function lispIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, elisp = fa
   }
   return normal;
 }
+/* common-lisp-indent-function, its specs reduced to CL_INDENT, CL_INNER, CL_LAMBDA, CL_FIRST and CL_TAGS. A line
+   directly in a loop goes at +6 in an extended loop (one whose first argument starts with a keyword or a word
+   character, or that has none) and at +1 in a simple one. Else, walking out from the list around the line (OPEN, at
+   column OC) through up to three lists, the first that decides gives the column. A list quoted with ' or written #(
+   holds data: its elements go under the first. A head of its own (its package prefix dropped, cl:when as when) with
+   N distinguished arguments puts an argument at +4 (the first at CL_FIRST's offset where it has one) while there are
+   no more than N before the line (the head counted), the first body form at +2 and the rest at NORMAL, or a line in
+   the tagbody of a CL_TAGS head at its tag or statement offset; around an inner list it gives NORMAL, but for the subforms
+   CL_INNER names, which are defun-like, and for a lambda list: the argument CL_LAMBDA names, or the first argument
+   of a CL_INNER subform. A def head of no entry counts only if nothing around it decides. A method's qualifiers
+   (defmethod foo :around ...), the atoms after its name, are distinguished arguments of their own. */
+function clIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, open: number, oc: number, normal: number) {
+  const rule = (o: number, fe: number, method: number, first = 4) => {
+    const n = 1 + sexpsBefore(t, cls, fe, ls, method + 1);
+    return n <= method ? column(t, o) + (n === 1 ? first : 4) : n === method + 1 ? column(t, o) + 2 : normal;
+  };
+  /* lisp-indent-tagbody, for the line that is the Nth element of the list at O: a tag at +1, a statement at +STATEMENT. */
+  const tagbody = (o: number, statement: number) => {
+    let ie = ls; while (t.charAt(ie) === ' ' || t.charAt(ie) === '\t') ie++;
+    return column(t, o) + (CL_TAG.test(t.slice(ie, ie + 1)) ? 1 : statement);
+  };
+  /* The index of the element of the list at O that starts at X, the head 0. */
+  const index = (o: number, x: number) => {
+    let k = 0; for (let p = o + 1, e = forwardSexp(t, cls, p); e !== null && e <= x; p = e, e = forwardSexp(t, cls, p)) k++;
+    return k;
+  };
+  /* The number of qualifiers of the defmethod whose head ends at FE: the sexps after its name up to a list. */
+  const qualifiers = (fe: number) => {
+    let p = forwardSexp(t, cls, fe) ?? fe, k = 0;
+    for (let e = forwardSexp(t, cls, p); e !== null && e > p && t.charAt(backwardSexp(t, cls, e)!) !== '('; e = forwardSexp(t, cls, p)) { k++; p = e; }
+    return k;
+  };
+  /* lisp-indent-lambda-list, for the line in the lambda list at OPEN: one that starts with a lambda-list keyword
+     goes under the first parameter, any other at the last keyword before it + 2, or under the first parameter. */
+  const lambdaList = () => {
+    let ie = ls; while (t.charAt(ie) === ' ' || t.charAt(ie) === '\t') ie++;
+    if (LAMBDA_LEAD.test(t.slice(ie, eol(t, ie)))) return oc + 1;
+    let col = oc + 1;
+    for (const m of t.slice(open, ls - 1).matchAll(LAMBDA_KEY)) col = column(t, open + m.index) + 2;
+    return col;
+  };
+  let tentative: number | null = null, grand = open, child = open, o: number | null = open;
+  for (let depth = 0; o !== null && depth < 3; depth++, grand = child, child = o, o = upList(t, cls, o)) {
+    const q = o > 0 ? t.charAt(o - 1) : '';
+    if ((q === "'" && (o < 2 || t.charAt(o - 2) !== '#')) || q === '#') return oc + 1;
+    const hd = listHead(t, cls, o);
+    if (!hd || /^[(["]/.test(t.charAt(hd[0]))) continue;
+    if (depth === 0 && hd[0] === o + 1 && t.slice(hd[0], hd[1]).toLowerCase() === 'loop') {
+      const e2 = forwardSexp(t, cls, hd[1]);
+      const extended = e2 === null || e2 <= hd[1] || /[:\p{L}\p{N}]/u.test(t.charAt(backwardSexp(t, cls, e2)!));
+      return oc + (extended ? 6 : 1);
+    }
+    let name = hd[2].toLowerCase(); const colon = name.lastIndexOf(':');
+    if (colon > 0) name = name.slice(colon + 1);
+    let method = own(CL_INDENT, name);
+    if (depth === 0) {
+      if (method === undefined) {
+        if (name.startsWith('def')) { tentative = rule(o, hd[1], 2); continue; }
+        if (/^(with|without|do)-/.test(name)) method = 1;
+      } else if (name === 'defmethod') method = 2 + qualifiers(hd[1]);
+      const tags = own(CL_TAGS, name);
+      if (tags && 1 + sexpsBefore(t, cls, hd[1], ls, tags[0]) >= tags[0]) return tagbody(o, tags[1]);
+      if (method !== undefined) return rule(o, hd[1], method, own(CL_FIRST, name));
+      continue;
+    }
+    if (method === undefined) continue;
+    const k = index(o, child);
+    if (depth === 1 && k === (name === 'defmethod' ? 2 + qualifiers(hd[1]) : own(CL_LAMBDA, name))) return lambdaList();
+    const inner = own(CL_INNER, name);
+    if (inner && k >= inner[1] && k <= inner[2]) {
+      if (inner[0] === depth) { const ih = listHead(t, cls, open); return ih ? rule(open, ih[1], 1) : normal; }
+      if (inner[0] + 1 === depth && index(child, grand) === 1) return lambdaList();
+    }
+    return tentative ?? normal;
+  }
+  return tentative ?? normal;
+}
+/* clojure-indent-function: a vector, a map, a set, a reader conditional (#?( #?@( ) or a list whose head is no
+   symbol holds data, its elements under the first; else the head's spec, found by walking out through up to three
+   lists around it (clojure--find-indent-spec-backtracking), decides: N puts the arguments up to the Nth at +4, the
+   next at +2 and the rest at NORMAL; defn puts the body at +2. With no spec a head that starts with def (not
+   default) or with-, after any namespace, takes the body at +2, and any other NORMAL. */
+function cljIndentFor(t: EdText, cls: ArrayLike<number>, ls: number, open: number, oc: number, f: number, fe: number, normal: number) {
+  const bracket = t.charAt(open);
+  let q = open; while (q > 0 && t.charAt(q - 1) === '@') q--;
+  const reader = q > 1 && t.charAt(q - 1) === '?' && t.charAt(q - 2) === '#';
+  if (bracket === '[' || bracket === '{' || reader || f !== open + 1 || /[(["`~^@;\\,{]/.test(t.charAt(f))) return oc + 1;
+  const name = t.slice(f, fe);
+  let method = cljSpecAt(t, cls, open, name, 0);
+  if (Array.isArray(method)) method = method.length === 1 && typeof method[0] === 'number' ? method[0] : null;
+  if (typeof method === 'number') {
+    const pos = 1 + sexpsBefore(t, cls, fe, ls, method + 2);
+    return pos <= method ? oc + 4 : pos === method + 1 ? oc + 2 : normal;
+  }
+  if (method === 'defn') return oc + 2;
+  if (name[0] !== ':') { const m = /^(?:\S+\/)?(def[a-z]*|with-)/.exec(name); if (m && !m[1].startsWith('default')) return oc + 2; }
+  return normal;
+}
+/* The spec that applies at the list opening at OPEN, its head NAME (null when its first element is no symbol), which
+   is the POSth element of its parent's list when DEPTH > 0: the head's own, or else what the lists around it give
+   for this element, read as clojure-mode does (a spec of one element applies to the list itself, or to every element
+   when it is a list; a longer one to the element at its position, the last element to the rest). */
+function cljSpecAt(t: EdText, cls: ArrayLike<number>, open: number, name: string | null, depth: number, pos = 0): CljSpec | undefined {
+  let method = name ? cljMethod(name) : undefined;
+  if (method === undefined && depth < 3) {
+    const up = upList(t, cls, open);
+    if (up !== null && column(t, open) > 0) {
+      let k = 0, p = up + 1;
+      for (let e = forwardSexp(t, cls, p); e !== null && e <= open; p = e, e = forwardSexp(t, cls, p)) k++;
+      const hd = listHead(t, cls, up);
+      method = cljSpecAt(t, cls, up, hd && !/^[(["{`~^@\\]/.test(t.charAt(hd[0])) ? t.slice(hd[0], hd[1]) : null, depth + 1, k);
+    }
+  }
+  if (typeof method === 'number') method = [method];
+  if (method === 'defn') return pos === 0 ? 'defn' : undefined;
+  if (!Array.isArray(method) || !method.length) return undefined;
+  if (method.length === 1) return pos === 0 || Array.isArray(method[0]) ? method[0] : undefined;
+  return method[Math.min(pos, method.length - 1)];
+}
 function indentLine(b: EdBuffer) {
   const t = b.rope, ls = bol(t, b.pt);
   const cls = lexOf(b)!;
-  const want = lispIndentFor(t, cls, ls, /\.el$/.test(b.file || b.name));
+  const want = lispIndentFor(t, cls, ls, lispDialect(b) || 'scheme');
   if (want === null) return;
   let ie = ls; while (ie < t.length && (t.charAt(ie) === ' ' || t.charAt(ie) === '\t')) ie++;
   const have = column(t, ie);
@@ -2221,19 +2497,20 @@ function computeFlags(b: EdBuffer, opts: EcRenderOpts, from: number, to: number,
   if (opts.current) mark(opts.current[0], opts.current[1], FLAG.MATCH);
   return flags;
 }
+const CLOSER: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
 function parenFlags(b: EdBuffer, cls: ArrayLike<number>, flags: Uint8Array, onChar: boolean | undefined, from: number, to: number) {
   const t = b.rope, p = b.pt, c0 = t.charAt(p);
   let k = -1;
-  /* ( ) and [ ] are counted as one kind (matchParen), so a pair that does not match, ( with ], shows as a
+  /* ( ), [ ] and { } are counted as one kind (matchParen), so a pair that does not match, ( with ], shows as a
      mismatch, as show-paren-mode does. */
-  const close = (c: string) => c === ')' || c === ']';
+  const close = (c: string) => c === ')' || c === ']' || c === '}';
   if (onChar && cls[p] === C.PAR) k = p;
   else if (p > 0 && close(t.charAt(p - 1)) && cls[p - 1] === C.PAR) k = p - 1;
   else if (!close(c0) && cls[p] === C.PAR) k = p;
   const set = (i: number, f: number) => { if (i >= from && i < to) flags[i - from] |= f; };
   if (k >= 0) {
     const o = matchParen(t, cls, k);
-    if (o === null || o === undefined || (t.charAt(Math.min(k, o)) === '(') !== (t.charAt(Math.max(k, o)) === ')')) set(k, FLAG.MISMATCH);
+    if (o === null || o === undefined || CLOSER[t.charAt(Math.min(k, o))] !== t.charAt(Math.max(k, o))) set(k, FLAG.MISMATCH);
     else { set(k, FLAG.PAREN); set(o, FLAG.PAREN); }
   }
 }
@@ -2825,8 +3102,10 @@ function posOfEl(el: HTMLElement | null, off: number, t: string) {
 }
 
 /* The lexer's source, for the worker pool (pool.ts) to lex big buffers off the main thread. */
-const LEX_SOURCE = `const C = ${JSON.stringify(C)}; const KEYWORDS = new Set(${JSON.stringify([...KEYWORDS])});
-const isWS = ${isWS}; const isDelim = ${isDelim}; const inStr = ${inStr};
+const LEX_SOURCE = `const C = ${JSON.stringify(C)};
+const KEYWORDS_OF = Object.create(null), DEFINERS_OF = Object.create(null), KW = ${JSON.stringify(LISP_KEYWORDS)}, DEF = ${JSON.stringify(LISP_DEFINERS)};
+for (const d in KW) { KEYWORDS_OF[d] = new Set(KW[d]); DEFINERS_OF[d] = new Set(DEF[d]); }
+const isWS = ${isWS}; const isDelim = ${isDelim}; const inStr = ${inStr}; const openAt = ${openAt}; const blankAt = ${blankAt};
 ${lex}
 ${markDocstrings}
 ${forwardSexp}
@@ -2837,7 +3116,7 @@ globalThis.Ed = {
   localized, localize, makeLocal, localValue, defaultValue, setDefault, minorModes, minorOn, modeParents, modeChain, lighters, LEX_SOURCE, Store, Buffer, Keymap, PREFIX, C, SENTINEL, getBuffer, getBufferCreate, toBuffer, setWindowBuffer, otherBuffer, checkRO,
   insertText, deleteText, replaceText, spanOf, changedSince, forgetLog, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, codeLexOf, markDocstrings,
   forwardSexp, backwardSexp, upList, matchParen, stringAt, inStringAt, inCommentAt, escapingAt, upListForward, downList, backwardDownList,
-  nextListStart, prevListEnd, defunBefore, defunAfter, balancedLisp, balanceSpan, keepsBalance, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,
+  nextListStart, prevListEnd, defunBefore, defunAfter, balancedLisp, balanceSpan, keepsBalance, indentLine, lispIndentFor, isLisp, lispDialect, lispDefiners: LISP_DEFINERS, modeFor, MODE_NAMES,
   normKey, kbd, defineKey, lookupIn, lookupKey, lookupWith, activeMaps, whereIs, keyName, keyChar, selfInsertable, message, ding,
   reportError, errorText, quietQuit, QUIET, feedKey, unreadKeys, flushReplay, nextKey, readMini, exitMini, abortMini, completeMini, historyMove,
   miniCandidates, miniMove, miniInsert, markUsed, termRegex, histories, historyFor, prescient, annotateCommand, annotateFunction, annotateVariable, annotateBuffer, annotateFile, readKeySeq, readChar, commandNames, functionNames, variableNames, bufferNames, isCommand, prefixNumeric, specArgs,

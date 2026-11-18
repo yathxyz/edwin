@@ -2,10 +2,13 @@
 // syntax (set-comment-syntax!, looked up through the modes a mode derives from, nearest first) and the comment
 // commands that use it, gc, gcc and M-;. Balanced brackets in Lisp buffers (lang-lisp-brackets): typing, Replace state,
 // DEL, C-d and RET keep a balanced buffer balanced, by rule and by a property test of random keys; the list motions.
+// The Lisp modes (lang-lisp-modes): Emacs Lisp, Common Lisp, Clojure and Racket buffers by file name, each read as its
+// dialect, and test/fixtures/indent's lisp-modes files, Emacs 31.1's own indentation, re-indent to themselves.
 // One Edwin per process, so the cases run in order on fresh buffers.
 // Run: node --test test/prog.test.mts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { startEdwin } from './headless.mts';
 
 const ed = await startEdwin();
@@ -167,6 +170,9 @@ const SAMPLES: [string, string][] = [
   ['player.gd', 'gdscript-mode'], ['justfile', 'just-mode'], ['Justfile', 'just-mode'], ['.justfile', 'just-mode'],
   ['build.just', 'just-mode'], ['meson.build', 'meson-mode'], ['meson_options.txt', 'meson-mode'],
   ['meson.options', 'meson-mode'], ['boot.nasm', 'nasm-mode'], ['nginx.conf', 'nginx-mode'], ['paper.typ', 'typst-mode'],
+  ['init.el', 'emacs-lisp-mode'], ['x.lisp', 'lisp-mode'], ['x.lsp', 'lisp-mode'], ['x.cl', 'lisp-mode'], ['x.asd', 'lisp-mode'],
+  ['core.clj', 'clojure-mode'], ['app.cljs', 'clojure-mode'], ['util.cljc', 'clojure-mode'], ['deps.edn', 'clojure-mode'],
+  ['main.rkt', 'racket-mode'],
 ];
 const PATHS: [string, string][] = [
   ['src/lib.rs', 'rust-mode'], ['/home/u/proj/flake.nix', 'nix-mode'], ['proj/justfile', 'just-mode'],
@@ -175,7 +181,7 @@ const PATHS: [string, string][] = [
 ];
 /* Names that must not be taken by a language. */
 const OTHERS: [string, string][] = [
-  ['notes.md', 'markdown-mode'], ['todo.org', 'org-mode'], ['init.scm', 'scheme-mode'], ['init.el', 'scheme-mode'],
+  ['notes.md', 'markdown-mode'], ['todo.org', 'org-mode'], ['init.scm', 'scheme-mode'], ['x.ss', 'scheme-mode'], ['x.sld', 'scheme-mode'],
   ['notes.txt', 'fundamental-mode'], ['site.conf', 'fundamental-mode'], ['myjustfile.txt', 'fundamental-mode'],
   ['x.json.bak', 'fundamental-mode'], ['a.ts.orig', 'fundamental-mode'], ['README', 'fundamental-mode'],
   // Case-sensitive, unlike Emacs's auto-mode-case-fold (docs/steps.md).
@@ -932,5 +938,216 @@ test('the bracket guard adds at most 2 ms to a keystroke (median of 50) in a 10,
     assert.ok(key <= 2, `${what}: key median ${key} ms`);
     assert.ok(del <= 2, `${what}: DEL median ${del} ms`);
     ed.Ed.deleteText(b, 0, b.text.length); b.modified = false;
+  }
+});
+
+/* ---------- the Lisp modes (lang-lisp-modes) ---------- */
+
+test('a Lisp file opens in its mode, read as its dialect, with ;; comments; lisp-buffer? holds in each, not in the minibuffer', async () => {
+  const modes: [string, string, string][] = [
+    ['el', 'emacs-lisp-mode', 'elisp'], ['lisp', 'lisp-mode', 'cl'], ['asd', 'lisp-mode', 'cl'], ['clj', 'clojure-mode', 'clojure'],
+    ['cljs', 'clojure-mode', 'clojure'], ['cljc', 'clojure-mode', 'clojure'], ['edn', 'clojure-mode', 'clojure'],
+    ['rkt', 'racket-mode', 'scheme'], ['scm', 'scheme-mode', 'scheme']];
+  for (const [ext, mode, dialect] of modes) {
+    await buffer(ext, '(a b)\n');
+    assert.equal(ed.E.current.mode, mode, ext);
+    assert.equal(ev('(lisp-dialect)').name, dialect, ext);
+    assert.equal(ev('(and (lisp-buffer?) #t)'), true, ext);
+    if (mode !== 'scheme-mode') assert.equal(ev(`(and (derived-mode-p 'prog-mode) #t)`), true, ext);
+    await ed.type('gcc');
+    assert.equal(ed.text(), ';; (a b)\n', ext);
+  }
+  await buffer('md', '(a b)\n');
+  assert.equal(ev('(lisp-dialect)'), false);
+  assert.equal(ev('(and (lisp-buffer? ) #t)'), false);
+  await ed.keys('M-:');
+  assert.equal(ev('(lisp-dialect)').name, 'scheme');
+  assert.equal(ev('(lisp-buffer?)'), false);
+  await ed.keys('C-g');
+});
+
+/* The lines where gg=G in Edwin differs from Emacs 31.1's indent-region (lisp-mode, clojure-mode 5.23.0, scheme-mode
+   for .rkt), by each line's text, with the column Edwin gives it; idem: on the fixture, flat: on it with every
+   line's leading blanks taken away. A lambda list's &key parameters, which cl-indent puts at the keyword's column + 2,
+   Edwin puts under the first; a line that starts inside a #_ datum Edwin leaves, as it leaves one inside #;, and the
+   line after it it puts under that line's first datum. */
+const LISP_DIFFERS: Record<string, Record<'idem' | 'flat', Record<string, number>>> = {
+  lisp: { idem: {}, flat: {} },
+  clj: { idem: { 'after-datum)': 9 }, flat: { 'x) a': 0 } },
+  rkt: { idem: {}, flat: {} },
+};
+for (const ext of ['lisp', 'clj', 'rkt'] as const)
+  test(`gg=G on the lisp-modes.${ext} fixture keeps it, and gives it back from its lines unindented, but on the lines written down`, async () => {
+    const want = readFileSync(new URL(`fixtures/indent/lisp-modes.${ext}`, import.meta.url), 'utf8');
+    for (const how of ['idem', 'flat'] as const) {
+      await buffer(ext, how === 'idem' ? want : want.replace(/^[ \t]+/gm, ''));
+      await ed.type('gg=G');
+      const got = ed.text().split('\n'), w = want.split('\n'), differs = LISP_DIFFERS[ext][how], seen = new Set<string>();
+      assert.equal(got.length, w.length);
+      got.forEach((line, i) => {
+        if (line === w[i]) return;
+        const text = line.trim();
+        assert.ok(text in differs, `${how} line ${i + 1}: Edwin ${JSON.stringify(line)}, Emacs ${JSON.stringify(w[i])}`);
+        assert.equal(line.length - line.trimStart().length, differs[text], text);
+        seen.add(text);
+      });
+      assert.deepEqual([...seen].sort(), Object.keys(differs).sort(), how);
+    }
+  });
+
+test('the Lisp indentation of each dialect: the forms each indents its own way', async () => {
+  const cases: [string, string, string][] = [
+    // if: Scheme and Common Lisp align the branches, Emacs Lisp puts the else at +2, Clojure all at +2
+    ['scm', '(if a\nb\nc)\n', '(if a\n    b\n    c)\n'], ['lisp', '(if a\nb\nc)\n', '(if a\n    b\n    c)\n'],
+    ['el', '(if a\nb\nc)\n', '(if a\n    b\n  c)\n'], ['clj', '(if a\nb\nc)\n', '(if a\n  b\n  c)\n'],
+    // a def word of no entry: Scheme and Common Lisp take a defun, Clojure the body at +2, Emacs Lisp a call
+    ['scm', '(define-foo a\nb)\n', '(define-foo a\n  b)\n'], ['lisp', '(define-foo a\nb)\n', '(define-foo a\n    b)\n'],
+    ['clj', '(define-foo a\nb)\n', '(define-foo a\n  b)\n'], ['el', '(define-foo a\nb)\n', '(define-foo a\n            b)\n'],
+    // Clojure's maps, vectors and sets hold data; a keyword head is a call; a namespaced spec is found by its name
+    ['clj', '{:a 1\n:b 2}\n', '{:a 1\n :b 2}\n'], ['clj', '(:k m\nn)\n', '(:k m\n    n)\n'], ['clj', '(s/when a\nb)\n', '(s/when a\n  b)\n'],
+    ['clj', '(defn f\n([x] x)\n([x y]\n(+ x y)))\n', '(defn f\n  ([x] x)\n  ([x y]\n   (+ x y)))\n'],
+    // Common Lisp's quoted lists hold data; flet's local functions are defun-like
+    ['lisp', "'(a\nb)\n", "'(a\n  b)\n"], ['lisp', '(flet ((g (x)\nx))\n(g 1))\n', '(flet ((g (x)\n         x))\n  (g 1))\n'],
+    // A method's qualifiers are distinguished arguments, its body at +2, nested too and with a list for its body
+    // (Emacs 31.1 counts the qualifiers of the top-level form, so a nested method's body goes under the line
+    // before, and signals a scan error on a body line that starts with a list)
+    ['lisp', '(defmethod f :before ((x a))\n(g x))\n', '(defmethod f :before ((x a))\n  (g x))\n'],
+    ['lisp', '(progn\n(defmethod f :before ((x a))\nx))\n', '(progn\n  (defmethod f :before ((x a))\n    x))\n'],
+    // A first argument with an offset of its own: unwind-protect's protected form at +5, multiple-value-bind's
+    // bindings at +6, nested too; a tagbody's statements at +3 (do's at +2) and its tags at +1
+    ['lisp', '(unwind-protect\n(foo)\n(bar))\n', '(unwind-protect\n     (foo)\n  (bar))\n'],
+    ['lisp', '(defun f ()\n(unwind-protect\n(foo)\n(bar)))\n', '(defun f ()\n  (unwind-protect\n       (foo)\n    (bar)))\n'],
+    ['lisp', '(multiple-value-bind\n(a b)\n(f)\nx)\n', '(multiple-value-bind\n      (a b)\n    (f)\n  x)\n'],
+    ['lisp', '(prog (a)\n(foo)\ntag\n(bar))\n', '(prog (a)\n   (foo)\n tag\n   (bar))\n'],
+    ['lisp', '(tagbody\n(foo)\n:tag\n(bar))\n', '(tagbody\n   (foo)\n :tag\n   (bar))\n'],
+    ['lisp', '(do ((i 0))\n((= i 3))\n(foo)\n1\n(bar))\n', '(do ((i 0))\n    ((= i 3))\n  (foo)\n 1\n  (bar))\n'],
+    // do's bindings and end test on lines of their own go at +4 as distinguished arguments (Emacs's (&whole nil
+    // &rest 1) puts them under the line before, column 1)
+    ['lisp', '(do\n((i 0))\n((= i 3))\n(foo))\n', '(do\n    ((i 0))\n    ((= i 3))\n  (foo))\n'],
+    // loop's rule is for loop alone, and a quoted list holds data even when its head is loop (Emacs takes both as a
+    // loop: the line after (loop-finish at column 6, after '(loop at column 7)
+    ['lisp', '(loop-finish\na)\n', '(loop-finish\n a)\n'], ['lisp', "'(loop\nfor)\n", "'(loop\n  for)\n"],
+    // A # dispatch prefix is one argument with its list, as Emacs 31.1 and clojure-mode count it: #( in every
+    // dialect, Clojure's #{ #?( #?@(, Emacs Lisp's #s( and #[; #u8 and #2A are a sexp before the list, as in Emacs
+    ['clj', '(when #(x)\ny)\n', '(when #(x)\n  y)\n'], ['clj', '(#(foo %)\n1)\n', '(#(foo %)\n 1)\n'],
+    ['clj', '(#(foo %) a\nb)\n', '(#(foo %) a\n          b)\n'], ['clj', '(when #{x}\ny)\n', '(when #{x}\n  y)\n'],
+    ['clj', '(when #?(:clj x)\ny)\n', '(when #?(:clj x)\n  y)\n'], ['clj', '(when #?@(:clj [x])\ny)\n', '(when #?@(:clj [x])\n  y)\n'],
+    ['scm', '(when #(x)\ny)\n', '(when #(x)\n  y)\n'], ['scm', '(#(a)\n1)\n', '(#(a)\n 1)\n'], ['scm', '(when #u8(1)\ny)\n', '(when #u8(1)\n      y)\n'],
+    ['lisp', '(when #(x)\ny)\n', '(when #(x)\n  y)\n'], ['lisp', '(when #2A((1))\ny)\n', '(when #2A((1))\n      y)\n'],
+    ['el', '(when #s(x)\ny)\n', '(when #s(x)\n  y)\n'], ['el', '(when #[x]\ny)\n', '(when #[x]\n  y)\n'], ['el', '(#(a)\n1)\n', '(#(a)\n 1)\n'],
+    // Common Lisp puts the line after a head with a prefix under the head past it, but a quoted list holds data
+    ['lisp', '(#(a)\n1)\n', '(#(a)\n  1)\n'], ['lisp', "(#'(a)\n1)\n", "(#'(a)\n   1)\n"], ['lisp', "'(#(a)\n1)\n", "'(#(a)\n  1)\n"],
+    ['lisp', '(#(a) b\nc)\n', '(#(a) b\n  c)\n'],
+    // A #_ datum is a comment, no argument (clojure-mode counts it: y at 6)
+    ['clj', '(when #_(x)\ny)\n', '(when #_(x)\n    y)\n'],
+  ];
+  for (const [ext, input, expected] of cases) {
+    await buffer(ext, input);
+    await ed.type('gg=G');
+    assert.equal(ed.text(), expected, `${ext} ${JSON.stringify(input)}`);
+  }
+});
+
+const LISP_MODE_CASES: [string, string, string, string[], string][] = [
+  ['pct-clj-string', 'clj', '(a ")" b)\n', ['%', 'iX', 'K:Escape'], '(a ")" bX)\n'],
+  ['=G-rkt', 'rkt', '(define (f)\n(g))\n', ['=G'], '(define (f)\n  (g))\n'],
+];
+for (const [id, ext, input, keys, expected] of LISP_MODE_CASES)
+  test(`audit case ${id}`, async () => {
+    await buffer(ext, input);
+    await press(keys);
+    assert.equal(ed.text(), expected);
+  });
+
+test('Clojure: { } are brackets, pairing and balanced, with % and the sexp motions; in Scheme { stays a plain character to type', async () => {
+  await buffer('clj', '(f {:a 1} x)\n');
+  await ed.type('f{%');
+  assert.equal(ed.E.current.pt, 8);
+  await ed.type('%');
+  assert.equal(ed.E.current.pt, 3);
+  ev('(forward-sexp)');
+  assert.equal(ed.E.current.pt, 9);
+  await ed.type('$i');
+  await ed.type(' {');
+  assert.equal(ed.text(), '(f {:a 1} x {})\n');
+  await ed.type('}');
+  assert.equal(ed.text(), '(f {:a 1} x {})\n');
+  await ed.keys('ESC');
+  // a } that would close the list early is refused
+  await buffer('clj', '(a)\n');
+  await ed.type('a}');
+  assert.equal(ed.text(), '(a)\n');
+  await ed.keys('ESC');
+  await buffer('clj', '#{a b}\n');
+  await ed.type('%');
+  assert.equal(ed.E.current.pt, 5);
+  // in Scheme { is no bracket to the lexer, but % pairs it by its text, as before
+  await buffer('scm', '(f {a} x)\n');
+  await ed.type('f{%');
+  assert.equal(ed.E.current.pt, 5);
+  await ed.type('i{');
+  assert.equal(ed.text(), '(f {a{} x)\n');
+  await ed.keys('ESC');
+  // a buffer switched to clojure-mode is lexed again as Clojure: { } become a list to the sexp motions
+  await buffer('scm', '{a b}\n');
+  ev('(forward-sexp)');
+  assert.equal(ed.E.current.pt, 2);
+  ev('(clojure-mode)');
+  ev('(goto-char 1)');
+  ev('(forward-sexp)');
+  assert.equal(ed.E.current.pt, 5);
+});
+
+test('each dialect reads its own character syntax: ?\\( in Emacs Lisp, \\( and #"(" in Clojure, #\\( in Scheme and Common Lisp, a comma a blank in Clojure', async () => {
+  for (const [ext, text] of [['el', '(f ?\\( ?\\) x)\n'], ['clj', '(f \\( \\) #"(" x)\n'], ['scm', '(f #\\( #\\) x)\n'], ['lisp', '(f #\\( #\\) x)\n']]) {
+    await buffer(ext, text);
+    await ed.type('%');
+    assert.equal(ed.E.current.pt, text.length - 2, ext);
+  }
+  await buffer('clj', '(f a, b)\n');
+  ev('(goto-char 5)');
+  ev('(forward-sexp)');
+  assert.equal(ed.E.current.pt, 7);
+  // a dialect that is none of the four (as a lex job's argument could be) reads as Scheme
+  for (const d of ['constructor', '__proto__', 'toString']) {
+    const t = '(define (f) "doc" {a} #\\( x)';
+    assert.deepEqual(ed.Ed.markDocstrings(t, ed.Ed.lex(t, undefined, d), 0, undefined, 0, d), ed.Ed.markDocstrings(t, ed.Ed.lex(t), 0, undefined, 0), d);
+  }
+});
+
+test('a # dispatch prefix goes with its list to forward-sexp and backward-sexp: #( everywhere, #{ #?( #?@( in Clojure, #s( in Emacs Lisp; not #u8(', async () => {
+  const cases: [string, string, number][] = [
+    ['clj', '(#(foo %) 1)', 9], ['clj', '(#{a b} 1)', 7], ['clj', '(#?(:clj x) 1)', 11], ['clj', '(#?@(:clj [x]) 1)', 14],
+    ['scm', '(#(a b) 1)', 7], ['lisp', '(#(a b) 1)', 7], ['el', '(#s(a b) 1)', 8], ['el', '(#[a b] 1)', 7], ['scm', '(#u8(1 2) 1)', 4],
+  ];
+  for (const [ext, text, end] of cases) {
+    const d = { scm: 'scheme', lisp: 'cl', el: 'elisp', clj: 'clojure' }[ext]!, cls = ed.Ed.lex(text, undefined, d);
+    assert.equal(ed.Ed.forwardSexp(text, cls, 1), end, `${ext} ${text}: forward from 1`);
+    assert.equal(ed.Ed.backwardSexp(text, cls, end), 1, `${ext} ${text}: backward from ${end}`);
+    await buffer(ext, text + '\n');
+    ev('(goto-char 2)');
+    ev('(forward-sexp)');
+    assert.equal(ed.E.current.pt, end, `${ext} ${text}: C-M-f`);
+    ev('(backward-sexp)');
+    assert.equal(ed.E.current.pt, 1, `${ext} ${text}: C-M-b`);
+  }
+});
+
+test('consult-imenu lists each dialect\'s definitions', async () => {
+  const cases: [string, string, string][] = [
+    ['el', '(defvar x 1)\n(defalias \'g #\'car)\n(defun h ()\n  1)\n', 'g'],
+    ['lisp', '(defparameter *p* 1)\n(defstruct (point (:conc-name p-)) x)\n', 'point'],
+    ['clj', '(ns a.b)\n(defn ^:private helper [x]\n  x)\n', 'helper'],
+    ['rkt', '(define (f) 1)\n(define-syntax g 2)\n', 'g'],
+  ];
+  for (const [ext, text, name] of cases) {
+    await buffer(ext, text);
+    await ed.keys('M-g i');
+    assert.ok(ed.E.mini, ext);
+    await ed.type(`${name}\n`);
+    assert.equal(ed.E.mini, null);
+    const b = ed.E.current;
+    assert.ok(b.text.slice(b.pt).startsWith('('), `${ext}: at ${b.pt}`);
+    assert.ok(b.text.slice(b.pt).split('\n')[0].includes(name), ext);
   }
 });

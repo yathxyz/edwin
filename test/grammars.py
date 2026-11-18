@@ -1,5 +1,6 @@
 # The grammar bundle (nix/grammars.nix, `edwin-grammars`): python3 test/grammars.py BUNDLE PROG_SCM.
-# Every mode scm/prog.scm declares has exactly one grammar; each grammar's parser.so loads, exports the manifest's
+# Every mode scm/prog.scm declares has exactly one grammar, the Lisp modes aside (LISP_MODES: Edwin's own Lisp lexer
+# reads them, src/editor-core.ts lispDialect); each grammar's parser.so loads, exports the manifest's
 # symbol and gives a language tree-sitter accepts (its ABI version in range); each query file the manifest lists
 # is there, nothing else is, and each compiles against its grammar. Prints one line per language.
 import ctypes
@@ -21,7 +22,9 @@ def fail(msg):
 
 
 manifest = json.loads(Path(bundle, "grammars.json").read_text())
-modes = re.findall(r"^\(define-language (\S+) ", Path(prog).read_text(), re.M)
+LISP_MODES = {"emacs-lisp-mode", "lisp-mode", "clojure-mode", "racket-mode"}
+declared = re.findall(r"^\(define-language (\S+) ", Path(prog).read_text(), re.M)
+modes = [m for m in declared if m not in LISP_MODES]
 if not modes:
     fail(f"no define-language in {prog}")
 by_mode = {}
