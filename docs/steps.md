@@ -6948,6 +6948,98 @@ bundle's language set.
   passed (`edwin-prog` failed a keystroke budget once at load 19 and passed rebuilt alone). Not run: `gg=G` over
   the owner's own shell, TOML or Terraform files.
 
+## Org source blocks highlighted with their grammars (done)
+
+Asked 2026-11-18 (the Emacs-to-Edwin plan, package `lang-src-block-highlight`): source blocks in notes are
+highlighted with the block's grammar. The package is owner-gated; the owner's answer 8 (the plan's default,
+tree-sitter grammars and highlighting included) covers it.
+
+- **An Org source block's body is drawn in its language's faces** over the block's background: keywords,
+  strings, comments, functions and the rest as the same text in a buffer of that language's mode is drawn
+  ("Highlighting from the grammar"), the background (`osb`) kept under them. org.ts's lexer still classifies the
+  shown lines; where it gives a block's body `osb`, `Ed.syntax.blockClasses` (src/syntax.ts) lays the grammar's
+  classes over it, as the combined classes `osb kw`, `osb st` and so on (appended to org.ts's class table `ON`;
+  display.ts draws each class of the name as a layer, the page's CSS does the same).
+- **The block's language** is the word after `#+begin_src` (any case), looked up as Org's `org-src-lang-modes`
+  does: `LANG-mode`, or the mode of an alias (`sh`, `bash`, `shell` and `zsh` to sh-mode, `js` to js-mode, `ts` to
+  typescript-mode, `cpp` and `c++` to c++-mode, `csharp` and `c#` to csharp-mode, `hcl` and `tf` to terraform-mode,
+  `yml` to yaml-mode, `jsonc` to json-mode, `py` to python-mode). The mode's grammar is the one its buffers use
+  (`grammarOf`). The note's word only looks these tables up: it never reaches the native side as a grammar's
+  name. Header arguments after the language (`:results output`) do not matter.
+- **One tree each block, of its body alone**, never of the rest of the note: the whole body (the lines between
+  `#+begin_src` and `#+end_src`, or a headline, or the buffer's end, which also end a block in org.ts's lexer), so
+  a window beginning or ending inside a block still sees a string begun above it; only the shown part is queried.
+  Only blocks the window shows are parsed: a note of 200 blocks parses the dozen in view.
+- **The block trees** (at most 32, across all buffers; the native side keeps 256 trees in all) are found by
+  grammar and text, so a block moved by an edit above it, or shown again, or the same in another buffer, is not
+  parsed again; the least recently drawn is freed first. A block edited in place (the same buffer, its body at the
+  same position) tells its old tree of the edit, as a buffer's own tree is told: typing in a block is an edit
+  and a reparse from the old tree, not a whole parse.
+- **Drawn as before** wherever a block cannot be highlighted: no tree-sitter (a web frame, edwind), a language
+  with no grammar, a block with no language, a body over 32 Ki characters, a failed parse (kept as failed until
+  the block is pushed out, so not tried on every draw) or a failed query. A failure in one block leaves the rest of
+  the note, and the note's other blocks, as they were.
+- **Two tests the phase 4 gate names, added here** (the plan gives them to the package that touches drawing):
+  - `the_first_draw_is_within_40_ms` (native/tests/terminal.rs, ignored as the other wall-clock tests are): edwin
+    started from its snapshot in an 80x24 terminal (DT1 measured 200x50), as the package lays it out (a copy of
+    the binary beside the bundle `EDWIN_TEST_GRAMMARS` names), the best of five starts each: no file and a plain
+    Org note within 40 ms; a note of 40 source blocks in Python, Nix and Rust is printed, not held to it (below).
+  - `the_snapshot_stays_within_its_size` (native/src/main.rs): the startup snapshot at most 8 MiB. It is 7,773,870
+    bytes (DT1's 5.2 MB is from before the later steps).
+- **Choices where the plan left one open:**
+  - Org only, as the package's title says (below).
+  - A block's own tree, not tree-sitter injections into a tree of the note: the bundle has no Org grammar.
+  - The bounds (32 trees, 32 Ki characters a body) are guesses at a note's size, generous for notes and well
+    inside the native side's 256 trees. A keystroke in a block reparses from its old tree (0.25 ms with the real
+    grammars in a note of 200 small blocks); a whole parse of a 32 Ki-character body was not timed.
+  - The package touches `src/syntax.ts`, `src/org.ts`, `src/core.d.ts`, `test/syntax.test.mts`,
+    `native/src/natives.rs`, `native/src/main.rs`, `native/tests/terminal.rs`, `nix/checks.nix` (the
+    `edwin-syntax` comment) and the README; no new `src/*.ts` or `.scm` file, so the touch lists are unchanged.
+- **Not in it, and where Edwin differs from Emacs:**
+  - **The first draw that shows a block in a language not yet used in the process** loads that grammar and
+    compiles its highlights query, as opening a file in that language does: measured on ex44 (load 1.4, 80x24,
+    best of five), Python adds about 5 ms, Nix about 3 and Rust about 15 to a start's first draw of 23 to 25 ms, so
+    a note showing blocks of all three draws first at 46 to 48 ms, past the 40 ms DT1 measured with no file. A
+    plain note, a note whose blocks are in languages already loaded or without a grammar, and every later draw
+    are not slowed (a window of 60 lines of blocks drew in 0.5 ms once loaded). Drawing such blocks plain first
+    and highlighting them on a later draw was not built: it needs a redraw the core does not ask for today.
+  - Markdown fences (```` ```lang ````) are not highlighted: markdown.ts's lexer is untouched.
+  - Lisp blocks (`scheme`, `emacs-lisp`, `elisp`) stay plain: Lisp has no grammar in the bundle (Edwin's own lexer
+    highlights Lisp buffers), and that lexer works on a whole buffer.
+  - Bodies over 32 Ki characters are plain.
+  - Emacs's `org-src-fontify-natively` fontifies with the language's major mode's font-lock; here it is the
+    grammar's highlights query, which is what that language's buffers in Edwin get too.
+  - A block's lines indented under a list item are parsed with their indentation; Python's parse took the
+    indented `def` and `return` in the test, but a body whose indentation confuses its grammar may come out
+    partly plain.
+- **Checked by** check `edwin-syntax` (34 passed, 5 new), with the stand-in host: a body's faces over its
+  background, one tree a block of its body alone, the grammar by alias (`sh` to bash, `js` to javascript), the
+  elisp, unknown-language and language-less blocks plain; a window begun or ended inside a block (only its part
+  queried), a block ended by a headline or by the buffer's end; no tree-sitter, a failed query and a 36,000-
+  character body drawn exactly as before; an edit in a block crossing to its tree (no parse), a block moved
+  not parsed again, 100 blocks shown in turn keeping 32 trees; and the 2 ms budget in a note of 200 blocks (a
+  keystroke in a block and a redraw of 60 lines: median 0.11 ms with the stand-in's query; the keystrokes cross
+  as edits, and one window parses its dozen blocks, not 200). Checks `edwin-typecheck`, `edwin-headless` (21),
+  `edwin-markdown` (20), `edwin-display` (20), `edit-notes` (18), `edwin-prog` (65) and `edwin-structural` (188),
+  `edit-lockdown` (6) and `edit-security` (21) passed.
+
+  `nix build .#edwin` passed: unit tests 41 passed and 3 ignored (2 new and 1 new ignored), `tests/gui.rs` 5 passed
+  and 1 ignored, `tests/terminal.rs` 37 passed and 1 ignored (the new first-draw test). The new cargo tests:
+  `the_core_highlights_org_source_blocks_with_their_grammars`
+  (Python, Nix, Rust, shell and JavaScript blocks with the real grammars, a Python and a JavaScript block indented
+  under list items, a Scheme block plain, each line drawn alone as in the whole, a line typed into a block and
+  taken back giving a fresh buffer's runs) and `the_snapshot_stays_within_its_size`. Run on their own (a release
+  build of the committed sources, the bundle from `nix build .#edwin-grammars`, a throwaway HOME and
+  XDG_RUNTIME_DIR, at a load of 2 to 10): the ignored
+  `a_key_in_a_note_of_200_blocks_redraws_its_faces_within_its_budget` (the real grammars, Rust, C, JavaScript, Nix
+  and Python blocks in turn: a keystroke in a block and a redraw of 60 lines
+  0.26 ms; the window's first draw, grammars loaded, 0.5 ms), `the_first_draw_is_within_40_ms` (no file 24.1 ms,
+  a plain Org note 28.0, a note of source blocks 45.6) and `a_key_in_10000_lines_redraws_its_faces_within_its_budget`
+  again (highlight's capture sort moved into `paint`): Rust 0.76 ms, C 0.44 to 0.46, JavaScript 0.65 to
+  0.75, Nix 0.29 to 0.97, Python 1.16 to 2.08 (held to half its fresh draw of 21.1 ms), all passed.
+
+  Not run: `nix flake check` as a whole.
+
 ## Comment syntax per mode (done)
 
 Asked 2026-11-15 (the Emacs-to-Edwin plan, package `lang-comment-syntax`). Modes declare their line and block

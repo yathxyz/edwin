@@ -1479,6 +1479,134 @@ mod tests {
       errors.length ? errors.join('\n\n') : 'ok'
     "#;
 
+    /// Org's source blocks highlighted with the real grammars (Ed.syntax.blockClasses, org.ts's lexer): a note
+    /// with Python, Nix, Rust, shell and JavaScript blocks (a JavaScript and a Python one under list items, their
+    /// lines indented) draws each block's keywords, strings and comments in their faces over the block's
+    /// background ('osb kw'), the text around them and a Scheme block as before; each line drawn alone has the
+    /// classes it has in the whole; and after a line typed into a block a character at a time and taken back, the
+    /// runs are a fresh buffer's.
+    #[test]
+    fn the_core_highlights_org_source_blocks_with_their_grammars() {
+        assert_eq!(with_core(ORG_BLOCKS_JS.to_string()), "ok");
+    }
+
+    const ORG_BLOCKS_JS: &str = r#"
+      const Ed = globalThis.Ed;
+      const NOTE = [
+        '* Blocks', 'Plain def text.',
+        '#+begin_src python', 'def f(x):', '    """Doc', '    string."""', '    return x  # note', '#+end_src',
+        '#+begin_src nix', '{ pkgs, ... }: let a = "b"; in a', '#+end_src',
+        '#+BEGIN_SRC rust :results silent', 'fn main() { let v = 1; }', '#+END_SRC',
+        '#+begin_src sh', 'if true; then echo "x"; fi', '#+end_src',
+        '- an item', '  #+begin_src js', '  const y = "z";', '  #+end_src',
+        '- another', '  #+begin_src python', '  def h():', '      return "w"', '  #+end_src',
+        '#+begin_src scheme', '(define (g) 1)', '#+end_src', '',
+      ].join('\n');
+      let n = 0;
+      const buffer = text => {
+        const b = Ed.getBufferCreate(`org-blocks-${++n}.org`);
+        Ed.replaceText(b, 0, b.rope.length, text);
+        Ed.switchMajorMode(b, 'org-mode');
+        return b;
+      };
+      const runs = (b, from = 0, count = 100000) => {
+        const out = [];
+        for (const l of Ed.renderBuffer(b, { from, count, runs: true, html: false }))
+          for (const r of l.runs) if (!r.k && r.cls) out.push([r.cls, l.text.slice(r.s, r.e)]);
+        return out;
+      };
+      const errors = [];
+      const b = buffer(NOTE), got = runs(b), has = (cls, text) => got.some(([c, t]) => c === cls && t === text);
+      for (const [cls, text] of [['osb kw', 'def'], ['osb fn', 'f'], ['osb kw', 'return'], ['osb cm', '# note'],
+        ['osb kw', 'let'], ['osb kw', 'in'], ['osb st', '"b"'], ['osb kw', 'fn'], ['osb fn', 'main'],
+        ['osb kw', 'if'], ['osb kw', 'fi'], ['osb kw', 'const'], ['osb st', '"z"']])
+        if (!has(cls, text)) errors.push(`no ${cls} ${text}`);
+      if (!got.some(([c, t]) => c.startsWith('osb ') && t.includes('Doc'))) errors.push('the docstring has no face');
+      if (got.some(([c, t]) => c.startsWith('osb ') && /Plain|define|item/.test(t))) errors.push('a face outside a grammar\'s block');
+      if (!has('osb', '(define (g) 1)')) errors.push('the scheme block is not plain');
+      /* The indented Python block (under a list item): its lines' faces as they come. */
+      const ind = NOTE.indexOf('  def h');
+      const indented = runs(b, ind, 2).filter(([c]) => c.startsWith('osb '));
+      if (JSON.stringify(indented) !== JSON.stringify([['osb kw', 'def'], ['osb fn', 'h'], ['osb kw', 'return'], ['osb st', '"w"']]))
+        errors.push('the indented python block: ' + JSON.stringify(indented));
+      for (const l of Ed.renderBuffer(b, { from: 0, count: 100000, runs: true, html: false })) {
+        const alone = Ed.renderBuffer(b, { from: l.o, count: 1, runs: true, html: false })[0];
+        if (JSON.stringify(alone.runs) !== JSON.stringify(l.runs)) errors.push(`the line at ${l.o} drawn alone differs`);
+      }
+      const at = NOTE.indexOf('    return');
+      for (const ch of '    y = [1, "2"]\n') { Ed.replaceText(b, at, at, ch); runs(b, 0, 12); }
+      if (!runs(b).some(([c, t]) => c === 'osb st' && t === '"2"')) errors.push('the typed string has no face');
+      Ed.replaceText(b, at, at + 17, '');
+      if (b.rope.toString() !== NOTE) errors.push('the edits did not give the text back');
+      if (JSON.stringify(runs(b)) !== JSON.stringify(runs(buffer(NOTE)))) errors.push('after edits the runs differ from a fresh buffer\'s');
+      errors.length ? errors.join('\n') + '\n' + got.map(r => r.join('\t')).join('\n') : 'ok'
+    "#;
+
+    /// The keystroke budget in a note of 200 source blocks (Python, Rust, C, JavaScript and Nix in turn, each
+    /// syntax.rs's BLOCKS text under a headline): a character typed or taken back in a block in the middle and a
+    /// window of 60 lines around it drawn again, within 2 ms, the median of 50, the best of three; and the
+    /// window's first draw, which parses the blocks it shows (not the other 190). Ignored as the other wall-clock
+    /// tests are; run it with "a_key_in_a_note_of_200_blocks" in place of its name.
+    #[test]
+    #[ignore]
+    fn a_key_in_a_note_of_200_blocks_redraws_its_faces_within_its_budget() {
+        let _alone = crate::syntax::tests::heavy();
+        let blocks: Vec<String> = crate::syntax::tests::BLOCKS
+            .iter()
+            .map(|(name, block, _)| format!("[{}, {}]", js_str(name), js_str(block)))
+            .collect();
+        let out = with_core(format!(
+            "const BLOCKS = [{}];\n{}",
+            blocks.join(", "),
+            ORG_BUDGET_JS
+        ));
+        eprintln!("{out}");
+        assert!(out.ends_with("\nok"), "{out}");
+    }
+
+    const ORG_BUDGET_JS: &str = r#"
+      const Ed = globalThis.Ed, report = [];
+      const LANG = { rust: 'rust', c: 'c', javascript: 'js', nix: 'nix', python: 'python' };
+      let note = '';
+      for (let i = 0; i < 200; i++) {
+        const [grammar, block] = BLOCKS[i % BLOCKS.length];
+        note += `** Block ${i}\n#+begin_src ${LANG[grammar]}\n${block}#+end_src\n`;
+      }
+      const buffer = () => {
+        const b = Ed.getBufferCreate(`org-budget-${Math.random()}.org`);
+        Ed.replaceText(b, 0, b.rope.length, note);
+        Ed.switchMajorMode(b, 'org-mode');
+        return b;
+      };
+      const median = v => v.sort((x, y) => x - y)[v.length >> 1];
+      let ok = true;
+      const head = note.indexOf('** Block 100\n'), at = note.indexOf('\n', note.indexOf('#+begin_src', head)) + 2;
+      const o = { from: Math.max(0, head - 20 * 40), count: 60, runs: true, html: false };
+      let first = Infinity;
+      for (let i = 0; i < 3; i++) {
+        const b = buffer(), t = performance.now();
+        Ed.renderBuffer(b, o);
+        first = Math.min(first, performance.now() - t);
+        globalThis.L.call('kill-buffer', [b]);
+      }
+      const b = buffer();
+      if (!Ed.renderBuffer(b, o).some(l => l.runs.some(r => r.cls === 'osb kw'))) { ok = false; report.push('no keyword drawn'); }
+      let key = Infinity;
+      for (let r = 0; r < 3; r++) {
+        const times = [];
+        for (let i = 0; i < 50; i++) {
+          const t = performance.now();
+          if (i % 2 === 0) Ed.replaceText(b, at, at, 'z'); else Ed.replaceText(b, at, at + 1, '');
+          Ed.renderBuffer(b, o);
+          times.push(performance.now() - t);
+        }
+        key = Math.min(key, median(times));
+      }
+      report.push(`a keystroke in a block of a note of 200 and a redraw of 60 lines: ${key.toFixed(3)} ms; the window's first draw ${first.toFixed(1)} ms`);
+      if (key > 2) { ok = false; report.push('over the 2 ms budget'); }
+      report.join('\n') + (ok ? '\nok' : '\nfailed')
+    "#;
+
     /// Imenu from the grammars' tags queries (Ed.syntax.imenu, src/syntax.ts), for each mode of the bundle
     /// whose grammar has one: the definitions of each fixture of test/syntax-imenu.txt, as KIND, NAME and line,
     /// are its golden list. Every such mode has a fixture, and no other mode does.

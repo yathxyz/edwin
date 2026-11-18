@@ -447,18 +447,21 @@ for (const n of ['evil-close-fold', 'evil-open-fold', 'evil-open-fold-rec', 'evi
 /* Class names: oh hidden (display none), ohs hidden star (blank), obN bullet star, olN headline text per
    level, ot/od todo and done keywords, ox done headline text, og tags, ots timestamp, osd planning keyword,
    obb oit ocd ovb oul ost emphasis, okw #+keyword line, oti title, obd block delimiter, osb/oqb block body,
-   olk link, ocb/ocx checkbox, odr drawer, opr priority, ocm comment, oli list bullet, otb table, ohr rule. */
+   olk link, ocb/ocx checkbox, odr drawer, opr priority, ocm comment, oli list bullet, otb table, ohr rule. Then
+   a source block's body in its grammar's classes (syntax.ts's faces) over its background: 'osb kw' and the rest. */
 const ON = ['', 'oh', 'ohs', 'ob1', 'ob2', 'ob3', 'ob4', 'ob5', 'ol1', 'ol2', 'ol3', 'ol4', 'ol5', 'ot', 'od', 'ox', 'og', 'ots', 'osd',
-  'obb', 'oit', 'ocd', 'ovb', 'oul', 'ost', 'okw', 'oti', 'obd', 'osb', 'oqb', 'olk', 'ocb', 'ocx', 'odr', 'opr', 'ocm', 'oli', 'otb', 'ohr'];
+  'obb', 'oit', 'ocd', 'ovb', 'oul', 'ost', 'okw', 'oti', 'obd', 'osb', 'oqb', 'olk', 'ocb', 'ocx', 'odr', 'opr', 'ocm', 'oli', 'otb', 'ohr',
+  ...['kw', 'fn', 'st', 'dc', 'cm', 'co', 'nu', 'ty', 'bi', 'pr', 'pa'].map(n => 'osb ' + n)];
 const OC: Record<string, number> = {}; ON.forEach((nm, i) => { if (nm) OC[nm] = i; });
 const TS_RE = /[<[]\d{4}-\d{2}-\d{2}(?: [^\s>\]]{1,3}\.?)?(?: \d{1,2}:\d{2}(?:-\d{1,2}:\d{2})?)?(?: [+.]+\d+[hdwmy])?(?: -\d+[hdwmy])?[>\]]/g;
 const EM: Record<string, string> = { '*': 'obb', '/': 'oit', '_': 'oul', '=': 'ocd', '~': 'ovb', '+': 'ost' };
 const EM_MD: Record<string, string> = { '*': 'oit', '_': 'oit', '`': 'ocd' }, EM_MD2: Record<string, string> = { '*': 'obb', '_': 'obb', '~': 'ost' };
 const PRE = /[\s\-('"{]/, POST = /[\s\-.,:!?;'")}\\[]/;
-/* The block that holds position FROM: the nearest block delimiter before it (within 64K), or null. A
-   delimiter may be indented, as lexLine accepts it; in Org a headline ends any block, so the search stops
-   there. Markdown fences are counted, since the same ``` line opens and closes. */
-function blockBefore(b: EdBuffer, from: number) {
+/* The block that holds position FROM: the nearest block delimiter before it (within 64K), or null; its kind and,
+   in Org, the start of its #+begin_ line (-1 in Markdown). A delimiter may be indented, as lexLine accepts it; in
+   Org a headline ends any block, so the search stops there. Markdown fences are counted, since the same ``` line
+   opens and closes. */
+function blockBefore(b: EdBuffer, from: number): { kind: string; at: number } | null {
   if (from === 0) return null;
   const r = b.rope, md = isMd(b), lim = Math.max(0, from - 65536), needle = md ? '```' : '#+';
   let fences = 0;
@@ -477,11 +480,11 @@ function blockBefore(b: EdBuffer, from: number) {
     if (ls >= 0) {
       const line = r.slice(ls, Math.min(eol(r, ls), ls + 120));
       if (md) { if (/^\s*```/.test(line)) fences++; }
-      else { const m = /^\s*#\+(begin|end)_(\w+)/i.exec(line); if (m) return m[1].toLowerCase() === 'begin' ? m[2].toLowerCase() : null; }
+      else { const m = /^\s*#\+(begin|end)_(\w+)/i.exec(line); if (m) return m[1].toLowerCase() === 'begin' ? { kind: m[2].toLowerCase(), at: ls } : null; }
     }
     p = i - 1;
   }
-  return md && fences % 2 ? 'src' : null;
+  return md && fences % 2 ? { kind: 'src', at: -1 } : null;
 }
 /* Whether the Markdown front matter that opens the buffer is still open at FROM. */
 function frontMatterAt(b: EdBuffer, from: number) {
@@ -494,8 +497,14 @@ function frontMatterAt(b: EdBuffer, from: number) {
 function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
   const n = seg.length, cls = new Uint8Array(n), md = isMd(b), kw = todoKeywords(), F = foldsOf(b);
   const hideEm = truthy(L.get('org-hide-emphasis-markers'));
-  let block = blockBefore(b, from);
+  const above = blockBefore(b, from);
+  let block = above ? above.kind : null;
   if (md && frontMatterAt(b, from)) block = 'frontmatter';
+  /* Org's source block open at the line being lexed (its language and where its body begins), and those whose
+     end was met, highlighted with their grammars once the lines are lexed. */
+  let src = !md && above && above.kind === 'src' ? srcBlock(b.rope.slice(above.at, eol(b.rope, above.at)), eol(b.rope, above.at) + 1) : null;
+  const srcs: { lang: string; body: number; end: number }[] = [];
+  const srcEnds = (at: number) => { if (src) srcs.push({ ...src, end: at }); src = null; };
   const fill = (a: number, z: number, c: number) => { for (let k = a; k < z; k++) cls[k] = c; };
   const st = md ? '#' : '*';
   /* Markup inside the text from A to Z (segment positions) over BASE: links, timestamps, emphasis. */
@@ -563,10 +572,10 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
   const lexLine = (line: string, ls: number, le: number) => {
     let m;
     /* In Org a headline ends any block, closed or not. */
-    if (block && !md && line[0] === st && /^\*+[ \t]/.test(line)) block = null;
+    if (block && !md && line[0] === st && /^\*+[ \t]/.test(line)) { block = null; srcEnds(from + ls); }
     if (block) {
       if (block === 'frontmatter') { fill(ls, le, OC.odr); if (from + ls > 0 && /^---\r?$/.test(line)) block = null; return; }
-      if (md ? /^\s*```/.test(line) : /^\s*#\+end_/i.test(line)) { fill(ls, le, OC.obd); block = null; return; }
+      if (md ? /^\s*```/.test(line) : /^\s*#\+end_/i.test(line)) { fill(ls, le, OC.obd); block = null; srcEnds(from + ls); return; }
       fill(ls, le, /^(src|example|export|comment|frontmatter)$/.test(block) ? OC.osb : OC.oqb); return;
     }
     if (line[0] === st) { let k = 1; while (line[k] === st) k++; if (line[k] === ' ' || line[k] === '\t') { headline(line, ls, le, k); return; } }
@@ -575,7 +584,11 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
       if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { fill(ls, le, OC.ohr); return; }
       if (/^\s*>/.test(line)) { fill(ls, le, OC.oqb); return; }
     } else {
-      if ((m = /^\s*#\+begin_(\w+)/i.exec(line))) { fill(ls, le, OC.obd); block = m[1].toLowerCase(); return; }
+      if ((m = /^\s*#\+begin_(\w+)/i.exec(line))) {
+        fill(ls, le, OC.obd); block = m[1].toLowerCase();
+        if (block === 'src') src = srcBlock(line, from + le + 1);
+        return;
+      }
       if (/^\s*#\+end_/i.test(line)) { fill(ls, le, OC.obd); return; }
       if ((m = /^\s*#\+(\w+):/.exec(line))) { fill(ls, le, OC.okw); if (/^title$/i.test(m[1])) { let k = m[0].length; while (line[k] === ' ') k++; fill(ls + k, le, OC.oti); } return; }
       if (/^\s*#(\s|$)/.test(line)) { fill(ls, le, OC.ocm); return; }
@@ -601,7 +614,32 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
     lexLine(seg.slice(ls, le), ls, le);
     ls = le + 1;
   }
+  if (src) srcEnds(srcEnd(b.rope, (src as { body: number }).body, from + n));
+  /* Each source block's shown body in its grammar's classes, over its background (osb). */
+  const syn = Ed.syntax;
+  for (const s of srcs) {
+    const r = s.end >= 0 && syn ? syn.blockClasses(b, s.lang, s.body, s.end, from, to) : null;
+    if (!r) continue;
+    const to_ = r.names.map(nm => OC['osb ' + nm] ?? OC.osb), at = Math.max(from, s.body) - from;
+    for (let i = 0; i < r.cls.length; i++) if (r.cls[i] && cls[at + i] === OC.osb) cls[at + i] = to_[r.cls[i]];
+  }
   return cls;
+}
+/* The source block whose #+begin_src line is LINE and whose body begins at BODY: its language, the word after
+   #+begin_src; null with none (Org draws such a block plain too). */
+function srcBlock(line: string, body: number) {
+  const m = /^\s*#\+begin_src[ \t]+([^\s]+)/i.exec(line);
+  return m ? { lang: m[1], body } : null;
+}
+/* Where the body of the source block begun at BODY ends, looking from P on: the start of its #+end_ line, or of
+   a headline (which ends any block), or the buffer's end; -1 past 64K characters of body (not highlighted). */
+function srcEnd(r: EdText, body: number, p: number) {
+  for (let ls = bol(r, Math.min(p, r.length)); ; ls = eol(r, ls) + 1) {
+    if (ls >= r.length) return r.length;
+    if (ls - body > 65536) return -1;
+    const head = r.slice(ls, Math.min(eol(r, ls), ls + 200));
+    if (/^\s*#\+end_/i.test(head) || /^\*+[ \t]/.test(head)) return ls;
+  }
 }
 H.lexSeg = (b, from, to, seg) => {
   if (!isOutline(b)) return null;

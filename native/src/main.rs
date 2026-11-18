@@ -717,3 +717,20 @@ fn gui_loop(
             .unwrap_or(-1.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The startup snapshot's size (docs/steps.md, "Step DT1": a start restores it, so its size is time and memory
+    /// at every start): at most SNAPSHOT_MAX bytes, 8 MiB (it was 7,773,870 on 2026-11-18). When a change grows it
+    /// past the bound, measure the first draw again (tests/terminal.rs, `the_first_draw_is_within_40_ms`) before raising it.
+    const SNAPSHOT_MAX: usize = 8 << 20;
+
+    #[test]
+    fn the_snapshot_stays_within_its_size() {
+        let n = super::SNAPSHOT.0.len();
+        assert!(
+            n <= SNAPSHOT_MAX,
+            "the snapshot is {n} bytes, over {SNAPSHOT_MAX}"
+        );
+    }
+}

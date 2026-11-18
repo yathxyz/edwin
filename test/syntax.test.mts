@@ -350,6 +350,137 @@ test('the frame\'s side of the 2 ms budget: a keystroke in 10,000 lines redraws 
   hl = null;
 });
 
+/* ---------- Org source blocks: each body highlighted with its language's grammar ---------- */
+/* A highlights query giving each word of WORDS a keyword and each "string" a string, wherever they are in a
+   tree's text (the stand-in does not parse). */
+const KW_ST = ['keyword', 'string'];
+const wordsQuery = (words: string[]) => ({
+  names: KW_ST,
+  of: (t: string, s: number, e: number) => {
+    const out: number[] = [];
+    for (const m of t.matchAll(/"[^"\n]*"|\w+/g)) {
+      const a = m.index!, z = a + m[0].length;
+      if (a >= e || z <= s) continue;
+      if (m[0][0] === '"') out.push(1, a, z, 0); else if (words.includes(m[0])) out.push(0, a, z, 0);
+    }
+    return out;
+  },
+});
+/* The runs of B's FROM..TO that a block's grammar gave a face ('osb kw', 'osb st', ...). */
+const blockFaces = (b: Edwin, from = 0, to = b.rope.length) => faces(b, from, to)!.filter(([c]) => c.startsWith('osb '));
+/* The block trees the stand-in holds now: their grammars and texts. */
+const liveTrees = () => [...trees.values()];
+const NOTE = '* Notes\n#+begin_src python\ndef f(x):\n    return "s"\n#+end_src\nText def "t"\n'
+  + '#+begin_src elisp\n(def g ())\n#+end_src\n#+begin_src nosuch\ndef\n#+end_src\n#+begin_src\ndef\n#+end_src\n'
+  + '#+BEGIN_SRC sh :results output\necho "hi"\n#+END_SRC\n- item\n  #+begin_src js\n  return "x"\n  #+end_src\n';
+
+test('Org source blocks: a body in its language\'s grammar\'s faces over the block\'s background, its text alone parsed', () => {
+  host.syntax = syntax; reset();
+  hl = wordsQuery(['def', 'return', 'echo']);
+  const b = inMode('org-mode', NOTE);
+  const before = new Set(trees.keys());
+  assert.deepEqual(blockFaces(b), [['osb kw', 'def'], ['osb kw', 'return'], ['osb st', '"s"'], ['osb kw', 'echo'], ['osb st', '"hi"'],
+    ['osb kw', 'return'], ['osb st', '"x"']]);
+  // The block's other characters keep the background; text outside blocks, the elisp block (no grammar: Lisp has
+  // Edwin's own lexer), an unknown language and a block with none are as before (the runs above are all there are).
+  const all = faces(b)!;
+  assert.ok(all.some(([c, t]) => c === 'osb' && t === ' f(x):'));
+  for (const t of ['(def g ())', 'def']) assert.ok(all.some(([c, s]) => c === 'osb' && s === t), t);
+  // One tree a block, of its body's text only, by the grammar its language names (sh: bash, js: javascript).
+  const made = [...trees.entries()].filter(([id]) => !before.has(id)).map(([, t]) => [t.grammar, t.text]);
+  assert.deepEqual(made, [['python', 'def f(x):\n    return "s"\n'], ['bash', 'echo "hi"\n'], ['javascript', '  return "x"\n']]);
+  assert.equal(calls.parse, 3);
+  hl = null;
+});
+
+test('Org source blocks: a window beginning or ending inside a block has the faces of the whole block\'s tree', () => {
+  host.syntax = syntax; reset();
+  const asked: [number, number][] = [];
+  hl = { names: KW_ST, of: (t, s, e) => { asked.push([s, e]); return t.startsWith('a = """') ? [1, 4, t.indexOf('"""', 7) + 3, 0] : []; } };
+  const text = '* H\n#+begin_src python\na = """one\ntwo\nthree"""\n#+end_src\n';
+  const b = inMode('org-mode', text);
+  const two = text.indexOf('two'), three = text.indexOf('three');
+  assert.deepEqual(blockFaces(b, two, three), [['osb st', 'two']], 'begun above the window');
+  assert.deepEqual(asked.at(-1), [two - text.indexOf('a = '), three - text.indexOf('a = ')], 'only the shown part is queried');
+  assert.deepEqual(blockFaces(b, 0, two), [['osb st', '"""one']], 'ended below it');
+  assert.equal(calls.parse, 1, 'one tree for both windows');
+  // A headline ends a block left open; so does the buffer's end.
+  const open = inMode('org-mode', '#+begin_src python\na = """x"""\n* Next\n');
+  assert.deepEqual(blockFaces(open), [['osb st', '"""x"""']]);
+  assert.equal(liveTrees().at(-1)!.text, 'a = """x"""\n');
+  const tail = inMode('org-mode', '#+begin_src python\na = """y"""');
+  assert.deepEqual(blockFaces(tail, tail.rope.indexOf('a')), [['osb st', '"""y"""']]);
+  hl = null;
+});
+
+test('Org source blocks: no tree-sitter, a failed query or a body past 32 Ki characters leave the block as it was drawn before', () => {
+  /* Each character's class, a block grammar's taken back to the block's background. */
+  const chars = (b: Edwin) => { const lx = Ed.hooks.lexSeg(b, 0, b.rope.length, b.rope.toString()); return Array.from(lx.cls as Uint8Array, c => lx.names[c].replace(/^osb .*/, 'osb')); };
+  host.syntax = undefined;
+  const b = inMode('org-mode', NOTE), before = faces(b), beforeChars = chars(b);
+  assert.ok(!before!.some(([c]) => c.startsWith('osb ')));
+  host.syntax = syntax; reset();
+  hl = null; // the stand-in's highlights query fails
+  assert.deepEqual(faces(inMode('org-mode', NOTE)), before, 'a failure');
+  hl = wordsQuery(['def']);
+  const lit = inMode('org-mode', NOTE);
+  assert.ok(blockFaces(lit).length > 0);
+  assert.deepEqual(chars(lit), beforeChars, 'only the faces are added');
+  const big = inMode('org-mode', `#+begin_src python\n${'def x\n'.repeat(6000)}#+end_src\n* After\n`);
+  const q = calls.parse;
+  assert.deepEqual(blockFaces(big, 0, 200), [], 'past the bound');
+  assert.equal(calls.parse, q);
+  hl = null;
+});
+
+test('Org source blocks: an edit in a block crosses to its tree; a block moved or shown again is not parsed again; at most 32 trees are kept', () => {
+  host.syntax = syntax; reset();
+  hl = wordsQuery(['def', 'return']);
+  const b = inMode('org-mode', '* A\n#+begin_src python\ndef f():\n    return 1\n#+end_src\n');
+  blockFaces(b);
+  assert.equal(calls.parse, 1);
+  const at = b.rope.indexOf('return');
+  Ed.replaceText(b, at, at, 'x = 2\n    ');
+  assert.deepEqual(blockFaces(b), [['osb kw', 'def'], ['osb kw', 'return']]);
+  assert.deepEqual([calls.parse, calls.edit], [1, 1], 'the edit crossed, no parse');
+  assert.equal(liveTrees().filter(t => t.grammar === 'python' && t.text.includes('x = 2')).length, 1);
+  // A line typed above moves the block: its tree is found by its text.
+  Ed.replaceText(b, 0, 0, 'Intro\n');
+  blockFaces(b);
+  assert.deepEqual([calls.parse, calls.edit], [1, 1]);
+  // Many blocks shown one window after another: the trees kept stay at 32, the oldest freed.
+  const many = inMode('org-mode', Array.from({ length: 100 }, (_, i) => `#+begin_src python\ndef f${i}():\n    return ${i}\n#+end_src\n`).join(''));
+  const held = trees.size;
+  for (let p = 0; p < many.rope.length; p = Ed.eol(many.rope, p) + 1) blockFaces(many, p, Math.min(many.rope.length, p + 200));
+  assert.equal(calls.parse, 101);
+  assert.ok(trees.size <= held + 32 && trees.size >= 32, `${trees.size} trees kept, ${held} before`);
+  hl = null;
+});
+
+test('Org source blocks: the 2 ms budget in a note of 200 blocks (a keystroke in a block and a redraw of 60 lines, median of 50)', () => {
+  host.syntax = syntax; reset();
+  hl = wordsQuery(['def', 'return']);
+  const block = (i: number) => `** Block ${i}\n#+begin_src python\ndef f(x, y):\n    return g(x) + h(y) * ${i}  # note\n#+end_src\n`;
+  const b = inMode('org-mode', Array.from({ length: 200 }, (_, i) => block(i)).join(''));
+  const mid = b.rope.indexOf('return', b.rope.indexOf('** Block 100\n'));
+  const o = { from: Ed.bol(b.rope, mid) - 30 * 30, count: 60, runs: true, html: false };
+  assert.ok(Ed.renderBuffer(b, o).some((l: Edwin) => l.runs.some((r: Edwin) => r.cls === 'osb kw')), 'a keyword drawn');
+  const shown = calls.parse;
+  assert.ok(shown >= 10 && shown <= 14, `${shown} blocks parsed for one window, not 200`);
+  const times: number[] = [];
+  for (let i = 0; i < 50; i++) {
+    const t0 = performance.now();
+    if (i % 2 === 0) Ed.replaceText(b, mid, mid, 'z'); else Ed.replaceText(b, mid, mid + 1, '');
+    Ed.renderBuffer(b, o);
+    times.push(performance.now() - t0);
+  }
+  times.sort((x, y) => x - y);
+  console.log(`org source blocks: median ${times[25].toFixed(3)} ms, max ${times[49].toFixed(3)} ms per keystroke and redraw of 60 lines of 200 blocks`);
+  assert.ok(times[25] <= 2, `median ${times[25]} ms`);
+  assert.equal(calls.parse, shown, 'the keystrokes cross as edits');
+  hl = null;
+});
+
 /* ---------- imenu: the definitions a tags query names ---------- */
 /* A tags query's answer from a list of [match, name, text, pattern], each text found in TEXT at or after the one
    before it: the captures in that order, and the match of each. */

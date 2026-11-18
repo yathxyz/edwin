@@ -1679,3 +1679,78 @@ setInterval(() => {}, 1000);
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// The 40 ms first draw (docs/steps.md, "Step DT1"), in an 80x24 terminal: edwin started from its snapshot with no
+/// file, and on a plain Org note, logs `startup first draw N ms` under EDWIN_TRACE within 40 ms of its start, the
+/// best of five starts each. The program runs as the package lays it out (a copy of the binary in bin/ beside
+/// share/edwin/grammars, the bundle EDWIN_TEST_GRAMMARS names). A note of 40 source blocks in Python, Nix and
+/// Rust is measured and printed but not held to 40 ms: its first draw loads those three grammars and compiles
+/// their highlights queries, once a process, as opening a file in each language does (docs/steps.md, "Org
+/// source blocks highlighted with their grammars"). Wall-clock, so ignored as the other timing tests are; run
+/// with `-- --ignored first_draw`.
+#[test]
+#[ignore]
+fn the_first_draw_is_within_40_ms() {
+    let grammars = PathBuf::from(
+        std::env::var_os("EDWIN_TEST_GRAMMARS")
+            .expect("set EDWIN_TEST_GRAMMARS to a grammar bundle (nix build .#edwin-grammars)"),
+    );
+    let d = workdir("first-draw");
+    std::fs::create_dir_all(d.join("prog/bin")).unwrap();
+    std::fs::create_dir_all(d.join("prog/share/edwin")).unwrap();
+    let bin = d.join("prog/bin/edwin");
+    std::fs::copy(BIN, &bin).unwrap();
+    std::os::unix::fs::symlink(&grammars, d.join("prog/share/edwin/grammars")).unwrap();
+    let mut blocks = String::from("#+title: Blocks\n");
+    for i in 0..40 {
+        let (lang, body) = [
+            ("python", "def f(x):\n    return x + 1  # one\n"),
+            ("nix", "{ pkgs, ... }: let a = \"b\"; in a\n"),
+            ("rust", "fn main() { let v = 1; }\n"),
+        ][i % 3];
+        blocks += &format!("* Block {i}\n#+begin_src {lang}\n{body}#+end_src\n");
+    }
+    std::fs::write(d.join("blocks.org"), blocks).unwrap();
+    std::fs::write(
+        d.join("plain.org"),
+        "* A heading\nSome *text*.\n".repeat(40),
+    )
+    .unwrap();
+    let log = d.join("state/edwin/edwin.log");
+    let first_draw = |args: &[&str]| {
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let _ = std::fs::remove_file(&log);
+            let mut t =
+                Pty::spawn_program(&d, bin.to_str().unwrap(), args, &[("EDWIN_TRACE", "1")]);
+            t.ready();
+            let end = Instant::now() + Duration::from_secs(10);
+            let ms = loop {
+                let text = std::fs::read_to_string(&log).unwrap_or_default();
+                if let Some(ms) = text
+                    .lines()
+                    .find_map(|l| l.split("startup first draw ").nth(1))
+                    .and_then(|s| s.trim_end_matches(" ms").parse::<f64>().ok())
+                {
+                    break ms;
+                }
+                assert!(Instant::now() < end, "no first draw in the log: {text}");
+                t.pump(20);
+            };
+            best = best.min(ms);
+            t.keys(":q!\r");
+            assert_eq!(t.exit(), 0, "screen tail: {:?}", tail(&t.out));
+        }
+        best
+    };
+    let (none, plain, blocks) = (
+        first_draw(&[]),
+        first_draw(&["plain.org"]),
+        first_draw(&["blocks.org"]),
+    );
+    let report = format!(
+        "first draw: no file {none:.1} ms, a plain Org note {plain:.1} ms, a note of source blocks {blocks:.1} ms"
+    );
+    eprintln!("{report}");
+    assert!(none <= 40.0 && plain <= 40.0, "{report}");
+}

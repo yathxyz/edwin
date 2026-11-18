@@ -1903,6 +1903,10 @@ interface EdSyntaxApi {
   indents(b: EdBuffer, from: number, to: number, how?: IndentHow): { starts: number[]; want: (string | null)[] } | null;
   /* re-indent those lines (the blank ones too when BLANKS): the number given blanks, null when B has no rules */
   indent(b: EdBuffer, from: number, to: number, blanks: boolean, how?: IndentHow): number | null;
+  /* the classes of FROM..TO inside B's source block in language LANG (its body BODY..END), from the block's own
+     tree: CLS from max(FROM, BODY), named by NAMES; null when it is drawn plain (no tree, no grammar for LANG, a
+     body too long, a failure) */
+  blockClasses(b: EdBuffer, lang: string, body: number, end: number, from: number, to: number): { cls: Uint8Array; names: string[] } | null;
 }
 /* How Python's statement lines (an @offside grammar's) are indented: by default a line keeps its blanks where
    they are a level Python takes there; 'new', a line just opened, the likeliest level; 'cycle', TAB after TAB, the

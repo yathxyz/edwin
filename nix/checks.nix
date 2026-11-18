@@ -323,7 +323,11 @@ in
   # an ERROR's pairs of brackets and of let/in and =/;; @indent.twice two levels in (Java's continuation
   # lines); @either keeping a @dedent line a level in and @align after a `:` (shell's comments before an elif, C++'s
   # constructor initializers); booted, RET (between { and its }), o (leaving its
-  # line alone), O, = and TAB by keys, and in python-mode RET, TAB TAB, o and =. Tree-sitter's side, the
+  # line alone), O, = and TAB by keys, and in python-mode RET, TAB TAB, o and =. Org's source blocks
+  # (Ed.syntax.blockClasses): a body in its language's faces over the block's background, a tree a block of its
+  # body alone, a window begun or ended inside a block, the fallbacks (no tree-sitter, a failed query, a body past
+  # 32 Ki characters) drawn as before, an edit crossing to the block's tree, at most 32 trees kept, and the 2 ms
+  # budget in a note of 200 blocks. Tree-sitter's side, the
   # golden face runs and imenu lists of each language, expreg's steps and each language's formatted fixture
   # re-indented with the real grammars (Nix's alejandra-formatted, its '' strings kept; C++, Java, C#, shell,
   # TOML, HCL, Meson and GDScript each as its formatter leaves it; the modes without rules keeping the line above's

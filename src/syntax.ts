@@ -13,8 +13,9 @@
    which only reads the tree, and the indentation of lines (syntax-indent-line, syntax-indent-region), which
    changes only their leading blanks; nothing here starts a process or reads a file: the grammar is named, and the
    native side loads it from the program's own bundle. What uses the trees: highlighting (lexSeg), imenu
-   (consult-imenu's definitions, from the grammar's tags query), expreg (the nodes a selection grows by) and
-   indentation (TAB, =, RET, o and O, from the grammar's indents query). */
+   (consult-imenu's definitions, from the grammar's tags query), expreg (the nodes a selection grows by),
+   indentation (TAB, =, RET, o and O, from the grammar's indents query) and Org's source blocks (blockClasses: a
+   tree each block, for org.ts's lexer). */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E;
@@ -119,20 +120,25 @@ const MAX_CHARS = 4 * 1024 * 1024, MAX_SHOWN = 64 * 1024;
 const failed = new WeakMap<EdBuffer, string>();
 
 type Lex = { ver: number; from: number; to: number; grammar: string; cls: Uint8Array; names: string[] };
-/* The classes of B's shown segment FROM..TO from its grammar's highlights query: the captures overlapping it
-   (so a comment begun above the window is still a comment), each node given one capture, the earlier or the
-   later pattern's as the grammar's queries are written, and a node inside another painted over it. */
+/* The classes of B's shown segment FROM..TO from its grammar's highlights query (paint). */
 function highlight(b: EdBuffer, grammar: string, from: number, to: number): Lex | null {
-  const syn = Ed.host.syntax!;
-  let r: { names: string[]; captures: number[] };
+  let cls: Uint8Array;
   try {
     const id = tree(b, grammar);
     if (id === null) return null;
-    r = syn.query(id, 'highlights', from, to);
+    cls = paint(Ed.host.syntax!, id, grammar, from, to);
   } catch (e) {
     failed.set(b, grammar);
     return null;
   }
+  return { ver: b.ver, from, to, grammar, cls, names: NAMES };
+}
+/* The classes of the text FROM..TO of tree ID from GRAMMAR's highlights query: the captures overlapping it (so a
+   comment begun above the window is still a comment), each node given one capture, the earlier or the later
+   pattern's as the grammar's queries are written, and a node inside another painted over it. Throws what the
+   host throws. */
+function paint(syn: EdHostSyntax, id: number, grammar: string, from: number, to: number) {
+  const r = syn.query(id, 'highlights', from, to);
   const { cc, weak } = classes(grammar, r.names);
   const caps = r.captures, later = !EARLIER_WINS.has(grammar);
   const at: number[] = [];
@@ -149,7 +155,80 @@ function highlight(b: EdBuffer, grammar: string, from: number, to: number): Lex 
     ps = s; pe = e;
     cls.fill(cc[caps[i]], Math.max(s, from) - from, Math.min(e, to) - from);
   }
-  return { ver: b.ver, from, to, grammar, cls, names: NAMES };
+  return cls;
+}
+
+/* ---------- source blocks: an Org block's body highlighted with its language's grammar ---------- */
+/* A block's language (the word after #+begin_src) names a mode as Org's org-src-lang-modes does: LANG-mode, or
+   the mode of one of these aliases; the mode's grammar (GRAMMARS) is the block's. A language with no such mode,
+   or a mode with no grammar (Lisp's, highlighted by Edwin's own lexer), leaves the block plain. The note's word
+   only ever looks up these tables: it never reaches the host as a grammar's name. */
+const LANG_MODES: Record<string, string> = {
+  sh: 'sh-mode', bash: 'sh-mode', shell: 'sh-mode', zsh: 'sh-mode', js: 'js-mode', javascript: 'js-mode',
+  ts: 'typescript-mode', cpp: 'c++-mode', 'c++': 'c++-mode', csharp: 'csharp-mode', 'c#': 'csharp-mode',
+  hcl: 'terraform-mode', tf: 'terraform-mode', yml: 'yaml-mode', jsonc: 'json-mode', py: 'python-mode',
+};
+function langGrammar(lang: string) {
+  const l = lang.toLowerCase();
+  return grammarOf(Object.prototype.hasOwnProperty.call(LANG_MODES, l) ? LANG_MODES[l] : l + '-mode');
+}
+/* Blocks' trees, the most recently drawn last: at most BLOCK_TREES of them (the native side keeps 256 trees in
+   all, the buffers' own among them), the least recently drawn freed first. A tree is found by its grammar and
+   text, so a block that moved (an edit above it) or that another buffer also has is not parsed again; a block
+   edited in place (the same buffer, its body at the same position) tells its old tree of the edit, as a buffer's
+   tree is told. A block whose parse failed is kept as failed (tree null) until it is pushed out, so it is not
+   parsed again on every draw. A block over BLOCK_MAX characters is not highlighted. */
+const BLOCK_TREES = 32, BLOCK_MAX = 32 * 1024;
+type BlockTree = { grammar: string; text: string; tree: number | null; b: EdBuffer; body: number };
+const blocks = new Map<string, BlockTree>();
+function blockTree(syn: EdHostSyntax, b: EdBuffer, body: number, grammar: string, text: string) {
+  const key = grammar + '\u0000' + text;
+  let k = blocks.get(key);
+  if (k) {
+    blocks.delete(key);
+  } else {
+    let old: BlockTree | undefined;
+    for (const [ok, o] of blocks)
+      if (o.b === b && o.body === body && o.grammar === grammar && o.tree !== null) { old = o; blocks.delete(ok); break; }
+    k = { grammar, text, tree: null, b, body };
+    if (old) {
+      let pre = 0;
+      const n = Math.min(old.text.length, text.length);
+      while (pre < n && old.text.charCodeAt(pre) === text.charCodeAt(pre)) pre++;
+      let suf = 0;
+      while (suf < n - pre && old.text.charCodeAt(old.text.length - 1 - suf) === text.charCodeAt(text.length - 1 - suf)) suf++;
+      try {
+        syn.edit(old.tree!, pre, old.text.length - pre - suf, text.slice(pre, text.length - suf));
+        k.tree = old.tree;
+      } catch (e) { syn.free(old.tree!); /* refused, or the reparse failed and freed it: a whole parse below */ }
+    }
+    if (k.tree === null) try { k.tree = syn.parse(grammar, text); } catch (e) { /* kept as failed */ }
+  }
+  k.b = b; k.body = body;
+  blocks.set(key, k);
+  for (const [ok, o] of blocks) {
+    if (blocks.size <= BLOCK_TREES) break;
+    blocks.delete(ok);
+    if (o.tree !== null) syn.free(o.tree);
+  }
+  return k.tree;
+}
+/* The classes of the text FROM..TO of B's source block in language LANG whose body is BODY..END (the lines
+   between its #+begin_src and #+end_src lines), from the block's own tree: the classes and their names (as
+   lexSeg gives them), the first class that of max(FROM, BODY). null when the host parses nothing, LANG has no
+   grammar, the body is past BLOCK_MAX, or its parse or query failed: the block is drawn plain then. Only the
+   body is parsed, never the rest of the buffer, and the whole body, so a string begun above the window is still
+   a string. */
+function blockClasses(b: EdBuffer, lang: string, body: number, end: number, from: number, to: number) {
+  const syn = Ed.host.syntax, grammar = syn ? langGrammar(lang) : null;
+  const s = Math.max(from, body), e = Math.min(to, end);
+  if (!syn || !grammar || end - body > BLOCK_MAX || e <= s) return null;
+  try {
+    const id = blockTree(syn, b, body, grammar, b.rope.slice(body, end));
+    return id === null ? null : { cls: paint(syn, id, grammar, s - body, e - body), names: NAMES };
+  } catch (e) {
+    return null;
+  }
 }
 
 /* ---------- imenu: the definitions the grammar's tags query names ---------- */
@@ -731,5 +810,5 @@ H.lexSeg = (b, from, to, seg) => {
   return prevLexSeg ? prevLexSeg(b, from, to, seg) : null;
 };
 
-Ed.syntax = { tree, grammarOf, imenu, nodes, indents, indent };
+Ed.syntax = { tree, grammarOf, imenu, nodes, indents, indent, blockClasses };
 })();
