@@ -3,10 +3,12 @@
 type Wire = Record<string, any>;
 export interface TranscriptReply { epoch: number; head: number; from: number; reset: boolean; truncated: boolean; events: Wire[] }
 export interface TranscriptPatch { start: number; remove: number; text: string; previousHead: number; previousEpoch: number }
-interface TranscriptControls {
-  sid: string; epoch: number; head: number;
+export class TranscriptPinLimitError extends Error { readonly retryable = false; }
+interface Steering {
   modes: unknown; modeId: unknown; configOptions: unknown; promptCapabilities: unknown; availableCommands: unknown; usage: unknown; sessionInfo: unknown;
-  pending: Wire[]; resolved: Wire[];
+}
+interface TranscriptControls extends Steering {
+  sid: string; epoch: number; head: number; pending: Wire[]; resolved: Wire[];
 }
 interface RenderedTranscript extends TranscriptControls {
   text: string; spans: Wire[]; from: number; truncated: boolean; droppedThrough: number; gaps: Wire[]; patch?: TranscriptPatch;
@@ -31,6 +33,44 @@ const REQUEST_LABELS: Record<string, string> = {
   permission: 'Permission', elicitation: 'Question', permission_resolved: 'Permission resolved',
   elicitation_resolved: 'Question resolved', elicitation_complete: 'Question complete',
 };
+
+const emptySteering = (): Steering => ({ modes: null, modeId: null, configOptions: null, promptCapabilities: null,
+  availableCommands: null, usage: null, sessionInfo: null });
+const isRequest = (e: Wire) => e.e === 'permission' || e.e === 'elicitation';
+const isResolution = (e: Wire) => e.e === 'permission_resolved' || e.e === 'elicitation_resolved';
+
+/* Both the evicted prefix and the live view fold the same invisible steering events. */
+function foldSteering(state: Steering, e: Wire): boolean {
+  let v: Wire, variant: unknown;
+  if (e.e === 'session' || e.e === 'initialize' || e.e === 'mode') v = e;
+  else if (e.e === 'update' && object(e.update)) {
+    v = e.update; variant = v.sessionUpdate;
+    if (variant !== 'usage_update' && variant !== 'session_info_update' && variant !== 'current_mode_update'
+      && variant !== 'config_option_update' && variant !== 'available_commands_update') return false;
+    if (e.sessionId) return true; // A child session cannot change the main session's controls.
+  } else return false;
+  if (own(v, 'modes')) {
+    state.modes = v.modes;
+    state.modeId = object(v.modes) && own(v.modes, 'currentModeId') ? v.modes.currentModeId : null;
+  }
+  const modeKey = variant === 'current_mode_update' && own(v, 'currentModeId') ? 'currentModeId' : 'modeId';
+  if (own(v, modeKey)) {
+    state.modeId = v[modeKey];
+    state.modes = { ...(object(state.modes) ? state.modes : {}), currentModeId: state.modeId };
+  }
+  if (own(v, 'configOptions')) state.configOptions = v.configOptions;
+  if (own(v, 'promptCapabilities')) state.promptCapabilities = v.promptCapabilities;
+  else if (object(v.agentCapabilities) && own(v.agentCapabilities, 'promptCapabilities')) state.promptCapabilities = v.agentCapabilities.promptCapabilities;
+  if (own(v, 'availableCommands')) state.availableCommands = v.availableCommands;
+  if (own(v, 'usage')) state.usage = v.usage;
+  if (own(v, 'sessionInfo')) state.sessionInfo = v.sessionInfo;
+  if (variant === 'usage_update' || variant === 'session_info_update') {
+    const { sessionUpdate: _, ...payload } = v;
+    if (variant === 'usage_update') state.usage = payload;
+    else state.sessionInfo = payload;
+  }
+  return true;
+}
 
 /* A single event shares one budget across its literal content, JSON, heading and current-plan summary.
    The journal itself is unchanged. An incomplete diff is visible as text, not advertised as a full diff. */
@@ -124,13 +164,11 @@ export class Transcript {
   private authority: { head: number; pending: Set<string> } | null = null;
   private plans = new Map<string, Block>();
   private messageBlock: Block | null = null;
-  private modes: unknown = null;
-  private modeId: unknown = null;
-  private configOptions: unknown = null;
-  private promptCapabilities: unknown = null;
-  private availableCommands: unknown = null;
-  private usage: unknown = null;
-  private sessionInfo: unknown = null;
+  private steering = emptySteering();
+  // Checkpoint at droppedThrough, not a second journal. Replaying the tail over this bounded
+  // state handles out-of-order arrivals without rewinding current controls or reviving resolved pins.
+  private prefixSteering = emptySteering();
+  private prefixPins = new Map<number, Wire>();
   private from = 1;
   private truncated = false;
   private droppedThrough = 0;
@@ -150,17 +188,28 @@ export class Transcript {
   reset(epoch: number) {
     this.epoch = epoch; this.head = 0; this.from = 1; this.truncated = false; this.gaps = []; this.authority = null;
     this.droppedThrough = 0;
+    this.prefixSteering = emptySteering(); this.prefixPins.clear();
     this.events = []; this.seen.clear(); this.clearFold(); this.fragments = new WeakMap(); this.cached = null;
   }
   private clearFold() {
     this.blocks = []; this.tools.clear(); this.requests.clear(); this.requestBlocks.clear(); this.plans.clear(); this.messageBlock = null;
-    this.modes = this.modeId = this.configOptions = this.promptCapabilities = this.availableCommands = this.usage = this.sessionInfo = null;
+    this.steering = { ...this.prefixSteering };
+    for (const e of this.prefixPins.values()) this.recordRequest(e);
+  }
+  /* The active buffer's metadata must be withdrawn when the replay cannot safely represent its pins. */
+  private rejectPinOverflow(which: string): never {
+    this.previous = null; this.reset(this.epoch);
+    throw new TranscriptPinLimitError(`Agent transcript exceeds the limit of ${RETAINED_EVENTS} ${which}`);
   }
   apply(reply: TranscriptReply): void {
     if (reply.reset || reply.epoch !== this.epoch) this.reset(reply.epoch);
     const oldHead = this.head, fresh: Wire[] = [];
+    let latePins = false;
     for (const e of reply.events) {
-      if ((!this.droppedThrough || e.seq > this.droppedThrough) && !this.seen.has(e.seq)) { this.seen.add(e.seq); fresh.push(e); }
+      if (this.droppedThrough && e.seq <= this.droppedThrough) {
+        // The hub may re-offer an unanswered pin before the scrollback cursor, even at the current head.
+        if (isRequest(e) && !this.prefixPins.has(e.seq)) { this.prefixPins.set(e.seq, e); latePins = true; }
+      } else if (!this.seen.has(e.seq)) { this.seen.add(e.seq); fresh.push(e); }
     }
     /* Late pinned/unsorted events and prefix eviction require refolding. Resets also clear authority. */
     let ordered = true, previous = this.events.length ? this.events[this.events.length - 1].seq : -Infinity;
@@ -173,9 +222,24 @@ export class Transcript {
       // Free a batch of the oldest events, so a busy full view need not refold 32K events per append.
       const cut = this.events.length - (RETAINED_EVENTS - RETAINED_EVENTS / 8);
       this.droppedThrough = this.events[cut - 1].seq;
-      for (let i = 0; i < cut; i++) this.seen.delete(this.events[i].seq);
+      for (let i = 0; i < cut; i++) {
+        const e = this.events[i];
+        this.seen.delete(e.seq);
+        foldSteering(this.prefixSteering, e);
+        if (isRequest(e) && this.pendingStatus(e.seq, e.e) === 'pending') this.prefixPins.set(e.seq, e);
+        else if (isResolution(e)) this.prefixPins.delete(e.req);
+        else if (e.e === 'elicitation_complete') {
+          for (const [req, pin] of this.prefixPins) if (pin.e === 'elicitation' && pin.request?.elicitationId === e.elicitationId)
+            this.prefixPins.delete(req);
+        }
+      }
       this.events = this.events.slice(cut);
       this.previous = null; ordered = false;
+    }
+    if (this.prefixPins.size > RETAINED_EVENTS) this.rejectPinOverflow('pinned requests outside scrollback');
+    if (latePins) {
+      this.prefixPins = new Map([...this.prefixPins].sort(([a], [b]) => a - b));
+      ordered = false;
     }
     if (!ordered) this.clearFold();
     for (const e of ordered ? fresh : this.events) this.fold(e);
@@ -191,10 +255,12 @@ export class Transcript {
   }
   /* The caller must first establish that this registry describes this exact epoch and journal head. */
   reconcilePending(pending: Array<{ req: number; kind: string }>): void {
+    if (pending.length > RETAINED_EVENTS) this.rejectPinOverflow('pending requests');
     this.authority = { head: this.head, pending: new Set(pending.map(r => JSON.stringify([r.req, r.kind]))) };
     for (const req of this.requests.values()) {
       if (req.status !== 'pending' && req.status !== 'unavailable') continue;
       const status = this.pendingStatus(req.req, req.kind);
+      if (status === 'unavailable') this.prefixPins.delete(req.req);
       if (status !== req.status) {
         req.status = status;
         const b = this.requestBlocks.get(req.req); if (b) b.rendered = undefined;
@@ -209,33 +275,17 @@ export class Transcript {
     const b: Block = { id: `${this.epoch}:${kind}:${e.seq}`, seq: e.seq, lastSeq: e.seq, kind, events: [e], sessionId: e.sessionId };
     this.blocks.push(b); return b;
   }
-  private setup(v: Wire) {
-    if (own(v, 'modes')) {
-      this.modes = v.modes;
-      this.modeId = object(v.modes) && own(v.modes, 'currentModeId') ? v.modes.currentModeId : null;
-    }
-    if (own(v, 'modeId')) {
-      this.modeId = v.modeId;
-      this.modes = { ...(object(this.modes) ? this.modes : {}), currentModeId: v.modeId };
-    }
-    if (own(v, 'configOptions')) this.configOptions = v.configOptions;
-    if (own(v, 'promptCapabilities')) this.promptCapabilities = v.promptCapabilities;
-    else if (object(v.agentCapabilities) && own(v.agentCapabilities, 'promptCapabilities')) this.promptCapabilities = v.agentCapabilities.promptCapabilities;
-    if (own(v, 'availableCommands')) this.availableCommands = v.availableCommands;
-    if (own(v, 'usage')) this.usage = v.usage;
-    if (own(v, 'sessionInfo')) this.sessionInfo = v.sessionInfo;
+  private recordRequest(e: Wire) {
+    this.requests.set(e.seq, { req: e.seq, kind: e.e, status: this.pendingStatus(e.seq, e.e), event: e, epoch: this.epoch });
   }
   private fold(e: Wire) {
+    if (foldSteering(this.steering, e)) return;
     const lastMessage = this.messageBlock; this.messageBlock = null;
-    if (e.e === 'session' || e.e === 'initialize' || e.e === 'mode') {
-      this.setup(e); this.messageBlock = lastMessage; return;
-    }
     if (e.e === 'prompt') { this.block(e, 'prompt'); return; }
-    if (e.e === 'permission' || e.e === 'elicitation') {
-      const req: RequestState = { ...e, req: e.seq, kind: e.e, status: this.pendingStatus(e.seq, e.e), event: e, epoch: this.epoch };
-      this.requests.set(req.req, req); this.requestBlocks.set(req.req, this.block(e, e.e)); return;
+    if (isRequest(e)) {
+      this.recordRequest(e); this.requestBlocks.set(e.seq, this.block(e, e.e)); return;
     }
-    if (e.e === 'permission_resolved' || e.e === 'elicitation_resolved') {
+    if (isResolution(e)) {
       const kind = e.e === 'permission_resolved' ? 'permission' : 'elicitation';
       const req = this.requests.get(e.req) || { req: e.req, kind, epoch: this.epoch };
       this.requests.set(e.req, { ...req, status: 'resolved', resolution: e });
@@ -274,19 +324,6 @@ export class Transcript {
         if (previous) this.blocks.splice(this.blocks.indexOf(previous), 1);
         const b = this.block(e, 'plan');
         this.plans.set(key, b); b.current = u; return;
-      }
-      if (variant === 'usage_update' || variant === 'session_info_update' || variant === 'current_mode_update'
-        || variant === 'config_option_update' || variant === 'available_commands_update') {
-        if (!e.sessionId) {
-          this.setup(u);
-          if (variant === 'current_mode_update' && own(u, 'currentModeId')) this.setup({ modeId: u.currentModeId });
-          if (variant === 'usage_update' || variant === 'session_info_update') {
-            const { sessionUpdate: _, ...payload } = u;
-            if (variant === 'usage_update') this.usage = payload;
-            else this.sessionInfo = payload;
-          }
-        }
-        this.messageBlock = lastMessage; return;
       }
       this.block(e, typeof variant === 'string' ? variant : 'update'); return;
     }
@@ -401,8 +438,7 @@ export class Transcript {
     }
     return {
       sid: this.sid, epoch: this.epoch, head: this.head,
-      modes: this.modes, modeId: this.modeId, configOptions: this.configOptions, promptCapabilities: this.promptCapabilities,
-      availableCommands: this.availableCommands, usage: this.usage, sessionInfo: this.sessionInfo, pending, resolved,
+      ...this.steering, pending, resolved,
     };
   }
   private header() {

@@ -6,7 +6,7 @@ import { randomId } from './journal.mts';
 import { sha256 } from './files.mts';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { diffOps } from './watch.mts';
-import { Transcript } from './agent-transcript.mts';
+import { Transcript, TranscriptPinLimitError } from './agent-transcript.mts';
 import type { TranscriptReply } from './agent-transcript.mts';
 import type { SchemeGen } from './threads.mts';
 import { installPrompts } from './agent-prompts.mts';
@@ -690,6 +690,7 @@ export class AgentSessions implements AgentBackend {
       const current = this.sessions.get(sid);
       if (!this.stopped && valid() && current) {
         const report = this.clean(String(e.message || e)).slice(0, 1024);
+        if (e instanceof TranscriptPinLimitError) this.publishState(sid);
         if (this.replayErrors.get(sid) !== report) {
           this.replayErrors.set(sid, report);
           for (const c of this.server.clients) if (c.hello && !c.closed && c.kind !== 'cli')

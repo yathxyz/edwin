@@ -84,6 +84,32 @@ test('view reservation: a failed fallback cannot release an existing or concurre
   assert.equal(hub.views.get(id), replacement);
 });
 
+test('scrollback pin overflow withdraws already published pending controls from the buffer', async t => {
+  const sid = 'pin_limit', id = `name:*Agent: ${sid}*`, epoch = 100;
+  const sb = { ed: { agentLocals: {} as Record<string, any> } };
+  const updates: Record<string, any>[] = [];
+  const backend = new AgentSessions({ cfg: {}, clients: [], buffers: { byId: new Map([[id, sb]]),
+    on: () => () => {}, sendMeta: () => updates.push(sb.ed.agentLocals) } } as unknown as Server);
+  t.after(() => backend.stop());
+  const session = { sid, kind: 'acp', createdAt: epoch, acp: { headSeq: 1, pending: [{ req: 1, kind: 'permission' }] } };
+  backend.request = async () => session;
+  backend.readEvents = async () => ({ epoch, head: session.acp.headSeq, from: 1, reset: false, truncated: false,
+    events: [{ e: 'permission', seq: 1 }] });
+  backend.publish = async (_name, _mode, _text, locals) => {
+    sb.ed.agentLocals = backend.withState(sid, locals);
+    return sb as unknown as Awaited<ReturnType<AgentSessions['publish']>>;
+  };
+  await backend.open(sid);
+  assert.deepEqual(sb.ed.agentLocals.agentSession.pending.map((p: { req: number }) => p.req), [1]);
+  session.acp.headSeq++;
+  session.acp.pending = Array.from({ length: 32769 }, (_, i) => ({ req: i + 1, kind: 'permission' }));
+  await assert.rejects(backend.replay(sid), /limit.*32768.*pending/);
+  assert.deepEqual(backend.snapshot(sid).pending, []);
+  assert.equal(updates.length, 1, 'publish the cleared metadata even though the replay failed');
+  assert.deepEqual(updates[0].agentState.pending, []);
+  assert.deepEqual(updates[0].agentSession.pending, []);
+});
+
 test('resource bounds: incremental journal flood keeps a marked recent tail, not every earlier event or span', async t => {
   const { backend, stub } = await boundsFixture(t), tr = new Transcript('tail');
   stub.add('tail'); let head = 0;

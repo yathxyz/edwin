@@ -168,6 +168,69 @@ test('pinned pending requests deduplicate, late pinned events retain sequence po
   assert.equal(r.epoch, 100);
 });
 
+test('scrollback eviction keeps current controls, including updates delivered with the overflowing batch', () => {
+  const tr = new Transcript('control-history');
+  const modes = { currentModeId: 'ask', availableModes: [{ id: 'ask' }, { id: 'code' }] };
+  const config = [{ id: 'model', currentValue: 'small' }], commands = [{ name: 'compact' }];
+  tr.apply(reply([
+    { seq: 1, e: 'initialize', agentCapabilities: { promptCapabilities: { image: true } } },
+    { seq: 2, e: 'session', modes, configOptions: config },
+    { seq: 3, e: 'update', update: { sessionUpdate: 'usage_update', used: 8 } },
+  ]));
+  tr.apply(reply([
+    { seq: 4, e: 'update', update: { sessionUpdate: 'available_commands_update', availableCommands: commands } },
+    { seq: 5, e: 'update', update: { sessionUpdate: 'session_info_update', title: 'Local test' } },
+    { seq: 6, e: 'mode', modeId: 'code' },
+    ...Array.from({ length: 32768 }, (_, i) => ({ seq: i + 7, e: 'session' })),
+  ]));
+  assert.ok(tr.journal[0].seq > 6);
+  const expected = { modes: { ...modes, currentModeId: 'code' }, modeId: 'code', configOptions: config,
+    availableCommands: commands, promptCapabilities: { image: true }, usage: { used: 8 }, sessionInfo: { title: 'Local test' } };
+  for (const state of [tr.controls(), tr.render()]) for (const [key, value] of Object.entries(expected))
+    assert.deepEqual((state as Event)[key], value, key);
+  tr.apply(reply([{ seq: tr.head + 1, e: 'mode', modeId: 'ask' }]));
+  assert.deepEqual(tr.controls().modes, modes, 'a later mode change still has its original choices');
+  tr.apply(reply([], { epoch: 101 }));
+  for (const key of Object.keys(expected)) assert.equal((tr.controls() as Event)[key], null, key);
+});
+
+test('scrollback eviction preserves unanswered permissions and accepts late same-epoch pins until resolution or reset', () => {
+  const tr = new Transcript('pinned-history');
+  const permission = { seq: 1, e: 'permission', requestKey: 'local-fixture', options: [{ optionId: 'yes', name: 'Allow once' }] };
+  const question = { seq: 2, e: 'elicitation', request: { elicitationId: 'q', message: 'Choose an option' } };
+  tr.apply(reply([permission]));
+  tr.apply(reply(Array.from({ length: 32768 }, (_, i) => ({ seq: i + 3, e: 'session' }))));
+  const head = tr.head;
+  assert.ok(tr.journal.length <= 32768 && tr.render().droppedThrough > 2);
+  assert.equal(tr.controls().pending[0]?.requestKey, permission.requestKey);
+  tr.reconcilePending([{ req: 1, kind: 'permission' }, { req: 2, kind: 'elicitation' }]);
+  tr.apply(reply([permission, question], { head, from: head + 1 }));
+  tr.apply(reply([permission, question], { head, from: head + 1 }));
+  assert.deepEqual(tr.render().pending.map(p => [p.req, p.options ?? p.request]), [[1, permission.options], [2, question.request]]);
+  tr.apply(reply([question, { seq: head + 1, e: 'permission_resolved', req: 1, by: 'user' }], { from: head + 1 }));
+  tr.reconcilePending([{ req: 2, kind: 'elicitation' }]);
+  assert.deepEqual(tr.controls().pending.map(p => p.req), [2]);
+  assert.deepEqual(tr.controls().resolved.map(p => [p.req, p.status, p.by]), [[1, 'resolved', 'user']]);
+  tr.apply(reply([], { reset: true }));
+  assert.deepEqual(tr.controls().pending, []);
+  assert.deepEqual(tr.controls().resolved, []);
+});
+
+test('scrollback eviction fails closed instead of publishing a partial overfull pin index', () => {
+  const tr = new Transcript('pin-limit');
+  const pins = Array.from({ length: 32769 }, (_, i) => ({ seq: i + 1, e: 'permission' }));
+  tr.apply(reply([pins[0]]));
+  assert.throws(() => tr.reconcilePending(pins.map(p => ({ req: p.seq, kind: p.e }))), /limit.*32768.*pending/i);
+  assert.deepEqual(tr.controls().pending, [], 'no stale answer is offered after rejecting the registry');
+
+  const tail = Array.from({ length: 32768 }, (_, i) => ({ seq: i + pins.length + 1, e: 'session' }));
+  assert.throws(() => tr.apply(reply([...pins, ...tail])), /limit.*32768.*pinned/i);
+  assert.deepEqual(tr.render().pending, []);
+  assert.equal(tr.head, 0);
+  tr.apply(reply([pins[0]]));
+  assert.deepEqual(tr.controls().pending.map(p => p.req), [1], 'a bounded replay can start over');
+});
+
 test('epoch, explicit resets, deduplication and the hub replay ceiling are explicit', () => {
   const tr = new Transcript('reset');
   tr.apply(reply([chunk(4, 'old')], { head: 9, from: 4, truncated: true }));
