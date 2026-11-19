@@ -35,11 +35,43 @@ test("the user's init.scm runs after every shipped file", () => {
 
 test('bounded literal search and replacement across a text chunk boundary', async () => {
   await fresh('a'.repeat(2046) + 'Cross' + 'a'.repeat(3000));
+  const b = ed.E.current;
+  ed.Ed.editText(b, 0, 1, 'z');
+  assert.equal(b.rope.flat, null);
   assert.equal(ev('(search-forward "Cross" 2051 #t)'), false);
   assert.equal(ev('(search-forward "Cross" 2052)'), 2052);
   assert.equal(ev('(search-backward "Cross" 2047)'), 2047);
+  assert.equal(b.rope.flat, null, 'short bounded searches do not join the buffer');
   ev('(replace-string "Cross" "X")');
   assert.equal(ev('(buffer-substring 2046 2049)'), 'aXa');
+});
+
+test('exact search finds a many-chunk literal in either direction on an edited rope', async () => {
+  const needle = 'A' + 'q'.repeat(3000) + 'Z', start = 2046;
+  await fresh('x'.repeat(start) + needle + 'y'.repeat(4200));
+  const b = ed.E.current;
+  for (const dir of ['forward', 'backward']) {
+    ed.Ed.editText(b, b.rope.length, 0, '!');
+    b.pt = dir === 'forward' ? 0 : b.rope.length;
+    assert.equal(b.rope.flat, null);
+    assert.ok(start < b.rope.ch[0].length && start + needle.length > b.rope.ch[0].length);
+    assert.equal(ev(`(search-${dir} "${needle}")`), 1 + start + (dir === 'forward' ? needle.length : 0));
+  }
+});
+
+test('exact search preserves string offsets beyond the int32 range', async t => {
+  await fresh();
+  const b = ed.E.current;
+  for (const [dir, text, point, result] of [
+    ['forward', 'A!', 2 ** 32, false], ['backward', 'xA', 2 ** 32 + 1, 2],
+  ] as const) await t.test(dir, () => {
+    b.text = text.slice(0, 1);
+    ed.Ed.editText(b, 1, 0, text[1]);
+    b.pt = point;
+    assert.equal(b.rope.flat, null);
+    assert.equal(ev(`(search-${dir} "A" #f #t)`), result);
+    assert.equal(b.pt, result === false ? point : result - 1);
+  });
 });
 
 test('markers: before and after insertion types, point is an after marker (R6.11)', async () => {

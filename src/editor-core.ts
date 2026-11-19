@@ -1763,7 +1763,7 @@ function isearchIndex(b: EdBuffer, re: RegExp | null, needle: string, from: numb
     if (dir > 0 ? hi + len >= r.length : lo === 0) return -1;
     from = dir > 0 ? hi + 1 : lo - 1;
   }
-  if (dir < 0) return lastMatch(b.text, re, Math.min(from, r.length), len);
+  if (dir < 0) return lastMatch(b.text, re, from, len);
   re.lastIndex = Math.max(0, from);
   return re.exec(b.text)?.index ?? -1;
 }

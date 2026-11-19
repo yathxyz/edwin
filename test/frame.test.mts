@@ -362,8 +362,9 @@ test('a refused later op leaves previously acknowledged text intact', async t =>
   await until(() => b.sver === 1);
   const shadow = b.sync.sverText; assert.notEqual(typeof shadow, 'string', 'rollback on an already published mutable rope');
   const error = t.mock.method(console, 'error', (..._args: unknown[]) => {});
-  // The first op is valid, the second deletes the wrong text. Neither may enter the shadow.
-  sync.sock.onmessage({ data: JSON.stringify({ t: 'edits', buf: id, ver: 2, by: { kind: 'server' }, ops: [[1, 'a', 'xy'], [3, '?', '']] }) });
+  // The second replacement consumes part of the first. The third deletes the wrong text;
+  // restoring the original requires undoing both successful ops in reverse order.
+  sync.sock.onmessage({ data: JSON.stringify({ t: 'edits', buf: id, ver: 2, by: { kind: 'server' }, ops: [[1, 'a', 'xy'], [2, 'yb', 'Q'], [3, '?', '']] }) });
   assert.equal(error.mock.callCount(), 1);
   assert.match(String(error.mock.calls[0].arguments[2]), /text at 3 is not the one the op deletes/); error.mock.restore();
   assert.equal(String(b.sync.sverText), 'Zabc😀\n'); assert.equal(b.text, 'Zabc😀\n'); assert.equal(b.sver, 1);
@@ -432,6 +433,7 @@ test('R7.16 reconnect after edwind restarts: the unacknowledged batch is resent 
   /* Offline edits queue up: the mode line shows the dot. */
   await type('A2'); await keys('ESC');
   assert.ok(b.inflight, 'held while offline'); assert.equal(b.text, '1keep2\n');
+  assert.ok(b.sync.sverText instanceof b.rope.constructor, 'the acknowledged text is a rope before export');
   assert.equal(sync.exportPending().find((p: Msg) => p.buf === id).sverText, '1keep\n', 'pending state exports text, not the rope');
   assert.ok(Ed.hooks.modeStatus(b).includes('•') && Ed.hooks.modeStatus(b).includes('offline'));
   child = await startEdwind(dir);

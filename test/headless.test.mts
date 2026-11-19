@@ -18,21 +18,28 @@ test('boots into *scratch* in Normal state with the shipped config loaded', () =
   for (const b of ['emacs.scm', 'evil.scm', 'init.scm']) assert.ok(ed.Ed.getBuffer(b), b);
 });
 
-test('folded isearch includes overlapping literals at both edges of its near search', async () => {
+test('isearch finds full literals on either side of the near-search boundary', async t => {
   await fresh();
   const b = ed.E.current;
-  b.text = 'x'.repeat(4095) + '..ÀÀ..' + 'x'.repeat(4095);
-  // Put the editor on a non-flat revision; the lower-case literal starts at offset 4096.
-  ed.Ed.editText(b, 0, 1, 'y');
-  for (const [cmd, point, end] of [
-    ['forward', 2049, 4100], ['backward', 6143, 4096],
-    ['forward', 2048, 4100], ['backward', 6144, 4096],
-  ] as const) {
-    ed.Ed.editText(b, 0, 1, point % 2 ? 'z' : 'y'); b.pt = point;
-    for (const key of [`<cmd:isearch-${cmd}>`, '.', 'à', 'à', '.', 'RET']) ed.Ed.feedKey(key);
-    await ed.Ed.whenIdle();
-    assert.equal(b.pt, end);
+  b.text = 'x'.repeat(4096) + '.ÀÀ.' + 'x'.repeat(4096);
+  ed.eval('(evil-emacs-state)');
+  for (const [key, dir] of [['C-s', 1], ['C-r', -1]] as const) {
+    for (const needle of ['.àà.', '.ÀÀ.']) for (const distance of [2047, 2048]) {
+      await t.test(`${key} ${needle} at distance ${distance}`, async () => {
+        ed.Ed.editText(b, b.rope.length, 0, 'x');
+        b.pt = 4096 - dir * distance;
+        // Repeat a complete previous search: earlier prefixes must not move the start of this probe.
+        ed.E.lastSearch = needle;
+        await ed.keys(`${key} ${key}`);
+        try {
+          assert.deepEqual(ed.E.isearch.match, [4096, 4100]);
+          assert.equal(b.pt, dir > 0 ? 4100 : 4096);
+          if (distance === 2047) assert.equal(b.rope.flat, null, 'near hit did not join the rope');
+        } finally { await ed.keys('RET'); }
+      });
+    }
   }
+  ed.eval('(evil-normal-state)');
 });
 
 test('isearch preserves flat-string start semantics for non-index points', async t => {
@@ -51,6 +58,17 @@ test('isearch preserves flat-string start semantics for non-index points', async
     for (const k of [`<cmd:isearch-${dir}>`, key, 'RET']) ed.Ed.feedKey(k);
     await ed.Ed.whenIdle();
     assert.equal(b.pt, point);
+  });
+  await t.test('backward from a fraction beyond the last 64 Ki window', async () => {
+    b.text = 'x'.repeat(69999) + 'A';
+    ed.Ed.editText(b, 0, 1, 'y');
+    b.pt = 70000.5;
+    ed.Ed.feedKey('<cmd:isearch-backward>'); await ed.keys('a');
+    try {
+      // The flat scanner slices at the integer offset but adds its fractional window origin back.
+      assert.deepEqual(ed.E.isearch.match, [69999.5, 70000.5]);
+      assert.equal(b.pt, 69999.5);
+    } finally { await ed.keys('RET'); }
   });
 });
 

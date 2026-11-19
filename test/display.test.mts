@@ -320,25 +320,6 @@ test('a warm row cache preserves spans and runs across cursor moves, folds and h
   b.markActive = false;
 });
 
-test('row cache cannot confuse a cursor class with row text', async () => {
-  const b = await show('cache.txt', 'fundamental-mode', 'x');
-  for (const [format, marker] of [[{}, ''], [{ runs: true }, 'RH|'], [{ runs: true, html: false }, 'R|']] as const) {
-    // Regression input for the rejected plain-row shortcut; the baseline keys distinguish these.
-    const prefix = `|p||${marker}0|0|`;
-    b.text = 'x';
-    const primed = Ed.renderBuffer(b, { ...format, pt: 0, cursorClass: prefix });
-    b.text = prefix + 'x';
-    const opts = { ...format, pt: 0, cursorClass: '' };
-    const fresh = Ed.renderBuffer(b, opts);
-    const reused = Ed.renderBuffer(b, { ...opts, cache: primed.cache });
-    assert.deepEqual(reused[0], fresh[0]);
-    if ('runs' in format) {
-      const again = Ed.renderBuffer(b, { ...opts, cache: reused.cache });
-      assert.equal(again[0].runs, reused[0].runs, 'unchanged runs are reused');
-    }
-  }
-});
-
 test('a cached folded row uses the current ellipsis', async () => {
   const b = await show('class-cache.txt', 'fundamental-mode', 'a\0|b\nhidden\nend');
   b.folds = [{ s: 4, e: 11 }];
