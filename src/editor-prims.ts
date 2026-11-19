@@ -1481,6 +1481,8 @@ function wire(f: EdFrame) {
     } else c.acc += delta;
     const w = c.window;
     if (c.page || !w?.view || !delta) return;
+    const locals = w.buffer.meta?.locals;
+    if (!locals?.agentSession && !locals?.agentList && !locals?.agentPrompt) return;
     /* At an editor boundary, or in a short card, let the browser scroll the host page normally. */
     if ((delta < 0 && w.start === 0) || (delta > 0 && (w.lastLine || 0) >= Ed.lineCountB(w.buffer))) { c.page = true; return; }
     if (!e.cancelable) { c.page = true; return; }

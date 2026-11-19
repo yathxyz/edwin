@@ -828,6 +828,12 @@ test('browser touch scroll leaves tail and off-tail points intact across real sh
     b.pt = text.length; Ed.render(); doc.hit = f.sel.view;
     const root = f.el('windows') as FakeElement, tailStart = f.sel.start;
     assert.ok(tailStart > 0);
+    touch(root, 'touchstart', 20, 100, 1);
+    const ordinary = touch(root, 'touchmove', 20, 350, 11);
+    touch(root, 'touchend', 20, 350, 21);
+    assert.equal(ordinary.defaultPrevented, false, 'a long ordinary buffer leaves vertical swipes to the host page');
+    assert.equal(f.sel.start, tailStart);
+    b.meta.locals.agentSession = { sid: 'touch', epoch: 1 };
     touch(root, 'touchstart', 20, 100, 100);
     const move = touch(root, 'touchmove', 20, 350, 110);
     touch(root, 'touchend', 20, 350, 120);
