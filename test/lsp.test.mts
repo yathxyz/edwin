@@ -115,7 +115,7 @@ test('eglot starts the server in the project, initializes it, and answers its qu
   const f = fake('normal');
   const [a, sub] = project('one two #3 %20 é', ['a.fake', 'deep/er/b.fake']);
   const before = proc.calls.length;
-  run('eglot', a);
+  await run('eglot', a);
   const s = Ed.lsp.sessionOf(a);
   assert.equal(s.state, 'starting', 'the command returns once the child runs, before initialize is answered');
   assert.equal(proc.calls.length, before + 1);
@@ -149,11 +149,11 @@ test('eglot starts the server in the project, initializes it, and answers its qu
   assert.match(E.echo, /: already running$/);
   assert.equal(s.buffers.size, 2);
   const [other] = project('other');
-  run('eglot', other);
+  await run('eglot', other);
   assert.notEqual(Ed.lsp.sessionOf(other), s);
   L.evalText(`(define-language-server 'fake2 :modes '(fake2-mode) :command (list ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} ${JSON.stringify(f.log)} "normal"))`);
   const [c] = project('one two #3 %20 é', ['c.fake2'], 'fake2-mode');
-  run('eglot', c);
+  await run('eglot', c);
   assert.notEqual(Ed.lsp.sessionOf(c), s);
   assert.equal(proc.calls.length, before + 3);
   assert.equal(Ed.lsp.sessions().length, 3);
@@ -252,7 +252,8 @@ test('the delays double: about 1, 2, 4 times restartDelay between an end and the
   const [a] = project('timed');
   const at: number[] = [];
   const spawn = proc.spawn;
-  proc.spawn = (...args: Parameters<FakeProc['spawn']>) => { at.push(Date.now()); return spawn(...args); };
+  /* the server's starts, not direnv's (asked first at each, this host having no stamps) */
+  proc.spawn = (...args: Parameters<FakeProc['spawn']>) => { if (args[0][0] !== 'direnv') at.push(Date.now()); return spawn(...args); };
   let waited: Promise<void> = Promise.resolve();
   try {
     run('eglot', a);
@@ -495,12 +496,12 @@ test('the refusals: the image replaying, a web frame, no host.proc, no file here
   const [plain] = project('refused', ['x.txt'], 'text-mode');
   assert.throws(() => run('eglot', plain), (e: unknown) => isErr('lsp-error')(e) && /No language server is declared for text-mode/.test(Ed.errorText(e)));
   assert.equal(proc.calls.length, before, 'nothing spawned');
-  /* a program that is not there: process-error, and no session kept */
+  /* a program that is not there: process-error once the environment is given, and no session kept */
   L.evalText(`(define-language-server 'gone :modes '(gone-mode) :command '("edwin-no-such-language-server"))`);
   const [g] = project('refused', ['y.gone'], 'gone-mode');
-  assert.throws(() => run('eglot', g), (e: unknown) => isErr('process-error')(e) && /cannot run edwin-no-such-language-server/.test(Ed.errorText(e)));
+  await assert.rejects(run('eglot', g), (e: unknown) => isErr('process-error')(e) && /cannot run edwin-no-such-language-server/.test(Ed.errorText(e)));
   assert.equal(Ed.lsp.sessionOf(g), null);
-  assert.deepEqual(Ed.lsp.sessions(), []);
+  await until(() => Ed.lsp.sessions().length === 0, 'the session forgotten');
   /* the declaration's own refusals */
   for (const [form, re] of [
     [`(define-language-server 'x :modes '() :command '("a"))`, /:modes needs a non-empty list/],

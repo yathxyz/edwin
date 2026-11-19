@@ -341,6 +341,8 @@ test('format-on-save-mode is off unless its language is in format-on-save-modes;
   await keys('SPC f s');
   assert.equal(saved(sh), 'echo   x\n');
   const by = typed('fos/by-hand.nix', 'nix-mode', UGLY);
+  /* the visit's language server start (the table's nixd, missing here) says so once envFor has answered */
+  await settled();
   await Ed.callInteractively(L.S.intern('format-on-save-mode'));
   assert.equal(on(by), false);
   assert.match(E.echo, /Format on save disabled in current buffer/);

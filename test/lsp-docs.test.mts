@@ -174,11 +174,11 @@ test('visiting a file whose mode has a server turns eglot-mode on; didOpen once 
   const b = visit(p);
   assert.equal(b.mode, 'fake-mode');
   assert.equal(on(b), true, 'eglot-mode is on at once');
-  assert.equal(proc.calls.length, before + 1, 'the server was started by the visit');
   const s = Ed.lsp.sessionOf(b);
   assert.equal(s.state, 'starting');
   b.pt = 0; Ed.insertText(b, 'X');   // an edit before the server is ready: the didOpen carries it
   await Ed.lsp.ready(s);
+  assert.equal(proc.calls.length, before + 1, 'the server was started by the visit (once its environment was given)');
   const got = await held(b);
   const [open] = f.of('textDocument/didOpen');
   assert.deepEqual(open.textDocument, { uri: uriOf(p), languageId: 'fake', version: b.ver, text: 'Xhéllo\n' });
@@ -460,12 +460,13 @@ test('eglot-mode turns on by itself only where a server can start: no server for
   try { assert.equal(on(visit(project('refuse', 'e.fake', 'x'))), false); }
   finally { host.proc = proc; }
   assert.equal(proc.calls.length, before);
-  /* a program missing: said, the visit goes on */
+  /* a program missing: the visit goes on, eglot-mode on until the start (after direnv) fails, then off and said */
   L.evalText(`(define-language-server 'gone :modes '(fake-mode) :command '("edwin-no-such-server"))`);
   const d = visit(project('refuse', 'd.fake', 'x'));
-  assert.equal(on(d), false);
-  assert.match(E.echo, /^eglot: /);
   assert.equal(d.text, 'x');
+  await until(() => !on(d), 'eglot-mode off once the start failed');
+  assert.match(E.echo, /^eglot: process-error: cannot run edwin-no-such-server/);
+  assert.equal(Ed.lsp.sessionOf(d), null);
 });
 
 test('nil: a definition found after edits around astral characters, so the server holds the buffer\'s text', { skip: !process.env.EDWIN_LSP_REAL && 'EDWIN_LSP_REAL names no nil' }, async () => {

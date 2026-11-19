@@ -12,7 +12,7 @@
 (define (define-language-server name . options)
   "(define-language-server NAME :modes MODES :command ARGV [:settings SETTINGS]) declares the language server NAME
 (a symbol) for the major modes MODES (a non-empty list of symbols), run as ARGV (a non-empty list of strings, the
-program first, found on PATH). Visiting a file in one of MODES turns eglot-mode on there, which starts it for the
+program first, found on PATH: the project's direnv PATH where an allowed .envrc gives one). Visiting a file in one of MODES turns eglot-mode on there, which starts it for the
 file's project (one process per project) and tells it of the buffer; M-x eglot does so in the current buffer.
 SETTINGS are the server's settings, given to it when it asks (workspace/configuration) and once it is initialized
 (workspace/didChangeConfiguration): JSON as Scheme (an alist with symbol keys an object, a vector or another list an
@@ -32,7 +32,7 @@ signals lsp-error. Skipped, with a message, while the image replays."
           (else (signal 'lsp-error "define-language-server: unknown option for" name (car o))))))
 
 ;;; The servers of the owner's languages (his Emacs's init-prog.el, and eglot's own table for the rest), each
-;;; found on PATH when it starts: where one is missing, visiting a file of its mode says so. Standalone edwin's
+;;; found on PATH when it starts (the project's direnv PATH, where it has an .envrc): where one is missing, visiting a file of its mode says so. Standalone edwin's
 ;;; init.scm declares one again to change it, or another for the same modes. An edwinclient frame has no init.scm
 ;;; of its own (edwind's is evaluated as the image replays, where a declaration is skipped): there this table is
 ;;; the one used, and changing it means changing this file.

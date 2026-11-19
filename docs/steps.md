@@ -1109,7 +1109,7 @@ formatters and language servers will all call it, from TypeScript.
   once, so a program that reads its input never waits for the user.
 - **`Ed.proc.available()`** says whether a child can start here now; **`Ed.proc.envFor(dir)`** gives the
   environment changes for a child run in DIR, what direnv exports there (proc-direnv, "direnv for child processes"). Callers pass it as
-  `env`.
+  `env`; `{quit: false}` makes its wait one C-g does not stop (lsp-direnv's, for a start no command waits on).
 - **Where.** The host gives the processes: `host.proc` (spawn, write, closeStdin, kill), which only the desktop
   program has (`native/js/host-native.ts` over the natives, in edwin and in edwinclient's frames). A web frame
   (`host.kind` browser) is refused by name; edwind's Node host has no `host.proc`, so edwind still never spawns
@@ -1767,7 +1767,8 @@ language servers. Risk named: direnv runs project code only where the owner alre
   commands would otherwise freeze the frame for as long as direnv takes, up to the 120 s. The wait is
   `EdPool.interruptible`: C-g kills direnv and the command quits (`Quit`), its own child never started. Nothing
   is kept, and the stopped run is forgotten at once, so an ask made before the killed direnv has ended starts a
-  direnv of its own. Every envFor wait is interruptible, so C-g quits every caller sharing a run; a stopped run
+  direnv of its own. Every envFor wait is interruptible (but one asked with `{quit: false}`, which lsp-direnv
+  added), so C-g quits every caller sharing a run; a stopped run
   never resolves to the plain environment (it is a process-error for any caller still waiting).
 - **Kept** per directory with the `.envrc`'s stamp (inode, modification time, size), in this frame's memory only:
   never storage, the image, edwind or a log, since an `.envrc` often exports tokens, and each caller gets its own
@@ -5611,6 +5612,104 @@ tell servers about file changes the editor makes or sees through auto-revert pol
   is of the same directory (a dired buffer only ever lists its own); and a generation check on the registration
   request (an old child's request after `lost` can only fill a session that is not running or is replaced, which
   nothing reads).
+
+## Servers in the project's direnv environment (done)
+
+Asked 2026-11-19 (the Emacs-to-Edwin plan, package `lsp-direnv`, on lsp-watched-files and proc-direnv): server
+lookup and start use `Ed.proc.envFor`; proved by edwin-lsp: a server only on the direnv PATH is found.
+
+- **Every start of a server** (src/lsp.ts, `launch`) asks `Ed.proc.envFor` for the session's root: the first
+  start in a root, a start again after a crash (lost's timer), the new session eglot-reconnect makes, and a start
+  again of a session that had given up. The child is spawned with what direnv gives as its `env`, so its program
+  is looked up on that PATH (the desktop program's spawn and the suites' stand-in both look the program up on the
+  child's PATH). direnv runs in the root (the nearest directory up with a `.git` or `.jj`), so the `.envrc` used
+  is the nearest one at or above the root. envFor's cache means a start again runs no direnv while that `.envrc`
+  is unchanged; a changed one is asked again at the next start. With no `.envrc` above the root direnv is not run.
+- **The start contract changed.** A start used to spawn at once and throw on a missing program. Now the session
+  is kept at once (state `starting`, its buffers attached, eglot-mode on) and the child is spawned when envFor
+  answers. A visit never waits for direnv, which can take up to envFor's 120 s for nix-direnv. A second start in
+  the root meanwhile (another buffer, M-x eglot) uses the same session: one direnv, one server. A shutdown
+  (eglot-shutdown, eglot-shutdown-all, quitting, a reconnect) while direnv runs means that start spawns nothing.
+- **Failures.** A missing program (missing on the direnv PATH too), or no environment (envFor rejecting), at a
+  start the user or a visit asked for: `eglot: …` is said and the session shut down, so no session is kept, its
+  buffers are detached and eglot-mode is off, as before, but once direnv has answered rather than at once. At a
+  start again after a crash it counts as an end (lost), as before.
+- **Waiting and C-g.** M-x eglot and eglot-reconnect return once the child runs, so a missing program is still
+  the command's error (process-error). While they wait for direnv every key is held, as in compile, and C-g quits
+  the wait only: the start goes on. A start no command waits on (a visit, eglot-mode, a start again) asks
+  envFor with a new option, `{quit: false}`. Without it, envFor registers every wait as interruptible, so a C-g
+  typed meanwhile would be swallowed (no keyboard-quit), kill direnv and fail the start. The refusals (the image's
+  replay, a web frame, edwind's host, no server for the mode, no file on this machine) still throw at once, before
+  any wait.
+- **Secrets.** The environment goes to the spawn and nowhere else: it is not kept on the session, logged or
+  shown (envFor keeps it in this frame's memory, as before). Only `direnv export json` is ever run, never
+  `direnv allow`.
+- **Choices made where the package left one open:**
+  - The environment is the root's, not the visited file's directory's: there is one server per root, so an
+    `.envrc` below the root (a subproject of a monorepo) is not used for that root's server.
+  - A C-g that stops a direnv run shared with a command (compile in the same root, which joins envFor's run)
+    also fails a server start waiting on that run: it is said, eglot-mode goes off, and M-x eglot starts it again.
+  - A session that had given up and fails again when started again is now dropped. Before, it stayed given up and
+    the buffer was not attached.
+- **Existing tests changed** to the new contract. test/lsp.test.mts awaits M-x eglot before counting spawns; the
+  missing program is an `assert.rejects`, and the forgotten session is waited for; the doubling-delays test counts
+  only the server's spawns. That last change is needed because those suites' `host.files` give no stamp, so envFor
+  tries direnv at every start (not on the check's PATH: the try throws and the environment is plain).
+  test/lsp-docs.test.mts counts the visit's spawn once the server is ready, and waits for eglot-mode to go off
+  after a missing program. test/format.test.mts waits after visiting a Nix file before toggling format-on-save-mode:
+  the visit's start of the table's nixd (missing from that check) now says `eglot: … cannot run nixd` once envFor
+  has answered, a moment after the visit, which overwrote the toggle's message. In use, that message likewise comes
+  a moment after the visit rather than during it.
+- **Differences from Emacs:** envrc.el sets `process-environment` per buffer, from the buffer's directory, and
+  eglot starts the server with the environment of the buffer that started it. Here it is always the root's. There
+  is no envrc-reload: after editing an `.envrc` or running `direnv allow` in a shell, eglot-reconnect picks it up.
+- **Not in it:** a `direnv allow` command; a mode-line indicator; starting running servers again when their
+  `.envrc` changes (the next start sees the change).
+- **Checked by**, on ex44 (the build host). The full flake check ran on the code before a last comment rewrap in
+  src/lsp.ts and the README row's wording; `edwin-lsp` (152 passed) and `edwin-typecheck` were rebuilt on the final
+  code. On the code before the rewrap:
+  `nix flake check --max-jobs 2 --keep-going` built every check but `edwin-bench`, which failed one timing
+  budget ("the shadow stack costs more than the limit") at a load average of 18. Rebuilt alone at a load of 6
+  it passed. The counts from `nix log`: `edwin-lsp` 152 passed, 0 failed, none skipped (6 of them
+  test/lsp-direnv.test.mts, new), `edwin-format` 16 passed, `edwin-proc` 13 passed, `edwin-typecheck` passed. An
+  earlier flake check, on the code before the format.test.mts change, failed only `edwin-format` (the message
+  above). `nix build --max-jobs 2 .#edwin` passed on that earlier commit, which differs from the final code only
+  in test/format.test.mts and this entry (unit 41 passed and 3 ignored, `tests/gui.rs` 5 and 1 ignored,
+  `tests/terminal.rs` 39 and 1 ignored, its stand-in nixd now started after envFor). One earlier `edwin-lsp`
+  build failed lsp.test.mts's 'a broken stream and an initialize past its time count as ends' (the hung stand-in
+  logged a `$/cancelRequest`), a known occasional race; it passed when rebuilt.
+  test/lsp-direnv.test.mts (6, new). It puts a stand-in direnv (node, `export json` only, anything else exits 2)
+  first on PATH, and uses a stand-in server reached only through a project's `bin/` and logging its
+  `LSP_FROM_DIRENV`, with host.files giving stamps as host-native.ts does. The real direnv is never run.
+  - M-x eglot in a file under `sub/` of a project whose `.envrc` is at the root: one direnv,
+    `['direnv','export','json']` in the root; the server spawned in the root with the root's `bin` first on PATH and
+    the `.envrc`'s variable, initialized and logging it. The same server in a project with no `.envrc`: no direnv,
+    `cannot run` rejected by the command, no session kept, eglot-mode off.
+  - A crash's start again with the `.envrc` unchanged (no direnv run, the kept environment), then with it
+    rewritten (direnv again, the new value), and eglot-reconnect after another rewrite (a new session, the newest
+    value in the server's log).
+  - A visit while direnv takes 600 ms: eglot-mode on and the session `starting` with no child at once; a second
+    buffer of the root turned on by eglot-mode on the same session; one direnv; C-g typed meanwhile leaves direnv
+    running; one server, with the environment.
+  - M-x eglot during a 600 ms direnv: C-g rejects the command with quit, the session stays `starting`, and the
+    server starts once direnv answers.
+  - eglot-shutdown during a 300 ms direnv: no server, the session stopped and not kept. Then a session starting
+    there reconnected during direnv: one server, the reconnected session's.
+  - envFor stubbed to reject: M-x eglot rejects with its error; a visit's eglot-mode goes off, `eglot: …` is
+    said, and no session is kept.
+  On the final code, each guard was taken out alone in the worktree and the suites run alone (the stripped
+  tree, a throwaway HOME,
+  XDG dirs and TMPDIR, system direnv off PATH), each making its test fail: the `env` given to the spawn (5 of 6
+  fail), the `starting` check before the deferred spawn (the shutdown test and the no-environment test), the
+  failure handler on the start (the first and the no-environment test), `{quit: false}` in lsp.ts and its
+  handling in proc.ts (the slow-visit and the M-x eglot C-g tests), the `&& p` in the connection's onClose that
+  keeps a failed first spawn out of lost (lsp-direnv's first test, and in lsp.test.mts and lsp-docs.test.mts the
+  missing-program and gone-program tests), envFor at a start again (the crash test), M-x eglot's wait (three
+  tests), and eglot-reconnect's check that a session came back before waiting on it (lsp.test.mts's two
+  shutdown-all-while-reconnecting tests). Two guards first written were deleted as unreachable: a gen check beside the `starting` check (a session
+  only starts again from lost or from given up, both of which need a child, so no second start is ever pending)
+  and a separate settling of a failed start's waiters (the shutdown that follows settles them).
+
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

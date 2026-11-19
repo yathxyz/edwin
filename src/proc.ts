@@ -147,8 +147,9 @@ function askDirenv(dir: string, file: string | null): { result: Promise<Env | nu
    there is none, direnv is not on PATH or the .envrc is blocked. Refused at once where a child is (the image's
    replay above all). Kept per directory until its .envrc changes. A command awaiting it holds every key (pool.ts),
    so the wait is EdPool.interruptible: C-g kills direnv and quits, rather than the frame waiting up to the timeout
-   for a slow nix-direnv. */
-async function envFor(dir: string): Promise<Env> {
+   for a slow nix-direnv. With QUIT false (a wait outside any command, which holds no key: a language server a
+   visit starts) C-g neither stops direnv nor is taken from the command loop. */
+async function envFor(dir: string, opts: { quit?: boolean } = {}): Promise<Env> {
   allowed();
   if (typeof dir !== 'string' || !dir) signal('process-error', 'envFor needs a directory');
   const files = Ed.host.files;
@@ -174,7 +175,7 @@ async function envFor(dir: string): Promise<Env> {
     direnvAsked.set(key, ask = made);
   }
   const wait = Object.assign(ask.result.then(env => ({ ...env })), { cancel: ask.stop });
-  return EdPool.interruptible ? EdPool.interruptible(wait) : wait;
+  return opts.quit !== false && EdPool.interruptible ? EdPool.interruptible(wait) : wait;
 }
 
 /* FN runs as the image's replay: no child starts in it, nor until the loop's next turn, by which time every

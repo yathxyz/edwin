@@ -15,8 +15,10 @@
 
    Only the desktop program has processes (Ed.proc): in a web frame and on edwind's Node host every start is
    refused, and a buffer whose file is edwind's (a note, a shared buffer) gets no server, its file not being on
-   this machine. Nothing here waits on the server while a key is held: a start returns once the child runs, and
-   the session says when it is ready.
+   this machine. A server starts in its root's direnv environment (docs/steps.md, "Servers in the project's direnv
+   environment"), its program looked up on that PATH: the session is kept at once and its child spawned once
+   direnv has answered, which a visit does not wait for. Nothing here waits on the server while a key is held:
+   M-x eglot returns once the child runs (C-g quits its wait for direnv), and the session says when it is ready.
 
    Documents (docs/steps.md, "Document sync and eglot-mode"): a buffer attached to a session is a document its
    server is told of, as the server's textDocumentSync asks: didOpen once it is initialized (again after each
@@ -124,6 +126,8 @@ interface Session extends LspSession {
   diags: Map<string, Diag[]>;
   /* the files its server watches (workspace/didChangeWatchedFiles), by registration id */
   watched: Map<string, Watcher[]>;
+  /* the last start (launch): settles once its child runs, or rejects with why none did */
+  launching: Promise<void> | null;
 }
 
 /* How a server wants documents synced (its textDocumentSync): whether opening and closing are told, changes as
@@ -272,21 +276,37 @@ function initializeParams(s: Session) {
   };
 }
 
-/* Start S's server: the child at once (a refusal, a missing program, throws here, before any wait), initialize
-   once it answers. */
-function launch(s: Session) {
+/* Start S's server in its root's direnv environment (Ed.proc.envFor, asked in this turn, so a refusal is too):
+   the child once the environment is given, unless S was shut down meanwhile (a session only starts again from
+   lost or failed, which need a child, so no second start is ever pending); initialize once it answers. The
+   program is looked up on that environment's PATH. Resolves once the child runs (or once S is shut down); a
+   missing program, or no environment, calls FAILED with why (S still starting) and rejects. Nothing waits on a
+   key: C-g stops neither direnv nor the start, only a command's wait on it (but a C-g quitting a command that
+   shares this direnv run, compile in the root, stops the run and so fails this start). The environment is never
+   kept on S: an .envrc often exports tokens. */
+function launch(s: Session, failed: (why: string) => void): Promise<void> {
   const gen = s.gen + 1;
+  s.gen = gen; s.state = 'starting'; s.capabilities = null;
+  const started = Ed.proc.envFor(s.root, { quit: false }).then(env => {
+    if (s.state === 'starting') spawnServer(s, gen, env);
+  });
+  started.catch(e => { if (s.state === 'starting') failed(Ed.errorText(e)); });
+  s.launching = started;
+  return started;
+}
+/* S's child for start GEN, with ENV's changes; a missing program throws. */
+function spawnServer(s: Session, gen: number, env: Record<string, string | null>) {
   let p: EdProc | null = null;
   const conn = LspRpc.connect({
     write: t => (p ? p.write(t) : false),
     requests: serverRequests(s),
     onNotification: (m, params) => { if (s.gen === gen) notified(s, m, params); },
-    onClose: why => { if (s.gen === gen) lost(s, gen, why); },
+    /* not before the child runs: a spawn that throws closes it, and the start's own failure takes that */
+    onClose: why => { if (s.gen === gen && p) lost(s, gen, why); },
   });
   try {
-    p = Ed.proc.spawn(s.argv, { cwd: s.root, onOut: c => conn.receive(c), onErr: t => { if (s.gen === gen) stderr(s, t); } });
+    p = Ed.proc.spawn(s.argv, { cwd: s.root, env, onOut: c => conn.receive(c), onErr: t => { if (s.gen === gen) stderr(s, t); } });
   } catch (e) { conn.close('not started'); throw e; }
-  s.gen = gen; s.state = 'starting'; s.capabilities = null;
   s.proc = p; s.conn = conn; s.started = Date.now();
   p.exit.then(x => {
     if (s.gen !== gen) return;
@@ -334,7 +354,7 @@ function lost(s: Session, gen: number, why: string) {
     s.timer = null;
     if (s.state !== 'restarting') return;
     s.started = Date.now();   // a start refused here is no healthy run
-    try { launch(s); } catch (e) { lost(s, s.gen, Ed.errorText(e)); }
+    void launch(s, why => lost(s, s.gen, why));
   }, delay);
 }
 
@@ -704,9 +724,9 @@ function rewatch() {
 /* B on the session its server and root give now: it stays where it is when that is its session (its document
    opened again when its file or mode changed), else it is detached and attached afresh; with no server for its
    mode (or no root), detached. Nothing changes where no process may start (the image's replay, a web frame,
-   edwind). A start that fails (the program missing) leaves it detached, said; with MAYSTART false only a
-   session already kept there is used, none started. Visiting a file and changing a major mode call this: eglot-mode turns
-   on per language, once a server is declared for its mode. */
+   edwind). A start that fails (the program missing, on the root's direnv PATH too) detaches it once known, said;
+   with MAYSTART false only a session already kept there is used, none started. Visiting a file and changing a
+   major mode call this: eglot-mode turns on per language, once a server is declared for its mode. */
 function ensure(b: EdBuffer, mayStart = true) {
   if (Ed.proc.refusal()) return;
   const s = ofBuffer.get(b), server = serverFor(b), root = server ? rootOf(b) : null;
@@ -744,20 +764,26 @@ function start(b: EdBuffer): Session {
 function sessionAt(server: LspServer, root: string): Session {
   const s = sessions.get(`${server.name}\0${root}`);
   if (!s) return open(server, root);
-  if (s.state === 'failed') { s.restarts = 0; launch(s); Ed.message(`${label(s)}: starting`); }
+  if (s.state === 'failed') { s.restarts = 0; void launch(s, abandon(s)); Ed.message(`${label(s)}: starting`); }
   return s;
 }
-/* A new session of SERVER in ROOT, its child started (a refusal, or settings that fail, throw before the session is
-   kept). */
+/* A start of S the user asked for (eglot, a visit) failed with WHY: said, and S shut down, so no session is kept
+   and its buffers are detached (eglot-mode off). A start again after a crash is lost's instead (it counts). */
+const abandon = (s: Session) => (why: string) => {
+  Ed.message(`eglot: ${why}`);
+  void shutdown(s);
+};
+/* A new session of SERVER in ROOT, kept at once (a second start in ROOT while direnv runs uses it), its child
+   started once its environment is given (settings that fail throw before the session is kept). */
 function open(server: LspServer, root: string): Session {
   const settings = settingsIn(server, root);
   const s: Session = {
     key: `${server.name}\0${root}`, name: server.name, root, argv: server.argv.slice(), settings, state: 'starting', proc: null,
     conn: null, capabilities: null, buffers: new Set(), restarts: 0, started: 0, why: null, gen: 0, timer: null,
-    idle: null, waiters: [], err: '', done: null, diags: new Map(), watched: new Map(),
+    idle: null, waiters: [], err: '', done: null, diags: new Map(), watched: new Map(), launching: null,
   };
-  launch(s);
   sessions.set(s.key, s);
+  void launch(s, abandon(s));
   Ed.message(`${label(s)}: starting`);
   return s;
 }
@@ -2397,16 +2423,22 @@ const sessionHere = () => {
   if (!s) signal('user-error', 'No language server for this buffer (M-x eglot starts one)');
   return s!;
 };
-CMD('eglot', '', '', "Start the language server for this buffer's mode in its project (the nearest directory up with a .git or a .jj, else the file's), or use the one already running there, and turn eglot-mode on: the server is told of the buffer.", () => {
+CMD('eglot', '', '', "Start the language server for this buffer's mode in its project (the nearest directory up with a .git or a .jj, else the file's), in the project's direnv environment, or use the one already running there, and turn eglot-mode on: the server is told of the buffer. A start returns once the server runs (C-g quits the wait for direnv; the start goes on).", () => {
   const had = new Map([...sessions.values()].map(s => [s, s.state]));
+  /* what is refused at once (no server, the image's replay) throws here, before any wait */
   const s = start(cur());
   const was = had.get(s);
-  if (was && was !== 'failed') Ed.message(`${label(s)}: ${s.state === 'running' ? 'already running' : s.state}`);
+  if (!was || was === 'failed') return quittable(s.launching!).then(() => false);
+  Ed.message(`${label(s)}: ${s.state === 'running' ? 'already running' : s.state}`);
   return false;
 });
 CMD('eglot-shutdown', '', '', "Shut down this buffer's language server.", () => { void shutdown(sessionHere()); return false; });
 CMD('eglot-shutdown-all', '', '', 'Shut down every language server.', () => { void shutdownAll(); return false; });
-CMD('eglot-reconnect', '', '', "Shut down this buffer's language server and start it again.", async () => { await reconnect(sessionHere()); return false; });
+CMD('eglot-reconnect', '', '', "Shut down this buffer's language server and start it again, in the project's direnv environment as it is now; returns once the server runs.", async () => {
+  const s = await reconnect(sessionHere());
+  if (s) await quittable(s.launching!);
+  return false;
+});
 CMD('eglot-stderr-buffer', '', '', "Show the last of what this buffer's language server wrote to its error output.", () => {
   const s = sessionHere();
   const b = Ed.getBufferCreate(`*EGLOT ${s.name} stderr*`);

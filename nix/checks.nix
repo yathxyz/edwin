@@ -347,6 +347,12 @@ in
   # --private session; unregistering, a start again and a shutdown dropping the watchers; only watched-files
   # registrations under a string id kept, an id given again replacing its watchers; the hook unset with none;
   # malformed and oversized watchers dropped, 256 alternatives a session; the glob syntax, in linear time.
+  # test/lsp-direnv.test.mts, servers in the project's direnv environment: a stand-in direnv first on PATH, a server
+  # only in a project's bin/ found on the PATH its .envrc gives (direnv run once, as `export json` in the root),
+  # not found with no .envrc; asked again at a start again after a crash and at eglot-reconnect, an .envrc changed
+  # meanwhile giving its new environment; a visit not waiting for a slow direnv (eglot-mode on at once, one session
+  # and one server for the root, C-g stopping neither), M-x eglot waiting and C-g quitting that wait only; a
+  # shutdown or reconnect while direnv runs starting no server for that start; no environment failing the start.
   edwin-lsp =
     pkgs.runCommand "edwin-lsp"
       {
@@ -359,7 +365,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil} EDWIN_LSP_SERVERS=1
-        node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts ${edwin}/edwin/test/lsp-servers.test.mts ${edwin}/edwin/test/lsp-watched-files.test.mts
+        node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts ${edwin}/edwin/test/lsp-servers.test.mts ${edwin}/edwin/test/lsp-watched-files.test.mts ${edwin}/edwin/test/lsp-direnv.test.mts
         touch $out
       '';
 
