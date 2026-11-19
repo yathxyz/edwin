@@ -74,3 +74,12 @@ No change to the wire, on-disk journal or FS durability contract. The first larg
 Next investigations: measure scroll reconciliation independently of layout; test wrapped mega-lines on an actual display; profile repeated **far** case-insensitive misses with Unicode offsets before introducing another search algorithm. Measure concurrent durable writers and slow receivers separately before changing journal batching or transport. The serialized latency measurements include queueing but do not isolate lock wait; process RSS and sampled GC are not exact object-allocation counts.
 
 On the daemon, profile worker-pool initialization and idle collection before rewriting buffer storage. At listen, median baseline CPU was 790 ms (730 user + 60 system) and RSS 215 MiB. In one traced run the last two pool threads became active during the small-file typing sample, and the daemon had 14 major GC events in the 10.5-second idle window. Those costs are not attributable to 64 small buffers. Measuring lazy worker startup would need first-command latency as well as startup RSS.
+
+## Verification
+
+Ran `node --test test/<name>.test.mts` sequentially for `scheme-editor` (20 passed), `headless` (22), `frame` (24) and `display` (19). Then `nix flake check -L --max-jobs 1 --keep-going` ran the repository gates. The only failing gate was `edwin-typecheck`: TS7022 inferred a cycle through the new display test's loop-carried cache. `a7d7082` adds explicit test result types, with no runtime change. Both affected gates passed on the corrected revision, in order:
+
+```sh
+nix build --no-link -L --max-jobs 1 .#checks.x86_64-linux.edwin-display
+nix build --no-link -L --max-jobs 1 .#checks.x86_64-linux.edwin-typecheck
+```
