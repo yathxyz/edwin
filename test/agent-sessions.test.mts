@@ -239,6 +239,55 @@ async function checkListRendering(hub: FakeAgentHub, c: EditClient, Ed: ReturnTy
 }
 
 
+test('review 5 config source: protect the inode parsed at startup, not just the current path', async t => {
+  const { loadConfig, Server, makeLog } = await import('../server/main.mts');
+  const dir = makeDir(); t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
+  dir.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile: path.join(dir.root, 'absent') };
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const source = path.join(dir.root, 'daemon-config'), original = path.join(dir.root, 'retained');
+  fs.symlinkSync(dir.file, source); fs.linkSync(dir.file, original);
+  const config = loadConfig(source);
+  fs.unlinkSync(dir.file); fs.writeFileSync(dir.file, 'replacement fixture');
+  const auth = new Server(config, makeLog('error')).auth;
+  for (const file of [original, source, dir.file]) {
+    assert.throws(() => auth.withRead(file, fd => fs.readFileSync(fd)), { code: 'refused_path' });
+  }
+});
+
+test('review 5 config source: editor reads and binary attachments refuse aliases without logging private ids', async t => {
+  const dir = makeDir(), tokenFile = path.join(dir.root, 'private-id-for-reload');
+  fs.writeFileSync(tokenFile, 'dummy fixture; not a bearer token');
+  const alias = path.join(dir.dirs.notes, 'alias.txt'), hard = path.join(dir.dirs.notes, 'copy.txt');
+  fs.symlinkSync(dir.file, alias); fs.linkSync(dir.file, hard);
+  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  t.after(async () => { c.close(); await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  await c.connect(); await c.hello();
+  assert.equal((await c.open(hard)).text, JSON.stringify(dir.cfg), 'without agentHub the config is ordinary');
+  assert.equal((await c.open(tokenFile)).text, 'dummy fixture; not a bearer token');
+  c.close(); await stopEdwind(child);
+
+  // The invalid fixture token prevents all hub I/O. Only the local editor socket is used.
+  dir.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile };
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  assert.match(child.logs, /error reload /, 'an indexed private file was refused');
+  assert.ok(!child.logs.includes(tokenFile) && !child.logs.includes(path.basename(hard)), 'no refused buffer id in logs');
+  const draft = (await c.call('agent-prompt-create', [{ text: 'ordinary draft' }])).value;
+  for (const file of [dir.file, alias, hard]) {
+    assert.equal((await c.open(file)).error?.code, 'refused_path');
+    assert.equal((await c.call('visit-id', [file])).code, 'refused_path');
+    assert.equal((await c.call('fs-stat', [{ path: file }])).code, 'refused_path');
+    assert.ok((await c.form(`(insert-file-contents ${JSON.stringify(file)})`)).error);
+    for (const mimeType of ['text/plain', 'application/octet-stream']) {
+      const r = await c.call('agent-prompt-attach-file', [draft, file, { embed: true, mimeType }]);
+      assert.ok(r.error, `attachment should refuse ${mimeType}`);
+    }
+  }
+  const entries = (await c.call('fs-list', [{ dir: dir.dirs.notes }])).value.entries;
+  assert.ok(!entries.some((e: { name: string }) => [path.basename(alias), path.basename(hard)].includes(e.name)));
+  assert.deepEqual((await c.call('agent-prompt-preview', [draft])).value.blocks, [{ type: 'text', text: 'ordinary draft' }]);
+});
+
 test('protected reader: credential identities are refused by editor reads, metadata, completion and binary attach', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
   const tokenFile = path.join(dir.dirs.notes, 'private-fixture'), link = path.join(dir.dirs.notes, 'linked-fixture'), hard = path.join(dir.dirs.notes, 'other-fixture');

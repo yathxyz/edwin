@@ -194,7 +194,10 @@ export class Buffers {
         if (privateStore && e.file && path.resolve(e.file).startsWith(privateStore + path.sep)) continue;
         this.reloadOne(e);
       }
-      catch (err) { this.log.error('reload', { jid: e.jid, id: e.id, error: err.message }); }
+      catch (err) {
+        this.log.error('reload', this.auth.guardsCredential && err.code === 'refused_path'
+          ? { error: 'Private file: access refused' } : { jid: e.jid, id: e.id, error: err.message });
+      }
     }
   }
   reloadOne(e: IndexEntry, privateFile?: string): SBuf | undefined {

@@ -14,7 +14,7 @@ import os from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import { Authority, expandHome } from './paths.mts';
+import { Authority, configSource, expandHome } from './paths.mts';
 import { Buffers } from './buffers.mts';
 import { Client } from './session.mts';
 import { ImageLog, randomId, readJournal, jidPath, SNAP_NEW } from './journal.mts';
@@ -79,6 +79,7 @@ export interface Config {
      one, that part is off. */
   brain?: { url: string; credential?: string; readCredential?: string; taskCredential?: string; tags: string[] };
   agentHub?: agentSessionsModule.AgentHubConfig;
+  configSource?: ReturnType<typeof configSource>;
 }
 
 /* A server command (§4.6): the result object, a promise of one, or undefined for a delayed result. */
@@ -115,7 +116,14 @@ export function makeLog(level: string = 'info'): Log {
 const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'brain', 'agentHub', 'host', 'logLevel']);
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
-  try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
+  let source: Config['configSource'];
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      cfg = JSON.parse(fs.readFileSync(fd, 'utf8'));
+      if (cfg?.agentHub !== undefined) source = configSource(file, fd);
+    } finally { fs.closeSync(fd); }
+  } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: not an object`);
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
@@ -172,7 +180,10 @@ export function loadConfig(file: string): Config {
     if (!Array.isArray(tags) || !tags.every(t => typeof t === 'string' && TAG.test(t))) throw new Error(`${file}: brain.tags must be a list of brain tags such as ["roam"]`);
     out.brain = { url: b.url, tags, ...(b.credential === undefined ? {} : { credential: b.credential }), ...(b.readCredential === undefined ? {} : { readCredential: b.readCredential }), ...(b.taskCredential === undefined ? {} : { taskCredential: b.taskCredential }) };
   }
-  if (cfg.agentHub !== undefined) out.agentHub = agentSessionsModule.validateAgentHub(cfg.agentHub);
+  if (cfg.agentHub !== undefined) {
+    out.agentHub = agentSessionsModule.validateAgentHub(cfg.agentHub);
+    out.configSource = source;
+  }
   return out;
 }
 
@@ -214,7 +225,7 @@ export class Server {
        frame, and to a model through pi's tools (R14.6). */
     const credentials = modelsModule.credentialsDirectory();
     this.auth = new Authority(credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg);
-    if (cfg.agentHub) this.auth.protectCredential(cfg.agentHub.tokenFile);
+    if (cfg.agentHub) this.auth.protectCredential(cfg.agentHub.tokenFile, cfg.configSource);
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */
