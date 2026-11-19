@@ -714,16 +714,21 @@ interface EdTempMarker {
   dead?: boolean;
 }
 
-/* A fold (org.ts, markdown.ts): lines S..E hidden, N lines. */
-interface EdFold {
+/* Zero-based UTF-16 offsets of the heading newline and the last hidden newline. */
+interface EdFoldRange {
   s: number;
   e: number;
+}
+/* Internal fold: outline commands can also use EOF for the end of a subtree. */
+interface EdFold extends EdFoldRange {
+  owner?: true;
   n?: number;
 }
 
 /* A shared buffer's sync state (sync.ts). */
 interface EdBufferSync {
-  sverText: string;
+  /* A snapshot string until the first batch; the acknowledged text is then edited in chunks. */
+  sverText: EdText;
   seq: number;
   /* the seqs edwind acknowledged (null: an ack of a batch with no seq) */
   acked: Set<number | null>;
@@ -842,10 +847,11 @@ interface EdBuffer extends SchemeForeign {
   saving?: boolean;
   saveError?: string | null;
   _presTick?: number;
-  /* org.ts and markdown.ts: folds and their caches */
+  /* Closed folds, owner-supplied toggle targets, and the shared hidden-line prefix cache. */
   folds?: EdFold[] | null;
+  _ownerFolds?: EdFold[];
   _foldVer?: number;
-  _foldPre?: number[] | null;
+  _foldPre?: { ver: number | undefined; n: number; pre: Int32Array };
   /* a directory listing (dired.ts) */
   dired?: unknown;
   _cycle?: unknown;
@@ -1421,6 +1427,9 @@ interface EdApi {
   rectAt(w: EdWindow, p: number, len: number): { left: number; top: number; width: number; height: number } | null;
   scheduleRender(): void;
   FRAME_CSS: string;
+  /* Replace all closed folds (both offsets must be newlines); read a detached snapshot. */
+  setBufferFolds(b: EdBuffer, ranges: readonly EdFoldRange[]): void;
+  getBufferFolds(b: EdBuffer): EdFoldRange[];
   /* text and edits */
   Marker: EdMarkerConstructor;
   shiftMarkers(b: EdBuffer, pos: number, del: number, ins: number, entry?: EdLogEntry): void;
