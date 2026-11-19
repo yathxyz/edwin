@@ -59,7 +59,7 @@ before(async () => {
   hub = await new FakeAgentHub().start(); hub.add('alpha'); hub.add('beta');
   dir = makeDir({ writablePaths: [] }); tokenFile = path.join(dir.root, 'agent-token');
   fs.writeFileSync(tokenFile, hub.token + '\n', { mode: 0o600 });
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   child = await startEdwind(dir); client = await connect();
 });
 after(async () => {
@@ -83,7 +83,7 @@ test('basic Markdown draft retains edited text after abandon, buffer kill and da
 
 test('prompt minor keys outrank Markdown/Evil, drain local edits and send exactly previewed JSON; abandon retains', async () => {
   await frame();
-  await L.call('agent-session-prompt', ['alpha']); const draft = E.current;
+  await L.call('agent-prompt-compose', ['alpha']); const draft = E.current;
   assert.equal(draft.mode, 'markdown-mode'); assert.equal(Ed.localValue(draft, 'agent-prompt-enabled'), true);
   Ed.insertText(draft, 'local edits before preview\n');
   await keys('C-c C-p');
@@ -91,7 +91,7 @@ test('prompt minor keys outrank Markdown/Evil, drain local edits and send exactl
   show(draft); await keys('C-c C-c');
   const call = hub.calls.filter(c => c.path === '/v1/sessions/alpha/prompt').at(-1)!;
   assert.deepEqual(call.body, { epoch: preview.targets[0].epoch, blocks: preview.blocks });
-  await L.call('agent-session-prompt', ['alpha']); const abandoned = E.current; Ed.insertText(abandoned, 'retained unsent');
+  await L.call('agent-prompt-compose', ['alpha']); const abandoned = E.current; Ed.insertText(abandoned, 'retained unsent');
   const mark = hub.calls.length; await keys('C-c C-k');
   assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 0);
   assert.equal((await value('agent-prompt-preview', [abandoned.id])).blocks[0].text, 'retained unsent');
@@ -200,7 +200,7 @@ test('quick, compose, named reuse and explicit retarget keep the incarnation sel
   for (const action of ['quick', 'compose', 'named', 'targets']) {
     const sid = `frame-${action}-race`, old = hub.add(sid), draft = action === 'targets' ? await value('agent-prompt-create', [{ text: 'retarget content' }]) : null;
     show(Ed.getBufferCreate('*Prompt picker elsewhere*'));
-    const rejected = action === 'quick' ? rejectingPicker('agent-session-quick-prompt', [undefined, sid]) : action === 'compose' ? rejectingPicker('agent-session-prompt') : action === 'named' ? rejectingPicker('agent-prompt-load', ['picker identity fixture']) : rejectingPicker('agent-prompt-targets', [undefined, draft]);
+    const rejected = action === 'quick' ? rejectingPicker('agent-session-quick-prompt', [undefined, sid]) : action === 'compose' ? rejectingPicker('agent-prompt-compose') : action === 'named' ? rejectingPicker('agent-prompt-load', ['picker identity fixture']) : rejectingPicker('agent-prompt-targets', [undefined, draft]);
     const prompt = action === 'quick' ? `Prompt ${sid}: ` : action === 'targets' ? 'Targets (comma separated): ' : 'Agent session: ';
     await until(() => E.mini?.prompt === prompt, 'incarnation-bearing prompt picker');
     const choice = action === 'quick' ? 'retained quick text' : action === 'targets' ? `${sid}@${old.createdAt}` : `${sid} (${old.createdAt})`;

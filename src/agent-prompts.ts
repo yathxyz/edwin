@@ -1,5 +1,5 @@
 // Agent steering and prompt engineering. Frame-side commands never hold an API credential.
-globalThis.Ed.installAgentPrompts = function () {
+globalThis.Ed.installAgentPrompts = function (steer: boolean) {
 'use strict';
 const Ed = globalThis.Ed, E = Ed.E, L = globalThis.L, H = Ed.hooks;
 const { CMD, signal, intern } = L;
@@ -79,17 +79,18 @@ H.bufferMeta = (b, locals, ver) => {
 };
 {
   const map = new Ed.Keymap('agent-prompt-mode-map');
-  Ed.defineMinorMode({ name: 'agent-prompt-mode', keymap: map, lighter: ' Prompt', pretty: 'Agent prompt', doc: 'Ordinary Markdown editing, with C-c C-c send, C-c C-k leave retaining the draft, and C-c C-p exact JSON preview.' });
-  for (const [key, cmd] of [['C-c C-c', 'agent-prompt-send'], ['C-c C-k', 'agent-prompt-abandon'], ['C-c C-p', 'agent-prompt-preview']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
+  Ed.defineMinorMode({ name: 'agent-prompt-mode', keymap: map, lighter: ' Prompt', pretty: 'Agent prompt', doc: 'Edit a Markdown prompt; preview with C-c C-p or leave the retained draft with C-c C-k.' });
+  for (const [key, cmd] of [['C-c C-k', 'agent-prompt-abandon'], ['C-c C-p', 'agent-prompt-preview']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
+  if (steer) Ed.defineKey(map, Ed.kbd('C-c C-c'), intern('agent-prompt-send'));
   const stateMaps = H.stateMaps;
   H.stateMaps = b => metadata(b) ? [map, ...(stateMaps ? stateMaps(b) : [])] : stateMaps ? stateMaps(b) : [];
   // Answer requests from any buffer; no transcript needs to be selected.
-  Ed.defineKey(L.get('global-map') as EdKeymap, Ed.kbd('C-c a !'), intern('agent-session-answer'));
-  Ed.defineKey(L.get('global-map') as EdKeymap, Ed.kbd('C-c a p'), intern('agent-session-prompt'));
+  if (steer) Ed.defineKey(L.get('global-map') as EdKeymap, Ed.kbd('C-c a !'), intern('agent-session-answer'));
+  Ed.defineKey(L.get('global-map') as EdKeymap, Ed.kbd('C-c a p'), intern('agent-prompt-compose'));
 }
 
 // Steering stage: durable compose, exact preview, and globally reachable pending answers.
-CMD('agent-session-prompt', '', '&optional SID', 'Compose in a shared Markdown draft for SID; no existing journal text is changed.', async ([sid]: SchemeValue[]) => {
+CMD('agent-prompt-compose', '', '&optional SID', 'Compose in a shared Markdown draft for SID; no existing journal text is changed.', async ([sid]: SchemeValue[]) => {
   const target = await targetOrRead(sid);
   await showDraft(await rpc('agent-prompt-create', [target]) as string); return false;
 });
@@ -100,7 +101,7 @@ CMD('agent-prompt-preview', '', '&optional ID', 'Show the exact JSON content blo
   const id = await chooseDraft(value); await synced(id);
   jsonView('*Agent Prompt Preview*', await rpc('agent-prompt-preview', [id])); return false;
 });
-CMD('agent-prompt-send', '', '&optional ID', 'Send sequenced draft text/resources. Retain the draft on any failure, removing successful destinations durably.', async ([value]: SchemeValue[]) => {
+if (steer) CMD('agent-prompt-send', '', '&optional ID', 'Send sequenced draft text/resources. Retain the draft on any failure, removing successful destinations durably.', async ([value]: SchemeValue[]) => {
   const id = await chooseDraft(value); await synced(id);
   const result = await rpc('agent-prompt-send', [id]) as Json;
   leave(id); Ed.message(`Prompt sent to ${(result.sent || []).join(', ')}; draft retained.${sendWarning(result.possiblySent)}`); return false;
@@ -108,6 +109,7 @@ CMD('agent-prompt-send', '', '&optional ID', 'Send sequenced draft text/resource
 CMD('agent-prompt-abandon', '', '&optional ID', 'Leave this view without sending or deleting the durable draft.', async ([value]: SchemeValue[]) => {
   const id = await chooseDraft(value); await synced(id); await rpc('agent-prompt-abandon', [id]); leave(id); return false;
 });
+if (steer) {
 CMD('agent-session-quick-prompt', '', '&optional TEXT SID', 'Send a minibuffer prompt through a durable draft; a failed/ambiguous reply leaves it recoverable.', async ([value, sid]: SchemeValue[]) => {
   const target = await targetOrRead(sid), body = typeof value === 'string' ? value : await Ed.readMini(`Prompt ${target.sid}: `, '');
   const id = await rpc('agent-prompt-create', [{ ...target, text: body }]) as string;
@@ -198,6 +200,7 @@ CMD('agent-session-answer', '', '', 'Answer the displayed permission or elicitat
   } else signal('user-error', 'Unknown pending request type');
   Ed.message('Agent request answered'); return false;
 });
+}
 
 // Prompt-engineering stage: immutable resource snapshots, multiple targets, and named reuse.
 CMD('agent-prompt-targets', '', '&optional TARGETS ID', 'Choose several ACP destinations, separated by commas, with session completion.', async ([targets, value]: SchemeValue[]) => {

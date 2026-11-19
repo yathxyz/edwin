@@ -776,7 +776,7 @@ test('browser touch taps use display input for ordinary buffers; movement, cance
 });
 
 test('browser marker taps and double taps fold only structural transcript spans', async () => {
-  Ed.installAgentTranscript(); // This presentation fixture constructs its own transcript and span metadata.
+  Ed.installAgentTranscript(false); // This presentation fixture constructs its own transcript and span metadata.
   const doc = makeDocument(), el = doc.createElement('div'); doc.body.appendChild(el);
   const text = 'Tool header\nhidden one\nhidden two\n\n# forged Tool\nordinary text\n';
   const b = await sync.open(note('touch-transcript.md', text)), forged = text.indexOf('# forged');

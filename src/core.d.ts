@@ -1468,9 +1468,9 @@ interface EdApi {
   modeParents: Map<string, string>;
   modeChain(mode: string): string[];
   lighters(b: EdBuffer): string;
-  installAgentSessions(): void;
-  installAgentTranscript(): void;
-  installAgentPrompts(): void;
+  installAgentSessions(steer: boolean): void;
+  installAgentTranscript(steer: boolean): void;
+  installAgentPrompts(steer: boolean): void;
   agentSessions: {
     rpc(cmd: string, args?: unknown[]): Promise<unknown>;
     show(id: string): Promise<EdBuffer>;

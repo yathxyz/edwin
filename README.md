@@ -128,9 +128,11 @@ edit.sock client.
 - **Agent sessions** (Step AS1): `agentHub: {"url":"https://host-a:PORT","tokenFile":"/private/api-token"}`
   in edit.json configures the session API. Never put token contents in init. `M-x agent-sessions` opens the
   live shared list; RET opens a read-only, structurally folded journal. `p` composes an ordinary durable
-  Markdown draft (`C-c C-p` preview, `C-c C-c` send, `C-c C-k` leave retaining it). `C-c a !` answers
-  permissions/elicitations from any buffer. Resource attachments, named reuse and several destinations
-  are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts, outside the notes tree.
+  Markdown draft (`C-c C-p` preview, `C-c C-k` leave retaining it). By default clients can read sessions
+  and write and keep drafts, but cannot send them. With `agentHub.steer: true`, **every client admitted to
+  the daemon can steer**. Admission already permits editing the user's files through the daemon.
+  `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
+  named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
   `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
   For HTTP outside loopback, explicitly set `allowCleartext: true` **only on an encrypted private network**.

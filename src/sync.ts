@@ -19,7 +19,7 @@ type SyncBy = {
 type SyncCondition = { condition: string; report: string; restarts?: unknown[]; backtrace?: string[] };
 type SyncAnchor = { id: string; pos: number; label?: string };
 type SyncMeta = { file: string | null; mode: string; modified: boolean; readOnly: string | boolean; saved: number; diskChanged: string | null; eol: 'lf' | 'crlf'; anchors: SyncAnchor[]; locals: Record<string, unknown>; ver: number };
-type SyncWelcomeMsg = { t: 'welcome'; proto: number; build: string; boot: string; imageEpoch: string; gen: number; caps: Record<string, unknown> };
+type SyncWelcomeMsg = { t: 'welcome'; proto: number; build: string; boot: string; imageEpoch: string; gen: number; caps: Record<string, unknown> & { agentHub?: { steer: boolean } } };
 type SyncPingMsg = { t: 'ping' | 'pong'; rid?: string };
 type SyncErrorMsg = { t: 'error'; code: string; msg: string; rid?: string; buf?: string; seq?: number; [k: string]: unknown };
 type SyncResultMsg = { t: 'result'; rid?: string; value?: unknown; error?: SyncCondition; msg?: string; out?: string };
@@ -956,7 +956,10 @@ async function bootServed({ sources, transport, device, cid, pending }: { source
   Ed.hooks.killShared = b => closeBuffer(b as SyncBuffer);
   if (pending) importPending(pending as (SyncPending | null)[]);
   const welcome = await start({ transport, device, cid });
-  if (welcome?.caps.agentHub) { Ed.installAgentSessions(); Ed.installAgentTranscript(); Ed.installAgentPrompts(); }
+  if (welcome?.caps.agentHub) {
+    const steer = welcome.caps.agentHub.steer === true;
+    Ed.installAgentSessions(steer); Ed.installAgentTranscript(steer); Ed.installAgentPrompts(steer);
+  }
   const ui = await call({ cmd: 'user-init' });
   if (ui && typeof ui.value === 'string' && ui.value.trim()) { try { for (const f of L.readAll(ui.value)) { L.resetOps(); L.ev(f); } } catch (e) { Ed.message(`Error in ~/.config/edwin/init.scm: ${Ed.errorText(e)}`); } }
   await imageQuery(0);

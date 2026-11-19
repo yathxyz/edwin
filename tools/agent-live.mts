@@ -89,7 +89,7 @@ async function main() {
     }
     const Ed = globals.Ed;
     Ed.boot({ host }); await Ed.whenIdle();
-    Ed.installAgentTranscript();
+    Ed.installAgentTranscript(false);
     const log: Log = { debug() {}, info() {}, warn() {}, error() {} };
     const auth = new Authority({ stateDir, configDir, notesDir, refusePaths: [config.tokenFile] });
     buffers = new Buffers({ Ed, auth, stateDir, log });

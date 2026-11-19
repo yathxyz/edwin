@@ -1144,9 +1144,14 @@ file; embedding reads an explicitly chosen Edwin-side file/buffer/region.
 
 ### Commands and keys
 
+`agentHub.steer` is a boolean, default `false`. In this mode lists and transcripts are read-only;
+clients can still compose, save, recall and preview drafts. No hub mutation command or binding is
+installed. With `agentHub.steer: true`, **every client admitted to the daemon can steer**, whether a
+frame, host page or terminal. An admitted client can already edit the user's files through the daemon.
+
 `M-x agent-sessions`, `agent-session-open`, `agent-session-start`, `agent-session-cancel`,
 `agent-session-remove`, `agent-session-revive`, `agent-session-mode`, `agent-session-config`,
-`agent-session-prompt`, `agent-session-quick-prompt`, `agent-session-answer` (global),
+`agent-prompt-compose`, `agent-session-quick-prompt`, `agent-session-answer` (global),
 `agent-prompt-preview`, `agent-prompt-send`, `agent-prompt-abandon`, `agent-prompt-targets`,
 `agent-prompt-attach-file`, `agent-prompt-attach-buffer`, `agent-prompt-attach-region`,
 `agent-prompt-save`, `agent-prompt-load`, `agent-session-recall`.

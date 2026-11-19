@@ -16,7 +16,7 @@ import type { SBuf } from './buffers.mts';
 import type { CallResult } from './proto.mts';
 
 type Json = Record<string, any>; // any: verbatim hub JSON; unknown ACP variants remain inspectable
-export interface AgentHubConfig { url: string; tokenFile: string; allowCleartext?: boolean }
+export interface AgentHubConfig { url: string; tokenFile: string; allowCleartext?: boolean; steer?: boolean }
 export interface AgentBackend {
   request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown): Promise<any>; // any: API JSON
   clean<T>(value: T): T;
@@ -80,21 +80,21 @@ type PresentationPatch = { start: number; remove: number; text: string; previous
 
 export function validateAgentHub(value: unknown): AgentHubConfig {
   const c = value as Partial<AgentHubConfig>;
-  if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some(k => !['url', 'tokenFile', 'allowCleartext'].includes(k))) throw new Error('Invalid agentHub configuration fields');
+  if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some(k => !['url', 'tokenFile', 'allowCleartext', 'steer'].includes(k))) throw new Error('Invalid agentHub configuration fields');
+  if (c.steer !== undefined && typeof c.steer !== 'boolean') throw new Error('agentHub.steer must be a boolean');
   if (c.allowCleartext !== undefined && typeof c.allowCleartext !== 'boolean') throw new Error('agentHub.allowCleartext must be a boolean');
   let u: URL; try { u = new URL(c.url!); } catch { throw new Error('agentHub.url must be an HTTP or HTTPS URL'); }
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || /[?#]/.test(u.href)) throw new Error('agentHub.url must be HTTP or HTTPS without credentials, query or fragment');
   const loopback = u.hostname === 'localhost' || u.hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(u.hostname);
   if (u.protocol !== 'https:' && !loopback && !c.allowCleartext) throw new Error('agentHub.url requires HTTPS outside loopback; allowCleartext is only for an encrypted private network');
   if (typeof c.tokenFile !== 'string' || !path.isAbsolute(c.tokenFile)) throw new Error('agentHub.tokenFile must be an absolute path');
-  return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile, allowCleartext: c.allowCleartext === true };
+  return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile, allowCleartext: c.allowCleartext === true, steer: c.steer === true };
 }
 function protect(server: Server, c: AgentHubConfig) {
   let real = c.tokenFile; try { real = fs.realpathSync(c.tokenFile); } catch { /* refusal also covers a missing file */ }
   if (server.buffers?.all().some(b => b.file === real)) throw new Error('Agent token file is already visited; choose a private credential file');
   if (!server.auth.refuse.includes(c.tokenFile)) server.auth.refuse.push(c.tokenFile);
   if (!server.auth.realRefuse.includes(real)) server.auth.realRefuse.push(real);
-}
 type RetryQueue = Map<string, NodeJS.Timeout>;
 export class AgentSessions implements AgentBackend {
   declare server: Server; declare config: AgentHubConfig | undefined;
@@ -543,7 +543,7 @@ export class AgentSessions implements AgentBackend {
     return {
       sid, bufferId: `name:*Agent${observedView ? ' Observed' : ''}: ${sid}*`, epoch: s?.createdAt ?? null,
       state: s ? s.state || (s.alive ? 'running' : 'ended') : observed?.state || (observed ? 'reported' : 'removed'),
-      steerable: !!s && s.kind === 'acp' && s.alive !== false && this.status === 'connected',
+      steerable: this.config?.steer === true && !!s && s.kind === 'acp' && s.alive !== false && this.status === 'connected',
       connection: this.status, modeId: view?.modeId ?? null, modes: view?.modes ?? null,
       configOptions: view?.configOptions ?? null, usage: view?.usage ?? null, sessionInfo: view?.sessionInfo ?? null, pending
     };
@@ -726,18 +726,20 @@ export async function install(server: Server) {
     if (!('id' in found)) throw new Error('Tool file moved');
     return found.id;
   });
-  cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
-  for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt']) cmd('agent-session-' + action, async a => {
-    const sid = sidOf(a[0]), body = a[1];
-    await hub.requireSession(sid, body?.epoch); expectedEpoch(body?.epoch);
-    return hub.request('POST', `sessions/${sid}/${action}`, body);
-  });
-  for (const action of ['permission', 'elicitation'] as const) cmd('agent-session-' + action, a => hub.answer(a[0], action, a[1]));
-  cmd('agent-session-remove', async a => {
-    const sid = sidOf(a[0]), epoch = a[1]?.epoch;
-    await hub.requireSession(sid, epoch); expectedEpoch(epoch);
-    return hub.request('DELETE', 'sessions/' + sid + '?forget=true', { epoch });
-  });
+  if (server.cfg.agentHub?.steer) {
+    cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
+    for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt']) cmd('agent-session-' + action, async a => {
+      const sid = sidOf(a[0]), body = a[1];
+      await hub.requireSession(sid, body?.epoch); expectedEpoch(body?.epoch);
+      return hub.request('POST', `sessions/${sid}/${action}`, body);
+    });
+    for (const action of ['permission', 'elicitation'] as const) cmd('agent-session-' + action, a => hub.answer(a[0], action, a[1]));
+    cmd('agent-session-remove', async a => {
+      const sid = sidOf(a[0]), epoch = a[1]?.epoch;
+      await hub.requireSession(sid, epoch); expectedEpoch(epoch);
+      return hub.request('DELETE', 'sessions/' + sid + '?forget=true', { epoch });
+    });
+  }
   server.statusProviders.push(() => ({ agentHub: hub.status, agentSessions: hub.sessions.size, agentObserved: hub.observed.size }));
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });
   primitive.where = 'server';

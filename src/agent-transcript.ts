@@ -1,6 +1,6 @@
 /* Transcript interaction is entirely structural. Markdown only supplies faces: headings, fences and paths
    inside an agent's text cannot manufacture command targets. Fold choices live in this runtime, not edwind. */
-globalThis.Ed.installAgentTranscript = function () {
+globalThis.Ed.installAgentTranscript = function (steer: boolean) {
 'use strict';
 const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
@@ -147,8 +147,9 @@ CMD(MODE, '', '', 'Use structural read-only agent transcript commands and Markdo
   for (const [key, cmd] of [
     ['TAB', 'agent-session-toggle-fold'], ['] ]', 'agent-session-next-prompt'], ['[ [', 'agent-session-previous-prompt'],
     ['RET', 'agent-session-visit-location'], ['d', 'agent-session-diff'], ['R', 'agent-session-recall'],
-    ['p', 'agent-session-prompt'], ['P', 'agent-session-quick-prompt'], ['c', 'agent-session-cancel'], ['!', 'agent-session-answer'],
-    ['m', 'agent-session-mode'], ['o', 'agent-session-config'], ['v', 'agent-session-revive'], ['g r', 'agent-sessions-refresh'], ['q', 'quit-window'],
+    ['p', 'agent-prompt-compose'], ['g r', 'agent-sessions-refresh'], ['q', 'quit-window'],
+    ...(steer ? [['P', 'agent-session-quick-prompt'], ['c', 'agent-session-cancel'], ['!', 'agent-session-answer'],
+      ['m', 'agent-session-mode'], ['o', 'agent-session-config'], ['v', 'agent-session-revive']] : []),
   ]) {
     Ed.defineKey(map, key, intern(cmd));
   }

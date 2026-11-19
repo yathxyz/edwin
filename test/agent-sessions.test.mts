@@ -76,7 +76,7 @@ test('transport boundary: list and stream ignore invalid journal identities befo
 test('AS-C1/C2: daemon-owned list is live in a served frame; waiting first, both registries, remote start and reconnect', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
   const tokenFile = path.join(dir.root, 'api-token'); fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   const idle = hub.add('idle'), waiting = hub.add('waiting'); waiting.acp.pending = [{ req: 7, kind: 'permission', title: 'Run command' }];
   hub.append('idle', { e: 'session', configOptions: [{ id: 'chosen-model', category: 'model', currentValue: 'hub-model-A' }] });
   hub.observed.set('o_report', { id: 'o_report', host: 'remote', harness: 'codex', project: 'demo', state: 'running', model: 'model-A', title: 'Reported work', lastAt: 1, pending: null });
@@ -202,7 +202,7 @@ test('AS-C8: token and symlink are refused; API-echoed token is redacted from bu
   const hub = await new FakeAgentHub().start(), dir = makeDir();
   const tokenFile = path.join(dir.root, 'private-token'); fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
   const alias = path.join(dir.root, 'alias'); fs.symlinkSync(tokenFile, alias);
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   hub.add('safe').acp.title = hub.token;
   const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
   t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
@@ -357,7 +357,7 @@ test('AS-C3: an old detail reply cannot replace a newer stream incarnation while
 test('host state exposes redacted journal controls and full requests; summary-only changes publish metadata without edits', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
   fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   const session = hub.add('host_state');
   const modes = { currentModeId: 'ask', availableModes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Automatic' }] };
   const configOptions = [{ id: 'model', type: 'select', currentValue: 'small', options: [{ value: 'small', name: 'Small' }, { value: 'large', name: 'Large' }], description: hub.token }];
@@ -413,7 +413,7 @@ test('host state exposes redacted journal controls and full requests; summary-on
 test('host answers require the exact request kind and epoch, accept only offered permission options, and preserve hub errors without retries', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
   fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   const session = hub.add('host_answers');
   const permission = hub.append('host_answers', { e: 'permission', toolCall: { title: 'Read source' }, options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }] });
   const elicitation = hub.append('host_answers', { e: 'elicitation', request: { message: 'Supply form', requestedSchema: { type: 'object', properties: { count: { type: 'number' } } } } });
@@ -495,7 +495,7 @@ for (const kind of ['permission', 'elicitation'] as const) {
 test('a summary-only incarnation reset immediately clears stale controls while its new journal replay is in flight', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
   fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   const old = hub.add('host_epoch');
   hub.append('host_epoch', { e: 'session', modes: { currentModeId: 'auto', availableModes: [{ id: 'auto', name: 'Automatic' }] }, configOptions: [{ id: 'model', currentValue: 'old' }] });
   hub.append('host_epoch', { e: 'update', update: { sessionUpdate: 'usage_update', size: 100, used: 20 } });
@@ -539,7 +539,7 @@ test('a summary-only incarnation reset immediately clears stale controls while i
 async function reviewFixture(t: TestContext, setup?: (hub: FakeAgentHub, dir: TestDir) => void) {
   const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
   fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  dir.cfg.agentHub = { url: hub.url, tokenFile, steer: true }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
   setup?.(hub, dir);
   const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket, { kind: 'frame' }); await c.connect(); await c.hello();
   t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });

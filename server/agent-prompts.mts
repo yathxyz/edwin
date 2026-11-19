@@ -177,7 +177,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     for (const target of next) requireUnsent(d, target);
     const changed = { ...d, targets: next }; persist(changed); d.targets = next; buffers.sendMeta(open(d)); return next;
   });
-  command('agent-prompt-send', async (args, buf) => {
+  if (server.cfg.agentHub?.steer) command('agent-prompt-send', async (args, buf) => {
     const d = selected(args, buf); writable(d); sending.add(d.key);
     try {
       const p = await snapshot(d), sent: string[] = [];

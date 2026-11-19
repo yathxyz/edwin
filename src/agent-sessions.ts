@@ -1,5 +1,5 @@
 /* Mesh session UI. Text and registries belong to edwind; frames hold no API token (Step AS1). */
-globalThis.Ed.installAgentSessions = function () {
+globalThis.Ed.installAgentSessions = function (steer: boolean) {
 'use strict';
 const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
@@ -75,6 +75,7 @@ CMD('agent-sessions-toggle-exited-row', '', '', 'Toggle exited sessions on the l
   if (!list || list.exited.line !== Ed.lineNoB(E.current, E.current.pt)) return signal('user-error', 'No exited-session group on this line');
   await show(await rpc('agent-sessions-toggle-exited') as string); return false;
 });
+if (steer) {
 CMD('agent-session-start', '', '', 'Start an agent on a configured host, in a directory.', async () => {
   const info = await rpc('agent-session-info') as { host: string; agents: { name: string }[]; hosts: { name: string; agents: { name: string }[] }[] };
   const hosts = [info.host, ...(info.hosts || []).map(h => h.name)];
@@ -88,10 +89,12 @@ CMD('agent-session-cancel', '', '', 'Cancel the displayed session turn, without 
 CMD('agent-session-remove', '', '', 'End and forget the selected hub session, after confirmation.', async () => {
   const shown = identity(); if (await Ed.readMini(`Remove ${shown.sid} (createdAt ${shown.epoch})? (yes/no) `, '', null) === 'yes') await rpc('agent-session-remove', [shown.sid, { epoch: shown.epoch }]); return false;
 });
+}
 {
   const map = new Ed.Keymap(); L.set('agent-sessions-mode-map', map); Ed.modeParents.set('agent-sessions-mode', 'special-mode');
   E.aux.set('agent-sessions-mode:motion', map); E.aux.set('agent-sessions-mode:normal', map);
-  for (const [key, cmd] of [['RET', 'agent-session-open-row'], ['TAB', 'agent-sessions-toggle-exited-row'], ['e', 'agent-sessions-toggle-exited'], ['r', 'agent-sessions-refresh'], ['g r', 'agent-sessions-refresh'], ['a', 'agent-session-start'], ['c', 'agent-session-cancel'], ['D', 'agent-session-remove'], ['p', 'agent-session-prompt'], ['!', 'agent-session-answer'], ['q', 'quit-window']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
+  for (const [key, cmd] of [['RET', 'agent-session-open-row'], ['TAB', 'agent-sessions-toggle-exited-row'], ['e', 'agent-sessions-toggle-exited'], ['r', 'agent-sessions-refresh'], ['g r', 'agent-sessions-refresh'], ['p', 'agent-prompt-compose'], ['q', 'quit-window']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
+  if (steer) for (const [key, cmd] of [['a', 'agent-session-start'], ['c', 'agent-session-cancel'], ['D', 'agent-session-remove'], ['!', 'agent-session-answer']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
 }
 const prevMeta = H.bufferMeta;
 H.bufferMeta = (b, locals, ver) => {
