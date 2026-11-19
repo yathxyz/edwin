@@ -67,6 +67,11 @@ An edit, including undo or a remote edit, forgets the supplied ranges, open or c
 text, set the full list again in the same task: the two calls coalesce into one folded frame, with no
 intermediate unfolded frame. Mode-created folds follow the mode's usual edit rules.
 
+Org highlighting looks back at most 65,536 UTF-16 code units from the start of a window. If an owner
+fold hides a block opener and more than that much text after it, a window starting beyond the fold
+can highlight the following lines differently from one starting at the heading. Folding does not
+build a block index.
+
 ## Layout
 
 | Path | What |

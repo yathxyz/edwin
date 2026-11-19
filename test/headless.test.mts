@@ -41,6 +41,54 @@ test('forward word motion inside a fold at EOF stays on the last visible line', 
   assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
 });
 
+for (const mixed of [false, true]) {
+  test(`w in a native Org EOF fold still reaches EOF ${mixed ? 'alongside an owner fold' : 'without owner ranges'}`, async () => {
+    await fresh('org');
+    const b = ed.E.current, prefix = mixed ? 'call\nout\n' : '';
+    b.text = prefix + '* H\none two\n\n'; b.pt = prefix.length;
+    const owner = mixed ? [{ s: 4, e: 8 }] : [];
+    if (mixed) ed.Ed.setBufferFolds(b, owner);
+    await ed.type('zc');
+    const closed = [...owner, { s: prefix.length + 3, e: b.text.length - 1 }];
+    assert.deepEqual(ed.Ed.getBufferFolds(b), closed);
+    b.pt = b.text.indexOf('one') + 1;
+    await ed.type('w');
+    assert.equal(b.pt, b.text.length);
+    assert.deepEqual(ed.Ed.getBufferFolds(b), closed);
+  });
+}
+
+test('forward-char from the last hidden newline of an owner fold avoids only the phantom row', async () => {
+  await fresh();
+  const b = ed.E.current, fold = { s: 4, e: 12 };
+  await ed.keys('C-z'); // In Emacs state, C-f is forward-char; Evil does not clamp point off EOF.
+  try {
+    b.text = 'head\none two\n'; b.pt = fold.e;
+    await ed.keys('C-f');
+    assert.equal(b.pt, 13, 'without a fold, forward-char reaches EOF');
+    for (const tail of ['next', '']) {
+      b.text = 'head\none two\n' + tail; b.pt = fold.e;
+      ed.Ed.setBufferFolds(b, [fold]);
+      assert.equal(b.pt, 12);
+      await ed.keys('C-f');
+      assert.equal(b.pt, tail ? fold.e + 1 : 3);
+      assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
+    }
+  } finally { await ed.keys('C-z'); }
+});
+
+test('shipped j from the last hidden logical line reaches the next visible line at the same column', async () => {
+  await fresh();
+  const b = ed.E.current;
+  b.text = 'head\nfirst hidden\nlast hidden\nvisible next\n';
+  const fold = { s: 4, e: b.text.indexOf('\nvisible') };
+  b.pt = b.text.indexOf('last hidden') + 2;
+  ed.Ed.setBufferFolds(b, [fold]);
+  await ed.type('j');
+  assert.equal(b.pt, b.text.indexOf('visible') + 2);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
+});
+
 test('lines, counts, the dot command and a macro', async () => {
   await fresh();
   await ed.type('ione'); await ed.keys('ESC');
@@ -142,6 +190,19 @@ test('invalid fold lists are refused as a whole, not sorted, clipped or rounded 
   ]) {
     assert.throws(() => Ed.setBufferFolds(b, bad), JSON.stringify(bad));
     assert.deepEqual(Ed.getBufferFolds(b), [keep]);
+  }
+});
+
+test('a nonnumeric fold array length cannot replace the current folds', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\n';
+  const keep = [{ s: 1, e: 3 }];
+  Ed.setBufferFolds(b, keep);
+  const bad = new Proxy([], { get: (target, k) => k === 'length' ? '0' : Reflect.get(target, k) });
+  for (const input of [{ length: '0' }, bad]) {
+    assert.throws(() => Ed.setBufferFolds(b, input));
+    assert.deepEqual(Ed.getBufferFolds(b), keep);
   }
 });
 

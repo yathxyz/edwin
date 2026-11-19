@@ -356,6 +356,19 @@ test('Markdown za distinguishes an owner target from a longer closed fold on the
   assert.deepEqual(ed.Ed.getBufferFolds(b), []);
 });
 
+for (const key of ['zo', 'zO']) test(`Markdown ${key} opens a native subtree over a shorter owner target`, async () => {
+  const b = await page('# H\nshort\nrest\n## Child\ninside\n# End\n');
+  const owner = { s: posOf('\nshort'), e: posOf('\nrest') };
+  ed.Ed.setBufferFolds(b, [owner]);
+  b.pt = posOf('rest');
+  await ed.type('zc');
+  assert.equal(b.pt, 0);
+  const end = posOf('\n# End');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [{ s: owner.s, e: end }]);
+  await ed.type(key);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), key === 'zo' ? [{ s: posOf('\ninside'), e: end }] : []);
+});
+
 test('plain major-mode za takes precedence; an owner-only fallback toggles supplied targets', async () => {
   const b = await page('tool\nresult\nrest');
   ev(`(define-derived-mode fold-key-test-mode text-mode "Fold keys" "Plain text with a local za.")
@@ -523,6 +536,31 @@ test('imenu lists the headings (not those inside fences); consult-imenu uses the
 test('markdown-unlinked-mentions runs on the server (:where server); in a frame runtime it says so', () => {
   assert.equal(ev('(command-where \'markdown-unlinked-mentions)').name, 'server');
   assert.throws(() => ev('(markdown-unlinked-mentions)'), /needs the notes index of the server/);
+});
+
+test('Org: a native fold skips the hidden block opener after an edit at its end', async () => {
+  await ed.type(':e native-fold-edit.org\n');
+  ev('(insert "* H\\n#+begin_src\\nhidden\\n* Next\\n") (goto-char 1)');
+  const b = ed.E.current, native = { s: posOf('\n#+begin_src'), e: posOf('\n* Next') };
+  await ed.type('zc');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [native]);
+  ed.Ed.replaceText(b, native.e, native.e, '\n:PROPERTIES:\n#+end_src');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [native], 'the inserted lines are outside the native fold');
+  const rows = ed.Ed.renderBuffer(b, { from: 0, active: false, runs: true });
+  assert.deepEqual(rows.find((r: Edwin) => r.text === ':PROPERTIES:').runs.map((r: Edwin) => r.cls), ['odr']);
+});
+
+test('Org: mixed folds skip native delimiters but carry owner delimiters', async () => {
+  await ed.type(':e mixed-fold-delimiters.org\n');
+  ev('(insert "* H\\n#+begin_src\\nhidden\\n\\n  \\n* Next\\n#+begin_quote\\nquoted\\n#+end_quote\\n") (goto-char 1)');
+  const b = ed.E.current, native = { s: posOf('\n#+begin_src'), e: posOf('\n  ') };
+  const owner = { s: posOf('\n#+begin_quote'), e: posOf('\nquoted') };
+  ed.Ed.setBufferFolds(b, [owner]);
+  await ed.type('zc');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [native, owner]);
+  const lx = ed.Ed.hooks.lexSeg(b, 0, b.rope.length, ed.text()), face = (at: number) => lx.names[lx.cls[at]];
+  assert.equal(face(posOf('  \n* Next')), '', 'the visible separator line is not source code');
+  assert.equal(face(posOf('quoted')), 'oqb', 'the visible quote body inherits the owner-hidden opener');
 });
 
 for (const [mode, heading, opener, closer, next] of [

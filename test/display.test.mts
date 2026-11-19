@@ -35,8 +35,8 @@ const type = (s: string) => feed([...s].map(ch => (ch === ' ' ? 'SPC' : ch === '
 const ev = (src: string) => { L.resetOps(); return L.evalText(src); };
 ev('(set! display-line-numbers #f)');   // init.scm turns them on; the test of the gutter turns them on again
 
-let size = { cols: 60, rows: 16 }, model: Model | null = null, bells = 0;
-const backend = { size: () => size, draw: (m: Model) => { model = m; }, bell: () => { bells++; } };
+let size = { cols: 60, rows: 16 }, model: Model | null = null, bells = 0, selectedDraws = 0;
+const backend = { size: () => size, draw: (m: Model) => { model = m; selectedDraws++; }, bell: () => { bells++; } };
 const frame = Ed.makeFrame(null, { backend });
 frame.focused = true;
 const draw = () => { Ed.render(); return model!; };
@@ -242,7 +242,63 @@ test('setting and clearing folds redisplays every window, including a cached fra
   }
 });
 
+test('native show-all with nothing folded does not redraw an unchanged passive frame', async () => {
+  const b = await show('*native passive*', 'org-mode', '* H\nbody');
+  let draws = 0;
+  const other = Ed.makeFrame(null, { buffer: b, backend: { size: backend.size, draw() { draws++; } } });
+  try {
+    await nextDraw();
+    const before = draws;
+    await type('zR');
+    await nextDraw();
+    assert.equal(draws, before);
+  } finally { Ed.deleteFrame(other); }
+});
+
 const nextDraw = () => new Promise<void>(resolve => host.nextFrame(resolve));
+/* Count the input loop's draw and any queued draw that follows it, never setup's pending draw. */
+async function drawsDuring(action: () => void | Promise<void>) {
+  await nextDraw();
+  const before = selectedDraws;
+  await action();
+  await nextDraw();
+  return selectedDraws - before;
+}
+
+test('keyboard undo, redo and zR draw once each without owner folds', async () => {
+  const b = await show('*native keyboard draws*', 'org-mode', '* heading\nbody\n* next');
+  await type('A!'); await keys('ESC');
+  const undo = await drawsDuring(() => keys('u'));
+  assert.equal(b.text, '* heading\nbody\n* next');
+  const redo = await drawsDuring(() => keys('C-r'));
+  assert.equal(b.text, '* heading!\nbody\n* next');
+  await type('zM');
+  assert.notEqual(row(model!, 1).trimEnd(), 'body');
+  const open = await drawsDuring(() => type('zR'));
+  assert.equal(row(model!, 1).trimEnd(), 'body');
+  assert.deepEqual({ undo, redo, open }, { undo: 1, redo: 1, open: 1 });
+});
+
+test('off-loop native folding and undo do not schedule draws without owner folds', async () => {
+  const b = await show('*native idle draws*', 'org-mode', '* heading\nbody\n* next');
+  await type('A!'); await keys('ESC');
+  const fold = await drawsDuring(() => { ev('(evil-close-fold)'); });
+  assert.ok(b.folds.length);
+  const undo = await drawsDuring(() => { Ed.undoStep(b); });
+  assert.equal(b.text, '* heading\nbody\n* next');
+  assert.deepEqual({ fold, undo }, { fold: 0, undo: 0 });
+});
+
+test('keyboard owner fold toggling and undo use the input loop draw', async () => {
+  const b = await show('*owner keyboard draws*', 'fundamental-mode', 'heading\nbody\nnext');
+  await type('A!'); await keys('ESC');
+  Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
+  const toggle = await drawsDuring(() => type('za'));
+  assert.equal(row(model!, 1).trimEnd(), 'body');
+  const undo = await drawsDuring(() => keys('u'));
+  assert.equal(row(model!, 0).trimEnd(), 'heading');
+  assert.deepEqual({ toggle, undo }, { toggle: 1, undo: 1 });
+});
 
 test('a cursor on a folded empty heading leaves its ellipsis in both HTML and model runs', async () => {
   const b = await show('*empty heading*', 'fundamental-mode', '\nbody\nnext');
@@ -252,6 +308,15 @@ test('a cursor on a folded empty heading leaves its ellipsis in both HTML and mo
   assert.deepEqual([lines[0].html.includes(`<span class="oe">${ev('org-ellipsis')}</span>`),
     lines[0].runs.find((r: Edwin) => r.k === 'ell')?.t], [true, ev('org-ellipsis')]);
   assert.equal(draw().cursor!.x, 0);
+});
+
+test('native fold display at the heading newline keeps the pre-owner cursor behavior', async () => {
+  const b = await show('*native heading newline*', 'org-mode', '* H\nbody\n* Next');
+  await type('zc');
+  b.pt = 3;
+  const lines = Ed.renderBuffer(b, { active: true, runs: true });
+  assert.deepEqual(lines.map((l: Edwin) => l.text), ['* H', '* Next']);
+  assert.deepEqual([lines[0].html.includes('class="oe"'), lines[0].runs.some((r: Edwin) => r.k === 'ell')], [false, false]);
 });
 
 test('a fold toggled from Scheme while idle redraws without another key', async () => {

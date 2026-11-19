@@ -1552,6 +1552,8 @@ function recordUndo(b: EdBuffer, before: EdSnap) {
 }
 /* Bring the text back to its content at snapshot S, then put point at the first changed position. */
 function restoreSnap(b: EdBuffer, s: EdSnap) {
+  // Restoring the text discards owner ranges. The key loop already redraws before it waits.
+  const redraw = !!b._ownerFolds && E.idle !== false;
   const log = b.log, ops: EdLogEntry[] = [];
   let k = log.length - 1;
   while (k >= 0 && log[k].v > s.ver) ops.push(log[k--]);
@@ -1585,7 +1587,7 @@ function restoreSnap(b: EdBuffer, s: EdSnap) {
   b.modified = s.modified; b.pt = Math.min(i, newLen);
   b.mark = s.mark === null ? null : Math.min(s.mark, newLen);
   for (const m of b.markers) if (m.pos !== null && m.pos > newLen) m.pos = newLen;
-  scheduleRender();
+  if (redraw) scheduleRender();
 }
 /* The buffer now matches its file. Every snapshot in its history differs from the file, so undoing or redoing
    to one leaves the buffer modified, and undoing back to this state leaves it unmodified again. */
@@ -1884,10 +1886,18 @@ function foldEndingAt(folds: EdFold[], le: number) {
   return null;
 }
 const foldsOf = (b: EdBuffer) => b.folds && b.folds.length ? b.folds : null;
+function clearFoldWindowCaches(b: EdBuffer, f: EdFrame | null) {
+  for (const w of leaves((f || E.implicit).wroot)) if (w.buffer === b) {
+    w._lcache = w._mcache = null;
+    if (f) f._rkey = null;
+  }
+}
 function setBufferFolds(b: EdBuffer, ranges: readonly EdFoldRange[]) {
   if (!Array.isArray(ranges)) throw new TypeError('Expected an array of fold ranges');
   // Read caller properties before validating: a getter can resize the input or edit the buffer.
-  const n = ranges.length, folds = new Array<EdFold>(n);
+  const n = ranges.length;
+  if (!Number.isInteger(n) || n < 0) throw new RangeError('Expected a non-negative integer fold array length');
+  const folds = new Array<EdFold>(n);
   for (let i = 0; i < n; i++) {
     const { s, e } = ranges[i];
     folds[i] = { s, e, owner: true };
@@ -1905,7 +1915,8 @@ function setBufferFolds(b: EdBuffer, ranges: readonly EdFoldRange[]) {
   b._ownerFolds = folds.length ? folds : undefined;
   b._foldVer = (b._foldVer || 0) + 1;
   b._cycle = b._gcycle = null;
-  for (const w of allWindows()) if (w.buffer === b) { w._lcache = w._mcache = null; }
+  clearFoldWindowCaches(b, null);
+  for (const f of E.frames) clearFoldWindowCaches(b, f);
   scheduleRender();
 }
 function getBufferFolds(b: EdBuffer): EdFoldRange[] {
@@ -2003,6 +2014,8 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     /* VIS is what fitsRows measures: a folded line also shows the ellipsis after its text. */
     const folded = folds && foldEndingAt(folds, le);
     if (folds) vis += seg.slice(ls - from, le - from) + (folded ? ellT : '') + seg.slice(le - from, le - from + 1);
+    // A native fold leaves the heading newline to the cursor or Avy; an owner fold always shows its indicator.
+    const showEll = folded && (folded.owner || (pt !== le && !o.avy?.has(le)));
     let html = '', start = ls;
     const rel = lines ? ls : 0;
     /* The keys (class, flags, depth) of the line's characters and of its end, read once. */
@@ -2012,7 +2025,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
     let ck: string | null = null;
     if (next && len <= 8192) {
-      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folded ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
+      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (showEll ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
       const hit = cache ? cache.get(ck) : undefined;
       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
     }
@@ -2049,7 +2062,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
       }
       if (k > start && kb[k - ls] !== kb[start - ls]) { flush(k); start = k; }
     }
-    if (folded) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
+    if (showEll) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
     const val: EcLineVal = !R ? html : wantHtml ? { html, runs: R } : R;
     if (ck !== null) next!.set(ck, val);
     pushLine(val, le);
@@ -2388,7 +2401,11 @@ function render() {
 }
 function frameKey(f: EdFrame) {
   let k = (f.mini ? 'm' : '') + f.echo + '|' + f.miniFlash + '|' + E.metricsGen + '|' + E.sizeGen + '|' + (hooks.statusKey ? hooks.statusKey() : '') + (f.backend ? '|' + f.focused + ':' + f.theme + ':' + JSON.stringify(f.backend.size()) : '');
-  for (const w of leaves(f.wroot)) { const b = w.buffer; k += `|${w.id}:${b.id}:${b.ver}:${b._foldVer || 0}:${w.pt}:${w.start}:${b.presence ? b.presence.length + ':' + (b._presTick || 0) : ''}`; }
+  for (const w of leaves(f.wroot)) {
+    const b = w.buffer;
+    k += `|${w.id}:${b.id}:${b.ver}:${w.pt}:${w.start}:${b.presence ? b.presence.length + ':' + (b._presTick || 0) : ''}`;
+    if (b._ownerFolds) k += ':f' + b._foldVer;
+  }
   return k;
 }
 function renderFrame(f: EdFrame) {

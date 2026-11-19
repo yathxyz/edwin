@@ -239,7 +239,11 @@ const headlineOrError = (b: EdBuffer) => { const hs = headlineBefore(b, b.pt); i
 
 /* ---------- folds: b.folds, sorted, no two overlapping; renderBuffer skips the hidden lines ---------- */
 function foldsOf(b: EdBuffer) { return b.folds && b.folds.length ? b.folds : null; }
-function setFolds(b: EdBuffer, list: EdFold[]) { b.folds = list; b._foldVer = (b._foldVer || 0) + 1; Ed.scheduleRender(); }
+function setFolds(b: EdBuffer, list: EdFold[]) {
+  b.folds = list; b._foldVer = (b._foldVer || 0) + 1;
+  // A direct owner-fold command needs a draw of its own; keyboard commands have the key loop's draw.
+  if (b._ownerFolds && E.idle !== false) Ed.scheduleRender();
+}
 /* The first fold whose end is at or after P. Ends, like starts, are sorted since folds are disjoint. */
 function foldSlot(folds: EdFold[], p: number) {
   let lo = 0, hi = folds.length;
@@ -352,13 +356,19 @@ H.postCommand = (def, b, failed) => {
   if (prevPost) prevPost(def, b, failed);
   if (E.depth > 0 || E.mini) return;
   const w = E.win, pre = ORG.pre; ORG.pre = null;
-  if (!w || !foldsOf(w)) return;
-  const f = foldHiding(w, w.pt); if (!f) return;
+  if (!w || !w.folds?.length) return;
+  let f = foldHiding(w, w.pt);
+  if (!f && w._ownerFolds && w.pt === w.rope.length && pre?.b === w && pre.pt < w.pt) {
+    // EOF itself isn't hidden. Check whether the motion started inside the fold on the final newline.
+    const last = w.folds[w.folds.length - 1];
+    if (last.owner && last.e + 1 === w.pt && pre.pt > last.s) f = last;
+  }
+  if (!f) return;
   const name = E.lastCommand instanceof Sym ? E.lastCommand.name : '';
   if (!pre || pre.b !== w || pre.pt === w.pt || REVEALS.test(name)) { reveal(w, w.pt); return; }
-  const r = w.rope, after = f.e + 1;
-  // Only step past the fold if a real line follows it, not the phantom row after a final newline.
-  w.pt = w.pt > pre.pt && after < r.length ? after : Math.max(bol(r, f.s), f.s - 1);
+  // Native outlines can step to EOF. For owner folds the following row must hold a real line.
+  const r = w.rope, limit = f.owner ? r.length - 1 : r.length;
+  w.pt = w.pt > pre.pt && f.e < limit ? f.e + 1 : Math.max(bol(r, f.s), f.s - 1);
 };
 D('org-fold-hidden-p', '&optional POS', '#t when POS (default point) is inside a fold.', ([p]: SchemeValue[]) => isHidden(cur(), L.absent(p) ? cur().pt : num(p) - 1));
 D('org-folds', '&optional BUFFER', 'The folds of BUFFER as a list of (START . END) pairs.', ([bb]: SchemeValue[]) => listOf((Ed.toBuffer(bb === undefined ? false : bb).folds || []).map(f => new L.Pair(f.s + 1, f.e + 1))));
@@ -371,7 +381,8 @@ function ownerFoldCommand(b: EdBuffer, action: 'toggle' | 'open' | 'close') {
   if (!defs?.length) return false;
   const f = defs[foldSlot(defs, b.pt)];
   if (!f || (b.pt < f.s && eol(b.rope, b.pt) !== f.s)) return false;
-  const closed = foldOnHeader(b, f.s)?.e === f.e;
+  const atHeading = foldOnHeader(b, f.s), closed = atHeading?.e === f.e;
+  if (action === 'open' && atHeading && !closed) return false; // Let the outline open its own fold.
   if (action === 'open' || (action === 'toggle' && closed)) {
     if (closed) removeFolds(b, f.s, f.e);
   } else {
@@ -530,6 +541,24 @@ function frontMatterAt(b: EdBuffer, from: number) {
     if (/^---\r?$/.test(r.slice(k + 1, eol(r, k + 1)))) return false;
   return true;
 }
+/* Only owner folds carry delimiters across hidden text. Match just the state-changing prefixes,
+   not whole lines; HIDDEN ends at the newline before the next visible line. */
+let mdFoldMarker: RegExp | undefined, orgFoldMarker: RegExp | undefined;
+function blockAcrossOwnerFold(hidden: string, block: string | null, md: boolean) {
+  const marker = md
+    ? (mdFoldMarker ??= /(?:^|\n)(?:(---)\r?(?=\n)|[^\S\n]*```)/g)
+    : (orgFoldMarker ??= /(?:^|\n)(?:(---)\r?(?=\n)|(\*+[ \t])|[^\S\n]*#\+(?:begin_(\w+)|end_))/gi);
+  for (let m; (m = marker.exec(hidden)); ) {
+    if (m[1]) { if (block === 'frontmatter') block = null; } // standalone ---
+    else if (m[2]) block = null; // Org headline
+    else if (block !== 'frontmatter') {
+      if (md) block = block ? null : 'src'; // fence
+      else if (!m[3]) block = null; // #+end_
+      else if (!block) block = m[3].toLowerCase(); // #+begin_NAME
+    }
+  }
+  return block;
+}
 function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
   const n = seg.length, cls = new Uint8Array(n), md = isMd(b), kw = todoKeywords(), F = foldsOf(b);
   const hideEm = truthy(L.get('org-hide-emphasis-markers'));
@@ -599,32 +628,23 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
     TS_RE.lastIndex = 0;
     while ((m = TS_RE.exec(line))) fill(ls + m.index, ls + m.index + m[0].length, OC.ots);
   };
-  /* Update block context independently of painting: a folded line can open or close a visible block. */
-  const blockFace = (line: string, ls: number) => {
+  const lexLine = (line: string, ls: number, le: number) => {
+    let m;
     /* In Org a headline ends any block, closed or not. */
     if (block && !md && line[0] === st && /^\*+[ \t]/.test(line)) block = null;
     if (block) {
-      if (block === 'frontmatter') { if (from + ls > 0 && /^---\r?$/.test(line)) block = null; return OC.odr; }
-      if (md ? /^\s*```/.test(line) : /^\s*#\+end_/i.test(line)) { block = null; return OC.obd; }
-      return /^(src|example|export|comment)$/.test(block) ? OC.osb : OC.oqb;
+      if (block === 'frontmatter') { fill(ls, le, OC.odr); if (from + ls > 0 && /^---\r?$/.test(line)) block = null; return; }
+      if (md ? /^\s*```/.test(line) : /^\s*#\+end_/i.test(line)) { fill(ls, le, OC.obd); block = null; return; }
+      fill(ls, le, /^(src|example|export|comment|frontmatter)$/.test(block) ? OC.osb : OC.oqb); return;
     }
-    if (md) { if (/^\s*```/.test(line)) { block = 'src'; return OC.obd; } }
-    else {
-      const m = /^\s*#\+begin_(\w+)/i.exec(line);
-      if (m) { block = m[1].toLowerCase(); return OC.obd; }
-      if (/^\s*#\+end_/i.test(line)) return OC.obd;
-    }
-    return 0;
-  };
-  const lexLine = (line: string, ls: number, le: number) => {
-    const c = blockFace(line, ls);
-    if (c) { fill(ls, le, c); return; }
-    let m;
     if (line[0] === st) { let k = 1; while (line[k] === st) k++; if (line[k] === ' ' || line[k] === '\t') { headline(line, ls, le, k); return; } }
     if (md) {
+      if (/^\s*```/.test(line)) { fill(ls, le, OC.obd); block = 'src'; return; }
       if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { fill(ls, le, OC.ohr); return; }
       if (/^\s*>/.test(line)) { fill(ls, le, OC.oqb); return; }
     } else {
+      if ((m = /^\s*#\+begin_(\w+)/i.exec(line))) { fill(ls, le, OC.obd); block = m[1].toLowerCase(); return; }
+      if (/^\s*#\+end_/i.test(line)) { fill(ls, le, OC.obd); return; }
       if ((m = /^\s*#\+(\w+):/.exec(line))) { fill(ls, le, OC.okw); if (/^title$/i.test(m[1])) { let k = m[0].length; while (line[k] === ' ') k++; fill(ls + k, le, OC.oti); } return; }
       if (/^\s*#(\s|$)/.test(line)) { fill(ls, le, OC.ocm); return; }
       if (/^\s*:[\w@#%-]+:(\s|$)/.test(line)) { fill(ls, le, OC.odr); return; }
@@ -642,23 +662,13 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
     }
     inline(line, ls, ls, le, 0);
   };
-  /* Search only the skipped span, and visit only lines with a possible block marker. Ordinary folded
-     text needs neither a line-by-line lex nor a backwards search from the next shown line. */
-  const hiddenMarker = md ? /```|---/g : /#\+|^\*|---/gm;
   let ls = 0;
   while (ls < n) {
     if (F) {
       const f = Ed.foldAt(F, from + ls);
       if (f) {
         const next = f.e + 1 - from;
-        if (next >= n) break;
-        const hidden = seg.slice(ls, next); // ends at the newline before NEXT
-        hiddenMarker.lastIndex = 0;
-        for (let m; (m = hiddenMarker.exec(hidden)); ) {
-          const start = hidden.lastIndexOf('\n', m.index - 1) + 1, end = hidden.indexOf('\n', m.index);
-          blockFace(hidden.slice(start, end), ls + start);
-          hiddenMarker.lastIndex = end + 1;
-        }
+        if (f.owner && next < n) block = blockAcrossOwnerFold(seg.slice(ls, next), block, md);
         ls = next; continue;
       }
     }
