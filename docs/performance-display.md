@@ -2,7 +2,7 @@
 
 The comparisons below use the same page workload and command driver from `tools/display-bench.mts`. Node 24.21.0, Chromium 156.0.8078.79, Linux 6.18.60, Core i5-13500 (6 performance + 8 efficiency cores), shared machine. Viewport 1280×800, device scale 1, 14px local font (fontconfig monospace fallback: DejaVu Sans). Each run starts a new headless Chromium process with a private profile, GPU disabled, private debugging pipe and ephemeral loopback HTTP server. The harness strips TS from the selected root on request and boots a console-kind page/frame. No existing browser, edwind, external service or packaged startup.
 
-**Final display decision:** revert the plain-row optimization, including its long-line gain. The final arm **V** uses the baseline per-character row builder at every length and a separate row-cache correctness guard. The three-arm comparison below found a repeatable ordinary styled cost alongside substantial run-to-run variation; the long-row-only candidate did not establish ordinary-use neutrality. The [decision and fixed-core controls](performance.md) explain why overlapping wall-time ranges alone were not enough.
+**What ships:** exact search, incremental search and the acknowledged-text changes; **no redisplay change**. The entire redisplay path, including the row-cache keys, is byte-identical to `c1fe9eec` (arm **R**, not **V**). No new display measurements were needed. The data below record why neither the shortcut nor the later cache guards were kept.
 
 ## Measurement
 
@@ -16,10 +16,10 @@ The comparisons below use the same page workload and command driver from `tools/
 |---|---|
 | A | Pristine baseline `c1fe9eec` |
 | H | Reviewed branch head `d8c8a65f` |
-| R | H minus only the production changes in `409a0fc` and `16fcd79`, in that order. Baseline renderer; H's search, incremental-search and sync changes still present. |
+| R | H minus the production changes in `409a0fc` and `16fcd79`, in that order. This is the shipped combination: the baseline renderer with H's exact search, incremental search and sync changes. |
 | G | Candidate based on H: ordinary rows use per-character classification; only visible text rows ≥8,192 UTF-16 units qualify for plain-row shortcut. No shortcut for styled rows. The reviewed cache separation remains, with a shorter key encoding. |
 | F | Baseline row builder on **all** rows, including long unstyled ones. R plus a render-context guard and HTML-offset distinction to retain row-cache correctness. |
-| V | Final `270691ef`: R's per-character row builder with unambiguous cursor/fold context, HTML offsets, wide cursor-face keys, and a snapshot check for mutable external lexer class names. No plain-row shortcut. |
+| V | Rejected guard-only version `270691ef`: R's row builder with altered cache keys and a snapshot check for mutable external lexer class names. No plain-row shortcut. |
 
 **Three-arm design.** One block runs A, H and R serially; one fresh browser per arm runs the seven scenarios in harness order. Blocks 1–10: `AHR RHA HRA ARH RAH HAR AHR HRA RAH RHA`. All six permutations occur; each arm occupies each position three or four times. H runs before A and before R in five blocks each. Same page commands, 20 warmups + 100 measured keys, no sampling profiler or coverage. The unit of comparison is the block, not a pool of 1,000 independent keys. H−A measures the whole branch; **H−R isolates the two redisplay changes together**. R−A is the control for the rest of the branch plus run-to-run variation. These contrasts cannot assign a cost independently to row classification and cache-key construction.
 
@@ -63,11 +63,11 @@ Each cell is **G−A, median within-block delta; higher/equal/lower** (DOM p99 a
 
 Long-type clearly benefited in these pairs, except for layout. Small-type, split Markdown and many-motion DOM p99 had mixed signs, **not** proof of equivalence: many-motion rAF p95 increased in eight pairs (+0.55 ms median) and p99 in seven; small-type layout increased in seven. Identical A small-type p99 spanned 0.7–11.1 ms in this cohort. The [fixed-core row-builder measurements and same-code scheduling control](performance.md) distinguish smaller repeatable costs from this much larger end-to-end variability.
 
-### Reverting the shortcut while retaining cache correctness
+### Rejected cache guards after reverting the shortcut
 
 F was a rejected intermediate: the old row builder plus a guard that serialized the external class-name table on every draw ([R→F patch](performance-display-f.patch)). A separate ten-block default-scheduler AF/FA cohort found mixed ordinary tails. F−A DOM p99 was **0** for small typing (4/2/4), **+1.0 ms** for many-motion (7/1/2), **−0.2 ms** for split Markdown (3/1/6), and **+0.25 ms** for folded Org (6/0/4). Small-type and many-motion CPU rose +35 and +50 ms/100 respectively (both 7/0/3). Split Markdown DOM p50 was +0.1 ms (7/2/1), layout +2.54 ms/100 (8/0/2). Long-type p50 had no median gain (2/4/4). All arm ranges overlapped. A separate controlled row-builder measurement still found a styled cost for F, motivating the cheaper snapshot guard in V; see [the controlled comparison](performance.md).
 
-### Final code versus pristine baseline
+### Last guard-only candidate versus pristine baseline
 
 Ten fresh AV/VA pairs; each cell is **V−A, median within-block delta; higher/equal/lower**. Every scenario's A/V ranges overlapped for all eight metrics. This is not an equivalence test: a noisy p99 or CPU estimate can still favor one arm in most blocks.
 
@@ -86,6 +86,8 @@ Ten fresh AV/VA pairs; each cell is **V−A, median within-block delta; higher/e
 Across the four follow-up series, all **90 browsers × 7 scenarios = 630 measured runs** (63,000 measured keys) completed. Every run reported 200 layouts and zero Rope flattens; every stream run appended 16,800 units with the reader anchor and cursor checks enabled. These counters establish comparable work, not equivalent layout duration.
 
 Protocol notes: the primary driver gained an optional coverage switch while the series was running; it was unset, so the page workload and timed CDP calls did not change. The primary shell reported a trailing parse error **after** all 210 expected scenario records had been written. No run was replaced. Subsequent series used the frozen H driver.
+
+The historical cohort name `default-shipped` in the data and commands denotes **V**. That version was subsequently rejected; do not use those timings as a result for **R**.
 
 ### Reproducing the cohorts
 
@@ -130,15 +132,26 @@ Each JSON line contains the raw 100 `keyDomMs` and `keyFrameMs`, their nearest-r
 
 ## Initial ranking (before production edits)
 
-Historical baseline scouting pass (not pooled below): long-type had the largest key→DOM p50/p95/p99, 9.5/10.1/10.4 ms, at 2020 ms renderer CPU per 100 keys. A separate CPU profile sampled `eolS` 588 times and `renderBuffer` 453 times, compared with 255 for `getBoundingClientRect` and 44 for `syncLines`. A sample names a function, not a source-line cost. With no syntax, overlays or selection, a row changes span only at point and end-of-line. The plain path skips initializing and scanning character keys and flags; this fixture previously allocated 83,592,700 bytes of flags per 100 keys (sum of segment length + 1). Text slicing, escaping, cursor painting and DOM geometry remain. The benchmark timings do not enable the profiler.
+Historical baseline scouting pass (not pooled below): long-type had the largest key→DOM p50/p95/p99, 9.5/10.1/10.4 ms, at 2020 ms renderer CPU per 100 keys. A separate CPU profile sampled `eolS` 588 times and `renderBuffer` 453 times, compared with 255 for `getBoundingClientRect` and 44 for `syncLines`. A sample names a function, not a source-line cost. The baseline fixture allocated 83,592,700 bytes of flags per 100 keys (sum of segment length + 1). That motivated the rejected shortcut. The benchmark timings do not enable the profiler.
 
 Scrolling remained a separate candidate (283 samples in `getBoundingClientRect`, 41 in `insertBefore` on downward motion). There is no timed prototype showing that changing node reuse or layout decisions pays off. No reconciliation, Markdown lexing or fold semantics were changed.
 
-## Historical cache-key design in H (not final V)
+## Baseline cache issues to file separately
 
-A row can only reuse HTML/runs from the same render context: active state, representation, plain/classified path, cursor class, fold label and lexer class-name table. Field boundaries must survive arbitrary UTF-16, including `|` and NUL. The renderer compares the context once per map, not once per row. Row keys record relative point, newline/fold state, HTML offset, length-prefixed text and (for classified rows) length-prefixed packed character keys. An external lexer can supply a cursor class index wider than its packed byte, so cursor rows also record that full index. Repeated unchanged runs are still reused; the existing cache limit (8192 units, including end-of-line) is unchanged.
+These are correctness reproductions, not timing runs. Each compares `Ed.renderBuffer` with and without the previous draw's cache. All five assertions failed on pristine `c1fe9eec` and passed with the removed guards (`270691ef`). The first three use `hooks.lexSeg`; the last two request HTML and runs together. They demonstrate behavior of that renderer API, not the frequency of these inputs in stock frames.
 
-`test/display.test.mts` primes the cache with row `x` and cursor class `|p||0|0|`, then reuses it for row `|p||0|0|x` with no cursor class. This formerly painted `x` instead of the longer row. The tests compare cached and fresh output in HTML, runs and combined formats, including format-specific delimiter sequences, changes to the names behind the same numeric class bytes, sparse class-table slots, a wider cursor class index and a changed fold label. Plain vs never-matching highlight checks cover escaping, cursor positions, UTF-16, folds and long rows independently of cache hits.
+1. Render `xy`, point 0, lexer IDs `[1,1]`, names `['a','b']`; rename `names[1]` to `renamed` and redraw with the cache.\
+   **Wrong:** cursor and text spans/runs still use `b`; a fresh draw uses `renamed`.
+2. Same first draw; prepend `''` to the names and delete slot 0, leaving a hole before `'a','b'`. Redraw with unchanged IDs.\
+   **Wrong:** ID 1 still paints as `b`; the new table maps it to `a`.
+3. Give IDs 1 and 257 the names `b` and `cursor-face`. Prime at point 0 with IDs `[1,1]`, then change just the first ID to 257.\
+   **Wrong:** the cached cursor still uses `b`; the fresh cursor uses `cursor-face`.
+4. Render `x\nsame` at point 0 with `{lines:false, runs:true}`. Insert `x` at offset 0 and redraw with the previous cache.\
+   **Wrong:** the `same` span keeps absolute `data-o="2"`; its new start is 3.
+5. Render `x\nsame` at point 0 with `{runs:true}`. Reuse its cache with `{lines:false, runs:true}`, without editing.\
+   **Wrong:** the `same` span keeps line-relative `data-o="0"` where absolute offset 2 is required.
+
+The `x` / `|p||0|0|x` collision was **not** a baseline failure. Its test, the warm-cache span/run comparisons and the changed fold-ellipsis test all pass with the baseline keys and remain in `test/display.test.mts`.
 
 ## Historical comparison: five interleaved pairs
 
@@ -184,14 +197,14 @@ Per 100 keys: fixture and work counters are identical across both versions unles
 
 ### Reproducing the historical comparison
 
-With the baseline sources under `.review/base` and a Node 24+ binary on `PATH`:
+With baseline `c1fe9eec` under `.review/base`, reviewed `409a0fc8` under `.review/reviewed`, and a Node 24+ binary on `PATH`:
 
 ```sh
 set -e
 export CHROMIUM=/path/to/chromium TMPDIR="$PWD/.review/tmp"
 mkdir -p "$TMPDIR"
 for run in A1 B1 B2 A2 A3 B3 B4 A4 A5 B5; do
-  case $run in A*) root=.review/base ;; B*) root=. ;; esac
+  case $run in A*) root=.review/base ;; B*) root=.review/reviewed ;; esac
   EDWIN_ROOT=$root node tools/display-bench.mts > ".review/display-$run.jsonl"
 done
 ```

@@ -1981,22 +1981,10 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const out: EcRendered = [];
   const wantRuns = !!o.runs, wantHtml = o.html !== false || !wantRuns;
   let R: EdRun[] | null = null;
-  type RowCache = Map<string, EcLineVal> & { lexerNames?: readonly string[] };
-  const next: RowCache | null = (lines || wantRuns) && !o.avy ? new Map() : null;
-  let cache: RowCache | null = next ? o.cache || null : null;
-  if (next && ext) {
-    // A lexer can mutate its table in place. Share the last snapshot, not the live array.
-    let snapshot = cache?.lexerNames;
-    if (snapshot?.length !== names.length) snapshot = undefined;
-    if (snapshot) for (let i = 0; i < names.length; i++) {
-      if (snapshot[i] !== names[i]) { snapshot = undefined; break; }
-    }
-    if (!snapshot) cache = null;
-    next.lexerNames = snapshot || names.slice();
-  }
-  const cc = o.cursorClass || '';
-  const ckPre = (o.active ? '1' : '0') + (wantRuns ? wantHtml ? 'B' : 'R' : 'H') + (ext ? 'x' : 'c') +
-    cc.length + ':' + cc + ellT.length + ':' + ellT;
+  const cache = (lines || wantRuns) && !o.avy ? o.cache || null : null, next = (lines || wantRuns) && !o.avy ? new Map<string, EcLineVal>() : null;
+  /* The cache key also names the class table (a mode's own lexer numbers its classes differently) and
+     the fold ellipsis, which change a line's html without changing its text or keys. */
+  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
   for (; ls <= n && made < count; ln++, made++) {
     const le = eolS(ls);
@@ -2013,12 +2001,6 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     let ck: string | null = null;
     if (next && len <= 8192) {
       ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
-      // The tail has a fixed split: text.length + 1 packed keys follow the NUL, even for text containing NUL.
-      if (!lines) ck = 'm' + ls + ':' + ck; // a minibuffer span uses an absolute offset
-      if (ecls && pt >= ls && pt < le && Number.isInteger(pt)) {
-        const face = ecls[pt - from]; // the cursor uses the full lexer class, not its packed byte
-        if (face !== (face & 255)) ck = 'w' + face + ':' + ck;
-      }
       const hit = cache ? cache.get(ck) : undefined;
       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
     }

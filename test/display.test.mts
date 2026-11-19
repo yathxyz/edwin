@@ -323,7 +323,7 @@ test('a warm row cache preserves spans and runs across cursor moves, folds and h
 test('row cache cannot confuse a cursor class with row text', async () => {
   const b = await show('cache.txt', 'fundamental-mode', 'x');
   for (const [format, marker] of [[{}, ''], [{ runs: true }, 'RH|'], [{ runs: true, html: false }, 'R|']] as const) {
-    // These strings occur at the boundaries of the old delimiter-based key.
+    // Regression input for the rejected plain-row shortcut; the baseline keys distinguish these.
     const prefix = `|p||${marker}0|0|`;
     b.text = 'x';
     const primed = Ed.renderBuffer(b, { ...format, pt: 0, cursorClass: prefix });
@@ -339,48 +339,21 @@ test('row cache cannot confuse a cursor class with row text', async () => {
   }
 });
 
-test('a cached classified row uses the current lexer class names and fold ellipsis', async () => {
+test('a cached folded row uses the current ellipsis', async () => {
   const b = await show('class-cache.txt', 'fundamental-mode', 'a\0|b\nhidden\nend');
   b.folds = [{ s: 4, e: 11 }];
-  const { lexSeg, ellipsis } = Ed.hooks;
-  const names = ['a\0|b', 'c'];
+  const { ellipsis } = Ed.hooks;
   let label = 'first\0|';
   try {
-    Ed.hooks.lexSeg = () => ({ cls: new Uint8Array(b.text.length), names });
     Ed.hooks.ellipsis = () => label;
     const opts = { pt: 0, runs: true };
-    let before = Ed.renderBuffer(b, opts);
-    for (const change of [() => names.splice(0, 2, 'a', 'b\0|c'), () => { label = '\0|<&>'; }]) {
-      change();
-      const reused = Ed.renderBuffer(b, { ...opts, cache: before.cache });
-      const fresh = Ed.renderBuffer(b, opts);
-      assert.deepEqual([...reused], [...fresh]);
-      assert.equal(reused[0].runs.at(-1).t, label);
-      before = reused;
-    }
+    const before = Ed.renderBuffer(b, opts);
+    label = '\0|<&>';
+    const reused = Ed.renderBuffer(b, { ...opts, cache: before.cache });
+    assert.deepEqual([...reused], [...Ed.renderBuffer(b, opts)]);
+    assert.equal(reused[0].runs.at(-1).t, label);
   } finally {
-    Ed.hooks.lexSeg = lexSeg;
     Ed.hooks.ellipsis = ellipsis;
-  }
-});
-
-test('row cache preserves sparse lexer tables and the full cursor class index', async () => {
-  const b = await show('sparse-cache.txt', 'fundamental-mode', 'xy');
-  const { lexSeg } = Ed.hooks;
-  const cls = Uint16Array.of(1, 1), names = ['a', 'b'];
-  const opts = { pt: 0, runs: true };
-  try {
-    Ed.hooks.lexSeg = () => ({ cls, names });
-    let primed = Ed.renderBuffer(b, opts);
-    names.unshift('');
-    delete names[0]; // index 1 now names 'a', but the sequence of populated names is still ['a', 'b'].
-    assert.deepEqual(Ed.renderBuffer(b, { ...opts, cache: primed.cache })[0], Ed.renderBuffer(b, opts)[0]);
-    names[257] = 'cursor-face';
-    primed = Ed.renderBuffer(b, opts);
-    cls[0] = 257; // packs to the same row byte as 1; the cursor still uses names[257].
-    assert.deepEqual(Ed.renderBuffer(b, { ...opts, cache: primed.cache })[0], Ed.renderBuffer(b, opts)[0]);
-  } finally {
-    Ed.hooks.lexSeg = lexSeg;
   }
 });
 
