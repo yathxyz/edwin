@@ -1942,6 +1942,17 @@ function vLineCount(b: EdBuffer) { const F = foldsOf(b); if (!F) return lineCoun
    line start and the class string of the span, plus k: 'cur' (the cursor; e === s at the end of a line),
    'avy' and 'ell' (t: the label or the fold ellipsis shown instead), 'eol' (the region past the end).
    The two never share a cache; o.html === false skips the html. */
+// The outer key is shared by every row. Don't hash the whole mode class table for each lookup.
+class EcRowCache extends Map<string, EcLineVal> {
+  context: string;
+  constructor(context: string) { super(); this.context = context; }
+}
+function rowKeyPart(s: string) { return s.length + ':' + s; }
+function rowClassTableKey(names: string[]) {
+  let key = '';
+  for (const name of names) key += name === undefined ? '-' : rowKeyPart(name);
+  return key;
+}
 let KBUF = new Uint16Array(1024);
 function renderBuffer(b: EdBuffer, o: EcRenderOpts & { runs: true }): EcRendered;
 function renderBuffer(b: EdBuffer, o: EcRenderOpts): EcRendered | string;
@@ -1984,10 +1995,12 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const out: EcRendered = [];
   const wantRuns = !!o.runs, wantHtml = o.html !== false || !wantRuns;
   let R: EdRun[] | null = null;
-  const cache = (lines || wantRuns) && !o.avy ? o.cache || null : null, next = (lines || wantRuns) && !o.avy ? new Map<string, EcLineVal>() : null;
-  /* The cache key also names the class table (a mode's own lexer numbers its classes differently) and
-     the fold ellipsis, which change a line's html without changing its text or keys. */
-  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : plain ? 'p' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
+  // Tags have fixed width. Length-prefix arbitrary strings: even packed class bytes can contain NUL.
+  const next = (lines || wantRuns) && !o.avy ? new EcRowCache(
+    (o.active ? '1' : '0') + (wantRuns ? wantHtml ? 'B' : 'R' : 'H') + (plain ? 'p' : ext ? 'x' : 'c') +
+    rowKeyPart(o.cursorClass || '') + rowKeyPart(ellT) + (ext ? rowClassTableKey(names) : '')
+  ) : null;
+  const cache = next && o.cache instanceof EcRowCache && o.cache.context === next.context ? o.cache : null;
   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
   for (; ls <= n && made < count; ln++, made++) {
     const le = eolS(ls);
@@ -2003,7 +2016,13 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     if (!plain) for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
     let ck: string | null = null;
     if (next && len <= 8192) {
-      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + (plain ? '' : '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]));
+      // A cacheable row is short enough to encode its cursor (+1, zero means absent) in one code unit.
+      const cursor = Number.isInteger(pt) && pt >= ls && pt <= le ? pt - ls + 1 : 0;
+      ck = String.fromCharCode(cursor) + (le < n ? '1' : '0') + (folds && foldEndingAt(folds, le) ? 'E' : '-') +
+        rowKeyPart(String(ls - rel)) + rowKeyPart(t.slice(ls, le)) +
+        (plain ? '' : rowKeyPart(String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]))) +
+        // Spans use the packed class byte; the cursor uses the mode's original class number.
+        (ecls && cursor && pt < le ? rowKeyPart(String(ecls[pt - from])) : '');
       const hit = cache ? cache.get(ck) : undefined;
       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
     }
