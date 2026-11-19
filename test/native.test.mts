@@ -3,7 +3,7 @@
 // The Node host stands in for host-native.ts; the program itself is tested by native/tests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import vm from 'node:vm';
 import { FILES, createHost, loadEdwin, coreSource } from './headless.mts';
 import type { Edwin, NodeHost } from './headless.mts';
@@ -97,6 +97,36 @@ test('host-native.ts: foo, ./foo and bar/../foo are one path; ~ is the home dire
   assert.equal(H.resolve('/../x'), '/x');
   assert.equal(H.truename('./l'), '/w/t');
   assert.equal(H.truename('new.txt'), '/w/new.txt');
+});
+
+test('a slow frame open leaves the whole welcome deadline after hello', () => {
+  let now = 0;
+  const sent: string[] = [], errors: string[] = [], exits: number[] = [];
+  const scm = new URL('../scm/', import.meta.url);
+  const ctx = vm.createContext({
+    __scm: Object.fromEntries(readdirSync(scm).map(f => [f, readFileSync(new URL(f, scm), 'utf8')])),
+    __n: {
+      now: () => now, args: () => [], client: () => true, edwind: () => ['/test.sock', 1],
+      env: () => null, cwd: () => '/', readFile: () => null, mkdirs() {}, guiSize: () => null,
+      ttyOpen: () => true, ttySize: () => [80, 24], ttyWrite() {}, ttyFlush() {}, ttyClose() {},
+      sockSend: (_id: number, s: string) => sent.push(JSON.parse(s).t),
+      eprint: (s: string) => errors.push(s), exit: (code: number) => exits.push(code),
+      load: (name: string) => load(name),
+    },
+  });
+  function load(name: string) {
+    const s = name.startsWith('native/') ? coreSource(name.slice(7), NATIVE_JS) : coreSource(name);
+    vm.runInContext(s.text, ctx, { filename: s.filename });
+  }
+  for (const name of ['prelude', 'host-native', 'term', 'main']) load('native/' + name);
+  assert.deepEqual(sent, []);
+  now = 40000; ctx.__native.tick(); // the loop gets to onopen only now
+  assert.deepEqual(sent, ['hello']);
+  now += 29999; ctx.__native.tick();
+  assert.deepEqual(exits, [], errors.join(''));
+  now++; ctx.__native.tick();
+  assert.deepEqual(exits, [1]);
+  assert.match(errors.join(''), /no welcome in 30 s/);
 });
 
 test('require-final-newline adds the newline a saved file lacks', async () => {

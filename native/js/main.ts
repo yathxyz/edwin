@@ -63,6 +63,7 @@ ${LEAVE} Your init file is ~/.config/edwin/init.scm.
 const ESC_MS = Number(N.env('EDWIN_ESC_MS')) || 25;     // how long a lone ESC waits for the rest of a sequence
 const FENCE_MS = 60;                                     // how long the first draw waits for the terminal's replies
 const DRAIN_MS = 5000;                                   // how long quitting waits for edwind to confirm edits
+const WELCOME_MS = Number(N.env('EDWIN_TEST_WELCOME_MS')) || 30000;
 /* EDWIN_TRACE=1 logs how long each startup step took (in the log file, as console does). */
 const trace = N.env('EDWIN_TRACE') ? ((what: string) => console.log(`startup ${what} ${N.now().toFixed(1)} ms`)) : () => {};
 trace('main');
@@ -113,21 +114,38 @@ const edwind = client ? N.edwind() : null;
 if (client && !edwind) { N.eprint('edwinclient: no edwind was attached\n'); N.exit(70); return; }
 if (opts.eval) { evaluate(opts.files, edwind!); return; }
 
+/* Only the first hello is a startup wait; after welcome a frame keeps the usual reconnect policy. */
+function welcomeDeadline(path: string, fail: (why: string) => void) {
+  let pending = true, timer: number | undefined;
+  const received = () => { pending = false; clearTimeout(timer); };
+  const reject = (why: string) => {
+    if (!pending) return;
+    received();
+    fail(`cannot attach to edwind at ${path}: ${why}`);
+  };
+  return {
+    sent() { timer = setTimeout(() => reject(`no welcome in ${WELCOME_MS / 1000} s`), WELCOME_MS); },
+    received,
+    closed(why: string | null) { reject('connection closed before welcome' + (why ? ': ' + why : '')); },
+  };
+}
+
 /* edwinclient -e: each form in turn, as a client of kind cli, whose failing form gives its error at once (a frame's
    would wait in the debugger). Its value goes to stdout as write prints it, and a newline; the first error ends
    the run with status 1. A definitional form enters edwind's image log as one typed in a frame does. */
-function evaluate(forms: string[], [, id]: [string, number]) {
+function evaluate(forms: string[], [path, id]: [string, number]) {
   let n = 0, done = false;
   const send = (m: object) => N.sockSend(id, JSON.stringify(m));
-  const end = (code: number, why?: string) => { if (done) return; done = true; if (why) N.eprint(`edwinclient: ${why}\n`); N.exit(code); };
+  const end = (code: number, why?: string) => { if (done) return; done = true; welcome.received(); if (why) N.eprint(`edwinclient: ${why}\n`); N.exit(code); };
+  const welcome = welcomeDeadline(path, why => end(1, why));
   const next = () => { if (n === forms.length) end(0); else send({ t: 'call', rid: 'e' + n, form: forms[n], ctx: {} }); };
   globalThis.__native.handlers.sock = (sid, line) => {
     if (sid !== id || done) return;
-    if (line === null) { end(1, 'edwind closed the connection' + (N.sockError(id) ? ': ' + N.sockError(id) : '')); return; }
+    if (line === null) { welcome.closed(N.sockError(id)); end(1, 'edwind closed the connection' + (N.sockError(id) ? ': ' + N.sockError(id) : '')); return; }
     let m: { t: string; rid?: string; msg?: string; value?: unknown; error?: { report: string } };
     try { m = JSON.parse(line); } catch (e) { end(1, 'edwind sent a line that is not JSON'); return; }
     if (m.t === 'ping') send({ t: 'pong', rid: m.rid });
-    else if (m.t === 'welcome') next();
+    else if (m.t === 'welcome') { welcome.received(); next(); }
     else if (m.t === 'error') end(1, m.msg || 'edwind refused the request');
     else if (m.t === 'result' && m.rid === 'e' + n) {
       if (m.error) { end(1, m.error.report); return; }
@@ -140,6 +158,7 @@ function evaluate(forms: string[], [, id]: [string, number]) {
     if (code) end(code);
   };
   send({ t: 'hello', proto: 1, cid: crypto.randomUUID().replace(/-/g, ''), kind: 'cli', device: 'edwinclient', caps: {} });
+  welcome.sent();
 }
 
 /* Standard input as a buffer (edwin -), read before the terminal is taken. */
@@ -288,11 +307,23 @@ globalThis.__native.handlers.sock = (id, line) => {
    one reconnects without waiting: ssh connects while the editor runs, and a failure is a close. */
 const transport = (path: string) => (): EdTransport => {
   const ws: EdTransport = { onopen: null, onmessage: null, onclose: null, onerror: null, readyState: 0 };
+  const initial = firstId !== null;
   let id: number;
   try { if (firstId !== null) { id = firstId; firstId = null; } else id = N.sockOpen(path); } catch (e) { setTimeout(() => { if (ws.onerror) ws.onerror(e); if (ws.onclose) ws.onclose({ code: 1006 }); }, 0); return ws; }
   sockets.set(id, ws);
   ws.send = s => N.sockSend(id, s);
   ws.close = () => { sockets.delete(id); N.sockClose(id); ws.readyState = 3; };
+  if (initial) {
+    const welcome = welcomeDeadline(path, why => {
+      stop(); leaveTerminal(); N.eprint(`edwinclient: ${why}\n`); N.exit(1);
+    });
+    const send = ws.send;
+    ws.send = hello => { ws.send = send; send(hello); welcome.sent(); };
+    const stop = Ed.sync.on('state', state => {
+      if (state === 'online') { welcome.received(); stop(); }
+      else if (state === 'offline') welcome.closed(N.sockError(id));
+    });
+  }
   setTimeout(() => { ws.readyState = 1; if (ws.onopen) ws.onopen(); }, 0);
   return ws;
 };
