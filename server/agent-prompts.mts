@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomId } from './journal.mts';
-import { writeAtomic, sha256, diskState } from './files.mts';
+import { sha256, diskState } from './files.mts';
 import { lexicalPath } from './buffers.mts';
-import { realPath } from './paths.mts';
+import { PrivateStore } from './paths.mts';
 import type { SBuf } from './buffers.mts';
 import type { Server } from './main.mts';
 import type { AgentBackend } from './agent-sessions.mts';
@@ -56,13 +56,11 @@ const nameOf = (d: Draft) => `*Agent Prompt: ${d.key}*`;
 const idOf = (d: Draft) => `name:${nameOf(d)}`;
 
 export async function installPrompts(server: Server, backend: AgentBackend): Promise<{ stop(): Promise<void> }> {
-  const buffers = server.buffers, dir = path.join(server.cfg.stateDir, 'agent-prompts');
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+  const buffers = server.buffers, store = new PrivateStore(server.auth), dir = store.dir;
+  server.auth.promptStore = store;
   const drafts = new Map<string, Draft>(), sending = new Set<string>(), owned = new Map<SBuf, Draft>();
   const markdown = (d: Draft) => path.join(dir, `${d.key}.md`);
-  const record = (d: Draft) => path.join(dir, `${d.key}.json`);
-  const persist = (d: Draft) => writeAtomic(record(d), JSON.stringify(d) + '\n');
+  const persist = (d: Draft) => store.write(`${d.key}.json`, JSON.stringify(d) + '\n');
   function draft(v: unknown): Draft { const d = drafts.get(keyOf(v)); return d || fail('No such agent prompt draft'); }
   function writable(d: Draft) { if (sending.has(d.key)) fail('This prompt is being sent'); }
   function meta(sb: SBuf, d: Draft) {
@@ -74,7 +72,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   function open(d: Draft): SBuf {
     const live = buffers.live(idOf(d));
     if (live) return live;
-    const body = fs.readFileSync(markdown(d), 'utf8');
+    const body = store.read(`${d.key}.md`);
     const sb = buffers.create({ id: idOf(d), jid: randomId(), name: nameOf(d), file: markdown(d), text: body });
     server.Ed.switchMajorMode(sb.ed, 'markdown-mode');
     meta(sb, d); buffers.startJournal(sb); buffers.index.write();
@@ -82,9 +80,9 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   }
   function durable(sb: SBuf, d: Draft): string {
     const body = sb.text;
-    writeAtomic(markdown(d), body);
+    const stat = store.write(`${d.key}.md`, body);
     sb.savedText = body; sb.savedHash = sha256(body); sb.savedVer = sb.ver;
-    sb.disk = diskState(fs.statSync(markdown(d)));
+    sb.disk = diskState(stat);
     return body;
   }
   async function snapshot(d: Draft): Promise<Preview> {
@@ -107,11 +105,12 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     for (const target of targets) await backend.requireSession(target.sid, epochOf(target.epoch));
     const blocks = a.blocks === undefined ? [{ type: 'text', text: typeof a.text === 'string' ? a.text : '' }] : blocksOf(a.blocks);
     const d: Draft = { key: randomId(), targets, acknowledged: [], possiblySent: [], blocks, baseText: backend.clean(promptText(blocks)) };
-    writeAtomic(markdown(d), d.baseText); persist(d); drafts.set(d.key, d); open(d);
+    store.write(`${d.key}.md`, d.baseText); persist(d); drafts.set(d.key, d); open(d);
     return idOf(d);
   }
-  for (const file of fs.readdirSync(dir)) {
+  const entries = store.entries();
   const retained = new Map([...buffers.index.buffers.values()].filter(e => e.file && path.dirname(e.file) === dir).map(e => [e.id, e]));
+  for (const file of entries) {
     if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json') continue;
     try {
       const d = JSON.parse(store.read(file)) as Draft;
@@ -236,16 +235,19 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
       return attach(d, { type: 'resource_link', uri, name: path.basename(name), mimeType });
     }
     const absolute = lexicalPath(server.auth, name); server.auth.checkRead(absolute);
-    const real = realPath(absolute); if (!real.exists) fail('No such embedded file'); server.auth.checkRead(real.real);
-    const data = fs.readFileSync(real.real), uri = pathToFileURL(real.real).href;
-    return attach(d, { type: 'resource', resource: { uri, mimeType, ...(mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType) ? { text: data.toString('utf8') } : { blob: data.toString('base64') }) } });
+    const block = server.auth.withRead(absolute, (fd, st, real) => {
+      if (!st.isFile()) fail('Not a regular file');
+      const data = fs.readFileSync(fd), uri = pathToFileURL(real).href;
+      return { type: 'resource', resource: { uri, mimeType, ...(mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType) ? { text: data.toString('utf8') } : { blob: data.toString('base64') }) } };
+    });
+    return attach(d, block);
   });
   for (const kind of ['buffer', 'region']) command(`agent-prompt-attach-${kind}`, ([id, resource]) => {
     if (!object(resource) || typeof resource.text !== 'string') fail(`Attach ${kind} needs an immutable text snapshot`);
     const r = resource as Record<string, unknown>, uri = text(r.uri, 'Resource URI'); new URL(uri);
     return attach(draft(id), { type: 'resource', resource: { uri, text: r.text, mimeType: typeof r.mimeType === 'string' ? r.mimeType : 'text/plain' } });
   });
-  const namedFile = path.join(dir, 'named.json');
+  const namedFile = 'named.json';
   let named: Record<string, { blocks: Block[] }> = Object.create(null);
   let namedReadable = true;
   if (entries.includes(namedFile)) {
@@ -262,7 +264,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   command('agent-prompt-save', async ([id, name]) => {
     if (!namedReadable) fail('Cannot overwrite unreadable named prompts');
     const d = draft(id), label = text(name, 'Prompt name'), p = await snapshot(d);
-    const next = Object.assign(Object.create(null), named, { [label]: { blocks: p.blocks } }); writeAtomic(namedFile, JSON.stringify(next) + '\n'); named = next;
+    const next = Object.assign(Object.create(null), named, { [label]: { blocks: p.blocks } }); store.write(namedFile, JSON.stringify(next) + '\n'); named = next;
     persist({ ...d, name: label }); d.name = label; buffers.sendMeta(open(d)); return label;
   });
   command('agent-prompt-load', ([name, targets]) => {

@@ -207,7 +207,9 @@ export class Notes {
     this.signal = new Int32Array(sab);
     const { port1, port2 } = new MessageChannel();
     this.syncPort = port1;
-    const w = new Worker(PARSER, { workerData: { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal }, transferList: [port2] });
+    const { notesDir, stateDir, configDir, agentHub } = this.server.cfg, refusePaths = this.server.auth.refuse;
+    const w = new Worker(PARSER, { workerData: { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal,
+      authority: { notesDir, stateDir, configDir, refusePaths }, tokenFile: agentHub?.tokenFile }, transferList: [port2] });
     this.worker = w; this.workerStarts++;
     w.unref();
     w.on('message', msg => this.onWorkerMessage(msg));
@@ -489,7 +491,8 @@ export class Notes {
   /* ---------- snapshot (R11.6) ---------- */
   loadSnapshot() {
     let snap: any; // any: the snapshot file, checked below
-    try { snap = JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') this.log.warn('notes', { snapshot: 'unreadable', error: e.message }); return; }
+    try { snap = JSON.parse(this.server.auth.withRead(this.stateFile, fd => fs.readFileSync(fd, 'utf8'), 'state')); }
+    catch (e) { if (e.code !== 'ENOENT') this.log.warn('notes', { snapshot: 'unreadable', error: e.code }); return; }
     if (!snap || snap.v !== 1 || !Array.isArray(snap.files)) { this.log.warn('notes', { snapshot: 'ignored', reason: 'unknown format' }); return; }
     for (const e of snap.files) if (e && typeof e.id === 'string' && e.rec && e.rec.file) this.files.set(e.id, { id: e.id, mtimeMs: e.mtimeMs, size: e.size, rec: e.rec, fromBuffer: !!e.fromBuffer });
     this.gen = Number.isInteger(snap.gen) ? snap.gen : 0;
@@ -672,7 +675,7 @@ export class Notes {
     for (const n of names) {
       let text;
       /* A symlinked log is read through the authority like any file (never a refused path). */
-      try { text = fs.readFileSync(this.server.auth.checkRead(realPath(path.join(dir, n)).real), 'utf8'); } catch (e) { continue; }
+      try { text = this.server.auth.withRead(path.join(dir, n), fd => fs.readFileSync(fd, 'utf8')); } catch { continue; }
       for (const line of text.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch (e) { /* a torn line */ } }
     }
     return { dir, reviews: out };

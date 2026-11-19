@@ -214,11 +214,7 @@ export class Server {
        frame, and to a model through pi's tools (R14.6). */
     const credentials = modelsModule.credentialsDirectory();
     this.auth = new Authority(credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg);
-    if (cfg.agentHub) {
-      this.auth.refuse.push(cfg.agentHub.tokenFile);
-      let real = cfg.agentHub.tokenFile; try { real = fs.realpathSync(real); } catch { /* absent credential stays refused */ }
-      this.auth.realRefuse.push(real);
-    }
+    if (cfg.agentHub) this.auth.protectCredential(cfg.agentHub.tokenFile);
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */

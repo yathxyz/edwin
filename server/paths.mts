@@ -5,6 +5,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { writeAtomic } from './files.mts';
+
+// Linux O_PATH (not exposed by node:fs): inspect an entry without opening a FIFO/device for I/O.
+const O_PATH = 0o10000000;
+const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
+const denied = () => new PathError('refused_path', 'Private file: access refused');
+const identity = (st: fs.BigIntStats) => `${st.dev}:${st.ino}`;
+type Reader<T> = (fd: number, stat: fs.Stats, real: string) => T;
 
 /* The codes a PathError carries; each is an error code of the protocol (§7.8). */
 export type PathErrorCode = 'no_buffer' | 'refused_path' | 'bad_id';
@@ -55,6 +63,54 @@ export class Authority {
   declare refuse: string[];
   declare realWriteRoots: string[];
   declare realRefuse: string[];
+  private credential?: string;
+  private credentialIds = new Set<string>();
+  private credentialNames = new Set<string>();
+  promptStore?: PrivateStore;
+
+  protectCredential(file: string): void {
+    this.credential = file; this.credentialNames.add(path.resolve(file));
+    try { this.withCredential(O_PATH, () => {}); } catch { /* its name remains private while absent */ }
+  }
+  private withCredential<T>(flags: number, use: (fd: number) => T): T {
+    const fd = fs.openSync(this.credential!, flags | fs.constants.O_NONBLOCK);
+    try {
+      this.credentialIds.add(identity(fs.fstatSync(fd, { bigint: true })));
+      this.credentialNames.add(fs.readlinkSync(fdPath(fd)));
+      return use(fd);
+    } finally { fs.closeSync(fd); }
+  }
+  readCredential(): string { return this.withCredential(fs.constants.O_RDONLY, fd => fs.readFileSync(fd, 'utf8')); }
+  private checkCredential(fd: number, real: string): void {
+    if (!this.credential) return;
+    if (this.credentialNames.has(real)) throw denied();
+    const id = identity(fs.fstatSync(fd, { bigint: true }));
+    if (this.credentialIds.has(id)) throw denied();
+    // Also protect a replacement *before* the backend's next request. The candidate fd stays pinned.
+    try {
+      const current = identity(fs.statSync(this.credential, { bigint: true }));
+      this.credentialIds.add(current);
+      if (id === current) throw denied();
+    } catch (e) { if (e.code !== 'ENOENT') throw denied(); }
+  }
+  /* Check the object the kernel actually opened. No callback may reopen the pathname for its data. */
+  withRead<T>(file: string, use: Reader<T>, kind: 'read' | 'entry' | 'state' | 'private' | 'private-live' = 'read'): T {
+    if (kind === 'read' && this.promptStore && path.dirname(file) === this.promptStore.dir)
+      return this.promptStore.withRead(path.basename(file), use);
+    if (this.credentialNames.has(file)) throw denied();
+    const flags = kind === 'entry' ? O_PATH : fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
+    const privateEntry = kind === 'private' || kind === 'private-live';
+    const fd = fs.openSync(file, flags | (privateEntry ? fs.constants.O_NOFOLLOW : 0));
+    try {
+      const real = fs.readlinkSync(fdPath(fd));
+      this.checkCredential(fd, real);
+      if (kind === 'read') this.checkRead(real);
+      const stat = fs.fstatSync(fd);
+      if (privateEntry && !(kind === 'private-live' && stat.isDirectory()) && (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!())) throw denied();
+      return use(fd, stat, real);
+    } finally { fs.closeSync(fd); }
+  }
+  get guardsCredential(): boolean { return this.credential !== undefined; }
   constructor({ notesDir, stateDir, configDir, writablePaths = [], refusePaths = [] }: AuthorityConfig) {
     const norm = (p: string) => path.resolve(expandHome(p));
     this.notesDir = norm(notesDir); this.stateDir = norm(stateDir); this.configDir = norm(configDir);
@@ -65,19 +121,21 @@ export class Authority {
     this.realRefuse = this.refuse.map(r => { try { return fs.realpathSync.native(r); } catch (e) { return r; } });
   }
   /* Nothing in, on or above a refused path (the rule of POST /api/mv). */
-  refused(real: string): boolean { return this.realRefuse.some(r => under(real, r) || under(r, real)) || this.refuse.some(r => under(real, r) || under(r, real)); }
+  refused(real: string): boolean { return [...this.credentialNames].some(r => under(real, r) || under(r, real)) || this.realRefuse.some(r => under(real, r) || under(r, real)) || this.refuse.some(r => under(real, r) || under(r, real)); }
   /* In or on a refused path. A directory above one is not: it lists, and shows the refused name and nothing of
      its inside. */
-  inRefused(real: string): boolean { return this.realRefuse.some(r => under(real, r)) || this.refuse.some(r => under(real, r)); }
+  inRefused(real: string): boolean { return this.credentialNames.has(real) || this.realRefuse.some(r => under(real, r)) || this.refuse.some(r => under(real, r)); }
   /* In or on edwind's state directory (journals, snapshots, the image log), by either spelling. */
   inState(real: string): boolean {
     let r = this.stateDir; try { r = fs.realpathSync.native(r); } catch (e) { /* not made yet */ }
     return under(real, r) || under(real, this.stateDir);
   }
   /* A read of REAL: anywhere but the refusal list. Throws PathError refused_path. */
-  checkRead(real: string): string { if (this.refused(real)) throw new PathError('refused_path', `${real}: refused`); return real; }
+  checkRead(real: string): string { if (this.credentialNames.has(real)) throw denied(); if (this.refused(real)) throw new PathError('refused_path', `${real}: refused`); return real; }
   /* A write of REAL (save, create, rename, delete). Throws PathError refused_path. */
   checkWrite(real: string): string {
+    if (this.credentialNames.has(real)) throw denied();
+    if (this.credential) { try { this.withRead(real, () => {}, 'entry'); } catch (e) { if (e.code !== 'ENOENT') throw e; } }
     if (this.refused(real)) throw new PathError('refused_path', `${real}: refused`);
     if (!this.realWriteRoots.some(r => under(real, r)) && !this.writeRoots.some(r => under(real, r))) throw new PathError('refused_path', `${real}: outside the writable paths`);
     return real;
@@ -115,5 +173,48 @@ export class Authority {
     const h = (() => { try { return fs.realpathSync.native(HOME); } catch (e) { return HOME; } })();
     if (under(real, h) && real !== h) return '~/' + real.slice(h.length + 1);
     return real;
+  }
+}
+
+/* Operate relative to an opened, non-symlink private directory. A concurrent directory replacement
+   cannot redirect a temp file, rename, chmod or read. The final rename never follows a destination link. */
+export class PrivateStore {
+  readonly dir: string;
+  readonly auth: Authority;
+  private rootId?: string;
+  constructor(auth: Authority) {
+    this.auth = auth; this.dir = path.join(auth.stateDir, 'agent-prompts');
+    try { fs.mkdirSync(this.dir, 0o700); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    this.at((_, fd) => { this.rootId = identity(fs.fstatSync(fd, { bigint: true })); fs.fchmodSync(fd, 0o700); });
+  }
+  private at<T>(fn: (root: string, fd: number) => T): T {
+    const fd = fs.openSync(this.dir, fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      const root = fs.fstatSync(fd, { bigint: true });
+      if (root.uid !== BigInt(process.getuid!()) || (this.rootId !== undefined && this.rootId !== identity(root))) throw denied();
+      return fn(fdPath(fd), fd);
+    } finally { fs.closeSync(fd); }
+  }
+  private leaf(name: string): string {
+    if (!/^[A-Za-z0-9_-]+\.(md|json)$/.test(name)) throw denied();
+    return name;
+  }
+  entries(): string[] { return this.at(root => fs.readdirSync(root)); }
+  // Serving a live draft uses its verified memory. A failed write (the target became a directory)
+  // must leave that memory recoverable, without following a substituted link or reading the target.
+  checkLive(name: string): void {
+    this.at(root => this.auth.withRead(path.join(root, this.leaf(name)), () => {}, 'private-live'));
+  }
+  withRead<T>(name: string, use: Reader<T>): T {
+    return this.at(root => this.auth.withRead(path.join(root, this.leaf(name)), use, 'private'));
+  }
+  read(name: string): string { return this.withRead(name, fd => fs.readFileSync(fd, 'utf8')); }
+  write(name: string, data: string): fs.Stats {
+    return this.at(root => {
+      const file = path.join(root, this.leaf(name));
+      try { this.auth.withRead(file, () => {}, 'private'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      writeAtomic(file, data);
+      return this.auth.withRead(file, (_fd, stat) => stat, 'private');
+    });
   }
 }

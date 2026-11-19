@@ -114,6 +114,7 @@ in
       }
     } src && chmod -R u+w src && cd src
     mkdir tools && ln -s ${devDeps}/node_modules tools/node_modules
+    cp ${../tools/agent-live.mts} tools/agent-live.mts
     ln -s ${edwindDeps}/node_modules server/node_modules
     for p in . src native/js; do node tools/node_modules/typescript/bin/tsc -p $p; done
     touch $out

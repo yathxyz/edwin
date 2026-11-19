@@ -91,7 +91,8 @@ async function main() {
     Ed.boot({ host }); await Ed.whenIdle();
     Ed.installAgentTranscript(false);
     const log: Log = { debug() {}, info() {}, warn() {}, error() {} };
-    const auth = new Authority({ stateDir, configDir, notesDir, refusePaths: [config.tokenFile] });
+    const auth = new Authority({ stateDir, configDir, notesDir });
+    auth.protectCredential(config.tokenFile);
     buffers = new Buffers({ Ed, auth, stateDir, log });
     // Deliberately no defineCommand, module installer, listener socket, user image or prompt store.
     const server = { cfg: { agentHub: config }, buffers, auth, log, clients: [] } as unknown as Server;

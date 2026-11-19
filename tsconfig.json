@@ -23,5 +23,5 @@
     "noFallthroughCasesInSwitch": true,
     "useUnknownInCatchVariables": false
   },
-  "include": ["server/**/*.mts", "test/**/*.mts", "tools/*.mts", "native/tests/**/*.mts", "src/host-node.cts"]
+  "include": ["server/**/*.mts", "test/**/*.mts", "tools/agent-live.mts", "native/tests/**/*.mts", "src/host-node.cts"]
 }

@@ -23,6 +23,8 @@ export class Client {
   declare server: Server;
   declare socket: net.Socket;
   declare log: Log;
+  private hiddenPath?: string;
+  private pathMask?: string;
   /* Set by hello (§7.2). */
   declare cid: string | null;
   declare kind: ClientKind | null;
@@ -43,6 +45,8 @@ export class Client {
   declare pinger: NodeJS.Timeout;
   constructor(server: Server, socket: net.Socket) {
     this.server = server; this.socket = socket; this.log = server.log;
+    const file = server.cfg.agentHub?.tokenFile;
+    if (file) { this.hiddenPath = JSON.stringify(file).slice(1, -1); this.pathMask = '*'.repeat(file.length); }
     this.cid = null; this.kind = null; this.device = null; this.session = null; this.caps = {};
     this.buffers = new Set(); this.closed = false; this.hello = false;
     this.queue = []; this.queued = 0; this.writing = false; this.bulk = [];
@@ -66,12 +70,18 @@ export class Client {
   deadlineMs(): number { return this.kind === 'cli' ? DEADLINE_CLI_MS : DEADLINE_FRAME_MS; }
 
   /* ---------- sending ---------- */
+  private encode(obj: OutMessage): string {
+    const line = encode(obj);
+    // Scheme conditions, backtraces and protocol correlation fields can echo a caller-supplied path.
+    // Keep text offsets stable; do not alter the authoritative buffer or journal.
+    return this.hiddenPath && line.includes(this.hiddenPath) ? line.replaceAll(this.hiddenPath, this.pathMask!) : line;
+  }
   /* Small frames: queued and written as the socket allows. */
-  send(obj: OutMessage): void { if (this.closed) return; this.queue.push(encode(obj)); this.pump(); }
+  send(obj: OutMessage): void { if (this.closed) return; this.queue.push(this.encode(obj)); this.pump(); }
   /* edits, sel and msg count toward the slow-client cap (R14.14). */
   sendBulkish(obj: OutMessage): void {
     if (this.closed) return;
-    const line = encode(obj);
+    const line = this.encode(obj);
     this.queued += line.length;
     /* Everything not yet on the wire counts: our queue and what Node holds for a socket that stopped draining. */
     const held = this.queued + this.socket.writableLength;
@@ -84,7 +94,7 @@ export class Client {
     this.queue.push(line); this.pump();
   }
   /* Bulk frames (snap, chunk, image): written one at a time, each after the previous one drained. */
-  sendBulk(obj: OutMessage): void { if (this.closed) return; this.queue.push(encode(obj)); this.pump(); }
+  sendBulk(obj: OutMessage): void { if (this.closed) return; this.queue.push(this.encode(obj)); this.pump(); }
   pump() {
     if (this.closed || this.writing) return;
     while (this.queue.length && !this.closed) {

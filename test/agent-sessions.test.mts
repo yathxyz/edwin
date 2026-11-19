@@ -10,6 +10,7 @@ import type { TestDir } from './edit-client.mts';
 import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { sessionsFixture } from './agent-render-fixture.mts';
 import type { Server } from '../server/main.mts';
+import { Authority } from '../server/paths.mts';
 const require = createRequire(import.meta.url);
 const { createHost, loadEdwin } = require('../src/host-node.cts');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -197,6 +198,88 @@ async function checkListRendering(hub: FakeAgentHub, c: EditClient, Ed: ReturnTy
   assert.ok(b.meta.locals.agentList.rows.find((r: { observedId: string }) => r.observedId === observed.id).line > b.meta.locals.agentList.exited.line);
 }
 
+
+test('protected reader: credential identities are refused by editor reads, metadata, completion and binary attach', async t => {
+  const hub = await new FakeAgentHub().start(), dir = makeDir();
+  const tokenFile = path.join(dir.dirs.notes, 'private-fixture'), link = path.join(dir.dirs.notes, 'linked-fixture'), hard = path.join(dir.dirs.notes, 'other-fixture');
+  fs.writeFileSync(tokenFile, hub.token); fs.symlinkSync(tokenFile, link); fs.linkSync(tokenFile, hard);
+  fs.mkdirSync(path.join(dir.dirs.notes, 'subdir'));
+  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const fd = fs.openSync(tokenFile, 'r');
+  const child = await startEdwind(dir, { fixtureFd: fd }); fs.closeSync(fd);
+  const c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  const draft = (await c.call('agent-prompt-create', [{ text: 'unchanged' }])).value;
+  const privateReply = (v: unknown) => {
+    const s = JSON.stringify(v);
+    assert.ok(!s.includes(tokenFile), 'a client reply must not disclose the configured path');
+    assert.ok(!s.includes(hub.token) && !s.includes(Buffer.from(hub.token).toString('base64')), 'a client reply must not contain credential bytes');
+  };
+  const procFds = ['/proc/self/fd/3', `/proc/${child.pid}/fd/3`, '/proc/thread-self/fd/3'];
+  for (const file of [tokenFile, link, hard, 'subdir/../private-fixture', ...procFds, '/proc/self/root' + hard, `/proc/${child.pid}/root` + tokenFile]) {
+    // find-file opens through the shared-buffer protocol; visit-id is the host-page opener.
+    const opened = await c.open(file); assert.ok(opened.error); privateReply(opened);
+    for (const [cmd, args] of [['visit-id', [file]], ['fs-stat', [{ path: file }]], ['fs-list', [{ dir: file }]],
+      ['agent-prompt-attach-file', [draft, file, { embed: true, mimeType: 'application/octet-stream' }]]] as const) {
+      const r = await c.call(cmd, [...args]); assert.ok(r.error || r.t === 'error', cmd); privateReply(r);
+    }
+    const insert = await c.form(`(insert-file-contents ${JSON.stringify(file)})`); assert.ok(insert.error || insert.t === 'error'); privateReply(insert);
+  }
+  // Dired and the minibuffer's filename completion use this same listing.
+  for (const dirname of [dir.dirs.notes, '/proc/self/root' + dir.dirs.notes, '/proc/self/fd']) {
+    const r = await c.call('fs-list', [{ dir: dirname }]); privateReply(r);
+    const names = (r.value?.entries || []).map((e: { name: string }) => e.name);
+    assert.ok(!names.some((n: string) => ['private-fixture', 'linked-fixture', 'other-fixture', ...(dirname === '/proc/self/fd' ? ['3'] : [])].includes(n)));
+  }
+  const watched = path.join(dir.dirs.notes, 'watched.txt'); fs.writeFileSync(watched, 'prior text');
+  assert.equal((await c.open(watched)).text, 'prior text');
+  fs.unlinkSync(watched); fs.linkSync(tokenFile, watched);
+  const revert = await c.request({ t: 'revert', buf: watched }); assert.equal(revert.t, 'error'); privateReply(revert);
+  await sleep(120); privateReply(await c.open(watched)); privateReply(c.queue);
+  assert.deepEqual((await c.call('agent-prompt-preview', [draft])).value.blocks, [{ type: 'text', text: 'unchanged' }]);
+});
+
+test('protected reader: private store rejects linked files, swapped directories and indexed draft restoration', async t => {
+  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'dummy-credential');
+  fs.writeFileSync(tokenFile, hub.token);
+  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const fd = fs.openSync(tokenFile, 'r');
+  let child = await startEdwind(dir, { fixtureFd: fd }); fs.closeSync(fd);
+  let c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  const store = path.join(dir.dirs.state, 'agent-prompts'), id = (await c.call('agent-prompt-create', [{ text: 'ordinary' }])).value;
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], md = path.join(store, key + '.md');
+  const moved = store + '-old', outside = path.join(dir.root, 'outside'); fs.mkdirSync(outside, 0o755);
+  fs.renameSync(store, moved); fs.symlinkSync(outside, store);
+  try {
+    const reply = await c.call('agent-prompt-create', [{ text: 'not outside' }]); assert.ok(reply.error);
+    assert.deepEqual(fs.readdirSync(outside), []); assert.equal(fs.statSync(outside).mode & 0o777, 0o755);
+  } finally { fs.unlinkSync(store); fs.renameSync(moved, store); }
+  const named = path.join(store, 'named.json'); fs.symlinkSync(tokenFile, named);
+  try { assert.ok((await c.call('agent-prompt-save', [id, 'label'])).error); assert.ok(fs.lstatSync(named).isSymbolicLink()); }
+  finally { fs.unlinkSync(named); }
+  // Reopen a killed retained buffer through each private-file alias. Even a harmless linked
+  // markdown file is not a retained store entry; no alias may supply the draft body.
+  const other = path.join(dir.root, 'ordinary.md'); fs.writeFileSync(other, 'outside draft');
+  const retained = (await c.call('agent-prompt-create', [{ text: 'private draft' }])).value;
+  const leaf = path.join(store, /: ([A-Za-z0-9_-]+)\*$/.exec(retained)![1] + '.md');
+  assert.ok(!(await c.call('kill-buffer', [retained])).error);
+  fs.unlinkSync(leaf);
+  for (const target of [tokenFile, path.relative(store, tokenFile), '/proc/self/fd/3', '/proc/self/root' + tokenFile, `/proc/${child.pid}/root` + tokenFile, other]) {
+    fs.symlinkSync(target, leaf);
+    try {
+      const r = await c.call('agent-prompt-open', [retained]);
+      assert.ok(r.error); assert.ok(!JSON.stringify(r).includes(tokenFile) && !JSON.stringify(r).includes(hub.token));
+    } finally { fs.unlinkSync(leaf); }
+  }
+  c.close(); await stopEdwind(child);
+  fs.unlinkSync(md); fs.linkSync(tokenFile, md);
+  const namedOutside = path.join(dir.root, 'outside.json'); fs.writeFileSync(namedOutside, '{"outside-label":{"blocks":[]}}'); fs.symlinkSync(namedOutside, named);
+  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  const reopened = await c.open(id); assert.ok(reopened.error); assert.ok(!JSON.stringify(reopened).includes(hub.token));
+  assert.ok(!(await c.call('agent-prompt-list')).value?.includes('outside-label'));
+  assert.ok(!(await c.call('buffer-list')).value.some((b: { id: string }) => b.id === id));
+});
 
 test('AS-C8: token and symlink are refused; API-echoed token is redacted from buffers, results and logs', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
@@ -827,8 +910,10 @@ test('review 12: rejected streaming responses close immediately and stop destroy
     await handle(req, res);
   };
   // Only construction dependencies are inert; HTTP requests, SSE bodies, sockets and shutdown are real.
+  const auth = new Authority({ stateDir: dir.dirs.state, configDir: dir.dirs.config, notesDir: dir.dirs.notes });
+  auth.protectCredential(tokenFile);
   const server = { cfg: { agentHub: { url: hub.url, tokenFile } }, buffers: { all: () => [], on: () => () => {} },
-    auth: { refuse: [], realRefuse: [] }, log: { debug: () => {} }, clients: [] } as unknown as Server;
+    auth, log: { debug: () => {} }, clients: [] } as unknown as Server;
   const backend = new AgentSessions(server);
   t.after(async () => { backend.stop(); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
   backend.start();

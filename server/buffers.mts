@@ -7,7 +7,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { ProtoError, CHUNK } from './proto.mts';
 import { PathError, expandHome, under } from './paths.mts';
-import { readText, saveAtomic, writeAtomic, fsyncDir, sha256, diskState, FileError, BIG } from './files.mts';
+import { readText, readTextFd, saveAtomic, writeAtomic, fsyncDir, sha256, diskState, FileError, BIG } from './files.mts';
 import { Journal, readJournal, healTail, header as journalHeader, Index, randomId, jidPath, SNAP_NEW } from './journal.mts';
 import { Sequencer } from './sequencer.mts';
 import { Watcher, diffOps, merge3 } from './watch.mts';
@@ -146,7 +146,7 @@ export class Buffers {
     this.Ed = Ed; this.auth = auth; this.stateDir = stateDir; this.log = log;
     this.byId = new Map(); this.byJid = new Map();
     fs.mkdirSync(path.join(stateDir, 'buffers'), { recursive: true, mode: 0o700 });
-    this.index = new Index(path.join(stateDir, 'index.json'));
+    this.index = new Index(path.join(stateDir, 'index.json'), auth);
     this.seq = new Sequencer(Ed, log);
     this.watcher = new Watcher(this, log);
     /* Renames (R6.1, §7 moved): old id → {to, at, dir}, kept 24 h in index.json; a directory's record covers the
@@ -194,11 +194,11 @@ export class Buffers {
       catch (err) { this.log.error('reload', { jid: e.jid, id: e.id, error: err.message }); }
     }
   }
-  reloadOne(e: IndexEntry): SBuf | undefined {
+  reloadOne(e: IndexEntry, privateFile?: string): SBuf | undefined {
     const jfile = jidPath(this.stateDir, e.jid, '.jsonl');
     if (!fs.existsSync(jfile)) { this.index.delete(e.jid); return; }
     /* Unload stale saved buffers: a header-only journal and no open for 7 days (R8.6). */
-    const read = readJournal(jfile), { header, batches, mv, anchors, torn, count } = read;
+    const read = this.auth.withRead(jfile, fd => readJournal(fd), 'state'), { header, batches, mv, anchors, torn, count } = read;
     /* The newest mv line names the current id, file and name (R8.1); compaction folds them into the header. */
     let last: { id: string; file?: string | null; name?: string } | null = mv.length ? mv[mv.length - 1] : null;
     /* A rename whose mv line never became durable (a crash right after it, or a full disk): the index, written
@@ -209,25 +209,34 @@ export class Buffers {
       last = { id: e.id, file: e.file, name: e.name || path.basename(e.file) }; mvLost = true;
     }
     const id = last ? last.id : header.id;
+    const file = last && last.file !== undefined ? last.file : header.file;
+    if (privateFile && (file !== privateFile || id !== e.id)) throw new PathError('refused_path', 'Invalid indexed draft');
+    // A journal or snapshot is not an alternate route to a now-private file.
+    if (file) {
+      try {
+        if (privateFile) this.auth.promptStore!.withRead(path.basename(file), () => {});
+        else this.auth.withRead(file, () => {});
+      } catch (err) { if (privateFile || err.code !== 'ENOENT') throw err; }
+    }
     let base: string | null = null, baseWhy = '';
     const saved = jidPath(this.stateDir, e.jid, '.saved'), snap = jidPath(this.stateDir, e.jid, '.snap'), next = jidPath(this.stateDir, e.jid, SNAP_NEW);
     /* A compaction killed after its journal was in place left the snapshot of that journal in SNAP_NEW: it
        becomes the snapshot now, before a later compaction writes SNAP_NEW again. */
     for (const f of [snap, next, saved]) {
       if (!fs.existsSync(f)) continue;
-      const t = fs.readFileSync(f, 'utf8');
+      const t = this.auth.withRead(f, fd => fs.readFileSync(fd, 'utf8'), 'state');
       if (sha256(t) === header.base.sha256) { base = t; if (f === next) promoteSnap(next, snap, this.log, header.id); break; }
       if (f !== next) baseWhy = `${path.basename(f)} does not match the journal base`;
     }
-    let file: string | null = last && last.file !== undefined ? last.file : header.file, eol: Eol = 'lf', disk: DiskState | null = null, savedText: string | null = null;
+    let eol: Eol = 'lf', disk: DiskState | null = null, savedText: string | null = null;
     if (file) {
-      try { const r = readText(file); eol = r.eol; disk = diskState(r.stat); savedText = r.text; if (base === null && sha256(r.text) === header.base.sha256) base = r.text; }
-      catch (err) { if (err.code !== 'no_buffer') baseWhy = `${file}: ${err.message}`; }
+      try { const r = readText(this.auth, file); eol = r.eol; disk = diskState(r.stat); savedText = r.text; if (base === null && sha256(r.text) === header.base.sha256) base = r.text; }
+      catch (err) { if (err.code === 'refused_path') throw err; if (err.code !== 'no_buffer') baseWhy = err.message; }
     }
     if (base === null && header.base.ver === 0 && !batches.length && header.base.sha256 === sha256('')) base = '';
     const sb = this.create({ id, jid: e.jid, name: (last && last.name) || header.name, file, text: base ?? '', eol });
     sb.disk = disk;
-    if (fs.existsSync(saved)) { const t = fs.readFileSync(saved, 'utf8'); sb.savedText = t; sb.savedHash = sha256(t); }
+    if (fs.existsSync(saved)) { const t = this.auth.withRead(saved, fd => fs.readFileSync(fd, 'utf8'), 'state'); sb.savedText = t; sb.savedHash = sha256(t); }
     else if (savedText !== null) { sb.savedText = savedText; sb.savedHash = sha256(savedText); }
     if (base === null) {
       sb.setReadOnly(`journal base is missing: ${baseWhy || 'no snapshot, saved copy or file matches'}`);
@@ -286,10 +295,21 @@ export class Buffers {
   }
   writeSaved(sb: SBuf): void { writeAtomic(jidPath(this.stateDir, sb.jid, '.saved'), sb.savedText); }
 
+  private checked(sb: SBuf): SBuf {
+    if (sb.file && this.auth.guardsCredential) {
+      try {
+        const store = this.auth.promptStore;
+        if (store && path.dirname(sb.file) === store.dir) store.checkLive(path.basename(sb.file));
+        else this.auth.withRead(sb.file, () => {}, 'entry');
+      }
+      catch (e) { if (e.code !== 'ENOENT') throw new ProtoError('refused_path', 'Private file: access refused'); }
+    }
+    return sb;
+  }
   /* Find or load the buffer for ID; CREATE makes a missing file buffer. Throws ProtoError. */
   resolve(id: string, create?: boolean): SBuf | Moved {
     const existing = this.byId.get(id);
-    if (existing) return existing;
+    if (existing) return this.checked(existing);
     /* A renamed file's old id names where it went, unless a file is at the old path again. */
     const to = this.movedTo(id);
     if (to && !this.fileExists(id)) return { moved: to };
@@ -303,7 +323,7 @@ export class Buffers {
       const ed = this.Ed.getBuffer(p.name);
       if (ed) {
         const sb = this.ofEd(ed);
-        if (sb) return sb;
+        if (sb) return this.checked(sb);
         /* One of Edwin's own buffers (*scratch*, *Messages*, the boot files): shared from now on. */
         const nb = this.create({ id, jid: randomId(), name: p.name, file: null, text: ed.text, special: true });
         nb.savedText = nb.text; nb.savedHash = sha256(nb.savedText);
@@ -319,7 +339,7 @@ export class Buffers {
     }
     const canon = this.auth.idOf(p.real);
     const byReal = this.byFile(p.real);
-    if (byReal) return byReal;
+    if (byReal) return this.checked(byReal);
     try { this.auth.checkRead(p.real); } catch (e) { throw new ProtoError('refused_path', e.message); }
     if (!p.exists) {
       if (!create) throw new ProtoError('no_buffer', `no file ${p.real}`);
@@ -331,7 +351,7 @@ export class Buffers {
       return nb;
     }
     let r: TextFile;
-    try { r = readText(p.real); } catch (e) { if (e instanceof FileError) throw new ProtoError(e.code, e.message); throw e; }
+    try { r = readText(this.auth, p.real); } catch (e) { if (e instanceof FileError) throw new ProtoError(e.code, e.message); throw e; }
     const nb = this.create({ id: canon, jid: randomId(), name: path.basename(p.real), file: p.real, text: r.text, eol: r.eol });
     nb.disk = diskState(r.stat);
     if (r.big) { nb.big = true; nb.readOnly = `file larger than ${BIG >> 20} MiB: read-only`; nb.ed.readOnly = true; }
@@ -393,7 +413,7 @@ export class Buffers {
     try { this.auth.checkWrite(sb.file); } catch (e) { throw new ProtoError('refused_path', e.message); }
     const text = sb.text, ver = sb.ver;
     let r: ReturnType<typeof saveAtomic>;
-    try { r = saveAtomic(sb.file, text, { eol: sb.eol }); }
+    try { r = saveAtomic(this.auth, sb.file, text, { eol: sb.eol }); }
     catch (e) { this.log.error('save', { buf: sb.id, error: e.code || e.message }); throw new ProtoError('refused_path', `save failed: ${e.code || e.message}`); }
     sb.savedText = text; sb.savedHash = r.hash; sb.savedVer = ver; sb.disk = diskState(r.stat);
     if (sb.diskChanged) sb.setDiskChanged(null);
@@ -410,7 +430,7 @@ export class Buffers {
   async revert(sb: SBuf): Promise<{ buf: string; ver: number; saved: true }> {
     if (!sb.file) throw new ProtoError('bad_request', `${sb.id} visits no file`);
     let r: TextFile;
-    try { r = readText(sb.file); } catch (e) { throw new ProtoError(e.code === 'no_buffer' ? 'no_buffer' : e.code, e.message); }
+    try { r = readText(this.auth, sb.file); } catch (e) { throw new ProtoError(e.code === 'no_buffer' ? 'no_buffer' : e.code, e.message); }
     sb.disk = diskState(r.stat); sb.eol = r.eol;
     await this.replaceText(sb, r.text, DISK_BY);
     sb.savedText = r.text; sb.savedHash = sha256(r.text); sb.savedVer = sb.ver;
@@ -453,21 +473,23 @@ export class Buffers {
      (bad_id, refused_path, no_buffer, not_text), so the board keeps the list of what edwind refuses here. */
   visitInfo(id: string): VisitInfo {
     const live = this.live(id);
-    if (live) return { buf: live.id, readOnly: live.readOnly || false };
+    if (live) return { buf: this.checked(live).id, readOnly: live.readOnly || false };
     let p: ParsedId;
     try { p = this.auth.parseId(id); } catch (e) { if (e instanceof PathError) throw new ProtoError(e.code, e.message); throw e; }
     if (p.kind === 'name') throw new ProtoError('bad_request', `${id} names no file`);
     const loaded = this.byFile(p.real);
-    if (loaded) return { buf: loaded.id, readOnly: loaded.readOnly || false };
+    if (loaded) return { buf: this.checked(loaded).id, readOnly: loaded.readOnly || false };
     try { this.auth.checkRead(p.real); } catch (e) { throw new ProtoError('refused_path', e.message); }
-    let st: fs.Stats;
-    try { st = fs.statSync(p.real); } catch (e) { throw new ProtoError('no_buffer', `no file ${p.real}`); }
-    if (!st.isFile()) throw new ProtoError('not_text', `${p.real}: not a regular file`);
-    const buf = this.auth.idOf(p.real);
-    try { this.auth.checkWrite(p.real); } catch (e) { return { buf, readOnly: 'outside the writable paths' }; }
-    if (st.size > BIG) return { buf, readOnly: `file larger than ${BIG >> 20} MiB: read-only` };
-    try { readText(p.real); } catch (e) { if (e instanceof FileError) throw new ProtoError(e.code, e.message); throw e; }
-    return { buf, readOnly: false };
+    try {
+      return this.auth.withRead(p.real, (fd, st, real) => {
+        if (!st.isFile()) throw new ProtoError('not_text', `${real}: not a regular file`);
+        const buf = this.auth.idOf(real);
+        try { this.auth.checkWrite(real); } catch { return { buf, readOnly: 'outside the writable paths' }; }
+        if (st.size > BIG) return { buf, readOnly: `file larger than ${BIG >> 20} MiB: read-only` };
+        readTextFd(fd, st, real);
+        return { buf, readOnly: false };
+      });
+    } catch (e) { throw new ProtoError(e.code === 'ENOENT' ? 'no_buffer' : e.code === 'not_text' ? 'not_text' : 'refused_path', e.message); }
   }
 
   /* ---------- rename (R4.49, R6.1, R8.1, R8.8, §7 moved) ---------- */

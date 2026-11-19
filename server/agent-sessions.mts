@@ -1,5 +1,4 @@
 // Agent sessions through the mesh HTTP API, never through ACP or the process hub socket (Step AS1).
-import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -90,11 +89,6 @@ export function validateAgentHub(value: unknown): AgentHubConfig {
   if (typeof c.tokenFile !== 'string' || !path.isAbsolute(c.tokenFile)) throw new Error('agentHub.tokenFile must be an absolute path');
   return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile, allowCleartext: c.allowCleartext === true, steer: c.steer === true };
 }
-function protect(server: Server, c: AgentHubConfig) {
-  let real = c.tokenFile; try { real = fs.realpathSync(c.tokenFile); } catch { /* refusal also covers a missing file */ }
-  if (server.buffers?.all().some(b => b.file === real)) throw new Error('Agent token file is already visited; choose a private credential file');
-  if (!server.auth.refuse.includes(c.tokenFile)) server.auth.refuse.push(c.tokenFile);
-  if (!server.auth.realRefuse.includes(real)) server.auth.realRefuse.push(real);
 type RetryQueue = Map<string, NodeJS.Timeout>;
 export class AgentSessions implements AgentBackend {
   declare server: Server; declare config: AgentHubConfig | undefined;
@@ -130,6 +124,7 @@ export class AgentSessions implements AgentBackend {
   #secrets = new Set<string>();
   constructor(server: Server) {
     this.server = server; this.config = server.cfg.agentHub; this.sessions = new Map(); this.observed = new Map();
+    if (this.config) this.#secrets.add(this.config.tokenFile);
     this.status = this.config ? 'connecting' : 'unconfigured'; this.info = {}; this.stopped = false;
     this.stream = null; this.requests = new Set(); this.generation = 0; this.listOpened = false;
     this.offKill = server.buffers.on('killed', sb => this.killed(sb.id));
@@ -145,9 +140,8 @@ export class AgentSessions implements AgentBackend {
     return value;
   }
   token(): string {
-    if (!this.config) throw new Error('No agent hub configured: set agentHub.url and agentHub.tokenFile in edit.json, or agent-hub-configure in init.scm');
-    protect(this.server, this.config);
-    let token: string; try { token = fs.readFileSync(this.config.tokenFile, 'utf8').trimEnd(); } catch { throw new Error('Agent hub token file is not readable'); }
+    if (!this.config) throw new Error('No agent hub configured');
+    let token: string; try { token = this.server.auth.readCredential().trimEnd(); } catch { throw new Error('Agent hub token file is not readable'); }
     if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('Agent hub token file must contain 64 lowercase hexadecimal characters');
     this.#secrets.add(token); return token;
   }
@@ -699,7 +693,6 @@ export class AgentSessions implements AgentBackend {
 }
 export async function install(server: Server) {
   const hub = new AgentSessions(server); modules.set(server, hub);
-  if (hub.config) protect(server, hub.config);
   const cmd = (name: string, fn: (args: any[]) => unknown) => server.defineCommand(name, async (_c, args) => { // any: API command arguments validated per command
     try { return { value: hub.clean(await fn(args)) }; } catch (e) { return fail(hub.clean(String(e.message || e))); }
   });
@@ -718,10 +711,8 @@ export async function install(server: Server) {
     if (!span?.locations?.some((l: Json) => JSON.stringify(l) === JSON.stringify(location))) throw new Error('Tool location is no longer available; refresh the transcript');
     if (s.host !== server.cfg.host) throw new Error(`Tool file is on ${line(s.host)}, not this edwind host; open it there`);
     if (!location || typeof location.path !== 'string') throw new Error('Tool has no file location');
-    const file = path.resolve(s.cwd, location.path), real = fs.realpathSync(file);
-    server.auth.checkRead(real);
-    const st = fs.statSync(real);
-    if (!st.isFile()) throw new Error('Tool location is not a file');
+    const file = path.resolve(s.cwd, location.path);
+    server.auth.withRead(file, (_fd, st) => { if (!st.isFile()) throw new Error('Tool location is not a file'); });
     const found = server.buffers.resolve(file, false);
     if (!('id' in found)) throw new Error('Tool file moved');
     return found.id;

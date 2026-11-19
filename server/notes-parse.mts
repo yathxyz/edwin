@@ -9,6 +9,7 @@ import path from 'node:path';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
 import { lockdown } from './lockdown.mts';
+import { Authority } from './paths.mts';
 
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 export const NOTE_EXT = /\.(md|org)$/i;
@@ -328,18 +329,19 @@ export type NoteRead =
   | { text: string; mtimeMs: number; size: number; skipped?: undefined }
   | { skipped: 'missing' | 'error' }
   | { skipped: 'big' | 'not_text'; mtimeMs: number; size: number };
-export function readNote(abs: string): NoteRead {
-  let st;
-  try { st = fs.statSync(abs); } catch (e) { return { skipped: 'missing' }; }
-  if (!st.isFile()) return { skipped: 'missing' };
-  if (st.size > MAX_FILE_BYTES) return { skipped: 'big', mtimeMs: st.mtimeMs, size: st.size };
-  let bytes;
-  try { bytes = fs.readFileSync(abs); } catch (e) { return { skipped: e.code === 'ENOENT' ? 'missing' : 'error' }; }
-  let text;
-  try { text = decoder.decode(bytes); } catch (e) { return { skipped: 'not_text', mtimeMs: st.mtimeMs, size: st.size }; }
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  if (text.includes('\r\n')) text = text.replace(/\r\n/g, '\n');
-  return { text, mtimeMs: st.mtimeMs, size: st.size };
+function readNote(auth: Authority, abs: string): NoteRead {
+  try {
+    return auth.withRead(abs, (fd, st): NoteRead => {
+      if (!st.isFile()) return { skipped: 'missing' };
+      if (st.size > MAX_FILE_BYTES) return { skipped: 'big', mtimeMs: st.mtimeMs, size: st.size };
+      const bytes = fs.readFileSync(fd);
+      let text: string;
+      try { text = decoder.decode(bytes); } catch { return { skipped: 'not_text', mtimeMs: st.mtimeMs, size: st.size }; }
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+      if (text.includes('\r\n')) text = text.replace(/\r\n/g, '\n');
+      return { text, mtimeMs: st.mtimeMs, size: st.size };
+    });
+  } catch (e) { return { skipped: e.code === 'ENOENT' ? 'missing' : 'error' }; }
 }
 
 /* An ignore pattern of notes-index-ignore as a test on a relative path: `dir/` names a directory anywhere,
@@ -361,7 +363,7 @@ export function ignoreMatcher(patterns: readonly unknown[] | null | undefined): 
 /* Every *.md and *.org under ROOT (R11.1): no dot-directories, no symlinks out of ROOT, no file over 4 MiB,
    nothing matching IGNORE. Returns [{id, mtimeMs, size}] with notesDir-relative ids. */
 export interface ScanEntry { id: string; mtimeMs: number; size: number }
-export function scanTree(root: string, ignorePatterns: readonly unknown[] | null | undefined): ScanEntry[] {
+function scanTree(auth: Authority, root: string, ignorePatterns: readonly unknown[] | null | undefined): ScanEntry[] {
   const ignored = ignoreMatcher(ignorePatterns);
   let realRoot;
   try { realRoot = fs.realpathSync.native(root); } catch (e) { return []; }
@@ -385,7 +387,7 @@ export function scanTree(root: string, ignorePatterns: readonly unknown[] | null
         if (name.startsWith('.') || ignored(r, true)) continue;
         stack.push({ dir: abs, rel: r });
       } else if (isFile && NOTE_EXT.test(name) && !ignored(r, false)) {
-        let st; try { st = fs.statSync(abs); } catch (e) { continue; }
+        let st; try { st = auth.withRead(abs, (_fd, stat) => stat); } catch { continue; }
         if (st.size > MAX_FILE_BYTES) continue;
         out.push({ id: r, mtimeMs: st.mtimeMs, size: st.size });
       }
@@ -428,14 +430,14 @@ export type ParseOutcome =
   | ParsedFile
   | { id: string; skipped: SkipReason; error?: undefined }
   | { id: string; error: string; skipped?: undefined };
-function parseItem(item: ParseItem, G: Grammar): ParseOutcome {
+function parseItem(auth: Authority, item: ParseItem, G: Grammar): ParseOutcome {
   try {
     if (typeof item.text === 'string') {
       const rec = parseFile(item.id, item.text, G);
       rec.file.mtime = item.mtimeMs ?? null;
       return { id: item.id, mtimeMs: item.mtimeMs ?? -1, size: item.text.length, rec, fromBuffer: true };
     }
-    const r = readNote(item.file!);
+    const r = readNote(auth, item.file!);
     if (r.skipped) return { id: item.id, skipped: r.skipped };
     const rec = parseFile(item.id, r.text, G);
     rec.file.mtime = r.mtimeMs;
@@ -460,6 +462,8 @@ export type SyncReply = { jobId: number; hits: GrepHit[]; error?: undefined } | 
 
 if (!isMainThread && workerData && workerData.notesWorker) {
   lockdown();
+  const auth = new Authority(workerData.authority);
+  if (workerData.tokenFile) auth.protectCredential(workerData.tokenFile);
   let G = compileGrammar(workerData.grammar);
   const { syncPort, signal }: { syncPort?: MessagePort; signal: Int32Array } = workerData;
   /* A grep job over MSG.files (live text or a file to read): the hits, at most MSG.max. */
@@ -468,7 +472,7 @@ if (!isMainThread && workerData && workerData.notesWorker) {
     const out: GrepHit[] = [];
     for (const f of msg.files) {
       if (out.length >= msg.max) break;
-      const text = typeof f.text === 'string' ? f.text : (() => { const r = readNote(f.file!); return r.skipped ? null : r.text; })();
+      const text = typeof f.text === 'string' ? f.text : (() => { const r = readNote(auth, f.file!); return r.skipped ? null : r.text; })();
       if (text === null) continue;
       grepText(f.id, text, re, { excludeLinks: msg.excludeLinks, wiki: G.wiki, ref: G.ref, max: msg.max }, out);
     }
@@ -478,8 +482,8 @@ if (!isMainThread && workerData && workerData.notesWorker) {
     try {
       switch (msg.t) {
         case 'grammar': G = compileGrammar(msg.grammar); parentPort!.postMessage({ t: 'grammar', ok: true }); break;
-        case 'parse': parentPort!.postMessage({ t: 'parsed', jobId: msg.jobId, results: msg.items.map(it => parseItem(it, G)) }); break;
-        case 'scan': parentPort!.postMessage({ t: 'scanned', jobId: msg.jobId, files: scanTree(msg.root, msg.ignore) }); break;
+        case 'parse': parentPort!.postMessage({ t: 'parsed', jobId: msg.jobId, results: msg.items.map(it => parseItem(auth, it, G)) }); break;
+        case 'scan': parentPort!.postMessage({ t: 'scanned', jobId: msg.jobId, files: scanTree(auth, msg.root, msg.ignore) }); break;
         case 'grep': parentPort!.postMessage({ t: 'grepped', jobId: msg.jobId, hits: grepJob(msg) }); break; // a thread waits (R4.42)
         default: parentPort!.postMessage({ t: 'error', jobId: (msg as { jobId: number }).jobId, error: `unknown job ${(msg as { t: string }).t}` });
       }

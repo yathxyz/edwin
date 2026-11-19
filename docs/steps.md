@@ -1287,7 +1287,7 @@ This is a manual tool, not a suite. It constructs `AgentSessions` and real daemo
 under a private temporary state directory removed on success or failure. No user init/image, listening
 socket, agent RPC installer or prompt store is loaded. The core modules registering agent start/send/
 answer/cancel/remove/mode/config/revive commands are omitted too; a GET-only override additionally
-refuses every write before HTTP. Only the feature's token reader opens the credential file.
+refuses every write before HTTP. Only the feature's token reader consumes credential bytes.
 
 With no SID, print the live list buffer after model-fact reads/publication finish. With SID, wait for
 the initial stream snapshot and replay to the latest announced epoch/head, freeze that snapshot,
@@ -1498,6 +1498,15 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
 - **Folds:** existing buffer-local folds are reused, including sharing between cards/windows inside one
   runtime. Separate terminal/browser runtimes have independent choices. No second daemon transcript.
 
+- **Credential and storage boundary:** ordinary editor readers (including directory metadata, note
+  indexing, reloads and binary attachment) authorize the opened Linux descriptor, not a pathname
+  checked before opening. Hard links and proc aliases do not grant access. Retained draft entries
+  must be single-link regular files; writes use atomic rename relative to an opened private directory.
+  This is **not a Scheme or process sandbox**. The server evaluator has host file-loading authority;
+  process primitives delegate to the configured PTY hub, whose processes have that host account's
+  permissions. If either can read the credential, an attached programmer can use that authority.
+  Don't grant untrusted clients evaluator/process access; isolate services and credentials with OS
+  identities and filesystem permissions when a stronger boundary is required.
 - **Tool file authority:** file/line jumps work when the agent's host is this edwind host and its path
   passes Edwin's read authority. The supplied HTTP API has no remote-file endpoint; a remote-host
   location says to open it on that host rather than treating the same path on this machine as its file.

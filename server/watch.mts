@@ -5,7 +5,7 @@
 // read. The line-then-character diff and the merge live here too.
 import fs from 'node:fs';
 import path from 'node:path';
-import { readText, sha256, diskState, sameDisk } from './files.mts';
+import { readTextFd, sha256, diskState, sameDisk } from './files.mts';
 import type { TextFile } from './files.mts';
 import type { Op } from './proto.mts';
 import type { Buffers, SBuf } from './buffers.mts';
@@ -167,15 +167,16 @@ export class Watcher {
   /* Compare the file with what edwind last saw and act (R8.12–R8.15). */
   check(sb: SBuf): void {
     if (!sb.file || sb.big) return;
-    let st: fs.Stats | null = null;
-    try { st = fs.statSync(sb.file); } catch (e) { if (e.code !== 'ENOENT') return; }
-    if (!st) {
+    let r: TextFile | null;
+    try {
+      r = this.buffers.auth.withRead(sb.file, (fd, st, real) =>
+        sameDisk(diskState(st), sb.disk) ? null : readTextFd(fd, st, real));
+    } catch (e) {
+      if (e.code !== 'ENOENT') { this.log.warn('disk', { buf: sb.id, error: e.code }); return; }
       if (sb.disk !== null) { sb.disk = null; sb.setDiskChanged('deleted'); this.log.info('disk', { buf: sb.id, change: 'deleted' }); }
       return;
     }
-    if (sameDisk(diskState(st), sb.disk)) { if (sb.diskChanged === 'deleted') sb.setDiskChanged(null); return; }
-    let r: TextFile;
-    try { r = readText(sb.file); } catch (e) { this.log.warn('disk', { buf: sb.id, error: e.code }); return; }
+    if (!r) { if (sb.diskChanged === 'deleted') sb.setDiskChanged(null); return; }
     sb.disk = diskState(r.stat);
     if (sb.diskChanged === 'deleted') sb.setDiskChanged(null);
     const hash = sha256(r.text);

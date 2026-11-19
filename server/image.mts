@@ -359,7 +359,7 @@ export class ImageLog {
       const re = new RegExp(`^\\s*\\((?:define|define-command|define-syntax|define-macro|defvar|defcustom|define-minor-mode|define-derived-mode|define-pi-tool)\\s+\\(?'?${esc}(?=[\\s)])`);
       let names: string[] = []; try { names = fs.readdirSync(path.join(EDWIN_TREE, 'scm')).filter(f => f.endsWith('.scm')).sort(); } catch (e) { return false; }
       for (const f of names) {
-        const lines = fs.readFileSync(path.join(EDWIN_TREE, 'scm', f), 'utf8').split('\n');
+        const lines = server.auth.withRead(path.join(EDWIN_TREE, 'scm', f), fd => fs.readFileSync(fd, 'utf8')).split('\n');
         const i = lines.findIndex(l => re.test(l));
         if (i >= 0) return S.listOf([`edwin/scm/${f}`, BigInt(i + 1)]);
       }
@@ -369,7 +369,13 @@ export class ImageLog {
       const rel = S.str(f, '%edwin-source').replace(/^edwin\//, '');
       const real = path.resolve(EDWIN_TREE, rel);
       if (!real.startsWith(EDWIN_TREE + path.sep) || rel.split('/').includes('node_modules')) throw new S.SchemeError('error', `%edwin-source: ${rel} is not in the shipped tree`, []);
-      let text: string; try { text = fs.readFileSync(real, 'utf8'); } catch (e) { throw new S.SchemeError('error', `%edwin-source: no file ${rel}`, []); }
+      let text: string;
+      try {
+        text = server.auth.withRead(real, (fd, st, opened) => {
+          if (!st.isFile() || !opened.startsWith(EDWIN_TREE + path.sep)) throw new Error();
+          return fs.readFileSync(fd, 'utf8');
+        });
+      } catch { throw new S.SchemeError('error', `%edwin-source: no file ${rel}`, []); }
       const lines = text.split('\n'), from = Math.max(1, Number(ln) || 1), count = Math.min(400, Math.max(1, n === undefined ? 40 : Number(n) || 40));
       return lines.slice(from - 1, from - 1 + count).map((l, i) => `${from + i}: ${l}`).join('\n');
     }));
