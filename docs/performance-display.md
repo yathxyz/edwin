@@ -12,7 +12,7 @@ The comparisons below use the same page workload and command driver from `tools/
 
 ## Row-cache fix
 
-Ten pairs of runs compared **B** (`d691a98889`, before the fix) with **C** (the same code with the cache fix). Order alternated BC, CB. Each browser ran all seven scenarios, with 20 warmup and 100 measured keys per scenario. The benchmark sends a synthetic key through the editor and checks the drawn cursor. DOM time ends when the edit and redisplay are idle; frame time ends at the next animation-frame callback, **before paint**. Neither measures physical keyboard-to-screen latency.
+Ten pairs of runs compared **B** (`d691a98889`, before the fix) with **C** (the cache fix in `bf980f5807`, before the byte-table and key-prefix changes). Order alternated BC, CB. Each browser ran all seven scenarios, with 20 warmup and 100 measured keys per scenario. The benchmark sends a synthetic key through the editor and checks the drawn cursor. DOM time ends when the edit and redisplay are idle; frame time ends at the next animation-frame callback, **before paint**. Neither measures physical keyboard-to-screen latency.
 
 Frame time in milliseconds, **p50 / p95 / p99**. Before and after are medians of the ten runs' percentiles. The last column takes the difference *within each pair* first; positive means slower.
 

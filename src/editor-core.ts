@@ -1981,10 +1981,11 @@ function vLineStart(b: EdBuffer, n: number) {
   return lineStartB(b, n + pre[lo]);
 }
 function vLineCount(b: EdBuffer) { const F = foldsOf(b); if (!F) return lineCountB(b); return lineCountB(b) - foldPrefix(b, F)[F.length]; }
+const BYTE_CLASS_COUNT = 256;
 // Compare by index: array iteration methods such as every() skip sparse slots.
 function sameClassNames(a: string[], b: string[]) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  const n = Math.min(BYTE_CLASS_COUNT, Math.max(a.length, b.length));
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false;
   return true;
 }
 /* Render the lines of B from the line at O.from, at most O.count lines (every line when o.lines is
@@ -2038,15 +2039,17 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const wantRuns = !!o.runs, wantHtml = o.html !== false || !wantRuns;
   let R: EdRun[] | null = null;
   // Absolute HTML offsets and lexer IDs wider than the packed byte are not in the row key.
-  const cacheable = (lines || !wantHtml) && !o.avy && (!ext || ecls instanceof Uint8Array);
+  const cacheable = (lines || !wantHtml) && !o.avy && (!ext || ecls instanceof Uint8Array || ecls instanceof Uint8ClampedArray);
   const next: EcLineCache | null = cacheable ? new Map() : null;
   let cache: EcLineCache | null = next ? o.cache || null : null;
   if (next && ext) {
     const prev = cache?.names;
     if (prev && sameClassNames(prev, names)) next.names = prev;
-    else { next.names = names.slice(); cache = null; }
+    else { next.names = names.slice(0, BYTE_CLASS_COUNT); cache = null; }
   }
-  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
+  const cursorClass = o.cursorClass || '';
+  const ckPre = next ? `${o.active ? 1 : 0}|${cursorClass.length}:${cursorClass}|${ext ? 'x' : ''}|${ellT.length}:${ellT}|`
+    + (wantRuns ? (wantHtml ? 'RH|' : 'R|') : '') : '';
   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
   for (; ls <= n && made < count; ln++, made++) {
     const le = eolS(ls);
@@ -2086,7 +2089,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
         const ch = t.charAt(k), atEnd = k === le;
         const kc = atEnd ? '' : cls ? CLS_NAMES[cls[k]] : ecls ? names[ecls[k - from]] || '' : '';
         const fk = flags[k - from] || 0;
-        const ccls = `cur ${o.cursorClass || ''}${o.active ? '' : ' ghost'}${kc ? ' ' + kc : ''}${fk & FLAG.REGION ? ' rg' : ''}${fk & FLAG.PAREN ? ' pm' : ''}`;
+        const ccls = `cur ${cursorClass}${o.active ? '' : ' ghost'}${kc ? ' ' + kc : ''}${fk & FLAG.REGION ? ' rg' : ''}${fk & FLAG.PAREN ? ' pm' : ''}`;
         if (R) R.push({ s: k - ls, e: atEnd ? k - ls : k - ls + 1, cls: ccls, k: 'cur' });
         if (wantHtml) html += `<span class="${ccls}" data-o="${k - rel}" data-len="${atEnd ? 0 : 1}">${atEnd ? ' ' : esc(ch)}</span>`;
         start = atEnd ? k : k + 1;

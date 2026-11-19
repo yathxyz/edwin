@@ -1353,6 +1353,7 @@ let booted = false;
 function boot(opts: NonNullable<Parameters<EdApi['boot']>[0]> = {}) {
   if (booted) throw new Error('Edwin has already booted');
   if (opts.host && opts.host !== host) throw new Error('Ed.boot: a different host from the one Edwin loaded with');
+  if (opts.frame && !E.frames.includes(opts.frame)) signal('wrong-type-argument', 'not a live frame', opts.frame);
   booted = true; E.booted = true; servedBoot = !!opts.served;
   for (const n of ['global-map', 'minibuffer-local-map', 'scheme-mode-map', 'scheme-interaction-mode-map', 'special-mode-map', 'fundamental-mode-map', 'org-mode-map', 'text-mode-map'])
     L.set(n, new Ed.Keymap(n));
@@ -1398,14 +1399,15 @@ function wire(f: EdFrame) {
   const on = <K extends keyof HTMLElementEventMap>(el: EventTarget, type: K, fn: (e: HTMLElementEventMap[K]) => void, o?: AddEventListenerOptions) => { el.addEventListener(type, fn as EventListener, o); f.listeners.push([el, type, fn, o]); };
   const focus = () => { if (doc.activeElement !== ta) ta.focus({ preventScroll: true }); };
   const focusHook = (name: string) => { try { L.resetOps(); L.runHook(name); } catch (e) { Ed.reportError(e); } };
-  on(ta, 'focus', () => {
+  const onFocus = () => {
     /* Focus follows the textarea: the frame becomes the selected one, and a minibuffer left open in another
        frame is abandoned (one command loop serves every frame). */
     const prev = E.frame;
     if (prev && prev !== f && prev.mini) { prev.mini.done = { quit: true }; Ed.feedKey('<cmd:ignore>'); }
     if (E.frames.includes(f)) Ed.selectFrame(f);
     f.focused = true; focusHook('focus-in-hook'); Ed.frameEvent('focus', f); Ed.render();
-  });
+  };
+  on(ta, 'focus', onFocus);
   on(ta, 'blur', () => { f.focused = false; focusHook('focus-out-hook'); Ed.frameEvent('blur', f); Ed.render(); });
   let composing = false, leaderSaid = false;
   on(ta, 'keydown', e => {
@@ -1478,7 +1480,10 @@ function wire(f: EdFrame) {
       else Ed.feedKey('<cmd:' + btn.dataset.cmd + '>');
     });
   }
-  if (f.legacy) focus();
+  if (f.legacy) {
+    if (doc.activeElement === ta) onFocus(); // Focus arrived before boot installed the listener.
+    else focus();
+  }
 }
 Ed.hooks.wireFrame = wire;
 /* Wheel scrolling of a window, wired once per window element when it is made (every frame). */

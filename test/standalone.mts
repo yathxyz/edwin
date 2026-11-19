@@ -1,5 +1,6 @@
-// Run SCRIPT (an async function body returning a string) against an unmodified standalone page.
-// Its window, document and editor are `win`, `doc` and `Ed`. Sources must be stripped to .js first.
+// Run SCRIPT (an async function body returning a string) in a fresh standalone page.
+// By default the page boots unmodified; beforeBoot hands the page's boot options to SCRIPT instead.
+// The page's window, document and editor are `win`, `doc` and `Ed`. Strip sources to .js first.
 import { execFile } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -9,26 +10,31 @@ import path from 'node:path';
 import type { TestContext } from 'node:test';
 import { promisify } from 'node:util';
 
-export async function inStandalonePage(t: TestContext, script: string): Promise<string> {
+export async function inStandalonePage(t: TestContext, script: string, beforeBoot = false): Promise<string> {
   const driver = `<!doctype html><style>body{margin:0}iframe{width:100vw;height:90vh;border:0}</style>
-    <output>waiting for *scratch*</output><script>
-    async function drive(frame) {
+    <output>waiting for the editor</output><script>
+    async function drive(frame, bootOptions) {
       const win = frame.contentWindow, doc = frame.contentDocument, out = document.querySelector('output');
       try {
-        while (!doc.querySelector('.ml-name')?.textContent.includes('*scratch*')) await new Promise(r => setTimeout(r, 10));
+        if (!bootOptions) while (!doc.querySelector('.ml-name')?.textContent.includes('*scratch*')) await new Promise(r => setTimeout(r, 10));
         const Ed = win.Ed;
         out.textContent = 'running page test';
         out.textContent = 'done:' + encodeURIComponent(await (async () => { ${script} })());
       } catch (e) { out.textContent = 'error:' + e; }
     }
-    </script><iframe src="/index.html" onload="drive(this)"></iframe>`;
+    </script><iframe src="/index.html" ${beforeBoot ? '' : 'onload="drive(this)"'}></iframe>`;
   const server = createServer((req, res) => {
     const url = req.url || '/';
     res.setHeader('Content-Security-Policy', "connect-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'");
     if (url === '/') { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(driver); return; }
     if (!/^\/(index\.html|src\/[\w-]+\.js|scm\/[\w-]+\.scm)$/.test(url)) { res.writeHead(404).end(); return; }
     res.setHeader('Content-Type', url.endsWith('.html') ? 'text/html; charset=utf-8' : url.endsWith('.js') ? 'text/javascript' : 'text/plain; charset=utf-8');
-    try { res.end(readFileSync(new URL('..' + url, import.meta.url))); } catch { res.writeHead(404).end(); }
+    try {
+      const file = new URL('..' + url, import.meta.url);
+      // Keep the standalone DOM, loading order, host and frame construction. Only defer the boot call.
+      if (beforeBoot && url === '/index.html') res.end(readFileSync(file, 'utf8').replace('Ed.boot(', 'parent.drive(frameElement, '));
+      else res.end(readFileSync(file));
+    } catch { res.writeHead(404).end(); }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => { server.close(); });

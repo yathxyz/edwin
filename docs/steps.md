@@ -9,7 +9,8 @@ The E0 gate of the edwind spec (§17) passes: `edwin-scheme`, `edwin-headless` w
 
 - **Host layer and boot (R4.1, R4.11, R9.1).** `index.html` loads `host-browser.js` (stripped from `host-browser.ts`) first and calls
   `Ed.boot({host, frame})` once the core scripts and Scheme sources have loaded. Boot installs the first window
-  on `*scratch*` in the page's existing frame and wires its input. Under Node, `require('./src/host-node.cts')` gives `createHost` and
+  on `*scratch*` in the page's existing frame and keeps its input focused if it already was. Passing a destroyed
+  frame is rejected without consuming the one boot. Under Node, `require('./src/host-node.cts')` gives `createHost` and
   `loadEdwin`; then `Ed.boot({host})`. Boot loads `emacs`, `evil`, `org`, `ai`, `init`, then the user's
   `~/.config/edwin/init.scm` when the host has one. Each shipped file is a feature, so `(require 'org)` does not load it again.
 - **Frames (R9.2, headless part).** Page elements are parts of a frame made by `Ed.makeFrame(root, parts)` and read

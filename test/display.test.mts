@@ -554,41 +554,92 @@ test('a warm row cache preserves spans and runs across cursor moves, folds and h
   b.markActive = false;
 });
 
-for (const change of ['rename', 'shift sparse table', 'wide cursor ID']) {
+for (const change of ['rename', 'fill used hole', 'wide cursor ID']) {
   test(`cached lexer faces on the grid: ${change}`, async () => {
     await show('lexer-faces.txt', 'fundamental-mode', 'xy');
     const lex = Ed.hooks.lexSeg, names = ['fn', 'kw'];
     const wide = change === 'wide cursor ID', cls = wide ? Uint16Array.of(1, 1) : Uint8Array.of(1, 1);
+    const sparse = change === 'fill used hole';
+    if (sparse) { names.length = 3; cls[0] = 2; }
     if (wide) names[257] = 'fn';
     Ed.hooks.lexSeg = () => ({ cls, names });
     try {
       const colors = () => { const m = draw(); return [faceAt(m, 0, 0).fg, faceAt(m, 1, 0).fg]; };
-      const { kw, fn } = D.PALETTE.light;
-      assert.deepEqual(colors(), [kw, kw]);
+      const { kw, fn, fg } = D.PALETTE.light;
+      assert.deepEqual(colors(), [sparse ? fg : kw, kw]);
       if (change === 'rename') names[1] = 'fn';
-      else if (change === 'shift sparse table') { names.unshift(''); delete names[0]; }
+      else if (sparse) names[2] = 'fn';
       else cls[0] = 257; // Same low byte as 1, but the cursor uses the full ID.
-      assert.deepEqual(colors(), [fn, change === 'wide cursor ID' ? kw : fn]);
+      assert.deepEqual(colors(), [fn, change === 'rename' ? fn : kw]);
     } finally { Ed.hooks.lexSeg = lex; }
   });
 }
 
-test('a cached folded row uses the current ellipsis', async () => {
+for (const Bytes of [Uint8Array, Uint8ClampedArray]) {
+  test(`${Bytes.name} lexer rows are reused without consulting unreachable names`, async () => {
+    const b = await show('byte-cache.txt', 'fundamental-mode', 'xy');
+    const lex = Ed.hooks.lexSeg, cls = Bytes.of(1, 1), names = ['', 'kw'];
+    let highName = 'fn', reads = 0;
+    Object.defineProperty(names, 65536, { configurable: true, get() { reads++; return highName; } });
+    Ed.hooks.lexSeg = () => ({ cls, names });
+    try {
+      const opts = { runs: true };
+      const first = Ed.renderBuffer(b, opts);
+      let cache = first.cache;
+      const expectHit = (message: string) => {
+        const warm = Ed.renderBuffer(b, { ...opts, cache });
+        assert.strictEqual(warm[0].runs, first[0].runs, message);
+        cache = warm.cache;
+      };
+      expectHit('an unchanged row reuses its runs');
+      highName = 'cm';
+      expectHit('renaming an unreachable ID cannot invalidate a byte row');
+      names.length = 2;
+      expectHit('truncating unreachable IDs cannot invalidate a byte row');
+      names[65536] = 'cm';
+      expectHit('extending the table beyond the reachable IDs cannot invalidate a byte row');
+      assert.equal(reads, 0, 'the snapshot and comparison stop at the byte boundary');
+    } finally { Ed.hooks.lexSeg = lex; }
+  });
+}
+
+test('a cached folded row uses the current cursor class and ellipsis', async () => {
   const b = await show('class-cache.txt', 'fundamental-mode', 'a\0|b\nhidden\nend');
   b.folds = [{ s: 4, e: 11 }];
-  const { ellipsis } = Ed.hooks;
-  let label = 'first\0|';
+  const { ellipsis, lexSeg } = Ed.hooks;
+  const cls = new Uint8Array(b.text.length), names = [''];
   try {
-    Ed.hooks.ellipsis = () => label;
-    const opts = { pt: 0, runs: true };
-    const before = Ed.renderBuffer(b, opts);
-    label = '\0|<&>';
-    const reused = Ed.renderBuffer(b, { ...opts, cache: before.cache });
-    assert.deepEqual([...reused], [...Ed.renderBuffer(b, opts)]);
-    assert.equal(reused[0].runs.at(-1).t, label);
+    Ed.hooks.lexSeg = () => ({ cls, names });
+    for (const [cursor, ell, nextCursor, nextEll] of [
+      ['', 'first\0|', '', '\0|<&>'],
+      ['a', 'b|x|c', 'a|x|b', 'c'],
+    ]) {
+      Ed.hooks.ellipsis = () => ell;
+      const opts = { pt: 0, runs: true, cursorClass: cursor };
+      const before = Ed.renderBuffer(b, opts);
+      opts.cursorClass = nextCursor;
+      Ed.hooks.ellipsis = () => nextEll;
+      const reused = Ed.renderBuffer(b, { ...opts, cache: before.cache });
+      assert.deepEqual([...reused], [...Ed.renderBuffer(b, opts)]);
+      assert.equal(reused[0].runs.at(-1).t, nextEll);
+    }
   } finally {
     Ed.hooks.ellipsis = ellipsis;
+    Ed.hooks.lexSeg = lexSeg;
   }
+});
+
+test('a cursor class containing row metadata cannot consume the start of the row', async () => {
+  // With separator-only fields, moving this header from text to the cursor class left the same
+  // key: the shorter row's NULs looked just like the longer row's extra zero class/flag bytes.
+  const header = '|||RH|0|0|';
+  const b = await show('cursor-class.txt', 'fundamental-mode', header);
+  const opts = { pt: 0, runs: true, cursorClass: 'a' };
+  const before = Ed.renderBuffer(b, opts);
+  b.text = '\0'.repeat(5);
+  opts.cursorClass += header;
+  const warm = Ed.renderBuffer(b, { ...opts, cache: before.cache });
+  assert.deepEqual(warm[0], Ed.renderBuffer(b, opts)[0]);
 });
 
 /* ---------- the face tables mirror the stylesheets ---------- */
