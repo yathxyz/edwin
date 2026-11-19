@@ -49,18 +49,28 @@ const arg = (args: unknown[]): Record<string, unknown> => (args[0] && typeof arg
 
 /* Every file read while copying a tree is a read under the same authority as a visit. A source
    replaced after open cannot change what is copied. Never follow a directory through a child name. */
-function copyEntry(auth: Authority, src: string, dst: string): void {
+async function copyGuardedEntry(auth: Authority, src: string, dst: string): Promise<void> {
   const entry = entryOf(auth, src, path.basename(src))?.entry;
   if (!entry) throw new ProtoError('bad_request', 'Missing copy source');
-  if (entry.kind === 'link') { fs.symlinkSync(entry.target!, dst); return; }
-  auth.withRead(src, (fd, st) => {
-    const pinned = `/proc/self/fd/${fd}`;
-    if (st.isDirectory()) {
-      fs.mkdirSync(dst, st.mode & 0o777);
-      for (const name of fs.readdirSync(pinned)) copyEntry(auth, path.join(pinned, name), path.join(dst, name));
-    } else if (st.isFile()) fs.copyFileSync(pinned, dst, fs.constants.COPYFILE_EXCL);
-    else throw new ProtoError('bad_request', 'Unsupported copy source');
+  if (entry.kind === 'link') { await fs.promises.symlink(entry.target!, dst); return; }
+  // withRead lends its descriptor only during the callback. Take a reference to the checked
+  // inode before returning, never reopening src after an await.
+  const { held, st } = auth.withRead(src, (fd, st) => {
+    if (!st.isDirectory() && !st.isFile()) throw new ProtoError('bad_request', 'Unsupported copy source');
+    return { held: fs.openSync(`/proc/self/fd/${fd}`, fs.constants.O_RDONLY), st };
   });
+  try {
+    const pinned = `/proc/self/fd/${held}`;
+    if (st.isFile()) { await fs.promises.copyFile(pinned, dst, fs.constants.COPYFILE_EXCL); return; }
+    await fs.promises.mkdir(dst, 0o700);
+    const target = await fs.promises.open(dst, fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      const into = `/proc/self/fd/${target.fd}`;
+      for await (const { name } of await fs.promises.opendir(pinned))
+        await copyGuardedEntry(auth, path.join(pinned, name), path.join(into, name));
+      await target.chmod(st.mode & 0o777);
+    } finally { await target.close(); }
+  } finally { fs.closeSync(held); }
 }
 
 /* REAL may be written by a file operation: inside a write root and not refused (checkWrite), not one of
@@ -151,7 +161,12 @@ export class Fs {
     let there = true;
     try { fs.lstatSync(dstReal); } catch (e) { if (e.code !== 'ENOENT') throw bad(e); there = false; }
     if (there || this.server.buffers.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
-    try { copyEntry(auth, srcReal, dstReal); } catch (e) { throw bad(e); }
+    try {
+      // Ordinary copies use asynchronous recursive I/O. With protected identities, cp's
+      // pathname-based content reads cannot substitute for copying the checked, pinned source.
+      if (auth.guardsCredential) await copyGuardedEntry(auth, srcReal, dstReal);
+      else await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_EXCL });
+    } catch (e) { throw bad(e); }
     fsyncDir(path.dirname(dstReal));
     this.server.log.info('fs-copy', { src: srcReal, dst: dstReal, dir });
     return { ok: true, src: srcReal, dst: dstReal, dir };

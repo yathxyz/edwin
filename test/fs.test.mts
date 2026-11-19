@@ -8,6 +8,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild } from './edit-client.mts';
+import { Authority } from '../server/paths.mts';
+import { Fs } from '../server/fs.mts';
+import type { Server } from '../server/main.mts';
 
 let dir: TestDir, child: EdwindChild, c: EditClient, outside: string;
 const at = (p: string) => path.join(dir.dirs.home, p);
@@ -138,6 +141,68 @@ test('fs-copy: files, links as links, whole directories; into a directory; never
   // A name an unsaved buffer already holds is taken.
   await c.open(at('cp/unsaved.md'), { create: true });
   assert.equal((await call('fs-copy', { src: '~/cp/a.md', dst: '~/cp/unsaved.md' })).code, 'bad_request');
+});
+
+test('fs-copy: serves a second command before an ordinary recursive copy finishes', async () => {
+  const src = at('many-files'), dst = at('many-copies'), count = 256;
+  fs.mkdirSync(src);
+  for (let i = 0; i < count; i++) fs.writeFileSync(path.join(src, String(i)), String(i));
+
+  // Dispatch in wire order. Sample the destination *inside the daemon*, not after its
+  // promises publish their replies: even a wholly synchronous copy returns a promise.
+  const copy = c.newRid(), probe = c.newRid();
+  c.sock.write([
+    { t: 'call', cmd: 'fs-copy', rid: copy, args: [{ src, dst }] },
+    { t: 'call', cmd: 'fs-list', rid: probe, args: [{ dir: dst }] },
+  ].map(m => JSON.stringify(m) + '\n').join(''));
+  const seen = await c.next(m => m.rid === probe);
+  const done = await c.next(m => m.rid === copy);
+  assert.equal(done.t, 'result', JSON.stringify(done));
+  assert.equal(fs.readdirSync(dst).length, count);
+  if (seen.t === 'error') assert.match(seen.msg, /ENOENT|no such file/i);
+  else assert.ok(seen.value.entries.length < count, 'the daemon could not inspect the destination until every file was copied');
+});
+
+test('fs-copy: a guarded copy yields between entries and keeps its source directory pinned', async () => {
+  const auth = new Authority(dir.cfg);
+  auth.protectCredential(put('guarded-copy-marker'));
+  const ops = new Fs({ buffers: { auth, all: () => [] }, log: { info() {} } } as unknown as Server);
+  const src = at('guarded-tree'), dst = src + '-copy', count = 128;
+  fs.mkdirSync(src);
+  for (let i = 0; i < count; i++) fs.writeFileSync(path.join(src, String(i)), String(i));
+
+  let done = false, renamed = false;
+  const copy = ops.copy(src, dst).finally(() => { done = true; });
+  const observe = async () => {
+    while (!done) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      if (!fs.existsSync(dst)) continue;
+      const n = fs.readdirSync(dst).length;
+      if (n > 0 && n < count) {
+        fs.renameSync(src, src + '-moved');
+        renamed = true;
+        break;
+      }
+    }
+  };
+  await Promise.all([copy, observe()]);
+  assert.ok(renamed, 'no turn of the event loop ran while the tree was partially copied');
+  for (let i = 0; i < count; i++) assert.equal(fs.readFileSync(path.join(dst, String(i)), 'utf8'), String(i));
+});
+
+test('fs-copy: guarded recursive reads refuse aliases to a protected fixture', async () => {
+  const auth = new Authority(dir.cfg), ops = new Fs({ buffers: { auth, all: () => [] } } as unknown as Server);
+  const protectedFile = put('protected-copy-fixture', 'synthetic marker');
+  auth.protectCredential(protectedFile);
+  for (const kind of ['hard', 'symbolic']) {
+    const src = at(`guarded-${kind}`), dst = src + '-copy';
+    fs.mkdirSync(src);
+    const leaf = path.join(src, 'alias');
+    if (kind === 'hard') fs.linkSync(protectedFile, leaf);
+    else fs.symlinkSync(protectedFile, leaf);
+    await assert.rejects(ops.copy(src, dst), { code: 'refused_path' });
+    assert.equal(fs.lstatSync(path.join(dst, 'alias'), { throwIfNoEntry: false }), undefined);
+  }
 });
 
 test('fs-copy refuses a source in a refused path, a tree that holds one, and every destination a rename would refuse', async () => {
