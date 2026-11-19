@@ -2,6 +2,7 @@
 // EDWIN_ROOT=.perf-base selects another checkout; SAMPLES (default 100), WARMUP (20), SCENARIO (substring),
 // PROFILE=1 (sampling profiler; use in a separate diagnostic run). One private headless browser, loopback HTTP,
 // local fonts and no existing profile. If your Chromium *requires* an unsandboxed launch set NO_SANDBOX=1.
+// COVERAGE_DIR=dir records V8 block counts per scenario in a separate diagnostic run (not latency data).
 // A synthetic keydown goes through the real textarea, keymap, command loop and DOM redisplay. keyDomMs ends
 // when the loop goes idle. keyFrameMs ends at the next rAF callback after idle (vsync-quantized, not physical
 // presentation/input latency). Browser counters span the measured keys, excluding setup, warmup and profiler IO.
@@ -11,7 +12,7 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
-import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Readable, Writable } from 'node:stream';
@@ -137,6 +138,13 @@ try {
   const run = (fn: Function, ...args: any[]) => ev(`(${fn})(${args.map(a => JSON.stringify(a)).join(',')})`);
   await tab('Runtime.enable');
   await tab('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  const coverageDir = process.env.COVERAGE_DIR;
+  if (coverageDir) {
+    mkdirSync(coverageDir, { recursive: true });
+    await tab('Profiler.enable');
+    // Enable before Edwin is compiled so V8 records individual branches, not just function entries.
+    await tab('Profiler.startPreciseCoverage', { callCount: true, detailed: true });
+  }
   await tab('Page.navigate', { url }); await tab('Page.bringToFront');
   const deadline = Date.now() + 30000;
   while (!await ev('Number.isFinite(globalThis.edwinBenchReadyMs)')) { if (Date.now() > deadline) throw Error(`page did not boot: ${await ev('document.body.innerText.slice(-500)')}`); await new Promise(r => setTimeout(r, 100)); }
@@ -147,7 +155,12 @@ try {
   for (const scenario of scenarios) {
     const fixture = await run(prepare, scenario); await run(drive, scenario, warmup);
     if (process.env.PROFILE === '1') { await tab('Profiler.enable'); await tab('Profiler.start'); }
+    if (coverageDir) await tab('Profiler.takePreciseCoverage'); // discard navigation, setup and warmup
     const cpu0 = await renderers(), m0 = await metrics(), r = await run(drive, scenario, samples), m1 = await metrics(), cpu1 = await renderers();
+    if (coverageDir) {
+      const { result } = await tab('Profiler.takePreciseCoverage');
+      writeFileSync(path.join(coverageDir, scenario + '.json'), JSON.stringify(result));
+    }
     let hot: Record<string, number> | undefined;
     if (process.env.PROFILE === '1') {
       const { profile } = await tab('Profiler.stop'); const names = new Map<number, string>(profile.nodes.map((n: any) => [n.id, n.callFrame.functionName + '@' + n.callFrame.url.split('/').pop() + ':' + (n.callFrame.lineNumber + 1)]));
