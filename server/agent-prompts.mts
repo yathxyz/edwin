@@ -15,9 +15,10 @@ interface Block { type: string; [key: string]: unknown }
 interface Target { sid: string; epoch: number | null }
 interface Draft {
   key: string; targets: Target[]; blocks: Block[]; baseText: string;
+  acknowledged: Target[]; possiblySent: Target[];
   name?: string;
 }
-interface Preview { draft: string; targets: Target[]; blocks: Block[] }
+interface Preview { draft: string; targets: Target[]; possiblySent: Target[]; blocks: Block[] }
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v); // any: ACP JSON
 const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 const fail = (message: string): never => { throw new Error(message); };
@@ -25,6 +26,12 @@ const text = (v: unknown, what: string): string => typeof v === 'string' && v.le
 const sidOf = (v: unknown): string => { const s = text(v, 'Session'); if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) fail('Not an ACP session id'); return s; };
 const epochOf = (v: unknown): number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : fail('A captured session incarnation (epoch) is required');
 const targetKey = (v: Target): string => `${v.sid}/${v.epoch}`;
+function requireUnsent(d: Draft, target: Target) {
+  const same = (t: Target) => t.sid === target.sid && t.epoch === target.epoch;
+  if (d.acknowledged.some(same)) fail(`This draft was already acknowledged by ${target.sid} (${target.epoch}); choose another destination or create a new draft`);
+  if (d.possiblySent.some(same)) fail(`This draft was possibly sent to ${target.sid} (${target.epoch}); check the session before creating a new draft`);
+}
+const uncertain = (d: Draft) => d.possiblySent.length ? ` Possibly sent to: ${d.possiblySent.map(targetKey).join(', ')}; these destinations will not be retried.` : '';
 function targetsOf(v: unknown, retained = false): Target[] {
   if (!Array.isArray(v)) fail('Targets must be an array of {sid, epoch} destinations');
   const targets = (v as unknown[]).map(t => {
@@ -53,7 +60,6 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
   const drafts = new Map<string, Draft>(), sending = new Set<string>(), owned = new Map<SBuf, Draft>();
-  const acknowledged = new Map<string, Set<string>>();
   const markdown = (d: Draft) => path.join(dir, `${d.key}.md`);
   const record = (d: Draft) => path.join(dir, `${d.key}.json`);
   const persist = (d: Draft) => writeAtomic(record(d), JSON.stringify(d) + '\n');
@@ -62,7 +68,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   function meta(sb: SBuf, d: Draft) {
     owned.set(sb, d);
     const original = sb.meta.bind(sb);
-    sb.meta = () => { const m = original(); m.locals = { ...m.locals, agentPrompt: { id: sb.id, targets: [...d.targets], name: d.name || null, resources: d.blocks.reduce((n, b) => n + Number(b.type !== 'text'), 0) } }; return m; };
+    sb.meta = () => { const m = original(); m.locals = { ...m.locals, agentPrompt: { id: sb.id, targets: d.targets, possiblySent: d.possiblySent, name: d.name || null, resources: d.blocks.reduce((n, b) => n + Number(b.type !== 'text'), 0) } }; return m; };
   }
   function open(d: Draft): SBuf {
     const live = buffers.live(idOf(d));
@@ -93,13 +99,13 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
       blocks = blocks.flatMap(b => b.type !== 'text' ? [b] : placed ? [] : (placed = true, [{ type: 'text', text: body }]));
       if (!placed && body) blocks.unshift({ type: 'text', text: body });
     }
-    return { draft: sb.id, targets: [...d.targets], blocks };
+    return { draft: sb.id, targets: d.targets, possiblySent: d.possiblySent, blocks };
   }
   async function create(value: unknown): Promise<string> {
     const a = object(value) ? value : {}, targets = targetsOf(a.targets ?? (a.sid ? [{ sid: a.sid, epoch: a.epoch }] : []));
     for (const target of targets) await backend.requireSession(target.sid, epochOf(target.epoch));
     const blocks = a.blocks === undefined ? [{ type: 'text', text: typeof a.text === 'string' ? a.text : '' }] : blocksOf(a.blocks);
-    const d: Draft = { key: randomId(), targets, blocks, baseText: backend.clean(promptText(blocks)) };
+    const d: Draft = { key: randomId(), targets, acknowledged: [], possiblySent: [], blocks, baseText: backend.clean(promptText(blocks)) };
     writeAtomic(markdown(d), d.baseText); persist(d); drafts.set(d.key, d); open(d);
     return idOf(d);
   }
@@ -107,6 +113,8 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json') continue;
     const d = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as Draft;
     if (!object(d) || d.key !== file.slice(0, -5) || typeof d.baseText !== 'string') fail('Invalid persisted agent prompt');
+    d.acknowledged = targetsOf(d.acknowledged === undefined ? [] : d.acknowledged);
+    d.possiblySent = targetsOf(d.possiblySent === undefined ? [] : d.possiblySent);
     d.targets = targetsOf(d.targets, true); d.blocks = blocksOf(d.blocks); drafts.set(d.key, d);
     const live = buffers.live(idOf(d));
     if (live) { server.Ed.switchMajorMode(live.ed, 'markdown-mode'); meta(live, d); durable(live, d); }
@@ -148,7 +156,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   }
   const selected = (args: unknown[], buf?: string) => draft(args[0] ?? buf);
   command('agent-prompt-create', ([a]) => create(a));
-  command('agent-prompt-drafts', () => [...drafts.values()].map(d => ({ id: idOf(d), targets: [...d.targets], name: d.name || null })));
+  command('agent-prompt-drafts', () => [...drafts.values()].map(d => ({ id: idOf(d), targets: d.targets, possiblySent: d.possiblySent, name: d.name || null })));
   command('agent-prompt-open', ([id]) => { const d = draft(id); open(d); return idOf(d); });
   command('agent-prompt-preview', async (args, buf) => snapshot(selected(args, buf)));
   command('agent-prompt-abandon', async (args, buf) => { const d = selected(args, buf); await snapshot(d); persist(d); return idOf(d); });
@@ -156,25 +164,26 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     const d = draft(id); if (targets === undefined) return [...d.targets]; writable(d);
     const next = targetsOf(targets);
     for (const target of next) {
-      if (acknowledged.get(d.key)?.has(targetKey(target))) fail(`This draft was already acknowledged by ${target.sid} (${target.epoch}); choose another destination or create a new draft`);
+      requireUnsent(d, target);
       await backend.requireSession(target.sid, epochOf(target.epoch));
     }
     writable(d);
-    for (const target of next) if (acknowledged.get(d.key)?.has(targetKey(target))) fail(`This draft was already acknowledged by ${target.sid} (${target.epoch}); choose another destination or create a new draft`);
+    for (const target of next) requireUnsent(d, target);
     const changed = { ...d, targets: next }; persist(changed); d.targets = next; buffers.sendMeta(open(d)); return next;
   });
   command('agent-prompt-send', async (args, buf) => {
     const d = selected(args, buf); writable(d); sending.add(d.key);
     try {
       const p = await snapshot(d), sent: string[] = [];
-      if (!p.targets.length) fail('This draft has no remaining destinations');
+      if (!p.targets.length) fail(`This draft has no remaining destinations.${uncertain(d)}`);
       if (!p.blocks.length || p.blocks.every(b => b.type === 'text' && !b.text)) fail('This prompt is empty');
       for (const target of p.targets) {
         const { sid } = target;
-        let accepted = false;
+        const remaining = d.targets, earlier = d.possiblySent;
+        let awaitingReply = false;
         try {
           if (target.epoch === null) fail(`${sid} has an unbound legacy destination; explicitly retarget this draft before sending`);
-          if (acknowledged.get(d.key)?.has(targetKey(target))) fail(`This draft was already acknowledged by ${sid} (${target.epoch})`);
+          requireUnsent(d, target);
           const epoch = epochOf(target.epoch), session = await backend.requireSession(sid, epoch);
           const caps = session.promptCapabilities ?? session.acp?.promptCapabilities ?? session.session?.promptCapabilities ?? session.info?.promptCapabilities;
           if (object(caps)) for (const b of p.blocks) {
@@ -182,19 +191,29 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
             if (capability && caps[capability] !== true) fail(`${sid} does not support ${capability} prompt blocks`);
           }
           await backend.requireSession(sid, epoch);
+          // Commit the intent before dispatch: a crash leaves either an unsent destination or a non-retryable one.
+          const targets = remaining.filter(t => t !== target), possiblySent = [...earlier, target];
+          persist({ ...d, targets, possiblySent }); d.targets = targets; d.possiblySent = possiblySent;
+          awaitingReply = true;
           await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { epoch, blocks: p.blocks });
-          // Acknowledgement is irrevocable in this daemon, even if the durable receipt cannot be written.
-          accepted = true;
-          let destinations = acknowledged.get(d.key);
-          if (!destinations) acknowledged.set(d.key, destinations = new Set());
-          destinations.add(targetKey(target));
-          d.targets = d.targets.filter(t => targetKey(t) !== targetKey(target)); sent.push(sid);
-          try { persist(d); }
-          catch (e) { fail(`Prompt acknowledged by ${sid}, but durable send receipt failed: ${backend.clean(String(e.message || e))}. This daemon will not resend this draft to that destination`); }
+          awaitingReply = false;
+          const acknowledged = [...d.acknowledged, target];
+          try { persist({ ...d, acknowledged, possiblySent: earlier }); }
+          catch (e) { fail(`Prompt acknowledged by ${sid}, but durable send receipt failed: ${backend.clean(String(e.message || e))}. On restart this destination may be marked possibly sent; it will not be retried`); }
+          finally { d.acknowledged = acknowledged; d.possiblySent = earlier; sent.push(sid); }
           buffers.sendMeta(open(d));
-        } catch (e) { fail(`${backend.clean(String(e.message || e))}. Sent: ${sent.join(', ') || 'none'}; retained for retry: ${d.targets.map(t => t.sid).join(', ') || 'none'}.${accepted ? '' : ' A lost reply may already have sent this prompt.'}`); }
+        } catch (e) {
+          let message = String(e.message || e);
+          // A client-error refusal (e.g. busy) is safe to retry. Timeouts, bad/lost replies and server errors are not.
+          if (awaitingReply && e.status >= 400 && e.status < 500 && e.status !== 408) {
+            try { persist({ ...d, targets: remaining, possiblySent: earlier }); d.targets = remaining; d.possiblySent = earlier; }
+            catch (err) { message += `. Could not record refusal: ${err.message || err}`; }
+          }
+          buffers.sendMeta(open(d));
+          fail(`${backend.clean(message)}. Sent: ${sent.join(', ') || 'none'}; retained for retry: ${d.targets.map(t => t.sid).join(', ') || 'none'}.${uncertain(d)}`);
+        }
       }
-      return { sent, remaining: [...d.targets], draft: idOf(d) };
+      return { sent, remaining: d.targets, possiblySent: d.possiblySent, draft: idOf(d) };
     } finally { sending.delete(d.key); }
   });
 

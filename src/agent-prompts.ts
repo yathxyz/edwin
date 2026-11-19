@@ -10,6 +10,7 @@ const api = () => Ed.agentSessions;
 const rpc = (cmd: string, args: unknown[] = []) => api().rpc(cmd, args);
 const cur = () => E.current;
 const metadata = (b: EdBuffer): Json | null => { const m = b.meta?.locals?.agentPrompt; return object(m) ? m : null; };
+const sendWarning = (targets?: Target[]) => targets?.length ? ` Possibly sent to ${targets.map(t => `${t.sid}@${t.epoch}`).join(', ')}; will not resend.` : '';
 const windows = new Map<string, EdWinConfig>();
 async function sessions(): Promise<Target[]> {
   const v = await rpc('agent-session-list');
@@ -41,7 +42,7 @@ async function chooseDraft(given?: unknown): Promise<string> {
   const list = await rpc('agent-prompt-drafts') as Json[];
   if (!list.length) signal('user-error', 'No prompt drafts; use agent-session-prompt first');
   if (list.length === 1) return list[0].id;
-  const labels = list.map(d => `${d.id}  ${d.name || d.targets.map((t: Json) => `${t.sid} (${t.epoch ?? 'unbound'})`).join(', ')}`);
+  const labels = list.map(d => `${d.id}  ${d.name || d.targets.map((t: Json) => `${t.sid} (${t.epoch ?? 'unbound'})`).join(', ')}${sendWarning(d.possiblySent)}`);
   const picked = await Ed.readMini('Prompt draft: ', '', () => labels, { require: true });
   return list[labels.indexOf(picked)].id;
 }
@@ -55,7 +56,8 @@ async function showDraft(id: string) {
   if (!windows.has(id)) windows.set(id, previous);
   Ed.makeLocal(b, 'agent-prompt-enabled'); b.locals!.set('agent-prompt-enabled', true);
   if (E.evil) globalThis.EvilCore.enterInsert(b, 1, false);
-  Ed.message('C-c C-c sends; C-c C-k leaves this durable draft; C-c C-p previews exact blocks');
+  const send = L.isCommand(intern('agent-prompt-send')) ? 'C-c C-c sends; ' : '';
+  Ed.message(`${send}C-c C-k leaves this durable draft; C-c C-p previews exact blocks.${sendWarning(metadata(b)?.possiblySent)}`);
   return b;
 }
 function leave(id: string) {
@@ -103,7 +105,7 @@ CMD('agent-prompt-preview', '', '&optional ID', 'Show the exact JSON content blo
 CMD('agent-prompt-send', '', '&optional ID', 'Send sequenced draft text/resources. Retain the draft on any failure, removing successful destinations durably.', async ([value]: SchemeValue[]) => {
   const id = await chooseDraft(value); await synced(id);
   const result = await rpc('agent-prompt-send', [id]) as Json;
-  leave(id); Ed.message(`Prompt sent to ${(result.sent || []).join(', ')}; draft retained`); return false;
+  leave(id); Ed.message(`Prompt sent to ${(result.sent || []).join(', ')}; draft retained.${sendWarning(result.possiblySent)}`); return false;
 });
 CMD('agent-prompt-abandon', '', '&optional ID', 'Leave this view without sending or deleting the durable draft.', async ([value]: SchemeValue[]) => {
   const id = await chooseDraft(value); await synced(id); await rpc('agent-prompt-abandon', [id]); leave(id); return false;

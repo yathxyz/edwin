@@ -285,6 +285,8 @@ test('multi-send snapshots exact blocks, removes successful targets before parti
     assert.equal(sends.filter(c => c.path.includes('/alpha/')).length, 1);
     client.close(); await stopEdwind(child); child = await startEdwind(dir); client = await connect();
     assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, [beta], 'partial success is durable across restart');
+    const repeated = await client.call('agent-prompt-targets', [retained, [alpha, beta]]);
+    assert.match(repeated.error?.report || '', /already acknowledged/i, 'positive receipt survives restart and explicit retarget');
     refuseBeta = false;
     const sent = await value('agent-prompt-send', [retained]); assert.deepEqual(sent.sent, ['beta']);
     assert.deepEqual((await value('agent-prompt-preview', [retained])).targets, []);
@@ -292,15 +294,40 @@ test('multi-send snapshots exact blocks, removes successful targets before parti
     const ambiguous = await value('agent-prompt-create', [{ ...beta, text: 'may already have acted' }]); lostReply = true;
     const mark = hub.calls.length, result = await client.call('agent-prompt-send', [ambiguous]); assert.ok(result.error);
     assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 1);
-    assert.deepEqual((await value('agent-prompt-preview', [ambiguous])).targets, [beta]);
+    assert.match(result.error.report, /possibly sent/i);
+    const preview = await value('agent-prompt-preview', [ambiguous]);
+    assert.deepEqual(preview.targets, []); assert.deepEqual(preview.possiblySent, [beta]);
+    assert.match((await client.call('agent-prompt-send', [ambiguous])).error?.report || '', /possibly sent/i);
+    assert.match((await client.call('agent-prompt-targets', [ambiguous, [beta]])).error?.report || '', /possibly sent/i);
+    assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 1);
   } finally { hub.handle = original; }
 });
 
-test('an acknowledged prompt stays excluded after receipt persistence fails, save, abandon, kill/reopen and explicit retarget', async () => {
+test('a durable send intent is required before any prompt POST', async () => {
+  const alpha = target('alpha'), id = await value('agent-prompt-create', [{ ...alpha, text: 'no intent, no send' }]);
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json');
+  fs.renameSync(file, file + '.saved'); fs.mkdirSync(file);
+  const mark = hub.calls.length;
+  try {
+    const failed = await client.call('agent-prompt-send', [id]);
+    assert.ok(failed.error);
+    assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST').length, 0, 'no mutation if its prior state cannot be recorded');
+    assert.deepEqual((await value('agent-prompt-preview', [id])).targets, [alpha]);
+  } finally { fs.rmdirSync(file); fs.renameSync(file + '.saved', file); }
+});
+
+test('an acknowledged prompt stays excluded after receipt persistence fails and the daemon crashes before saving', async () => {
   const alpha = target('alpha'), beta = target('beta'), blocks = [{ type: 'text', text: 'keep the text and resource' }, { type: 'resource_link', uri: 'file:///remote/kept', name: 'kept' }];
   const id = await value('agent-prompt-create', [{ targets: [alpha, beta], blocks }]);
-  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json'), original = fs.readFileSync(file, 'utf8');
-  fs.unlinkSync(file); fs.mkdirSync(file);
+  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json');
+  const original = hub.handle.bind(hub);
+  hub.handle = async (req, res) => {
+    if (req.method === 'POST' && req.url === '/v1/sessions/alpha/prompt') {
+      // Preserve exactly the durable state at dispatch, then make only the post-reply receipt write fail.
+      fs.renameSync(file, file + '.saved'); fs.mkdirSync(file);
+    }
+    await original(req, res);
+  };
   const mark = hub.calls.length;
   try {
     const failed = await client.call('agent-prompt-send', [id]);
@@ -309,12 +336,19 @@ test('an acknowledged prompt stays excluded after receipt persistence fails, sav
     assert.doesNotMatch(failed.error.report, /lost reply/i);
     assert.deepEqual((await value('agent-prompt-preview', [id])).targets, [beta]);
     assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 1);
-  } finally { fs.rmdirSync(file); fs.writeFileSync(file, original, { mode: 0o600 }); }
+    assert.match((await client.call('agent-prompt-targets', [id, [alpha]])).error?.report || '', /already acknowledged/i);
+  } finally {
+    hub.handle = original;
+    if (fs.existsSync(file + '.saved')) { fs.rmdirSync(file); fs.renameSync(file + '.saved', file); }
+  }
+  client.close(); await stopEdwind(child, 'SIGKILL'); child = await startEdwind(dir); client = await connect();
+  const recovered = await value('agent-prompt-preview', [id]);
+  assert.deepEqual(recovered.targets, [beta]); assert.deepEqual(recovered.possiblySent, [alpha]);
   assert.equal((await client.request({ t: 'save', buf: id })).error, undefined);
   await value('agent-prompt-save', [id, 'receipt failure keeps blocks']);
   await value('agent-prompt-abandon', [id]); await value('kill-buffer', [id]); await value('agent-prompt-open', [id]);
   const retarget = await client.call('agent-prompt-targets', [id, [alpha, beta]]);
-  assert.match(retarget.error.report, /already acknowledged/i);
+  assert.match(retarget.error?.report || '', /possibly sent/i);
   const preview = await value('agent-prompt-preview', [id]);
   assert.deepEqual(preview.targets, [beta]); assert.deepEqual(preview.blocks, blocks);
   const sent = await value('agent-prompt-send', [id]); assert.deepEqual(sent.sent, ['beta']);
@@ -322,8 +356,23 @@ test('an acknowledged prompt stays excluded after receipt persistence fails, sav
   assert.equal(sends.filter(c => c.path.includes('/alpha/')).length, 1);
   assert.equal(sends.filter(c => c.path.includes('/beta/')).length, 1);
   for (const send of sends) assert.deepEqual(send.body!.blocks, blocks);
-  const again = await client.call('agent-prompt-targets', [id, [alpha]]);
-  assert.match(again.error.report, /already acknowledged/i);
+  assert.match((await client.call('agent-prompt-targets', [id, [alpha]])).error?.report || '', /possibly sent/i);
+});
+
+test('a durable acknowledgement survives sudden restart and bars only its exact draft and incarnation', async () => {
+  const sid = 'receipt-identity', old = hub.add(sid), seen = target(sid), id = await value('agent-prompt-create', [{ ...seen, text: 'once at this epoch' }]);
+  const mark = hub.calls.length;
+  assert.deepEqual((await value('agent-prompt-send', [id])).sent, [sid]);
+  client.close(); await stopEdwind(child, 'SIGKILL'); child = await startEdwind(dir); client = await connect();
+  assert.deepEqual((await value('agent-prompt-preview', [id])).targets, []);
+  assert.match((await client.call('agent-prompt-targets', [id, [seen]])).error?.report || '', /already acknowledged/i);
+  assert.ok((await client.call('agent-prompt-send', [id])).error);
+  assert.equal(hub.calls.slice(mark).filter(c => c.path === `/v1/sessions/${sid}/prompt`).length, 1);
+  const fresh = await value('agent-prompt-create', [{ ...seen, text: 'distinct draft' }]);
+  assert.deepEqual((await value('agent-prompt-send', [fresh])).sent, [sid]);
+  const replacement = hub.add(sid); replacement.createdAt = Math.max(replacement.createdAt, old.createdAt + 1); hub.emit('session', replacement);
+  assert.deepEqual(await value('agent-prompt-targets', [id, [target(sid)]]), [target(sid)]);
+  assert.deepEqual((await value('agent-prompt-send', [id])).sent, [sid]);
 });
 
 test('restart preserves captured destinations and migrates legacy SID-only drafts to unbound until explicit retarget', async () => {
