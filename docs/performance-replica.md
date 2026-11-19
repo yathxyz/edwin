@@ -1,12 +1,83 @@
 # Replica and daemon measurements
 
+## Small-file follow-up: does the acknowledged rope cost ordinary typing time?
+
+**Yes, in the handler:** the chunked shadow added **4–6 µs** to the median synchronous ack dispatch on the 4 Ki-unit file in two separate controlled comparisons (18 of 20 paired medians higher). It did not show a repeatable increase in total driver CPU, durable median or p95. The pooled durable p99 was higher in both comparisons, by very different amounts; those long waits were outside ack dispatch. This is a small-file cost, not the large-file benefit measured below.
+
+**Three trees, one workload.** A = `c1fe9eec`; H = measured head `d8c8a65`; C = H with **only** `src/sync.ts` restored from A (the flat acknowledged string). H vs A compares the full revisions; H vs C isolates the acknowledged-text change. For each observation, `node tools/replica-bench.mts TREE --small-typing` starts a fresh real daemon, frame and protocol peer, opens 4,096 ASCII units, inserts eight warmup keys and measures the next 96 midpoint keys, serially. Each key must be durably acknowledged, applied by the frame and delivered with the correct version/text to the peer before the next key. The final frame and daemon text are checked. The selector skips only the subsequent phases; it uses the same timing loop as the full benchmark.
+
+Linux x86-64, Node 24.21.0, default daemon workers, stripped private source trees, fresh socket and journals under a private worktree `TMPDIR` on ext4. `taskset -c 12,14,16,18` on each driver restricted it and its daemon/threads to the same four E-cores, separate from the browser measurement CPUs but **not reserved**. Disk, other host activity and caches are shared. No DOM or paint. Ten blocks of three fresh processes; every pair of trees appears in each relative order five times. Do not pool these runs with the older, unpinned, broader experiment below.
+
+**Warm key → frame-applied durable ack (ms)**, nearest-rank p50/p95/p99, with driver user + system CPU (ms/96 keys). Statistics below are computed from the raw key timings; at 96 keys the per-run p99 **is the maximum**. No slow block was dropped.
+
+| Block / run order | A | H | C | Driver CPU: A / H / C |
+|---|---:|---:|---:|---:|
+| 1 AHC | 3.330558/4.850416/6.595993 | 3.254926/5.062731/6.468170 | 3.276153/5.228313/6.371117 | 51.043 / 45.077 / 42.365 |
+| 2 CHA | 3.490156/5.393216/7.271939 | 3.240753/4.089039/6.068093 | 3.261913/4.350312/5.059181 | 54.025 / 41.778 / 43.376 |
+| 3 CAH | 3.283902/4.659499/5.220300 | 3.299016/4.905236/5.381446 | 3.294646/5.109397/5.700062 | 45.061 / 44.800 / 45.264 |
+| 4 HAC | 3.292099/4.233543/5.881092 | 3.291813/4.944499/6.315770 | 3.225284/4.544798/5.650128 | 43.973 / 44.936 / 40.700 |
+| 5 ACH | 6.034034/14.604088/18.859207 | 4.658863/25.519058/51.801970 | 3.868860/6.569880/10.451467 | 49.608 / 51.042 / 46.395 |
+| 6 HCA | 3.392582/5.052985/9.007301 | 3.395280/4.976593/6.607974 | 3.276966/5.084809/5.283492 | 51.773 / 51.207 / 44.343 |
+| 7 CAH | 3.285429/4.491215/6.340763 | 3.241228/4.592276/5.229032 | 3.316821/4.357397/5.193407 | 45.206 / 41.459 / 46.153 |
+| 8 HAC | 3.284522/4.758599/6.139535 | 3.273192/4.119339/6.752631 | 3.355128/5.156094/6.019331 | 44.354 / 42.349 / 49.588 |
+| 9 ACH | 7.209894/18.693842/36.552403 | 3.221353/3.944726/5.348938 | 3.229259/4.201522/5.549864 | 54.759 / 41.933 / 41.635 |
+| 10 HCA | 3.293912/4.495543/5.472566 | 5.531303/21.183229/39.970165 | 3.260061/4.943609/5.000288 | 42.748 / 53.228 / 44.674 |
+
+**All ten blocks**, 960 warm keys per tree. Throughput = 960 / total timed loop seconds, including both ack and peer delivery. CPU is summed across the ten typing windows, not a percentile of key latencies. Driver CPU includes the headless frame, peer, socket activity and harness; daemon CPU includes all threads. Neither includes time blocked waiting for I/O.
+
+| Metric | A | H | C |
+|---|---:|---:|---:|
+| Durable ack p50/p95/p99 (ms) | 3.392582/8.865146/16.104215 | 3.322171/8.288260/21.183229 | 3.290528/4.959256/5.738261 |
+| Key → peer fanout p50/p95/p99 (ms) | 3.471/8.985/16.214 | 3.385/8.365/21.276 | 3.356/5.037/5.904 |
+| Synchronous ack handler p50/p95/p99 (µs) | 24.060/42.392/368.375 | 26.780/52.707/377.001 | 21.071/40.373/360.445 |
+| Driver CPU (ms/960 keys) | 482.550 | 457.809 | 444.493 |
+| Daemon user + system CPU (ms/960 keys, 10 ms ticks) | 1000 + 170 | 960 + 130 | 1070 + 160 |
+| Serialized keys/s | 227.8 | 225.3 | 280.6 |
+| Journal bytes/96 keys, every run | 19,784 | 19,784 | 19,784 |
+
+H vs A: pooled durable p50 and p95 decreased by 0.070 and 0.577 ms; **p99 increased by 5.079 ms**, with five of ten block maxima higher. H used 24.741 ms less total driver CPU, lower in seven of ten blocks. H vs C: the synchronous handler was **5.709/12.334/16.556 µs slower** at p50/p95/p99 (p50/p95 higher in nine blocks, p99 higher in eight). Driver CPU averaged 1.332 ms more per 96 keys, higher in six blocks. A flat 4 Ki-unit string is cheap to edit; the rope splice also locates and rechunks the edited piece and updates newline metadata. The handler measures wall time in dispatch, **not handler-only CPU**.
+
+H's durable p99 was 15.445 ms higher than C's. All ten H observations at or above its p99 came from blocks 5 and 10; the handler during those keys took only 0.040–0.442 ms, not the 21–52 ms seen end-to-end. All ten A observations at or above its p99 came from blocks 5 and 9. Durable round trips include file synchronization, event-loop/worker scheduling and the client path; this does not identify which wait was responsible.
+
+### Independent direct comparison: H vs C only
+
+Ten **additional** fresh pairs, five H-first and five flat-shadow-first, same affinity, driver, durability, sample size and definitions. End-to-end timings are ms; per-run handler timings are µs and include the slowest dispatch at p99.
+
+| Pair / order | H durable p50/p95/p99 | C durable p50/p95/p99 | Driver CPU ms: H / C | H handler p50/p95/p99 | C handler p50/p95/p99 |
+|---|---:|---:|---:|---:|---:|
+| 1 HC | 3.255469/4.244929/8.165190 | 3.260293/4.678479/5.701797 | 44.673 / 44.723 | 26.3/47.3/398.7 | 22.1/40.5/434.2 |
+| 2 CH | 3.230873/4.091526/5.209754 | 3.292997/4.514245/5.318652 | 42.243 / 46.253 | 24.5/48.5/388.1 | 23.1/52.5/432.5 |
+| 3 HC | 3.299376/4.800511/5.440396 | 3.265004/4.986413/6.119509 | 46.808 / 46.343 | 29.2/45.8/387.2 | 22.1/46.8/440.7 |
+| 4 CH | 3.235928/4.155618/6.896331 | 3.297134/4.938804/6.865328 | 43.480 / 44.330 | 23.9/46.0/376.7 | 20.6/42.9/416.6 |
+| 5 HC | 3.278227/4.071778/5.815505 | 3.219709/4.014219/5.596166 | 44.075 / 39.881 | 25.8/50.3/379.7 | 17.6/32.4/396.7 |
+| 6 CH | 3.268753/4.811565/5.411769 | 3.246589/4.193701/5.192612 | 40.914 / 43.137 | 23.2/37.5/370.4 | 19.7/42.1/385.3 |
+| 7 HC | 3.246785/4.150178/4.963263 | 5.642760/17.951529/25.627726 | 42.248 / 50.162 | 24.0/43.6/388.6 | 26.1/42.9/403.9 |
+| 8 CH | 3.229784/4.934760/7.006968 | 3.243405/4.202181/5.341532 | 41.501 / 41.219 | 23.1/46.4/367.9 | 18.9/35.3/389.3 |
+| 9 HC | 3.252747/4.368023/5.187227 | 3.341284/4.157376/5.708425 | 43.302 / 45.043 | 24.5/44.8/452.5 | 21.3/41.3/409.7 |
+| 10 CH | 8.283911/22.944570/29.471190 | 8.708493/20.048385/26.353904 | 56.203 / 54.387 | 34.9/61.1/376.7 | 30.7/50.2/532.1 |
+
+| Metric, direct pairs only (960 keys/side) | H | C | H − C |
+|---|---:|---:|---:|
+| Durable ack p50/p95/p99 (ms) | 3.279266/8.283911/18.501052 | 3.327972/9.988040/18.018646 | −0.049/−1.704/+0.482 |
+| Key → peer fanout p50/p95/p99 (ms) | 3.341/8.380/18.583 | 3.393/10.071/18.277 | −0.051/−1.690/+0.306 |
+| Synchronous ack handler p50/p95/p99 (µs) | 25.691/47.335/367.915 | 21.677/41.625/385.274 | +4.014/+5.710/−17.359 |
+| Driver CPU (ms/960 keys) | 445.447 | 455.478 | −10.031 |
+| Daemon user + system CPU (ms/960 keys) | 960 + 160 | 990 + 130 | 0 total |
+| Serialized keys/s | 244.2 | 223.1 | +21.1 |
+| Daemon storage read/write bytes (sum, `/proc/PID/io`) | 0/4,440,064 | 0/4,460,544 | 0/−20,480 |
+| Journal bytes/96 keys, every run | 19,784 | 19,784 | 0 |
+
+The direct comparison reproduced the **median and p95 handler cost**, not the handler p99 increase. Mean dispatch cost was also higher: +8.38 µs/key in the triples, +5.57 µs/key in the direct pairs. Driver CPU changed sign (+1.332 then −1.003 ms per 96 keys), as did throughput, durable p50 and p95. The direct durable p99 excess was +0.482 ms, versus +15.445 ms in the triples. All ten direct H samples at or above H's pooled p99 occurred in pair 10; the handler took at most 0.127 ms on those keys. This supports attributing microseconds of typical dispatch time to the shadow change, **not** attributing the millisecond-scale durable tails or the aggregate CPU difference to it. No sync, durability or transport change was made for this measurement.
+
+## Earlier five-pair experiment: small and large buffers, startup, idle and fanout
+
 **Result.** On the 4 Mi-unit file, warm local ack dispatch p50/p95/p99 was **1.93/4.56/7.77 → 0.039/0.10/0.12 ms**, and remote edit dispatch **1.96/4.23/7.27 → 0.051/0.11/0.21 ms**. Driver CPU for 96 keys was 307.37 → 51.01 ms; for 48 reverse edits 133.57 → 9.25 ms. End-to-end key → applied durable ack was 5.41/8.53/12.35 → 3.36/4.81/5.79 ms. Those end-to-end timings include the disk and scheduler; the synchronous handler and driver CPU are the cleaner evidence for the changed client path.
 
 **Cost.** The first large ack pays to turn the immutable snapshot into chunks: its median handler was 0.026 → 1.29 ms, before the warm savings. A read-only frame does not pay this at open. Large attach median was 30.09 → 32.49 ms; driver RSS (KiB, medians) after attach was 167024 → 163524, after first key 167024 → 163524, after 96 keys 274244 → 203876. On the 4 Ki-unit file, warm ack p50/p95/p99 was 0.019/0.066/0.26 → 0.028/0.071/0.30 ms; remote dispatch 0.092/0.23/1.28 → 0.051/0.17/0.54 ms. No general small-file, startup, idle, or fanout speedup is claimed. Journal and transport behavior are unchanged.
 
-## Method
+### Method
 
-Five independent process pairs on Linux x86-64, Node 24.21.0, ext4, default daemon worker configuration. Baseline = `c1fe9eec`; fixed = worktree with the lazy acknowledged rope and the search/render review fixes. Order alternates **baseline/fixed, fixed/baseline, baseline/fixed, fixed/baseline, baseline/fixed**. The same `node tools/replica-bench.mts [source-tree]` drives every run; install each tree's server dependencies and strip its core first (see [setup](performance.md)). Each invocation starts a fresh private daemon and Unix socket, HOME/XDG/TMPDIR and file-backed journals. No live desktop, paint, mocked sync or relaxed durability. No CPU pinning or OS-cache flush; this is not a storage latency or idle-worker scalability experiment.
+Five independent process pairs on Linux x86-64, Node 24.21.0, ext4, default daemon worker configuration. Baseline = `c1fe9eec`; fixed = the previously measured code at `409a0fc8` (lazy acknowledged rope and search/render review fixes). Order alternates **baseline/fixed, fixed/baseline, baseline/fixed, fixed/baseline, baseline/fixed**. The same `node tools/replica-bench.mts [source-tree]` drives every run; install each tree's server dependencies and strip its core first (see [setup](performance.md)). Each invocation starts a fresh private daemon and Unix socket, HOME/XDG/TMPDIR and file-backed journals. No live desktop, paint, mocked sync or relaxed durability. No CPU pinning or OS-cache flush; this is not a storage latency or idle-worker scalability experiment.
 
 The driver runs the real headless frame/key/OT stack and an independent protocol peer on one event loop. For each of 4,096 and 4,194,304 ASCII units: open file outside the notes index, attach frame, record first key separately within eight warmups, then 96 serialized midpoint keys, 48 edits in the reverse direction, four reconnects with 12 missed edits each. Wait for durable acknowledgments (journal append and fdatasync); check versions, peer delivery and final text. Then open 64 additional five-byte files on a protocol peer and idle 10.5 seconds (crosses the ten-second file-stat sweep). Finally connect 32 additional protocol peers to one of those files and require the durable ack and correct edit on all 32. These are subscriptions, not 32 rendered heaps.
 
@@ -49,7 +120,7 @@ Pooled nearest-rank **p50/p95/p99 [min–max of the five run p50s]**, millisecon
 | sharedEdit.durableAckMs | 5 | 6.15/10.64/10.64 [3.83–10.64] | 7.43/12.38/12.38 [5.57–12.38] |
 | sharedEdit.allFanoutMs | 5 | 9.00/11.49/11.49 [4.59–11.49] | 8.92/15.36/15.36 [6.70–15.36] |
 
-## CPU, RSS, I/O and traffic
+### CPU, RSS, I/O and traffic
 
 Median [min–max] of five per-process observations; a single value means identical on all five. B = baseline, F = fixed. CPU is driver (both peers plus harness) or daemon (all threads, 10 ms ticks). Startup reads are totals up to listening; other CPU and I/O values are deltas across the named phase. RSS is at phase end, HWM process lifetime. Neither RSS measure isolates objects or GC.
 

@@ -1,4 +1,4 @@
-// Linux / Node 24. node tools/replica-bench.mts [source-tree] >run.json
+// Linux / Node 24. node tools/replica-bench.mts [source-tree] [--small-typing] >run.json
 // Install that tree's server dependencies first. Each invocation starts one fresh daemon with a private
 // state directory; use TMPDIR on the filesystem whose journal syncs you want to measure. No paint/display.
 import assert from 'node:assert/strict';
@@ -10,7 +10,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { EditClient, FakeSocket } from '../test/edit-client.mts';
 import type { Edwin } from '../test/headless.mts';
 
-const root = path.resolve(process.argv[2] || path.join(import.meta.dirname, '..'));
+const args = process.argv.slice(2), smallTyping = args.at(-1) === '--small-typing';
+if (smallTyping) args.pop();
+if (args.length > 1 || args[0]?.startsWith('--')) throw new Error('usage: replica-bench.mts [source-tree] [--small-typing]');
+const root = path.resolve(args[0] || path.join(import.meta.dirname, '..'));
 const moduleUrl = (file: string) => pathToFileURL(path.join(root, file)).href;
 const harness: typeof import('../test/edit-client.mts') = await import(moduleUrl('test/edit-client.mts'));
 const { createHost, loadEdwin, memoryStorage }: typeof import('../test/headless.mts') = await import(moduleUrl('test/headless.mts'));
@@ -46,7 +49,7 @@ async function peer(cid?: string) {
 }
 
 let child: Awaited<ReturnType<typeof harness.startEdwind>> | undefined, other: EditClient | undefined, sync: Edwin;
-try {
+async function measure() {
   // No inherited user agent sockets, credentials, edwind overrides, Node options or compile cache.
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.keys(process.env).map(k => [k, undefined]));
   Object.assign(env, { HOME: dir.dirs.home, XDG_RUNTIME_DIR: dir.dirs.sock, XDG_CONFIG_HOME: dir.dirs.config,
@@ -97,9 +100,16 @@ try {
     }
     for (let i = 0; i < warm; i++) await key(false, true);
     let j = journalBytes(), a = meters(pid); bytes = other.sock.bytesRead;
+    const typingStart = now();
     for (let i = 0; i < keys; i++) await key(true, true);
-    resources[`${name}.typing`] = { ...delta(a, meters(pid)), peerWireBytes: other.sock.bytesRead - bytes, journalBytes: journalBytes() - j };
+    const elapsedMs = now() - typingStart;
+    resources[`${name}.typing`] = { ...delta(a, meters(pid)), elapsedMs, peerWireBytes: other.sock.bytesRead - bytes, journalBytes: journalBytes() - j };
     Ed.feedKey('ESC'); await Ed.whenIdle();
+    if (smallTyping) {
+      const expected = text.slice(0, size / 2) + 'x'.repeat(warm + keys) + text.slice(size / 2);
+      assert.equal(b.text, expected); assert.equal((await other.open(id)).text, expected);
+      return;
+    }
     // Reverse direction: time protocol send -> durable ack and -> production receiver's applied edit.
     j = journalBytes(); a = meters(pid);
     for (let i = 0; i < remote; i++) {
@@ -159,11 +169,15 @@ try {
     resources.sharedEdit = { ...delta(a, z), durableAckMs: ackMs, allFanoutMs: allAt - t, journalBytes: journalBytes() - j,
       peerBytesRead: subscribers.reduce((n, p) => n + p.sock.bytesRead, 0) - bytes };
   } finally { for (const p of subscribers) p.close(); }
+}
+try {
+  await measure();
   const summary = Object.fromEntries(Object.entries(samples).map(([k, v]) => {
     const sorted = v.toSorted((a, b) => a - b), at = (q: number) => sorted[Math.ceil(q * v.length) - 1];
     return [k, { n: v.length, min: sorted[0], p50: at(.5), p95: at(.95), p99: at(.99), max: sorted.at(-1) }];
   }));
-  console.log(JSON.stringify({ node: process.version, source: root, fsType, cpuTickMs: tickMs, warm, keys, remote, missed, replays, idleBuffers, idleMs, summaryMs: summary, resources, samplesMs: samples }));
+  console.log(JSON.stringify({ node: process.version, source: root, fsType, cpuTickMs: tickMs, warm, keys,
+    ...(smallTyping ? { workload: 'small-typing' } : { remote, missed, replays, idleBuffers, idleMs }), summaryMs: summary, resources, samplesMs: samples }));
 } finally {
   sync?.shutdown(); other?.close(); if (child) await harness.stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true });
 }
