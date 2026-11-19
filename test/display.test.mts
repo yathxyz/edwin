@@ -291,6 +291,34 @@ test('runs reproduce the html renderer: same text, same classes, and the html is
   b.markActive = false;
 });
 
+test('unstyled lines retain the same spans and runs at point, line ends and folds', async () => {
+  const long = 'x'.repeat(12000), text = '\n<&>"\t😀\0\n' + long + '\nhidden\nend\n';
+  const b = await show('plain.txt', 'fundamental-mode', text);
+  const eol = text.indexOf('\n', 1);
+  b.folds = [{ s: text.indexOf('\nhidden'), e: text.indexOf('\nend') }];
+  for (const format of [{}, { runs: true }, { runs: true, html: false }]) {
+    let cache: Map<string, unknown> | null = null;
+    for (const pt of [0, 1, 2.5, 7, eol, eol + 124, b.folds[0].s, text.length]) {
+      b.pt = pt;
+      const o = { active: pt % 2 === 0, numbers: 'relative', count: 12, cursorClass: 'bar', ...format };
+      const rows = Ed.renderBuffer(b, { ...o, cache });
+      // A regexp that never matches exercises the classified path but must not change its output.
+      const classified = Ed.renderBuffer(b, { ...o, hl: /(?!)/g, cache: rows.cache });
+      assert.deepEqual([...rows], [...classified]);
+      assert.equal(rows.seg, classified.seg);
+      cache = rows.cache;
+    }
+  }
+  assert.equal(Ed.renderBuffer(b, { lines: false }), Ed.renderBuffer(b, { lines: false, hl: /(?!)/g }));
+  // A plain cache must not mask later search highlighting or a selection past end-of-line.
+  const before = Ed.renderBuffer(b, { count: 2 });
+  b.mark = 1; b.pt = eol + 1; b.markActive = true;
+  const marked = Ed.renderBuffer(b, { count: 2, hl: /</g, cache: before.cache });
+  assert.match(marked[1].html, /class="rg lz"/);
+  assert.match(marked[1].html, /class="rg eolsel"/);
+  b.markActive = false;
+});
+
 /* ---------- the face tables mirror the stylesheets ---------- */
 /* var(--a, var(--b, #c)) -> ['a', 'b', '#c']; a plain colour -> [it]. */
 function chain(v: string) {

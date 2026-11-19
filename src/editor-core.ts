@@ -1966,10 +1966,13 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const ecls = ext ? ext.cls : null, names = ext ? ext.names : CLS_NAMES;
   const ellT = folds ? String(hooks.ellipsis ? hooks.ellipsis(b) : '...') : '';
   const ell = folds ? `<span class="oe">${esc(ellT)}</span>` : '';
-  const flags = computeFlags(b, o, from, to, seg);
-  if (cls && o.active) parenFlags(b, cls, flags, o.onChar, from, to);
+  /* Without syntax, overlays or selection, all span keys are zero. Only point and end-of-line
+     break a plain line's span; do not materialize and scan a key per character to find them. */
+  const plain = !cls && !ecls && !o.hl && !o.isearch && !o.current && !o.avy && !b.visual && !b.markActive && Number.isInteger(pt);
+  const flags = plain ? null : computeFlags(b, o, from, to, seg);
+  if (cls && o.active) parenFlags(b, cls, flags!, o.onChar, from, to);
   const depths = cls && b._ld && truthy(L.get('rainbow-delimiters-enabled')) ? b._ld as Uint8Array : null;
-  const key = (k: number) => ((cls && k < n ? cls[k] : ecls ? ecls[k - from] || 0 : 0) << 8) | flags[k - from] | (depths && cls![k] === C.PAR ? (depths[k] + 1) << 5 : 0);
+  const key = (k: number) => ((cls && k < n ? cls[k] : ecls ? ecls[k - from] || 0 : 0) << 8) | flags![k - from] | (depths && cls![k] === C.PAR ? (depths[k] + 1) << 5 : 0);
   const last = lastLineStart(r);
   const showPhantom = pt === n || n === 0;
   const out: EcRendered = [];
@@ -1978,7 +1981,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const cache = (lines || wantRuns) && !o.avy ? o.cache || null : null, next = (lines || wantRuns) && !o.avy ? new Map<string, EcLineVal>() : null;
   /* The cache key also names the class table (a mode's own lexer numbers its classes differently) and
      the fold ellipsis, which change a line's html without changing its text or keys. */
-  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
+  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : plain ? 'p' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
   for (; ls <= n && made < count; ln++, made++) {
     const le = eolS(ls);
@@ -1989,23 +1992,24 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     const rel = lines ? ls : 0;
     /* The keys (class, flags, depth) of the line's characters and of its end, read once. */
     const len = le - ls + 1;
-    if (KBUF.length < len) KBUF = new Uint16Array(len + (len >> 1) + 1024);
+    if (!plain && KBUF.length < len) KBUF = new Uint16Array(len + (len >> 1) + 1024);
     const kb = KBUF;
-    for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
+    if (!plain) for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
     let ck: string | null = null;
     if (next && len <= 8192) {
-      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
+      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + (plain ? '' : '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]));
       const hit = cache ? cache.get(ck) : undefined;
       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
     }
     if (wantRuns) R = [];
     const flush = (end: number) => {
       if (end <= start) return;
-      const kk = kb[start - ls];
+      const kk = plain ? 0 : kb[start - ls];
       if (R) R.push({ s: start - ls, e: end - ls, cls: spanClass(names[kk >> 8], kk & 255) });
       if (wantHtml) html += `<span class="${spanClass(names[kk >> 8], kk & 255)}" data-o="${start - rel}">${esc(t.slice(start, end))}</span>`;
     };
-    for (let k = ls; k <= le; k++) {
+    const first = !plain ? ls : pt >= ls && pt < le ? pt : le;
+    for (let k = first; k <= le; k++) {
       if (o.avy && o.avy.has(k)) {
         flush(k);
         const lab = o.avy.get(k)!, w = Math.min(lab.length, Math.max(1, le - k));
@@ -2017,16 +2021,17 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
         flush(k);
         const ch = t.charAt(k), atEnd = k === le;
         const kc = atEnd ? '' : cls ? CLS_NAMES[cls[k]] : ecls ? names[ecls[k - from]] || '' : '';
-        const fk = flags[k - from] || 0;
+        const fk = flags?.[k - from] || 0;
         const ccls = `cur ${o.cursorClass || ''}${o.active ? '' : ' ghost'}${kc ? ' ' + kc : ''}${fk & FLAG.REGION ? ' rg' : ''}${fk & FLAG.PAREN ? ' pm' : ''}`;
         if (R) R.push({ s: k - ls, e: atEnd ? k - ls : k - ls + 1, cls: ccls, k: 'cur' });
         if (wantHtml) html += `<span class="${ccls}" data-o="${k - rel}" data-len="${atEnd ? 0 : 1}">${atEnd ? ' ' : esc(ch)}</span>`;
         start = atEnd ? k : k + 1;
+        if (plain && !atEnd) k = le - 1; // next comes the end, not another change of class
         continue;
       }
       if (k === le) {
         flush(k);
-        if (le < n && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
+        if (le < n && flags && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
         if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
         break;
       }
