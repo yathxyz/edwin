@@ -87,6 +87,77 @@ test('every edit lands in the delta log that edwind will send', async () => {
   assert.equal(t, ed.text());
 });
 
+test('the owner replaces a read-only buffer’s folds in UTF-16 offsets without editing or selecting it', async () => {
+  await fresh();
+  const { Ed, E } = ed, b = E.current;
+  b.text = 'tool 🧠\nfirst\nthought\ndetails 💡\nlast';
+  await ed.type('GA!'); await ed.keys('ESC');
+  await ed.type('A?'); await ed.keys('ESC'); await ed.type('u');
+  await ed.type(':w\n');
+  assert.equal(b.modified, false);
+  assert.ok(b.undo.length && b.redo.length);
+  await fresh(); // The host can fold a transcript while the user edits another buffer.
+  const current = E.current, win = E.sel;
+  b.readOnly = true; b.pt = 10; b.mark = 26; b.markActive = true;
+  const state = () => structuredClone({ text: b.text, ver: b.ver, log: b.log, undo: b.undo, redo: b.redo,
+    modified: b.modified, readOnly: b.readOnly, pt: b.pt, mark: b.mark, active: b.markActive });
+  const before = state(), first = { s: 7, e: 13 }, second = { s: 21, e: 32 };
+  const ranges = [{ ...first }, { ...second }];
+  Ed.setBufferFolds(b, ranges);
+  ranges[0].s = -1; ranges.pop();
+  const view = Ed.getBufferFolds(b);
+  assert.deepEqual(view, [first, second]);
+  view[1].e = -1; view.shift();
+  assert.deepEqual(Ed.getBufferFolds(b), [first, second]);
+  assert.deepEqual(state(), before, 'point and the active mark remain inside the hidden lines');
+  Ed.setBufferFolds(b, [second]);
+  assert.deepEqual(Ed.getBufferFolds(b), [second]);
+  Ed.setBufferFolds(b, []);
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  assert.deepEqual(state(), before);
+  assert.equal(E.current, current); assert.equal(E.sel, win);
+});
+
+test('invalid fold lists are refused as a whole, not sorted, clipped or rounded to line boundaries', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\nd\ne\nf\ntail';
+  const keep = { s: 9, e: 11 }, a = { s: 1, e: 5 }, z = { s: 7, e: 9 };
+  Ed.setBufferFolds(b, [keep]);
+  for (const bad of [
+    null, [null], [{}], [z, a], [a, a], [a, { s: 3, e: 7 }], [a, { s: 5, e: 7 }],
+    [{ s: -1, e: 3 }], [{ s: 3, e: 3 }], [{ s: 5, e: 3 }], [{ s: 1.5, e: 3 }],
+    [{ s: 0, e: 3 }], [{ s: 1, e: 4 }], [{ s: 9, e: b.text.length }], [{ s: 9, e: b.text.length + 1 }],
+    [a, { s: 7, e: NaN }], [a, { s: '7', e: 9 }],
+  ]) {
+    assert.throws(() => Ed.setBufferFolds(b, bad), JSON.stringify(bad));
+    assert.deepEqual(Ed.getBufferFolds(b), [keep]);
+  }
+});
+
+test('za toggles exact owner ranges without an outline; clear and edits forget even open ranges', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  ed.eval('(fundamental-mode)');
+  b.text = 'call\noutput\nthought\nresult\nafter';
+  const call = { s: 4, e: 11 }, thought = { s: 19, e: 26 };
+  b.pt = 2;
+  Ed.setBufferFolds(b, [call, thought]);
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [thought]);
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [call, thought]);
+  Ed.setBufferFolds(b, []);
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [], 'no old definition to close');
+
+  Ed.setBufferFolds(b, [call, thought]);
+  await ed.type('za'); // One open definition and one closed fold when the remote edit arrives.
+  Ed.applyOps(b, [[b.text.length, '', '!']], 'remote');
+  assert.deepEqual(Ed.getBufferFolds(b), [], 'an edit even outside the ranges drops the closed fold');
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [], 'it drops the open definition too');
+  Ed.setBufferFolds(b, [call]);
+  b.text = 'new transcript';
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+});
+
 test('Scheme: define a command, bind it, run it from a key', async () => {
   await fresh();
   await ed.type('ione two'); await ed.keys('ESC');

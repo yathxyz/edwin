@@ -549,7 +549,7 @@ function substituteSync(b: EdBuffer, lines: [number, number], re: RegExp, patter
    no match) is put back after it, moved by the changes before it. Its hidden text is the same. */
 function replaceSubstituted(b: EdBuffer, s: number, e: number, out: string, seg?: string) {
   const F = b.folds && b.folds.length ? b.folds : null;
-  if (!F) { Ed.replaceText(b, s, e, out); return; }
+  if (!F || F.every(f => f.owner)) { Ed.replaceText(b, s, e, out); return; }
   seg = seg ?? b.rope.slice(s, e);
   const a = seg.split('\n'), z = out.split('\n'), keep: EdFold[] = [];
   if (a.length === z.length) {
@@ -566,7 +566,7 @@ function replaceSubstituted(b: EdBuffer, s: number, e: number, out: string, seg?
     }
     let r = 0, shift = 0;
     for (const f of F) {
-      if (e <= f.s || s > f.e) continue;
+      if (f.owner || e <= f.s || s > f.e) continue;
       while (r < runs.length && runs[r].q <= f.s) shift += runs[r++].d;
       if (r < runs.length && runs[r].p <= f.e) continue;
       keep.push({ ...f, s: f.s + shift, e: f.e + shift });

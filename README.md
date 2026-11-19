@@ -49,6 +49,21 @@ stale `.js`) and the nix packages all strip first. In a checkout:
 `host-node.cts` loads a `.js` only when it is at least as new as its `.ts`, and strips the `.ts` itself otherwise,
 so edwind and the suites need no step. `src/host-node.cts` is checked with the server (`tsc -p .`).
 
+## Host-supplied folds
+
+`Ed.setBufferFolds(buffer, ranges)` replaces the closed folds in every window on that buffer, including
+read-only buffers. For example, on `"Tool\noutput\nNext\n"`, `[{s: 4, e: 11}]` leaves `Tool` and `Next`
+visible. Both offsets count UTF-16 code units from zero and must point to actual newline characters.
+Ranges must be ordered and disjoint (`s < e`, then `e < next.s`); invalid input throws without changing
+the previous folds. `[]` clears them. The setter neither selects the buffer nor edits it. Point, mark and
+selection stay at their text offsets, even if hidden; subsequent navigation uses the usual fold rules.
+
+`Ed.getBufferFolds(buffer)` returns a detached list of the currently closed `{s, e}` ranges, including
+folds made by the mode (which can also end at EOF). Normal-state `za` toggles a supplied fold without
+requiring an Org or Markdown heading. An edit, including undo or a remote edit, forgets the supplied
+ranges, open or closed; supply new offsets for the changed text. Mode-created folds follow the mode's
+usual edit rules.
+
 ## Layout
 
 | Path | What |

@@ -277,22 +277,22 @@ test('R10.3 folding by heading: TAB on a heading folds, S-TAB cycles the buffer,
   await page('# One\n\nbody one\n\n## Two\n\nbody two\n\n# Three\n\nbody three\n');
   const b = ed.E.current;
   await ed.keys('TAB');
-  assert.ok(b.folds && b.folds.length === 1, 'folded');
+  assert.equal(ed.Ed.getBufferFolds(b).length, 1, 'folded');
   assert.equal(ev(`(org-fold-hidden-p ${posOf('body one') + 1})`), true);
   assert.equal(ev(`(org-fold-hidden-p ${posOf('body three') + 1})`), false);
   await ed.keys('TAB');   // children
   assert.equal(ev(`(org-fold-hidden-p ${posOf('body one') + 1})`), false);
   assert.equal(ev(`(org-fold-hidden-p ${posOf('body two') + 1})`), true);
   await ed.keys('TAB');   // subtree
-  assert.equal(b.folds.length, 0);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), []);
   await ed.keys('S-TAB'); // overview
-  assert.equal(b.folds.length, 2);
+  assert.equal(ed.Ed.getBufferFolds(b).length, 2);
   assert.equal(ev(`(org-fold-hidden-p ${posOf('body three') + 1})`), true);
   await ed.keys('S-TAB'); // contents
   assert.equal(ev(`(org-fold-hidden-p ${posOf('## Two') + 1})`), false);
   assert.equal(ev(`(org-fold-hidden-p ${posOf('body two') + 1})`), true);
   await ed.keys('S-TAB'); // show all
-  assert.equal(b.folds.length, 0);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), []);
   await ed.type('zc'); assert.equal(ev(`(org-fold-hidden-p ${posOf('body one') + 1})`), true);
   await ed.type('zo'); assert.equal(ev(`(org-fold-hidden-p ${posOf('body one') + 1})`), false);
   await ed.type('za'); assert.equal(ev(`(org-fold-hidden-p ${posOf('body one') + 1})`), true);
@@ -301,6 +301,30 @@ test('R10.3 folding by heading: TAB on a heading folds, S-TAB cycles the buffer,
   await ed.type('zc');
   const faces = MK.facesOf(b, 0, b.rope.length);
   assert.equal(faces[posOf('body one')], '');
+});
+
+test('Markdown toggles the owner’s exact range, not its enclosing headline, alongside ordinary folds', async () => {
+  const b = await page('# Native\nbody\n# Next\ntool call\noutput\ntrailer\n# End\n');
+  const { Ed } = ed, folds = () => Ed.getBufferFolds(b);
+  const native = { s: posOf('\nbody'), e: posOf('\n# Next') }, owner = { s: posOf('\noutput'), e: posOf('\ntrailer') };
+  await ed.type('zc'); assert.deepEqual(folds(), [native]);
+  Ed.setBufferFolds(b, [owner]);
+  assert.deepEqual(folds(), [owner], 'installation replaces even mode-created folds');
+
+  b.pt = posOf('tool call', 3);
+  await ed.type('za'); assert.deepEqual(folds(), []);
+  await ed.type('za'); assert.deepEqual(folds(), [owner]);
+  await ed.keys('TAB'); assert.deepEqual(folds(), []);
+  await ed.keys('TAB'); assert.deepEqual(folds(), [owner]);
+  b.pt = posOf('output', 1);
+  await ed.type('zo'); assert.deepEqual(folds(), []);
+  await ed.type('zc'); assert.deepEqual(folds(), [owner]);
+
+  b.pt = 0;
+  await ed.type('zc'); assert.deepEqual(folds(), [native, owner]);
+  await ed.type(':%s/End/Done/\n');
+  assert.match(ed.text(), /# Done/);
+  assert.deepEqual(folds(), [native], 'substitution preserves untouched Markdown folds but not owner folds');
 });
 
 test('R10.4 motions: ]] and [[ move by heading, gj and gk by visual line', async () => {

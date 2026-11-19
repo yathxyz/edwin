@@ -181,6 +181,39 @@ test('splits: side by side windows have a divider, stacked ones share the height
   Ed.deleteOtherWindows();
 });
 
+test('setting and clearing folds redisplays every window, including a cached frame, on the next draw', async () => {
+  const lines = ['call', 'secret', 'thought', 'private', 'last'];
+  const b = await show('*transcript*', 'fundamental-mode', lines.join('\n'));
+  Ed.splitWindow(E.sel, 'below');
+  const selected = E.sel;
+  let passive!: Model, draws = 0;
+  const other = Ed.makeFrame(null, { buffer: b, backend: { size: backend.size, draw(m: Model) { passive = m; draws++; } } });
+  const nextFrame = () => new Promise<void>(resolve => host.nextFrame(resolve));
+  const expectRows = (expected: string[]) => {
+    assert.equal(model!.windows.length, 2); assert.equal(passive.windows.length, 1);
+    for (const m of [model!, passive]) for (const w of m.windows) {
+      assert.equal(w.buffer, b.name);
+      assert.deepEqual(expected.map((_, i) => row(m, w.y + i).trimEnd()), expected);
+    }
+  };
+  try {
+    await nextFrame(); // Finish setup's queued draw so it cannot mask a missing redisplay.
+    expectRows(lines);
+    const before = draws, ellipsis = ev('org-ellipsis');
+    Ed.setBufferFolds(b, [{ s: 4, e: 11 }, { s: 19, e: 27 }]);
+    await nextFrame(); // No keys, explicit render or focus change.
+    expectRows(['call' + ellipsis, 'thought' + ellipsis, 'last']);
+    assert.equal(draws, before + 1);
+    Ed.setBufferFolds(b, []);
+    await nextFrame();
+    expectRows(lines);
+    assert.equal(draws, before + 2);
+    assert.equal(E.frame, frame); assert.equal(E.sel, selected); assert.equal(frame.focused, true);
+  } finally {
+    Ed.deleteFrame(other); Ed.deleteOtherWindows();
+  }
+});
+
 test('the minibuffer: prompt, input, candidates with every matching term marked, and the cursor in the echo area', async () => {
   await show('d7.txt', 'text-mode', '', 0);
   await keys('M-x'); await type('find fi');

@@ -104,10 +104,11 @@
   "g l" 'org-next-visible-heading
   "M-RET" 'org-meta-return)
 
-;; Vim's fold keys fold outlines too, as evil-fold-list makes them do in Org and Markdown buffers.
+;; za toggles an owner-supplied fold in any buffer, or a heading in an outline.
+(define-key evil-motion-state-map "z a" 'evil-toggle-fold)
+;; The other Vim fold keys act on Org and Markdown outlines.
 (for-each (lambda (mode)
             (evil-define-key 'normal mode
-              "z a" 'evil-toggle-fold
               "z c" 'evil-close-fold
               "z o" 'evil-open-fold
               "z O" 'evil-open-fold-rec
