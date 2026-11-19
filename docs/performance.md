@@ -14,7 +14,7 @@ node tools/replica-bench.mts
 
 Text: optional second argument `index`, `find`, `miss` or `replace`; e.g. `node --cpu-prof tools/text-bench.mts large replace`. Display: `SCENARIO`, `SAMPLES`, `WARMUP`; use `PROFILE=1` for a separate sampling run. Replica: put `TMPDIR` on the filesystem to measure; the temporary daemon and sockets are not the installed service. Each harness checks the result of the work, prints JSON, and has no timing pass/fail thresholds. Compare the **same harness** against different source trees (display: `EDWIN_ROOT`, replica: positional source directory, text: put the script in each tree's `tools/`).
 
-Baseline: `c1fe9eec`. Linux 6.18.60, x86-64, 20 logical CPUs available, ext4, concurrent unrelated builds. No CPU isolation, cold OS cache flush, or attempt to tune the machine. Before/after runs interleaved; profiles separate from timing. Counters are preferable to small changes in wall time. No hardware instruction or lock-wait counters collected. A whole-rope join counts an actual document-sized string allocation, not every allocation V8 makes. RSS includes runtime and GC; don't interpret process high-water marks as retained bytes per buffer.
+Baseline: `c1fe9eec`; final measured code: `409a0fc8`. Linux 6.18.60, x86-64, 20 logical CPUs available, ext4, concurrent unrelated builds. No CPU isolation, cold OS cache flush, or attempt to tune the machine. Before/after runs interleaved; profiles separate from timing. Counters are preferable to small changes in wall time. No hardware instruction or lock-wait counters collected. A whole-rope join counts an actual document-sized string allocation, not every allocation V8 makes. RSS includes runtime and GC; don't interpret process high-water marks as retained bytes per buffer.
 
 ## Ranked findings
 
@@ -30,33 +30,33 @@ The underlying buffer already has ~2 Ki-character chunks and lazily maintained p
 
 ## Text workloads
 
-Independent process per size/run; four warmups per row. Order B/A/B/A/B/A. Fixed 8 KiB or 16 MiB input, 16 occurrences at regular intervals. `index`: overwrite near midpoint, read line number and start. `find`: edit, then issue real isearch keys for `token` and RET, alternating directions near `Token`. `miss`: edit then search forward from the beginning for absent `z`. `replace`: invoke shipped Scheme `replace-string`, replacing all 16 `Token` with `Value` or vice versa. Wall time includes command dispatch where used; no DOM, daemon or file I/O.
+Independent process per size/run; four warmups per row. Five interleaved pairs (`BA AB BA AB BA`, B = `c1fe9eec`, A = corrected code). Fixed 8 KiB or 16 MiB input, 16 occurrences at regular intervals. `index`: overwrite near midpoint, read line number and start. `find`: edit, then issue real isearch keys for `token` and RET, alternating directions near `Token`. `miss`: edit then search forward from the beginning for absent `z`. `replace`: invoke shipped Scheme `replace-string`, replacing all 16 `Token` with `Value` or vice versa. Wall time includes command dispatch where used; no DOM, daemon or file I/O.
 
-Each cell is **before → after**, the median across three runs of the indicated statistic. CPU is user + system ms **for all N commands**; throughput is commands/s; Linux VmHWM is the cumulative high-water mark to the end of that row, MiB. ASCII fixture sizes are UTF-16 code units, not a general bound on V8 bytes.
+Each cell is **before → after**, the median across five runs of the indicated statistic. CPU is user + system ms **for all N commands**; throughput is commands/s; Linux VmHWM is the cumulative high-water mark to the end of that row, MiB. ASCII fixture sizes are UTF-16 code units, not a general bound on V8 bytes.
 
 |Size / workload|N/run|p50 ms|p95 ms|p99 ms|CPU ms|commands/s|joins/run|peak MiB|
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-|8 KiB index|240|.004 → .004|.009 → .013|.030 → .048|2.4 → 3.8|206717 → 80144|0 → 0|113 → 123|
-|8 KiB find|80|.048 → .050|.089 → .084|.125 → 1.443|10.1 → 10.9|19033 → 14079|80 → 0|113 → 129|
-|8 KiB miss|40|.017 → .014|.035 → .024|.344 → .033|4.0 → 1.5|36461 → 59209|40 → 40|113 → 129|
-|8 KiB replace|24|.172 → .119|.325 → .180|.541 → .404|13.4 → 11.6|5028 → 7278|384 → 0|117 → 129|
-|16 MiB index|240|.011 → .013|.026 → .023|.050 → .050|13.9 → 15.8|36422 → 34171|0 → 0|132 → 141|
-|16 MiB find|80|4.656 → .044|10.584 → .074|23.926 → .101|494.6 → 8.4|183 → 20449|80 → 0|468 → 157|
-|16 MiB miss|40|5.534 → 5.703|7.801 → 7.706|18.009 → 17.354|268.1 → 282.6|160 → 157|40 → 40|469 → 351|
-|16 MiB replace|24|86.106 → 3.215|104.414 → 6.777|105.825 → 7.201|2328.7 → 104.9|11.2 → 261.8|384 → 0|609 → 448|
+|8 KiB index|240|.004 → .003|.012 → .009|.043 → .022|6.9 → 2.3|88178 → 231812|0 → 0|116 → 113|
+|8 KiB find|80|.042 → .039|.105 → .067|.763 → .093|9.8 → 7.1|15908 → 23105|80 → 0|116 → 114|
+|8 KiB miss|40|.016 → .015|.026 → .030|.034 → .053|1.8 → 2.9|55980 → 43887|40 → 40|116 → 114|
+|8 KiB replace|24|.125 → .140|.314 → .203|.632 → .320|12.8 → 11.4|6736 → 6644|384 → 0|116 → 116|
+|16 MiB index|240|.011 → .012|.021 → .020|.039 → .052|13.2 → 14.7|35405 → 35068|0 → 0|132 → 133|
+|16 MiB find|80|4.821 → .047|6.980 → .074|23.167 → .103|516.4 → 9.1|178 → 19811|80 → 0|485 → 149|
+|16 MiB miss|40|5.739 → 5.692|7.654 → 7.939|11.015 → 12.109|269.8 → 276.7|156 → 160|40 → 40|532 → 358|
+|16 MiB replace|24|80.964 → 2.960|96.975 → 6.139|103.311 → 6.440|2177.6 → 94.1|11.9 → 291.7|384 → 0|597 → 455|
 
-Run spread (min–max of p50s): 16 MiB find 4.40–5.31 → .044–.045 ms; replace 81–130 → 2.92–3.28; index .010–.020 → .011–.018; miss 5.29–6.10 → 5.41–6.09. Large miss CPU was slightly worse; still one full join per miss. No demonstrated index improvement. Small find p99 is also the maximum of 80, .102–.142 → .108–1.570 ms; reduced joins but **not** reduced small-buffer latency. Isolating replace in fresh processes (no earlier workload's GC/JIT state): alternating A/B/A on 16 MiB gave 154,760–154,944 KiB peak after vs 542,508 KiB before. Small-file RSS differences include pre-workload process footprint, not just this command's allocations.
+Run spread (min–max of p50s): 16 MiB find 4.37–7.95 → .042–.051 ms; replace 76.3–118.1 → 2.60–3.28; index .010–.025 → .010–.021; miss 5.24–6.96 → 5.09–6.83. A miss still needs one full join; its p95 and CPU were slightly worse. No demonstrated index or general small-buffer improvement. Small find p99 is the maximum of 80 and varied .102–2.691 → .089–3.050 ms. The search guard keeps invalid start offsets off the chunk path; the benchmark uses valid offsets, while `test/headless.test.mts` covers fractional, negative and oversized offsets.
 
 ## Standalone web front
 
-`tools/front-start-bench.mts` starts a **fresh process per observation**, loads `server/front.mts`, has its production `start()` preload the pre-stripped JS/Scheme/console assets and listen on an ephemeral loopback port, completes an authorized GET of `/`, checks its byte count, and stops. This includes Node startup and the benchmark's TS entry point, not the reverse proxy, CLI config parsing, a WebSocket, or a browser. Filesystem cache warm, `NODE_COMPILE_CACHE` unset. Two batches of 12 fresh processes per revision, B/A/A/B:
+`tools/front-start-bench.mts` starts a **fresh process per observation**, loads `server/front.mts`, has its production `start()` preload the pre-stripped JS/Scheme/console assets and listen on an ephemeral loopback port, completes an authorized GET of `/`, checks its byte count, and stops. This includes Node startup and the benchmark's TS entry point, not the reverse proxy, CLI config parsing, a WebSocket, or a browser. Filesystem cache warm, `NODE_COMPILE_CACHE` unset. Five interleaved pairs of 12 fresh processes per revision (`BA AB BA AB BA`); pooled nearest-rank percentiles over 60 observations per side:
 
 |Spawn to|Baseline p50/p95/p99 ms|After p50/p95/p99 ms|
 |---|---:|---:|
-|Listening|85.1 / 98.9 / 137.8|84.1 / 94.3 / 97.5|
-|Root page received|91.5 / 106.5 / 148.2|90.8 / 100.7 / 104.3|
+|Listening|86.3 / 216.0 / 274.2|86.6 / 179.4 / 187.6|
+|Root page received|93.9 / 233.2 / 292.3|93.3 / 195.0 / 203.3|
 
-Process CPU through GET p50 137.8 → 130.4 ms; peak RSS p50 98,848 → 99,144 KiB; kernel read characters p50 1,703,331 → 1,706,034, block-device read bytes zero. Listening p50 across batches 82.8–87.7 → 82.3–84.1 ms. No startup code was changed or startup speedup established. The small increase in read characters includes the larger shipped code.
+Process CPU through GET p50 137.1 → 135.7 ms; peak RSS p50 98,780 → 98,892 KiB; kernel read characters p50 1,703,331 → 1,707,132, block-device read bytes zero. Listening p50 across batches 79.1–210.0 → 79.9–131.9 ms. No startup code was changed or startup speedup established. The increase in read characters includes the larger shipped code.
 
 ## Browser, replica and daemon
 
@@ -64,22 +64,22 @@ Process CPU through GET p50 137.8 → 130.4 ms; peak RSS p50 98,848 → 99,144 K
 
 |Optimization commit|Affected path|Before → after|
 |---|---|---|
-|`996b068`|Exact Scheme search (`replace-string`)|16 MiB, 24 commands: 384 → 0 whole-buffer joins; p50 86.1 → 3.22 ms|
-|`750fd80`|Incremental literal search near point|16 MiB, 80 edit-then-searches: 80 → 0 joins; p95 10.58 → .074 ms|
-|`77b99ac`|Frame's independent acknowledged text|4 MiB, client CPU for 96 warm local keys 202 → 39 ms; remote handler p99 6.26 → .097 ms|
-|`16fcd79`|Unstyled redisplay|12 Ki-character lines, renderer CPU / 100 keys 1510 → 715 ms; key → DOM p50 4.8 → 2.4 ms, **p99 9.5 → 13.9 ms**|
+|`996b068`|Exact Scheme search (`replace-string`)|16 MiB, 24 commands: 384 → 0 whole-buffer joins; p50 81.0 → 2.96 ms|
+|`750fd80`, `2290335`|Incremental literal search near point|16 MiB, 80 edit-then-searches: 80 → 0 joins; p95 6.98 → .074 ms|
+|`77b99ac`|Frame's independent acknowledged text|4 MiB, client CPU for 96 warm local keys 307 → 51 ms; remote handler p99 7.27 → .21 ms; first ack p50 .026 → 1.29 ms|
+|`16fcd79`, `409a0fc`|Unstyled redisplay and cache separation|12 Ki-character lines, renderer CPU / 100 keys 1210 → 980 ms; key → DOM p50 4.2 → 2.7 ms, p99 11.3 → 6.7 ms|
 
-No change to the wire, on-disk journal or FS durability contract. The first large ack now pays for chunking; after that, both a local ack and a remote edit cost much less. Small file/search latency, scroll-only frame tails, startup, syntax/folding, RSS and idle-daemon CPU do **not** show a general improvement. In particular, under the default scheduler many-line motion DOM p99 went from 3.6 to 14.8 ms; it went from 5.7 to 1.7 ms when the same runs were restricted to performance cores. The long-line CPU reduction held in both cohorts. Timing ends at the DOM or the next rAF, **not** the physical display.
+No change to the wire, on-disk journal or FS durability contract. The first large ack pays for chunking; warm ack and remote handlers benefit. Long-line DOM p50 decreased in all five pairs; renderer CPU decreased in three. Small-buffer and styled display tails did not share that improvement: DOM p99 rose from 3.1 to 6.4 ms for small-file typing, 3.8 to 7.0 ms for split Markdown, and 3.0 to 5.6 ms for folded Org. Many-line motion p99 rose from 4.6 to 6.0 ms. No general scroll, syntax/folding, startup, RSS or idle-daemon CPU speedup. Browser timing ends at the DOM or the next rAF, **not** the physical display.
 
 Next investigations: measure scroll reconciliation independently of layout; test wrapped mega-lines on an actual display; profile repeated **far** case-insensitive misses with Unicode offsets before introducing another search algorithm. Measure concurrent durable writers and slow receivers separately before changing journal batching or transport. The serialized latency measurements include queueing but do not isolate lock wait; process RSS and sampled GC are not exact object-allocation counts.
 
-On the daemon, profile worker-pool initialization and idle collection before rewriting buffer storage. At listen, median baseline CPU was 790 ms (730 user + 60 system) and RSS 215 MiB. In one traced run the last two pool threads became active during the small-file typing sample, and the daemon had 14 major GC events in the 10.5-second idle window. Those costs are not attributable to 64 small buffers. Measuring lazy worker startup would need first-command latency as well as startup RSS.
+On the daemon, profile worker-pool initialization and idle collection before rewriting buffer storage. In a separate baseline trace, the last two pool threads became active during the small-file typing sample, and the daemon had 14 major GC events in the 10.5-second idle window. Those costs are not attributable to 64 small buffers. Measuring lazy worker startup would need first-command latency as well as startup RSS.
 
 ## Verification
 
-Ran `node --test test/<name>.test.mts` sequentially for `scheme-editor` (20 passed), `headless` (22), `frame` (24) and `display` (19). Then `nix flake check -L --max-jobs 1 --keep-going` ran the repository gates. The only failing gate was `edwin-typecheck`: TS7022 inferred a cycle through the new display test's loop-carried cache. `a7d7082` adds explicit test result types, with no runtime change. Both affected gates passed on the corrected revision, in order:
+Review regressions were exercised against the pre-review renderer/search and against disposable mutants where the shadow already behaved correctly:
 
-```sh
-nix build --no-link -L --max-jobs 1 .#checks.x86_64-linux.edwin-display
-nix build --no-link -L --max-jobs 1 .#checks.x86_64-linux.edwin-typecheck
-```
+- The old row key returned the wrong HTML for the reported cursor-class/text collision and reused obsolete lexer class names. The old search returned fractional or otherwise wrong offsets for non-index points; the flat pre-optimization path passed those cases.
+- The shadow tests compare against flat `OT.apply`, `transformOps` and `hash` while driving a private daemon and a frame. Hashing the optimistic replica instead of the acknowledged text failed on a remote edit **and**, independently, on an ack while another edit was pending. Removing inverse rollback or dropping validation of the deletion's ending surrogate boundary each failed its regression. None of these faults was present in production.
+
+On the final source, `node --test test/<name>.test.mts` ran sequentially: `headless` 27/27, `display` 22/22, `frame` 26/26. Then `nix flake check -L --max-jobs 1 --keep-going` completed with **all checks passed**, including typechecking. No performance threshold is part of a correctness gate.
