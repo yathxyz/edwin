@@ -1746,9 +1746,15 @@ function lastMatch(str: string, re: RegExp, from: number, len: number, win?: num
 /* Probe around point before materializing a recently edited buffer. A far search still
    gets the native flat-string scan and subsequent prefixes can reuse the joined text.
    Overlap by len - 1 so a match starting at the last probed offset is complete. */
-function foldedIsearch(b: EdBuffer, re: RegExp, from: number, len: number, dir: number) {
-  const r = b.rope;
-  if (r.flat === null) {
+function isearchIndex(b: EdBuffer, re: RegExp | null, needle: string, from: number, dir: number) {
+  const r = b.rope, len = needle.length;
+  // Only integer buffer offsets are chunk coordinates. Otherwise preserve the flat search's coercions.
+  const indexed = Number.isInteger(from) && from >= 0 && from <= r.length;
+  if (!re) {
+    const text = indexed ? r : b.text;
+    return dir > 0 ? text.indexOf(needle, from) : text.lastIndexOf(needle, from);
+  }
+  if (indexed && r.flat === null) {
     const lo = dir > 0 ? from : Math.max(0, from - 2047);
     const hi = dir > 0 ? Math.min(r.length, from + 2047) : from;
     const sub = r.slice(lo, Math.min(r.length, hi + len));
@@ -1757,8 +1763,8 @@ function foldedIsearch(b: EdBuffer, re: RegExp, from: number, len: number, dir: 
     if (dir > 0 ? hi + len >= r.length : lo === 0) return -1;
     from = dir > 0 ? hi + 1 : lo - 1;
   }
-  if (dir < 0) return lastMatch(b.text, re, from, len);
-  re.lastIndex = from;
+  if (dir < 0) return lastMatch(b.text, re, Math.min(from, r.length), len);
+  re.lastIndex = Math.max(0, from);
   return re.exec(b.text)?.index ?? -1;
 }
 function isearchFind(next: boolean) {
@@ -1766,18 +1772,18 @@ function isearchFind(next: boolean) {
   if (!s.str) { s.match = null; s.failing = false; return; }
   /* Case folding with a regular expression, not by lowercasing a copy of the whole buffer. */
   const fold = s.str === s.str.toLowerCase();
-  const hay = b.rope, needle = s.str;
+  const needle = s.str;
   const re = fold ? new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : null;
   let i: number;
   if (s.dir > 0) {
     const from = s.failing && next ? 0 : next ? b.pt : (s.match ? s.match[0] : s.origin);
     if (s.failing && next) s.wrapped = true;
-    i = re ? foldedIsearch(b, re, from, needle.length, 1) : hay.indexOf(needle, from);
+    i = isearchIndex(b, re, needle, from, 1);
     if (i >= 0) { s.match = [i, i + needle.length]; b.pt = s.match[1]; s.failing = false; } else s.failing = true;
   } else {
-    const from = s.failing && next ? hay.length : next ? (s.match ? s.match[0] - 1 : b.pt - 1) : (s.match ? s.match[0] : s.origin);
+    const from = s.failing && next ? b.rope.length : next ? (s.match ? s.match[0] - 1 : b.pt - 1) : (s.match ? s.match[0] : s.origin);
     if (s.failing && next) s.wrapped = true;
-    i = from < 0 ? -1 : re ? foldedIsearch(b, re, from, needle.length, -1) : hay.lastIndexOf(needle, from);
+    i = from < 0 ? -1 : isearchIndex(b, re, needle, from, -1);
     if (i >= 0) { s.match = [i, i + needle.length]; b.pt = i; s.failing = false; } else s.failing = true;
   }
 }

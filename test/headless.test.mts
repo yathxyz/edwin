@@ -35,6 +35,25 @@ test('folded isearch includes overlapping literals at both edges of its near sea
   }
 });
 
+test('isearch preserves flat-string start semantics for non-index points', async t => {
+  await fresh();
+  const b = ed.E.current;
+  for (const [dir, start, key, point] of [
+    ['forward', 0.5, 'a', 1],       // RegExp.lastIndex truncates a fractional point.
+    ['forward', -1, 'a', 1],        // A restored window can start before the buffer.
+    ['backward', 2060.5, 'a', 20],  // The local probe would start on a fractional boundary.
+    ['forward', 2 ** 32, 'A', 2 ** 32], // A rope's int32 offset must not wrap back to zero.
+  ] as const) await t.test(`${dir} from ${start}`, async () => {
+    b.text = 'A' + '.'.repeat(19) + 'A' + '.'.repeat(2100);
+    ed.Ed.editText(b, 1, 1, '-'); // Search an edited revision, not its flat snapshot.
+    if (start < 0) ed.Ed.restoreWinConfig({ ...ed.Ed.winConfig(), pt: start });
+    else b.pt = start;
+    for (const k of [`<cmd:isearch-${dir}>`, key, 'RET']) ed.Ed.feedKey(k);
+    await ed.Ed.whenIdle();
+    assert.equal(b.pt, point);
+  });
+});
+
 test('Insert, Normal, operators, undo and redo', async () => {
   await fresh();
   await ed.type('ihello world foo'); await ed.keys('ESC');
