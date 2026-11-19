@@ -35,8 +35,8 @@ const type = (s: string) => feed([...s].map(ch => (ch === ' ' ? 'SPC' : ch === '
 const ev = (src: string) => { L.resetOps(); return L.evalText(src); };
 ev('(set! display-line-numbers #f)');   // init.scm turns them on; the test of the gutter turns them on again
 
-let size = { cols: 60, rows: 16 }, model: Model | null = null, bells = 0;
-const backend = { size: () => size, draw: (m: Model) => { model = m; }, bell: () => { bells++; } };
+let size = { cols: 60, rows: 16 }, model: Model | null = null, bells = 0, selectedDraws = 0;
+const backend = { size: () => size, draw: (m: Model) => { model = m; selectedDraws++; }, bell: () => { bells++; } };
 const frame = Ed.makeFrame(null, { backend });
 frame.focused = true;
 const draw = () => { Ed.render(); return model!; };
@@ -116,6 +116,34 @@ test('long lines wrap after the last space that fits; truncate-lines keeps one r
   ev('(set! truncate-lines #f)');
 });
 
+test('gj and gk move a folded visual selection between visible buffer lines in a wrapped window', async () => {
+  const head = 'h'.repeat(70), hidden = 'private'.repeat(11), tail = 'z'.repeat(70);
+  const b = await show('*wrapped selection*', 'fundamental-mode', [head, hidden, tail].join('\n'), head.length + 1 + 62);
+  const mark = b.pt, pt = mark + 2, fold = { s: head.length, e: head.length + 1 + hidden.length };
+  const expectSelection = (p: number) => {
+    assert.equal(b.pt, p); assert.equal(b.mark, mark);
+    assert.equal(b.markActive, true); assert.equal(b.visual, 'char');
+    assert.deepEqual(Ed.getBufferFolds(b), [fold]);
+  };
+  try {
+    await type('vll');
+    Ed.setBufferFolds(b, [fold]);
+    const m = draw();
+    expectSelection(pt);
+    assert.deepEqual(rows(m).slice(0, 4).map(s => s.trimEnd()), [
+      head.slice(0, 60), head.slice(60) + ev('org-ellipsis'), tail.slice(0, 60), tail.slice(60),
+    ], 'the hidden selection has not exposed a body row');
+    // The plain-buffer gj/gk bindings move by logical line, retaining column 64 on the second screen row.
+    for (const [motion, dest, y] of [['gj', fold.e + 1 + 64, 3], ['gk', 64, 1]] as const) {
+      await type(motion);
+      const cursor = draw().cursor!;
+      expectSelection(dest);
+      assert.equal(cursor.y, y); assert.equal(cursor.x, 4);
+      assert.equal(D.posAt(frame, cursor.x, cursor.y).pos, dest);
+    }
+  } finally { await keys('ESC'); }
+});
+
 test('tabs reach the next stop of 8, wide characters take two cells, control characters show as ^X', async () => {
   await show('d3.txt', 'text-mode', 'a\tb\n日本x\n\u0001z\n', 0);
   const m = draw();
@@ -179,6 +207,212 @@ test('splits: side by side windows have a divider, stacked ones share the height
   assert.deepEqual(m.windows.map(w => [w.y, w.h]), [[0, 7], [7, 8]]);
   assert.match(row(m, 6), /d6\.txt/); assert.match(row(m, 14), /d6\.txt/);
   Ed.deleteOtherWindows();
+});
+
+test('setting and clearing folds redisplays every window, including a cached frame, on the next draw', async () => {
+  const lines = ['call', 'secret', 'thought', 'private', 'last'];
+  const b = await show('*transcript*', 'fundamental-mode', lines.join('\n'));
+  Ed.splitWindow(E.sel, 'below');
+  const selected = E.sel;
+  let passive!: Model, draws = 0;
+  const other = Ed.makeFrame(null, { buffer: b, backend: { size: backend.size, draw(m: Model) { passive = m; draws++; } } });
+  const nextFrame = () => new Promise<void>(resolve => host.nextFrame(resolve));
+  const expectRows = (expected: string[]) => {
+    assert.equal(model!.windows.length, 2); assert.equal(passive.windows.length, 1);
+    for (const m of [model!, passive]) for (const w of m.windows) {
+      assert.equal(w.buffer, b.name);
+      assert.deepEqual(expected.map((_, i) => row(m, w.y + i).trimEnd()), expected);
+    }
+  };
+  try {
+    await nextFrame(); // Finish setup's queued draw so it cannot mask a missing redisplay.
+    expectRows(lines);
+    const before = draws, ellipsis = ev('org-ellipsis');
+    Ed.setBufferFolds(b, [{ s: 4, e: 11 }, { s: 19, e: 27 }]);
+    await nextFrame(); // No keys, explicit render or focus change.
+    expectRows(['call' + ellipsis, 'thought' + ellipsis, 'last']);
+    assert.equal(draws, before + 1);
+    Ed.setBufferFolds(b, []);
+    await nextFrame();
+    expectRows(lines);
+    assert.equal(draws, before + 2);
+    assert.equal(E.frame, frame); assert.equal(E.sel, selected); assert.equal(frame.focused, true);
+  } finally {
+    Ed.deleteFrame(other); Ed.deleteOtherWindows();
+  }
+});
+
+test('empty-to-empty replacement preserves the Org visibility cycle and schedules no draw', async () => {
+  const b = await show('*empty outline*', 'org-mode', '* A\n* B\n');
+  await keys('S-TAB');
+  assert.equal(E.echo, 'OVERVIEW');
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  const draws = await drawsDuring(() => Ed.setBufferFolds(b, []));
+  await keys('S-TAB');
+  assert.deepEqual({ echo: E.echo, draws }, { echo: 'CONTENTS', draws: 0 });
+});
+
+test('native show-all with nothing folded does not redraw an unchanged passive frame', async () => {
+  const b = await show('*native passive*', 'org-mode', '* H\nbody');
+  let draws = 0;
+  const other = Ed.makeFrame(null, { buffer: b, backend: { size: backend.size, draw() { draws++; } } });
+  try {
+    await nextDraw();
+    const before = draws;
+    await type('zR');
+    await nextDraw();
+    assert.equal(draws, before);
+  } finally { Ed.deleteFrame(other); }
+});
+
+const nextDraw = () => new Promise<void>(resolve => host.nextFrame(resolve));
+/* Count the input loop's draw and any queued draw that follows it, never setup's pending draw. */
+async function drawsDuring(action: () => void | Promise<void>) {
+  await nextDraw();
+  const before = selectedDraws;
+  await action();
+  await nextDraw();
+  return selectedDraws - before;
+}
+
+test('keyboard undo, redo and zR draw once each without owner folds', async () => {
+  const b = await show('*native keyboard draws*', 'org-mode', '* heading\nbody\n* next');
+  await type('A!'); await keys('ESC');
+  const undo = await drawsDuring(() => keys('u'));
+  assert.equal(b.text, '* heading\nbody\n* next');
+  const redo = await drawsDuring(() => keys('C-r'));
+  assert.equal(b.text, '* heading!\nbody\n* next');
+  await type('zM');
+  assert.notEqual(row(model!, 1).trimEnd(), 'body');
+  const open = await drawsDuring(() => type('zR'));
+  assert.equal(row(model!, 1).trimEnd(), 'body');
+  assert.deepEqual({ undo, redo, open }, { undo: 1, redo: 1, open: 1 });
+});
+
+test('off-loop native folding and undo do not schedule draws without owner folds', async () => {
+  const b = await show('*native idle draws*', 'org-mode', '* heading\nbody\n* next');
+  await type('A!'); await keys('ESC');
+  const fold = await drawsDuring(() => { ev('(evil-close-fold)'); });
+  assert.ok(b.folds.length);
+  const undo = await drawsDuring(() => { Ed.undoStep(b); });
+  assert.equal(b.text, '* heading\nbody\n* next');
+  assert.deepEqual({ fold, undo }, { fold: 0, undo: 0 });
+});
+
+test('keyboard owner fold toggling and undo redisplay the buffer', async () => {
+  const b = await show('*owner keyboard draws*', 'fundamental-mode', 'heading\nbody\nnext');
+  await type('A!'); await keys('ESC');
+  Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'next');
+  await type('za');
+  assert.equal(row(model!, 1).trimEnd(), 'body');
+  await keys('u');
+  assert.equal(row(model!, 0).trimEnd(), 'heading');
+});
+
+test('a cursor on a folded empty heading leaves its ellipsis in both HTML and model runs', async () => {
+  const b = await show('*empty heading*', 'fundamental-mode', '\nbody\nnext');
+  Ed.setBufferFolds(b, [{ s: 0, e: 5 }]);
+  const lines = Ed.renderBuffer(b, { active: true, runs: true });
+  assert.deepEqual(lines.map((l: Edwin) => l.text), ['', 'next']);
+  assert.deepEqual([lines[0].html.includes(`<span class="oe">${ev('org-ellipsis')}</span>`),
+    lines[0].runs.find((r: Edwin) => r.k === 'ell')?.t], [true, ev('org-ellipsis')]);
+  assert.equal(draw().cursor!.x, 0);
+});
+
+test('native fold display at the heading newline keeps the pre-owner cursor behavior', async () => {
+  const b = await show('*native heading newline*', 'org-mode', '* H\nbody\n* Next');
+  await type('zc');
+  b.pt = 3;
+  const lines = Ed.renderBuffer(b, { active: true, runs: true });
+  assert.deepEqual(lines.map((l: Edwin) => l.text), ['* H', '* Next']);
+  assert.deepEqual([lines[0].html.includes('class="oe"'), lines[0].runs.some((r: Edwin) => r.k === 'ell')], [false, false]);
+});
+
+test('Avy labels on heading newlines retain only owner fold indicators', async () => {
+  const b = await show('*Avy outlines*', 'org-mode', '* A\none\n* B\ntwo\n* C');
+  Ed.setBufferFolds(b, [{ s: 3, e: 7 }]);
+  b.pt = 8;
+  await type('zc');
+  const lines = Ed.renderBuffer(b, { active: true, runs: true, avy: new Map([[3, 'a'], [11, 'b']]) });
+  assert.deepEqual(lines.map((l: Edwin) => l.text), ['* A', '* B', '* C']);
+  for (const [i, label] of ['a', 'b'].entries()) {
+    assert.ok(lines[i].html.includes(`>${label}</span>`));
+    assert.equal(lines[i].html.includes('class="oe"'), i === 0);
+    assert.deepEqual(lines[i].runs.filter((r: Edwin) => r.k === 'ell').map((r: Edwin) => r.t),
+      i === 0 ? [ev('org-ellipsis')] : []);
+  }
+});
+
+test('a fold toggled from Scheme while idle redraws without another key', async () => {
+  const b = await show('*direct toggle*', 'fundamental-mode', 'heading\nbody\nnext');
+  Ed.setBufferFolds(b, [{ s: 7, e: 12 }]);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'next');
+  ev('(evil-toggle-fold)');
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'body');
+});
+
+test('direct undo discards owner folds and redraws the restored text while idle', async () => {
+  const b = await show('*direct undo*', 'fundamental-mode', 'heading\nbody\nnext');
+  await type('A!'); await keys('ESC');
+  Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'next');
+  Ed.undoStep(b);
+  assert.equal(b.text, 'heading\nbody\nnext');
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  await nextDraw();
+  assert.deepEqual([row(model!, 0).trimEnd(), row(model!, 1).trimEnd()], ['heading', 'body']);
+});
+
+for (const action of ['toggle', 'undo']) {
+  test(`direct owner fold ${action} redraws while a keyboard command is pending`, async () => {
+    const b = await show(`*pending ${action}*`, 'scheme-mode', 'heading\nbody\nnext');
+    await type('A!'); await keys('ESC');
+    Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
+    await nextDraw();
+    assert.equal(row(model!, 1).trimEnd(), 'next');
+
+    // C-c C-b (eval-buffer) waits for its server result without reading another key.
+    const started = Promise.withResolvers<void>(), result = Promise.withResolvers<void>();
+    const original = Ed.hooks.evalServer;
+    Ed.hooks.evalServer = () => { started.resolve(); return result.promise; };
+    const command = keys('C-c C-b');
+    try {
+      await started.promise;
+      if (action === 'toggle') ev('(evil-toggle-fold)');
+      else Ed.undoStep(b);
+      assert.deepEqual(Ed.getBufferFolds(b), []);
+      await nextDraw();
+      assert.deepEqual([row(model!, 0).trimEnd(), row(model!, 1).trimEnd()],
+        [action === 'toggle' ? 'heading!' : 'heading', 'body']);
+    } finally {
+      result.resolve(); await command;
+      Ed.hooks.evalServer = original;
+    }
+  });
+}
+
+test('appending and reinstalling owner folds in one task draws only the folded result', async () => {
+  const b = await show('*streaming transcript*', 'fundamental-mode', 'call\nout\n');
+  const first = { s: 4, e: 8 }, both = [first, { s: 13, e: 17 }];
+  Ed.setBufferFolds(b, [first]);
+  await nextDraw();
+  const draws: string[][] = [], original = backend.draw;
+  backend.draw = m => { original(m); draws.push([row(m, 0).trimEnd(), row(m, 1).trimEnd()]); };
+  try {
+    Ed.applyOps(b, [[b.text.length, '', 'call\nout\n']]);
+    assert.deepEqual(Ed.getBufferFolds(b), []);
+    Ed.setBufferFolds(b, both);
+    assert.deepEqual(Ed.getBufferFolds(b), both);
+    await nextDraw();
+    const header = 'call' + ev('org-ellipsis');
+    assert.deepEqual(draws, [[header, header]]);
+  } finally { backend.draw = original; }
 });
 
 test('the minibuffer: prompt, input, candidates with every matching term marked, and the cursor in the echo area', async () => {
