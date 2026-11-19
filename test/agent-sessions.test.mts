@@ -3,6 +3,9 @@ import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
+import https from 'node:https';
+import { isIP } from 'node:net';
 import { createRequire } from 'node:module';
 import { FakeAgentHub } from './fake-agent-hub.mts';
 import { makeDir, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
@@ -37,6 +40,43 @@ test('transport boundary: plain HTTP requires a loopback host or a boolean priva
   const url = 'https://host-a.test/path';
   assert.equal(validateAgentHub({ ...config, url }).url, url);
   for (const value of [1, 'true', null]) assert.throws(() => validateAgentHub({ ...config, url, allowCleartext: value }), /boolean/);
+});
+
+test('transport boundary: pin localhost HTTP connections for API and stream without changing the origin', async t => {
+  const attempts: { host: string; address: string; authority?: string | string[] | number }[] = [];
+  // Intercept the agent's last step before any socket is opened. Our synthetic resolver would
+  // send every nonliteral to TEST-NET, but never consults the system resolver or the network.
+  const intercept: http.Agent['createConnection'] = options => {
+    const host = options.host!;
+    attempts.push({ host, address: isIP(host) ? host : '192.0.2.1', authority: (options.headers as http.OutgoingHttpHeaders).host });
+    throw new Error('fixture stopped connection');
+  };
+  t.mock.method(http.Agent.prototype, 'createConnection', intercept);
+  t.mock.method(https.Agent.prototype, 'createConnection', intercept);
+  for (const [base, expectedHost] of [
+    ['http://localhost', '127.0.0.1'], ['http://127.8.9.1', '127.8.9.1'], ['http://[::1]', '::1'],
+    ['https://localhost', 'localhost'], ['http://mesh.test', 'mesh.test']
+  ]) {
+    const url = base + ':1234/prefix', config = validateAgentHub({ url, tokenFile: '/unused', allowCleartext: base === 'http://mesh.test' });
+    const hub = new AgentSessions({ cfg: { agentHub: config }, buffers: { on: () => () => {} } } as unknown as Server);
+    hub.token = () => 'synthetic';
+    try {
+      attempts.length = 0;
+      await assert.rejects(hub.request('GET', 'info'), /fixture stopped connection/);
+      // Reach the independent SSE connection without a real /info response.
+      hub.request = async () => ({});
+      await hub.follow(hub.generation);
+      assert.equal(config.url, url);
+      assert.equal(attempts.length, 2);
+      for (const attempt of attempts) {
+        assert.equal(attempt.host, expectedHost, url);
+        if (base === 'http://localhost') {
+          assert.equal(attempt.address, '127.0.0.1');
+          assert.equal(attempt.authority, 'localhost:1234');
+        }
+      }
+    } finally { hub.stop(); }
+  }
 });
 
 test('transport boundary: reject unsafe routes, IDs and cursors before looking up a bearer token', async () => {

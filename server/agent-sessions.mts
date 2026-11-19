@@ -77,6 +77,7 @@ const expectedEpoch = (value: unknown): number => {
   return value;
 };
 type PresentationPatch = { start: number; remove: number; text: string; previousHead: number; previousEpoch: number };
+const loopbackHost = (hostname: string) => hostname === 'localhost' || hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(hostname);
 
 export function validateAgentHub(value: unknown): AgentHubConfig {
   const c = value as Partial<AgentHubConfig>;
@@ -85,8 +86,7 @@ export function validateAgentHub(value: unknown): AgentHubConfig {
   if (c.allowCleartext !== undefined && typeof c.allowCleartext !== 'boolean') throw new Error('agentHub.allowCleartext must be a boolean');
   let u: URL; try { u = new URL(c.url!); } catch { throw new Error('agentHub.url must be an HTTP or HTTPS URL'); }
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || /[?#]/.test(u.href)) throw new Error('agentHub.url must be HTTP or HTTPS without credentials, query or fragment');
-  const loopback = u.hostname === 'localhost' || u.hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(u.hostname);
-  if (u.protocol !== 'https:' && !loopback && !c.allowCleartext) throw new Error('agentHub.url requires HTTPS outside loopback; allowCleartext is only for an encrypted private network');
+  if (u.protocol !== 'https:' && !loopbackHost(u.hostname) && !c.allowCleartext) throw new Error('agentHub.url requires HTTPS outside loopback; allowCleartext is only for an encrypted private network');
   if (typeof c.tokenFile !== 'string' || !path.isAbsolute(c.tokenFile)) throw new Error('agentHub.tokenFile must be an absolute path');
   return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile, allowCleartext: c.allowCleartext === true, steer: c.steer === true };
 }
@@ -97,6 +97,7 @@ export class AgentSessions implements AgentBackend {
   declare sessions: Map<string, Json>; declare observed: Map<string, Json>;
   declare status: string; declare info: Json; declare stopped: boolean;
   declare stream: http.ClientRequest | null; declare requests: Set<http.ClientRequest>;
+  private loopbackAgent?: http.Agent;
   declare reconnect: NodeJS.Timeout | undefined; declare generation: number;
   reconnectAttempt = 0;
   declare listOpened: boolean;
@@ -159,6 +160,17 @@ export class AgentSessions implements AgentBackend {
     if (u.origin !== base.origin || !u.pathname.startsWith(base.pathname)) throw new Error('Agent route outside the configured API prefix');
     return u;
   }
+  private connect(u: URL, method: string, headers: http.OutgoingHttpHeaders, receive: (res: http.IncomingMessage) => void, timeout?: number) {
+    const options: http.RequestOptions = { method, headers, timeout };
+    if (u.protocol === 'https:') return https.request(u, options, receive);
+    if (loopbackHost(u.hostname)) {
+      // Bypass the process-wide agent (which may use an environment proxy) and DNS for
+      // loopback HTTP. Only the socket destination changes, never the API origin or Host.
+      options.agent = this.loopbackAgent ??= new http.Agent({ keepAlive: true, timeout: 5000 });
+      if (u.hostname === 'localhost') { options.hostname = '127.0.0.1'; headers.host = u.host; }
+    }
+    return http.request(u, options, receive);
+  }
   async request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown, beforeDispatch?: () => void): Promise<Json> {
     const u = this.apiURL(route), token = this.token(), generation = this.generation;
     const data = body === undefined ? undefined : JSON.stringify(body), bytes = data === undefined ? 0 : Buffer.byteLength(data);
@@ -167,7 +179,7 @@ export class AgentSessions implements AgentBackend {
       const headers: Record<string, string | number> = { authorization: `Bearer ${token}` };
       if (data !== undefined) { headers['content-type'] = 'application/json'; headers['content-length'] = bytes; }
       beforeDispatch?.(); // A prompt must persist its intent only after all local preflight checks pass.
-      const req = (u.protocol === 'https:' ? https : http).request(u, { method, headers }, res => {
+      const req = this.connect(u, method, headers, res => {
         const chunks: Buffer[] = []; let bytes = 0;
         const oversize = () => {
           reject(Object.assign(new Error('Agent hub response exceeds the 32 MiB limit'), { retryable: false }));
@@ -241,7 +253,7 @@ export class AgentSessions implements AgentBackend {
       if (this.stopped || gen !== this.generation) return;
       const u = this.apiURL('stream'), token = this.token();
       await new Promise<void>((resolve, reject) => {
-        const req = (u.protocol === 'https:' ? https : http).get(u, { headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' }, timeout: 40000 }, res => {
+        const req = this.connect(u, 'GET', { authorization: `Bearer ${token}`, accept: 'text/event-stream' }, res => {
           if (res.statusCode !== 200) { res.destroy(); req.destroy(); reject(new Error('stream refused')); return; }
           // Every connection is a fresh authoritative snapshot, including observed removals while offline.
           this.streamActive = true; this.registryRevision++;
@@ -269,12 +281,13 @@ export class AgentSessions implements AgentBackend {
             if (bytes + Buffer.byteLength(rest) > SSE_LIMIT) { reason = SSE_OVERSIZE; req.destroy(); }
           });
           res.on('end', resolve); res.on('error', reject);
-        });
+        }, 40000);
         const deadline = setTimeout(() => { reason = 'initial snapshot deadline exceeded'; req.destroy(); }, 40000);
         this.stream = req; this.requests.add(req);
         req.on('close', () => { clearTimeout(deadline); this.requests.delete(req); if (this.stream === req) this.stream = null; });
         req.on('timeout', () => req.destroy()); req.on('error', reject);
         req.on('close', resolve);
+        req.end();
       });
     } catch { /* transport diagnostics deliberately contain no remote text or headers */ }
     if (this.stopped || gen !== this.generation) return;
@@ -690,6 +703,7 @@ export class AgentSessions implements AgentBackend {
     this.stopped = true; this.generation++; clearTimeout(this.reconnect);
     for (const queue of [this.retries, this.factRetries]) for (const sid of queue.keys()) this.clearRetry(queue, sid);
     for (const req of this.requests) req.destroy();
+    this.loopbackAgent?.destroy();
     this.offKill(); this.views.clear(); this.transcripts.clear(); this.openedObserved.clear();
     this.facts.clear(); this.factReads.clear(); this.announced.clear(); this.replayErrors.clear();
   }
