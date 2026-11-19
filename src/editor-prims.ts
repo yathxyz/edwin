@@ -228,9 +228,10 @@ let matchOneBased = false;
 D('search-forward', 'STRING &optional BOUND NOERROR COUNT', 'Search forward for STRING; move point to the end of the match.', ([s, bound, noerr, count]) => searchStr(s, bound, noerr, count, 1));
 D('search-backward', 'STRING &optional BOUND NOERROR COUNT', 'Search backward for STRING; move point to the start of the match.', ([s, bound, noerr, count]) => searchStr(s, bound, noerr, count, -1));
 function searchStr(s: SchemeValue, bound: SchemeValue, noerr: SchemeValue, count: SchemeValue, dir: number) {
-  const b = cur(); str(s);
-  const fold = truthy(L.get('case-fold-search')) && s === (s as string).toLowerCase();
-  const hay = fold ? b.text.toLowerCase() : b.text, needle = fold ? (s as string).toLowerCase() : s as string;
+  const b = cur(), needle = str(s);
+  const fold = truthy(L.get('case-fold-search')) && needle === needle.toLowerCase();
+  /* Keep whole-string lowercasing: Unicode can expand, affecting the existing match offsets. */
+  const hay = fold ? b.text.toLowerCase() : b.rope;
   const lim = L.absent(bound) ? null : clampPos(b, num(bound) - 1);
   let p = b.pt, n = optNum(count, 1); if (n < 0) { dir = -dir; n = -n; }
   for (let k = 0; k < n; k++) {

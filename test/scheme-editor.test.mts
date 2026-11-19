@@ -33,6 +33,15 @@ test("the user's init.scm runs after every shipped file", () => {
   assert.equal(ev('user-init-saw-org'), true);
 });
 
+test('bounded literal search and replacement across a text chunk boundary', async () => {
+  await fresh('a'.repeat(2046) + 'Cross' + 'a'.repeat(3000));
+  assert.equal(ev('(search-forward "Cross" 2051 #t)'), false);
+  assert.equal(ev('(search-forward "Cross" 2052)'), 2052);
+  assert.equal(ev('(search-backward "Cross" 2047)'), 2047);
+  ev('(replace-string "Cross" "X")');
+  assert.equal(ev('(buffer-substring 2046 2049)'), 'aXa');
+});
+
 test('markers: before and after insertion types, point is an after marker (R6.11)', async () => {
   await fresh('abcdef');
   ev('(define m-before (copy-marker 3)) (define m-after (copy-marker 3 #t))');
