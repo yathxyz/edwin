@@ -651,16 +651,15 @@ export async function install(server: Server) {
   });
   cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
   for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt']) cmd('agent-session-' + action, async a => {
-    const sid = sidOf(a[0]), { epoch, ...body } = a[1] || {};
-    await hub.requireSession(sid, epoch);
-    expectedEpoch(epoch);
-    return hub.request('POST', `sessions/${sid}/${action}`, Object.keys(body).length ? body : undefined);
+    const sid = sidOf(a[0]), body = a[1];
+    await hub.requireSession(sid, body?.epoch); expectedEpoch(body?.epoch);
+    return hub.request('POST', `sessions/${sid}/${action}`, body);
   });
   for (const action of ['permission', 'elicitation'] as const) cmd('agent-session-' + action, a => hub.answer(a[0], action, a[1]));
   cmd('agent-session-remove', async a => {
     const sid = sidOf(a[0]), epoch = a[1]?.epoch;
     await hub.requireSession(sid, epoch); expectedEpoch(epoch);
-    return hub.request('DELETE', 'sessions/' + sid + '?forget=true');
+    return hub.request('DELETE', 'sessions/' + sid + '?forget=true', { epoch });
   });
   server.statusProviders.push(() => ({ agentHub: hub.status, agentSessions: hub.sessions.size, agentObserved: hub.observed.size }));
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });

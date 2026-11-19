@@ -1454,11 +1454,11 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
   No filesystem or direct-agent workaround invents a second record.
   These are per-unit bounds, not a total-memory cap: retained history for an open journal still grows
   in memory. Killing its daemon buffer releases that replay/presentation state.
-- **Incarnation precondition:** permission/elicitation APIs already enforce epoch. Draft sends recheck the
-  captured `{sid,createdAt}` immediately before POST, but `/prompt` accepts no expected incarnation:
-  a replacement between that GET and the POST cannot be ruled out locally. The hub must accept and
-  atomically enforce an expected incarnation to close this window. Other steering endpoints lacking that
-  precondition have the same remote race; Edwin never silently refreshes a displayed choice to a new epoch.
+- **Incarnation precondition:** every mutation of an existing session carries the selected `createdAt`
+  as `epoch` in its JSON body, including draft prompt POSTs and DELETE. Edwin rechecks the session
+  before sending. The hub enforces epoch for permission/elicitation answers; other routes may ignore it.
+  On those routes a replacement between the check and the write can still act on the wrong incarnation.
+  Only an atomic check at the hub can close that window.
 - **Receipt durability:** after a positive acknowledgement, this daemon never offers the same draft target
   for retry even if receipt persistence fails, and tells the user so. If the daemon then crashes before a
   receipt becomes durable, restart may recover the older target record. No crash reconciliation/idempotency

@@ -89,7 +89,8 @@ test('prompt minor keys outrank Markdown/Evil, drain local edits and send exactl
   await keys('C-c C-p');
   const preview = JSON.parse(Ed.getBuffer('*Agent Prompt Preview*').text); assert.equal(preview.blocks[0].text, 'local edits before preview\n');
   show(draft); await keys('C-c C-c');
-  const call = hub.calls.filter(c => c.path === '/v1/sessions/alpha/prompt').at(-1)!; assert.deepEqual(call.body!.blocks, preview.blocks);
+  const call = hub.calls.filter(c => c.path === '/v1/sessions/alpha/prompt').at(-1)!;
+  assert.deepEqual(call.body, { epoch: preview.targets[0].epoch, blocks: preview.blocks });
   await L.call('agent-session-prompt', ['alpha']); const abandoned = E.current; Ed.insertText(abandoned, 'retained unsent');
   const mark = hub.calls.length; await keys('C-c C-k');
   assert.equal(hub.calls.slice(mark).filter(c => c.path.endsWith('/prompt')).length, 0);
@@ -150,7 +151,7 @@ test('form elicitation preserves primitive types and arrays; decline/cancel and 
   await pending('beta', request.seq);
   await keys('C-c a !');
   for (const input of ['accept', 'Alice', '2.5', 'true', '["one","two"]']) await mini(input);
-  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/elicitation')).at(-1)!.body!.response, { action: 'accept', content: { name: 'Alice', count: 2.5, allowed: true, tags: ['one', 'two'] } });
+  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/elicitation')).at(-1)!.body, { epoch: target('beta').epoch, req: request.seq, response: { action: 'accept', content: { name: 'Alice', count: 2.5, allowed: true, tags: ['one', 'two'] } } });
   for (const action of ['decline', 'cancel']) {
     const next = hub.append('beta', { e: 'elicitation', request: { message: 'Supply form', requestedSchema: schema } }); await pending('beta', next.seq);
     await keys('C-c a !'); await mini(action);
@@ -168,9 +169,9 @@ test('offered mode/config values reach the API and an old hub reports config uns
   await frame();
   hub.append('alpha', { e: 'session', via: 'new', sessionId: 'agent-alpha', modes: { currentModeId: 'ask', availableModes: [{ id: 'ask', name: 'Ask' }, { id: 'auto', name: 'Automatic' }] }, configOptions: [{ id: 'model', name: 'Model', type: 'select', currentValue: 'small', options: [{ value: 'small', name: 'Small' }, { value: 'large', name: 'Large' }] }] });
   await L.call('agent-session-mode', ['auto', 'alpha']);
-  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/mode')).at(-1)!.body, { modeId: 'auto' });
+  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/mode')).at(-1)!.body, { epoch: target('alpha').epoch, modeId: 'auto' });
   await L.call('agent-session-config', ['model', 'large', 'alpha']);
-  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/config')).at(-1)!.body, { id: 'model', value: 'large' });
+  assert.deepEqual(hub.calls.filter(c => c.path.endsWith('/config')).at(-1)!.body, { epoch: target('alpha').epoch, id: 'model', value: 'large' });
   hub.configSupported = false;
   try { await assert.rejects(L.call('agent-session-config', ['model', 'small', 'alpha']), /unsupported|does not support/i); }
   finally { hub.configSupported = true; }
@@ -453,8 +454,12 @@ test('AS-C10: host RPC addresses a transcript without selecting it: folds, struc
   await rpc('agent-session-cancel', [sid, { epoch }]);
   await rpc('agent-session-mode', [sid, { modeId: 'auto', epoch }]);
   await rpc('agent-session-config', [sid, { id: 'model', value: 'large', epoch }]);
-  assert.deepEqual(hub.calls.filter(c => c.method === 'POST' && c.path.startsWith(`/v1/sessions/${sid}/`)).map(c => [c.path.split('/').at(-1), c.body]), [
-    ['prompt', { text: 'Sent from an ordinary host text field' }], ['cancel', undefined], ['mode', { modeId: 'auto' }], ['config', { id: 'model', value: 'large' }],
+  await rpc('agent-session-revive', [sid, { epoch }]);
+  await rpc('agent-session-remove', [sid, { epoch }]);
+  assert.deepEqual(hub.calls.filter(c => c.method !== 'GET' && c.path.startsWith(`/v1/sessions/${sid}`)).map(c => [c.method, c.path.slice(`/v1/sessions/${sid}`.length), c.body]), [
+    ['POST', '/prompt', { text: 'Sent from an ordinary host text field', epoch }], ['POST', '/cancel', { epoch }],
+    ['POST', '/mode', { modeId: 'auto', epoch }], ['POST', '/config', { id: 'model', value: 'large', epoch }],
+    ['POST', '/revive', { epoch }], ['DELETE', '?forget=true', { epoch }],
   ]);
   assert.equal(E.current, other); assert.equal(other.pt, point);
 });

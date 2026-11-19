@@ -182,7 +182,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
             if (capability && caps[capability] !== true) fail(`${sid} does not support ${capability} prompt blocks`);
           }
           await backend.requireSession(sid, epoch);
-          await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { blocks: p.blocks });
+          await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { epoch, blocks: p.blocks });
           // Acknowledgement is irrevocable in this daemon, even if the durable receipt cannot be written.
           accepted = true;
           let destinations = acknowledged.get(d.key);
