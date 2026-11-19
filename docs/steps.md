@@ -447,9 +447,10 @@ split is in Edwin itself, on every host, and the terminal stays the default of b
   one. `-a` has nothing to start for an edwind that `--socket`, `--remote` or a remote `$EDWIN_SOCKET` names.
   `-t` (`-nw`, `--tty`) asks for a terminal frame, the default, and `-c` (`--create-frame`) for a window, which
   `--geometry` sizes; `-g` is edwin's.
-  After hello, both a frame and `-e` wait up to 30 s for welcome. If it does not arrive, or the connection closes
-  first, edwinclient names the edwind and the reason and exits with status 1; a frame leaves the alternate screen
-  and resets the terminal modes before saying why.
+  Both a frame and `-e` start the 30 s wait for welcome when they send their first hello. If welcome does not
+  arrive, or the connection closes first, edwinclient names the edwind and the reason and exits with status 1;
+  a frame resets the terminal modes and leaves the alternate screen before saying why. A close after welcome
+  starts the frame's usual reconnect instead.
 - **`-e`, `--eval`.** The arguments after it are Scheme forms, not files (a FILE before it is one too, as
   emacsclient takes it), and at least one must follow it. edwinclient says hello as a client of kind `cli` (device
   `edwinclient`) and sends the forms as `call`s, one after another; a cli client's failing form answers with its

@@ -63,7 +63,7 @@ ${LEAVE} Your init file is ~/.config/edwin/init.scm.
 const ESC_MS = Number(N.env('EDWIN_ESC_MS')) || 25;     // how long a lone ESC waits for the rest of a sequence
 const FENCE_MS = 60;                                     // how long the first draw waits for the terminal's replies
 const DRAIN_MS = 5000;                                   // how long quitting waits for edwind to confirm edits
-const WELCOME_MS = 30000;                                // hello must get a welcome, not just the initial ping's reply
+const WELCOME_MS = Number(N.env('EDWIN_TEST_WELCOME_MS')) || 30000;
 /* EDWIN_TRACE=1 logs how long each startup step took (in the log file, as console does). */
 const trace = N.env('EDWIN_TRACE') ? ((what: string) => console.log(`startup ${what} ${N.now().toFixed(1)} ms`)) : () => {};
 trace('main');
@@ -116,16 +116,17 @@ if (opts.eval) { evaluate(opts.files, edwind!); return; }
 
 /* Only the first hello is a startup wait; after welcome a frame keeps the usual reconnect policy. */
 function welcomeDeadline(path: string, fail: (why: string) => void) {
-  const prefix = `cannot attach to edwind at ${path}: `;
-  let timer: number | undefined = setTimeout(() => { timer = undefined; fail(prefix + `no welcome in ${WELCOME_MS / 1000} s`); }, WELCOME_MS);
-  const received = () => { clearTimeout(timer); timer = undefined; };
+  let pending = true, timer: number | undefined;
+  const received = () => { pending = false; clearTimeout(timer); };
+  const reject = (why: string) => {
+    if (!pending) return;
+    received();
+    fail(`cannot attach to edwind at ${path}: ${why}`);
+  };
   return {
+    sent() { timer = setTimeout(() => reject(`no welcome in ${WELCOME_MS / 1000} s`), WELCOME_MS); },
     received,
-    closed(why: string | null) {
-      if (timer === undefined) return;
-      received();
-      fail(prefix + 'connection closed before welcome' + (why ? ': ' + why : ''));
-    },
+    closed(why: string | null) { reject('connection closed before welcome' + (why ? ': ' + why : '')); },
   };
 }
 
@@ -157,6 +158,7 @@ function evaluate(forms: string[], [path, id]: [string, number]) {
     if (code) end(code);
   };
   send({ t: 'hello', proto: 1, cid: crypto.randomUUID().replace(/-/g, ''), kind: 'cli', device: 'edwinclient', caps: {} });
+  welcome.sent();
 }
 
 /* Standard input as a buffer (edwin -), read before the terminal is taken. */
@@ -315,6 +317,8 @@ const transport = (path: string) => (): EdTransport => {
     const welcome = welcomeDeadline(path, why => {
       stop(); leaveTerminal(); N.eprint(`edwinclient: ${why}\n`); N.exit(1);
     });
+    const send = ws.send;
+    ws.send = hello => { ws.send = send; send(hello); welcome.sent(); };
     const stop = Ed.sync.on('state', state => {
       if (state === 'online') { welcome.received(); stop(); }
       else if (state === 'offline') welcome.closed(N.sockError(id));
