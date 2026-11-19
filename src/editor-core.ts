@@ -14,6 +14,7 @@ type EcLexInfo = { dirty?: boolean };
 type EcIsearchFrame = { pt: number; str: string; failing: boolean; match: [number, number] | null; dir: number; wrapped: boolean };
 type EcLineBoth = { html: string; runs: EdRun[] };
 type EcLineVal = string | EdRun[] | EcLineBoth;
+type EcLineCache = Map<string, EcLineVal> & { names?: string[] };
 type EcLine = { o: number; n: number | null; cl: boolean; html: string | undefined; pulse: boolean; runs?: EdRun[]; text?: string };
 type EcRendered = EcLine[] & { seg?: string; cache?: Map<string, EcLineVal> | null };
 type EcLexSeg = { cls: ArrayLike<number>; names: string[] };
@@ -337,7 +338,8 @@ class Frame extends FrameState {
 /* Ed.makeFrame(el, {buffer, kind: 'card' | 'console', fontSize}) builds a frame's parts inside EL: the
    windows, the echo area, the hidden input textarea and the presence layer, with a menubar for a console
    (R9.2, R9.3). The older form makeFrame(root, parts) takes a page that already holds the parts
-   (index.html). The window tree starts with one window on BUFFER (else the current buffer).
+   (index.html); when created before boot, it gets its first window from boot. Otherwise a frame starts
+   with one window on BUFFER (else the current buffer).
    Ed.makeFrame(null, {backend, buffer, kind, theme}) makes a model frame (DT0): no page, no DOM; each redisplay
    lays the frame out on backend.size()'s cell grid and hands the result to backend.draw (display.ts). */
 function makeFrame(root: HTMLElement | null, opts?: EdMakeFrameOpts) {
@@ -347,7 +349,8 @@ function makeFrame(root: HTMLElement | null, opts?: EdMakeFrameOpts) {
   const f = new Frame(root, built ? {} : opts as Record<string, HTMLElement>);
   if (built) buildFrame(f, root, opts);
   const b = (opts.buffer && toBuffer(opts.buffer)) || E.current || E.buffers[0];
-  f.wroot = f.sel = new Window(b); f.sel.pt = b.pt;
+  if (b) f.wroot = f.sel = new Window(b);
+  else if (built || E.booted) signal('error', 'Ed.makeFrame: no buffer for the initial window');
   E.frames.push(f);
   E.headless = false;
   if (!E.frame) selectFrame(f);
@@ -1978,6 +1981,13 @@ function vLineStart(b: EdBuffer, n: number) {
   return lineStartB(b, n + pre[lo]);
 }
 function vLineCount(b: EdBuffer) { const F = foldsOf(b); if (!F) return lineCountB(b); return lineCountB(b) - foldPrefix(b, F)[F.length]; }
+const BYTE_CLASS_COUNT = 256;
+// Compare by index: array iteration methods such as every() skip sparse slots.
+function sameClassNames(a: string[], b: string[]) {
+  const n = Math.min(BYTE_CLASS_COUNT, Math.max(a.length, b.length));
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 /* Render the lines of B from the line at O.from, at most O.count lines (every line when o.lines is
    false: the minibuffer). Span offsets are relative to the line start, so an edit changes only the
    lines it touches. Returns [{o, n, cl, html}], or one HTML string without lines.
@@ -2028,10 +2038,18 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const out: EcRendered = [];
   const wantRuns = !!o.runs, wantHtml = o.html !== false || !wantRuns;
   let R: EdRun[] | null = null;
-  const cache = (lines || wantRuns) && !o.avy ? o.cache || null : null, next = (lines || wantRuns) && !o.avy ? new Map<string, EcLineVal>() : null;
-  /* The cache key also names the class table (a mode's own lexer numbers its classes differently) and
-     the fold ellipsis, which change a line's html without changing its text or keys. */
-  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
+  // Absolute HTML offsets and lexer IDs wider than the packed byte are not in the row key.
+  const cacheable = (lines || !wantHtml) && !o.avy && (!ext || ecls instanceof Uint8Array || ecls instanceof Uint8ClampedArray);
+  const next: EcLineCache | null = cacheable ? new Map() : null;
+  let cache: EcLineCache | null = next ? o.cache || null : null;
+  if (next && ext) {
+    const prev = cache?.names;
+    if (prev && sameClassNames(prev, names)) next.names = prev;
+    else { next.names = names.slice(0, BYTE_CLASS_COUNT); cache = null; }
+  }
+  const cursorClass = o.cursorClass || '';
+  const ckPre = next ? `${o.active ? 1 : 0}|${cursorClass.length}:${cursorClass}|${ext ? 'x' : ''}|${ellT.length}:${ellT}|`
+    + (wantRuns ? (wantHtml ? 'RH|' : 'R|') : '') : '';
   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
   for (; ls <= n && made < count; ln++, made++) {
     const le = eolS(ls);
@@ -2071,7 +2089,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
         const ch = t.charAt(k), atEnd = k === le;
         const kc = atEnd ? '' : cls ? CLS_NAMES[cls[k]] : ecls ? names[ecls[k - from]] || '' : '';
         const fk = flags[k - from] || 0;
-        const ccls = `cur ${o.cursorClass || ''}${o.active ? '' : ' ghost'}${kc ? ' ' + kc : ''}${fk & FLAG.REGION ? ' rg' : ''}${fk & FLAG.PAREN ? ' pm' : ''}`;
+        const ccls = `cur ${cursorClass}${o.active ? '' : ' ghost'}${kc ? ' ' + kc : ''}${fk & FLAG.REGION ? ' rg' : ''}${fk & FLAG.PAREN ? ' pm' : ''}`;
         if (R) R.push({ s: k - ls, e: atEnd ? k - ls : k - ls + 1, cls: ccls, k: 'cur' });
         if (wantHtml) html += `<span class="${ccls}" data-o="${k - rel}" data-len="${atEnd ? 0 : 1}">${atEnd ? ' ' : esc(ch)}</span>`;
         start = atEnd ? k : k + 1;

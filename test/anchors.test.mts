@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
-import type { EditOp } from './ot-sim.mts';
+import { OT, type EditOp } from './ot-sim.mts';
 
 let dir: TestDir, child: EdwindChild;
 before(async () => {
@@ -126,43 +126,58 @@ test('R4.41 edits by a server thread and server undo move anchors too; Scheme pr
 test('R8.12 after a disk revert an anchor is relocated by prefix and quote, announced in meta and journaled; R8.13 merge too', async () => {
   const { p, id } = file('r.md', 'one\ntwo\nthree\nfour\n');
   const a = await client({ kind: 'frame' });
-  await a.open(id);
+  const opened = await a.open(id);
+  let text = opened.text!, ver = opened.ver!;
   await a.call('anchor-add', [id, 8, 'ink', 'ink-3']); // the start of "three"
   await a.call('anchor-add', [id, 0, null, 'top']);
-  await a.next(m => m.t === 'meta' && m.buf === id); await sync(a); a.queue = a.queue.filter(m => m.t !== 'meta');
+  // Match the broadcast for the text under test, not anchor-adds or a partial disk update.
+  const diskMetaAtText = async (expected: string) => {
+    do {
+      const ed = await a.next(m => m.t === 'edits' && m.buf === id);
+      assert.deepEqual(ed.by, { kind: 'disk' });
+      assert.equal(ed.ver, ++ver);
+      text = OT.apply(text, ed.ops);
+    } while (text !== expected);
+    return a.next(m => m.t === 'meta' && m.buf === id && m.ver === ver);
+  };
+  // Force two observed disk batches; leave both broadcasts queued on the frame under test.
+  const observer = await client();
+  await observer.open(id);
+  externalWrite(p, 'one\ntwo\nthree\nfour\nzero\n');
+  await observer.next(m => m.t === 'edits' && m.buf === id && m.by.kind === 'disk');
+  observer.close();
   // The lines above change and move: the diff alone could leave the anchor on another line.
-  externalWrite(p, 'four\ntwo\nthree\none\nzero\n');
-  const ed = await a.next(m => m.t === 'edits' && m.buf === id);
-  assert.deepEqual(ed.by, { kind: 'disk' });
-  const meta = await a.next(m => m.t === 'meta' && m.buf === id && m.anchors.length === 2);
-  const text = 'four\ntwo\nthree\none\nzero\n';
+  const reverted = 'four\ntwo\nthree\none\nzero\n';
+  externalWrite(p, reverted);
+  const meta = await diskMetaAtText(reverted);
+  assert.equal(meta.anchors.length, 2);
   assert.equal(meta.anchors.find((x: Msg) => x.id === 'ink-3').pos, text.indexOf('three'));
   const top = meta.anchors.find((x: Msg) => x.id === 'top').pos;
   assert.ok(top >= 0 && top <= 5, `an anchor whose quote is gone keeps its shifted position: ${top}`);
-  assert.equal(meta.ver, 1);
   assert.deepEqual(await anchorsOf(a, id), meta.anchors);
   // A modified buffer: the three-way merge is a disk batch as well.
-  await a.edit(id, 1, [[0, 'four', 'FOUR']]);
-  externalWrite(p, 'four\ntwo\nthree\none\nzero\nfive\n');
-  await a.next(m => m.t === 'edits' && m.buf === id && m.by.kind === 'disk');
-  assert.equal((await a.open(id)).text, 'FOUR\ntwo\nthree\none\nzero\nfive\n');
-  // The watcher may see the external write in two parts (two disk batches): read the anchors once the last one landed.
-  let ink3;
-  for (let i = 0; i < 200 && ink3 !== 9; i++) { if (i) await sleep(25); ink3 = (await anchorsOf(a, id)).find((x: Msg) => x.id === 'ink-3').pos; }
-  assert.equal(ink3, 9);
+  const ops: EditOp[] = [[0, 'four', 'FOUR']];
+  assert.equal((await a.edit(id, ver, ops)).ver, ++ver);
+  text = OT.apply(text, ops);
+  externalWrite(p, reverted + 'five\n');
+  const merged = 'FOUR\ntwo\nthree\none\nzero\nfive\n';
+  const mergedMeta = await diskMetaAtText(merged);
+  assert.equal((await a.open(id)).text, merged);
+  assert.equal(mergedMeta.anchors.find((x: Msg) => x.id === 'ink-3').pos, 9);
+  assert.deepEqual(await anchorsOf(a, id), mergedMeta.anchors);
   // The relocation is in the journal: the last anchors line names the current version and the positions.
   // The append is fsynced after the batch is announced, so wait for it instead of a fixed pause.
   let last;
-  for (let i = 0; i < 200 && (!last || last.ver < 3); i++) {
+  for (let i = 0; i < 200 && (!last || last.ver < mergedMeta.ver); i++) {
     if (i) await sleep(25);
     const lines = journalOf(id).split('\n').filter(l => l.includes('"t":"a"')).map(l => JSON.parse(l));
     last = lines[lines.length - 1];
   }
-  assert.equal(last.ver, 3); assert.equal(last.anchors.find((x: Msg) => x.id === 'ink-3').pos, 9); assert.equal(last.anchors.find((x: Msg) => x.id === 'ink-3').quote.slice(0, 5), 'three');
+  assert.equal(last.ver, mergedMeta.ver); assert.equal(last.anchors.find((x: Msg) => x.id === 'ink-3').pos, 9); assert.equal(last.anchors.find((x: Msg) => x.id === 'ink-3').quote.slice(0, 5), 'three');
   // A quote that vanished: the shifted position stands, clamped (the buffer is saved first, so this is a revert).
   await a.request({ t: 'save', buf: id });
   externalWrite(p, 'x\n');
-  await a.next(m => m.t === 'edits' && m.buf === id && m.by.kind === 'disk');
+  await diskMetaAtText('x\n');
   const now = await a.open(id); assert.equal(now.text, 'x\n');
   for (const x of now.meta!.anchors) assert.ok(x.pos >= 0 && x.pos <= 2);
   a.close();
