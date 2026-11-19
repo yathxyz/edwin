@@ -291,7 +291,7 @@ test('runs reproduce the html renderer: same text, same classes, and the html is
   b.markActive = false;
 });
 
-test('unstyled lines retain the same spans and runs at point, line ends and folds', async () => {
+test('a warm row cache preserves spans and runs across cursor moves, folds and highlighting', async () => {
   const long = 'x'.repeat(12000), text = '\n<&>"\t😀\0\n' + long + '\nhidden\nend\n';
   const b = await show('plain.txt', 'fundamental-mode', text);
   const eol = text.indexOf('\n', 1);
@@ -303,15 +303,15 @@ test('unstyled lines retain the same spans and runs at point, line ends and fold
       b.pt = pt;
       const o = { active: pt % 2 === 0, numbers: 'relative', count: 12, cursorClass: 'bar', ...format };
       const rows: Rendered = Ed.renderBuffer(b, { ...o, cache });
-      // A regexp that never matches exercises the classified path but must not change its output.
-      const classified: Rendered = Ed.renderBuffer(b, { ...o, hl: /(?!)/g, cache: rows.cache });
+      // A fresh render with a highlight that matches nothing must draw exactly the same rows.
+      const classified: Rendered = Ed.renderBuffer(b, { ...o, hl: /(?!)/g });
       assert.deepEqual([...rows], [...classified]);
       assert.equal(rows.seg, classified.seg);
       cache = rows.cache;
     }
   }
   assert.equal(Ed.renderBuffer(b, { lines: false }), Ed.renderBuffer(b, { lines: false, hl: /(?!)/g }));
-  // A plain cache must not mask later search highlighting or a selection past end-of-line.
+  // Cached rows must not mask later search highlighting or a selection past end-of-line.
   const before = Ed.renderBuffer(b, { count: 2 });
   b.mark = 1; b.pt = eol + 1; b.markActive = true;
   const marked = Ed.renderBuffer(b, { count: 2, hl: /</g, cache: before.cache });
