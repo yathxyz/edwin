@@ -304,6 +304,30 @@ test('multi-send snapshots exact blocks, removes successful targets before parti
   } finally { hub.handle = original; }
 });
 
+test('an oversized serialized prompt retains its destination and can be shortened and sent', async () => {
+  // The source fits in 1 MiB, but its JSON escapes do not.
+  const body = ('"'.repeat(63) + '\n').repeat(8192), alpha = target('alpha');
+  const id = await value('agent-prompt-create', [{ ...alpha, text: body }]), mark = hub.calls.length;
+  const refused = await client.call('agent-prompt-send', [id]);
+  assert.match(refused.error?.report || '', /1 MiB/);
+  const preview = await value('agent-prompt-preview', [id]);
+  assert.deepEqual(preview.targets, [alpha]); assert.deepEqual(preview.possiblySent, []);
+  assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST').length, 0);
+  const opened = await client.open(id);
+  assert.equal((await client.edit(id, opened.ver!, [[0, body, 'shorter prompt']])).t, 'ack');
+  assert.deepEqual((await value('agent-prompt-send', [id])).sent, ['alpha']);
+  assert.deepEqual(hub.calls.slice(mark).filter(c => c.method === 'POST').map(c => c.body),
+    [{ epoch: alpha.epoch, blocks: [{ type: 'text', text: 'shorter prompt' }] }]);
+});
+
+test('an oversized file cannot be embedded into a draft', async () => {
+  const file = path.join(dir.dirs.notes, 'large-attachment.txt'), id = await value('agent-prompt-create', [{ text: 'small' }]);
+  fs.writeFileSync(file, ''); fs.truncateSync(file, 1024 * 1024 + 1);
+  const refused = await client.call('agent-prompt-attach-file', [id, file, { embed: true, mimeType: 'application/octet-stream' }]);
+  assert.match(refused.error?.report || '', /limit|too large/i);
+  assert.deepEqual((await value('agent-prompt-preview', [id])).blocks, [{ type: 'text', text: 'small' }]);
+});
+
 test('a durable send intent is required before any prompt POST', async () => {
   const alpha = target('alpha'), id = await value('agent-prompt-create', [{ ...alpha, text: 'no intent, no send' }]);
   const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json');

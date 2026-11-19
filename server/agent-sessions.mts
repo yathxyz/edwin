@@ -17,7 +17,8 @@ import type { CallResult } from './proto.mts';
 type Json = Record<string, any>; // any: verbatim hub JSON; unknown ACP variants remain inspectable
 export interface AgentHubConfig { url: string; tokenFile: string; allowCleartext?: boolean; steer?: boolean }
 export interface AgentBackend {
-  request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown): Promise<any>; // any: API JSON
+  readonly requestBodyLimit: number;
+  request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown, beforeDispatch?: () => void): Promise<Json>;
   clean<T>(value: T): T;
   requireSession(sid: string, epoch?: number): Promise<Json>;
   open(sid: string): Promise<string>;
@@ -91,6 +92,7 @@ export function validateAgentHub(value: unknown): AgentHubConfig {
 }
 type RetryQueue = Map<string, NodeJS.Timeout>;
 export class AgentSessions implements AgentBackend {
+  readonly requestBodyLimit = 1024 * 1024;
   declare server: Server; declare config: AgentHubConfig | undefined;
   declare sessions: Map<string, Json>; declare observed: Map<string, Json>;
   declare status: string; declare info: Json; declare stopped: boolean;
@@ -157,13 +159,14 @@ export class AgentSessions implements AgentBackend {
     if (u.origin !== base.origin || !u.pathname.startsWith(base.pathname)) throw new Error('Agent route outside the configured API prefix');
     return u;
   }
-  async request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown): Promise<Json> {
+  async request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown, beforeDispatch?: () => void): Promise<Json> {
     const u = this.apiURL(route), token = this.token(), generation = this.generation;
-    const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
-    if (data && data.length > 1024 * 1024) throw new Error('Agent hub request exceeds its 1 MiB body limit');
+    const data = body === undefined ? undefined : JSON.stringify(body), bytes = data === undefined ? 0 : Buffer.byteLength(data);
+    if (bytes > this.requestBodyLimit) throw new Error('Agent hub request exceeds its 1 MiB body limit');
     return new Promise((resolve, reject) => {
       const headers: Record<string, string | number> = { authorization: `Bearer ${token}` };
-      if (data) { headers['content-type'] = 'application/json'; headers['content-length'] = data.length; }
+      if (data !== undefined) { headers['content-type'] = 'application/json'; headers['content-length'] = bytes; }
+      beforeDispatch?.(); // A prompt must persist its intent only after all local preflight checks pass.
       const req = (u.protocol === 'https:' ? https : http).request(u, { method, headers }, res => {
         const chunks: Buffer[] = []; let bytes = 0;
         const oversize = () => {

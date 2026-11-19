@@ -196,11 +196,11 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
             if (capability && caps[capability] !== true) fail(`${sid} does not support ${capability} prompt blocks`);
           }
           await backend.requireSession(sid, epoch);
-          // Commit the intent before dispatch: a crash leaves either an unsent destination or a non-retryable one.
-          const targets = remaining.filter(t => t !== target), possiblySent = [...earlier, target];
-          persist({ ...d, targets, possiblySent }); d.targets = targets; d.possiblySent = possiblySent;
-          awaitingReply = true;
-          await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { epoch, blocks: p.blocks });
+          await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { epoch, blocks: p.blocks }, () => {
+            const targets = remaining.filter(t => t !== target), possiblySent = [...earlier, target];
+            persist({ ...d, targets, possiblySent }); d.targets = targets; d.possiblySent = possiblySent;
+            awaitingReply = true;
+          });
           awaitingReply = false;
           const acknowledged = [...d.acknowledged, target];
           try { persist({ ...d, acknowledged, possiblySent: earlier }); }
@@ -237,8 +237,20 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     const absolute = lexicalPath(server.auth, name); server.auth.checkRead(absolute);
     const block = server.auth.withRead(absolute, (fd, st, real) => {
       if (!st.isFile()) fail('Not a regular file');
-      const data = fs.readFileSync(fd), uri = pathToFileURL(real).href;
-      return { type: 'resource', resource: { uri, mimeType, ...(mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType) ? { text: data.toString('utf8') } : { blob: data.toString('base64') }) } };
+      const isText = mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType);
+      const limit = isText ? backend.requestBodyLimit : 3 * Math.floor(backend.requestBodyLimit / 4);
+      if (st.size > limit) fail('Embedded file exceeds the agent request body limit');
+      // Read only the checked descriptor and never chase a growing file beyond its original size.
+      const data = Buffer.allocUnsafe(st.size + 1);
+      let bytes = 0;
+      while (bytes < data.length) {
+        const n = fs.readSync(fd, data, bytes, data.length - bytes, bytes);
+        if (!n) break;
+        bytes += n;
+      }
+      if (bytes !== st.size) fail('Embedded file changed size while reading');
+      const uri = pathToFileURL(real).href;
+      return { type: 'resource', resource: { uri, mimeType, ...(isText ? { text: data.toString('utf8', 0, bytes) } : { blob: data.toString('base64', 0, bytes) }) } };
     });
     return attach(d, block);
   });
