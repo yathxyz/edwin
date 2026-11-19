@@ -39,8 +39,7 @@ class ReadOnlySessions extends AgentSessions {
   }
   override changed() {
     if (!this.stopped && this.status.startsWith('offline'))
-      this.failure ??= new Error(this.status.includes('exceeds') ? this.status
-        : 'Agent hub stream refused or disconnected (HTTP/authentication or transport failure)');
+      this.failure ??= new Error(`Agent hub stream refused or disconnected: ${this.status}`);
     super.changed();
   }
   check() { if (this.failure) throw this.failure; }
@@ -97,7 +96,7 @@ async function main() {
     const server = { cfg: { agentHub: config }, buffers, auth, log, clients: [] } as unknown as Server;
     hub = new ReadOnlySessions(server);
     const live = hub;
-    const idle = () => !live.replaying.size && !live.factReads.size && !live.publications.size && !live.listJob &&
+    const idle = () => !live.replaying.size && !live.retries.size && !live.factReads.size && !live.factRetries.size && !live.publications.size && !live.listJob &&
       [...live.requests].every(req => req === live.stream);
     deadline = setTimeout(() => {
       live.failure ??= new Error('Agent hub inspection timed out after 120 seconds'); live.stop();
@@ -141,7 +140,7 @@ async function main() {
     output.push(`\n=== All folds open (each line cut to ${OPEN_WIDTH} Unicode characters) ===`, ...excerpts(Ed, b, OPEN_WIDTH),
       '\n=== Host-page pending requests and control state ===', JSON.stringify(state, null, 2),
       '\n=== Truncation / bounds ===', JSON.stringify({ journalAvailable: !!t, replayTruncated: view?.truncated ?? null,
-        from: view?.from ?? null, gaps: view?.gaps ?? [], renderedBoundMarker: BOUND_MARKER, boundMarkers,
+        from: view?.from ?? null, gaps: view?.gaps ?? [], localDropThrough: view?.droppedThrough ?? null, renderedBoundMarker: BOUND_MARKER, boundMarkers,
         note: 'Bound-marker occurrences include literal agent quotations. Preview clipping to 200 characters is not journal truncation.' }, null, 2));
     process.stdout.write(hub.clean(output.join('\n') + '\n'));
   } catch (e) {

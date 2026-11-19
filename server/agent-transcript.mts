@@ -9,7 +9,7 @@ interface TranscriptControls {
   pending: Wire[]; resolved: Wire[];
 }
 interface RenderedTranscript extends TranscriptControls {
-  text: string; spans: Wire[]; from: number; truncated: boolean; gaps: Wire[]; patch?: TranscriptPatch;
+  text: string; spans: Wire[]; from: number; truncated: boolean; droppedThrough: number; gaps: Wire[]; patch?: TranscriptPatch;
 }
 interface Fragment { text: string; diffs: Wire[] }
 interface RenderedBlock { text: string; span: Wire; bodyEnd: number; append?: { span: Wire; start: number } }
@@ -24,6 +24,7 @@ const json = (v: unknown) => JSON.stringify(v, null, 2) ?? String(v);
 const line = (v: unknown) => String(v ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ');
 const own = (v: Wire, k: string) => Object.prototype.hasOwnProperty.call(v, k);
 const EVENT_LIMIT = 1024 * 1024;
+const RETAINED_EVENTS = 32768;
 const TRUNCATION = '\n[EVENT CONTENT TRUNCATED: rendered event limit is 1048576 UTF-16 code units]\n';
 const UNAVAILABLE = 'no longer pending; resolution unavailable';
 const REQUEST_LABELS: Record<string, string> = {
@@ -132,6 +133,7 @@ export class Transcript {
   private sessionInfo: unknown = null;
   private from = 1;
   private truncated = false;
+  private droppedThrough = 0;
   private gaps: Wire[] = [];
   private fragments = new WeakMap<Wire, Map<string, Fragment>>();
   private cached: RenderedTranscript | null = null;
@@ -147,6 +149,7 @@ export class Transcript {
   get journal(): readonly Wire[] { return this.events; }
   reset(epoch: number) {
     this.epoch = epoch; this.head = 0; this.from = 1; this.truncated = false; this.gaps = []; this.authority = null;
+    this.droppedThrough = 0;
     this.events = []; this.seen.clear(); this.clearFold(); this.fragments = new WeakMap(); this.cached = null;
   }
   private clearFold() {
@@ -157,22 +160,31 @@ export class Transcript {
     if (reply.reset || reply.epoch !== this.epoch) this.reset(reply.epoch);
     const oldHead = this.head, fresh: Wire[] = [];
     for (const e of reply.events) {
-      if (!this.seen.has(e.seq)) { this.seen.add(e.seq); fresh.push(e); }
+      if ((!this.droppedThrough || e.seq > this.droppedThrough) && !this.seen.has(e.seq)) { this.seen.add(e.seq); fresh.push(e); }
     }
-    /* Only late pinned/unsorted events require refolding. Authority survives that refold, not resets. */
+    /* Late pinned/unsorted events and prefix eviction require refolding. Resets also clear authority. */
     let ordered = true, previous = this.events.length ? this.events[this.events.length - 1].seq : -Infinity;
-    for (const e of fresh) { if (e.seq <= previous) ordered = false; previous = e.seq; }
-    if (ordered) { for (const e of fresh) { this.events.push(e); this.fold(e); } }
-    else {
-      for (const e of fresh) this.events.push(e);
-      this.events.sort((a, b) => a.seq - b.seq); this.clearFold();
-      for (const e of this.events) this.fold(e);
+    for (const e of fresh) {
+      if (e.seq <= previous) ordered = false;
+      previous = e.seq; this.events.push(e);
     }
+    if (!ordered) this.events.sort((a, b) => a.seq - b.seq);
+    if (this.events.length > RETAINED_EVENTS) {
+      // Free a batch of the oldest events, so a busy full view need not refold 32K events per append.
+      const cut = this.events.length - (RETAINED_EVENTS - RETAINED_EVENTS / 8);
+      this.droppedThrough = this.events[cut - 1].seq;
+      for (let i = 0; i < cut; i++) this.seen.delete(this.events[i].seq);
+      this.events = this.events.slice(cut);
+      this.previous = null; ordered = false;
+    }
+    if (!ordered) this.clearFold();
+    for (const e of ordered ? fresh : this.events) this.fold(e);
     if (!oldHead) this.from = reply.from;
     if (reply.truncated) {
       this.truncated = true;
       const gap = { after: oldHead, from: reply.from, head: reply.head };
       if (!this.gaps.some(g => g.after === gap.after && g.from === gap.from && g.head === gap.head)) this.gaps.push(gap);
+      if (this.gaps.length > 1024) this.gaps.shift();
     }
     this.head = Math.max(this.head, reply.head, this.events.length ? this.events[this.events.length - 1].seq : 0);
     this.cached = null;
@@ -396,6 +408,7 @@ export class Transcript {
   private header() {
     const text: string[] = [];
     if (this.truncated) text.push(`Earlier history unavailable from hub; transcript starts at event ${this.from}.\n\n`);
+    if (this.droppedThrough) text.push(`Oldest events dropped by Edwin's retention limit (through event ${this.droppedThrough}).\n\n`);
     text.push(`# Agent: ${line(this.sid)}\n\n`);
     return this.clean(text.join(''));
   }
@@ -432,7 +445,7 @@ export class Transcript {
       text = previous.rendered.text.slice(0, start) + replacement + previous.rendered.text.slice(end);
     }
     const rendered = {
-      text, spans, ...this.controls(), from: this.from, truncated: this.truncated, gaps: this.gaps, patch,
+      text, spans, ...this.controls(), from: this.from, truncated: this.truncated, droppedThrough: this.droppedThrough, gaps: this.gaps, patch,
     };
     this.previous = { rendered, header, blocks };
     return rendered;

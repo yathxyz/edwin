@@ -60,6 +60,17 @@ const cell = (value: unknown, cap: number, charWidth: (cp: number) => number): s
   return text;
 };
 const RESPONSE_LIMIT = 32 * 1024 * 1024, SSE_LIMIT = 1024 * 1024, JOURNAL_READS = 4;
+const JOURNAL_WAITERS = 64, REGISTRY_LIMIT = 1024, EPOCH_READS = 3;
+const REGISTRY_FULL = 'Agent hub registry exceeds the 1024-record limit';
+const SSE_OVERSIZE = 'Agent hub SSE event exceeds the 1 MiB limit';
+const retryDelay = (attempt: number) => Math.min(5000, 250 * 2 ** Math.min(attempt, 5));
+class EpochDisagreement extends Error {
+  constructor() { super('Agent journal and registry epochs disagree; backing off'); }
+}
+function storeRecord(map: Map<string, Json>, id: string, value: Json) {
+  if (map.size >= REGISTRY_LIMIT && !map.has(id)) throw new Error(REGISTRY_FULL);
+  map.set(id, value);
+}
 const replaced = () => new Error('Agent session was replaced (stale incarnation); refresh and explicitly select it again');
 const expectedEpoch = (value: unknown): number => {
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw replaced();
@@ -94,12 +105,14 @@ export function prepare(server: Server) {
   f.where = 'server';
 }
 
+type RetryQueue = Map<string, NodeJS.Timeout>;
 export class AgentSessions implements AgentBackend {
   declare server: Server; declare config: AgentHubConfig | undefined;
   declare sessions: Map<string, Json>; declare observed: Map<string, Json>;
   declare status: string; declare info: Json; declare stopped: boolean;
   declare stream: http.ClientRequest | null; declare requests: Set<http.ClientRequest>;
   declare reconnect: NodeJS.Timeout | undefined; declare generation: number;
+  reconnectAttempt = 0;
   declare listOpened: boolean;
   listGeneration = 0;
   listDirty = false;
@@ -108,8 +121,8 @@ export class AgentSessions implements AgentBackend {
   publications = new Map<string, Promise<SBuf>>();
   views = new Map<string, number>();
   nextView = 0;
-  retries = new Map<string, { timer: NodeJS.Timeout; attempt: number; epoch: number; view: number }>();
-  retryAttempts = new Map<string, number>();
+  retries: RetryQueue = new Map();
+  factRetries: RetryQueue = new Map();
   replayErrors = new Map<string, string>();
   journalActive = 0;
   journalWaiters: (() => void)[] = [];
@@ -167,7 +180,7 @@ export class AgentSessions implements AgentBackend {
     return new Promise((resolve, reject) => {
       const headers: Record<string, string | number> = { authorization: `Bearer ${token}` };
       if (data) { headers['content-type'] = 'application/json'; headers['content-length'] = data.length; }
-      const req = (u.protocol === 'https:' ? https : http).request(u, { method, headers, timeout: 45000 }, res => {
+      const req = (u.protocol === 'https:' ? https : http).request(u, { method, headers }, res => {
         const chunks: Buffer[] = []; let bytes = 0;
         const oversize = () => {
           reject(Object.assign(new Error('Agent hub response exceeds the 32 MiB limit'), { retryable: false }));
@@ -196,6 +209,7 @@ export class AgentSessions implements AgentBackend {
           if (status >= 200 && status < 300) {
             if (method === 'GET' && (route === 'sessions' || route === 'observed') && Array.isArray(answer?.sessions))
               answer.sessions = answer.sessions.filter((s: Json) => validSid(route === 'sessions' ? s?.sid : s?.id));
+            if ((route === 'sessions' || route === 'observed') && answer?.sessions?.length > REGISTRY_LIMIT) { reject(new Error(REGISTRY_FULL)); return; }
             resolve(answer);
           }
           else if (route.endsWith('/config') && [404, 405, 501].includes(status)) reject(new Error('This hub does not support agent config options (POST /config is unavailable)'));
@@ -205,15 +219,20 @@ export class AgentSessions implements AgentBackend {
           }
         });
       });
-      this.requests.add(req); req.on('close', () => this.requests.delete(req));
-      req.on('timeout', () => req.destroy());
+      const deadline = setTimeout(() => {
+        reject(new Error('Agent hub request deadline exceeded; a write may already have acted')); req.destroy();
+      }, 45000);
+      this.requests.add(req); req.on('close', () => { clearTimeout(deadline); this.requests.delete(req); });
       req.on('error', () => reject(new Error('Agent hub cannot be reached or did not answer; a write may already have acted')));
       req.end(data);
     });
   }
   async readEvents(sid: string, since: number, valid: () => boolean): Promise<TranscriptReply> {
     sidOf(sid); cursorOf(since);
-    if (this.journalActive >= JOURNAL_READS) await new Promise<void>(resolve => this.journalWaiters.push(resolve));
+    if (this.journalActive >= JOURNAL_READS) {
+      if (this.journalWaiters.length >= JOURNAL_WAITERS) throw new Error('Agent journal queue at its 64-waiter limit');
+      await new Promise<void>(resolve => this.journalWaiters.push(resolve));
+    }
     else this.journalActive++;
     try {
       if (this.stopped || !valid()) throw new Error('Agent view was closed; reopen it');
@@ -229,6 +248,7 @@ export class AgentSessions implements AgentBackend {
   start() { if (this.config && !this.stopped) void this.follow(++this.generation); }
   async follow(gen: number) {
     if (this.stopped || gen !== this.generation) return;
+    let reason = 'last known records', readyAt = 0;
     try {
       this.info = await this.request('GET', 'info');
       if (this.stopped || gen !== this.generation) return;
@@ -246,33 +266,48 @@ export class AgentSessions implements AgentBackend {
             while ((nl = rest.indexOf('\n')) >= 0) {
               const raw = rest.slice(0, nl + 1);
               bytes += Buffer.byteLength(raw);
-              if (bytes > SSE_LIMIT) { this.status = 'Agent hub SSE event exceeds the 1 MiB limit'; this.changed(); res.destroy(); req.destroy(); return; }
+              if (bytes > SSE_LIMIT) { reason = SSE_OVERSIZE; req.destroy(); return; }
               const s = raw.slice(0, -1).replace(/\r$/, ''); rest = rest.slice(nl + 1);
               if (!s) {
-                if (data.length) { try { this.event(event, this.clean(JSON.parse(data.join('\n')))); } catch { res.destroy(); req.destroy(); return; } }
+                if (data.length) {
+                  try {
+                    this.event(event, this.clean(JSON.parse(data.join('\n'))));
+                    if (event === 'ready' && !readyAt) { clearTimeout(deadline); readyAt = Date.now(); }
+                  } catch (e) { if (e.message === REGISTRY_FULL) reason = REGISTRY_FULL; req.destroy(); return; }
+                }
                 event = ''; data = []; bytes = 0;
               } else if (s.startsWith('event:')) event = s.slice(6).trim();
               else if (s.startsWith('data:')) data.push(s.slice(5).replace(/^ /, ''));
             }
-            if (bytes + Buffer.byteLength(rest) > SSE_LIMIT) { this.status = 'Agent hub SSE event exceeds the 1 MiB limit'; this.changed(); res.destroy(); req.destroy(); }
+            if (bytes + Buffer.byteLength(rest) > SSE_LIMIT) { reason = SSE_OVERSIZE; req.destroy(); }
           });
           res.on('end', resolve); res.on('error', reject);
         });
+        const deadline = setTimeout(() => { reason = 'initial snapshot deadline exceeded'; req.destroy(); }, 40000);
         this.stream = req; this.requests.add(req);
-        req.on('close', () => { this.requests.delete(req); if (this.stream === req) this.stream = null; });
+        req.on('close', () => { clearTimeout(deadline); this.requests.delete(req); if (this.stream === req) this.stream = null; });
         req.on('timeout', () => req.destroy()); req.on('error', reject);
         req.on('close', resolve);
       });
     } catch { /* transport diagnostics deliberately contain no remote text or headers */ }
-    this.streamActive = false;
     if (this.stopped || gen !== this.generation) return;
-    this.status = this.status.includes('exceeds') ? `offline (${this.status})` : 'offline (last known records)'; this.changed();
-    this.reconnect = setTimeout(() => void this.follow(gen), 1000); this.reconnect.unref();
+    this.streamActive = false; this.status = `offline (${reason})`; this.changed();
+    if (readyAt && Date.now() - readyAt >= 5000) this.reconnectAttempt = 0;
+    const delay = Math.min(5000, Math.round(retryDelay(this.reconnectAttempt) * (0.75 + Math.random() * 0.5)));
+    this.reconnectAttempt = Math.min(5, this.reconnectAttempt + 1);
+    this.reconnect = setTimeout(() => void this.follow(gen), delay); this.reconnect.unref();
   }
-  clearRetry(sid: string) {
-    const retry = this.retries.get(sid);
-    if (retry) clearTimeout(retry.timer);
-    this.retries.delete(sid);
+  private clearRetry(queue: RetryQueue, sid: string) {
+    clearTimeout(queue.get(sid));
+    queue.delete(sid);
+  }
+  private deferRead(queue: RetryQueue, sid: string, attempt: number, run: () => void) {
+    this.clearRetry(queue, sid);
+    const timer = setTimeout(() => {
+      queue.delete(sid);
+      if (!this.stopped && this.sessions.has(sid)) run();
+    }, retryDelay(attempt));
+    timer.unref(); queue.set(sid, timer);
   }
   killed(id: string) {
     this.views.delete(id);
@@ -280,6 +315,7 @@ export class AgentSessions implements AgentBackend {
       this.listOpened = false; this.listGeneration++; this.listDirty = false; this.listJob = undefined;
       this.exitedExpanded = false;
       this.facts.clear(); this.factReads.clear();
+      for (const sid of this.factRetries.keys()) this.clearRetry(this.factRetries, sid);
       return;
     }
     const transcript = /^name:\*Agent: ([A-Za-z0-9_-]{1,64})\*$/.exec(id);
@@ -287,8 +323,8 @@ export class AgentSessions implements AgentBackend {
     if (observed) this.openedObserved.delete(observed[1]);
     if (!transcript) return;
     const sid = transcript[1];
-    this.transcripts.delete(sid); this.replaying.delete(sid); this.clearRetry(sid);
-    this.retryAttempts.delete(sid); this.replayErrors.delete(sid);
+    this.transcripts.delete(sid); this.replaying.delete(sid); this.clearRetry(this.retries, sid);
+    this.replayErrors.delete(sid);
     if (!this.listOpened) this.facts.delete(sid);
     for (const key of this.announced) if (key.startsWith(sid + '/')) this.announced.delete(key);
   }
@@ -297,24 +333,24 @@ export class AgentSessions implements AgentBackend {
       (name === 'observed' || name === 'observed_gone') && !validSid(data?.id)) return;
     this.registryRevision++;
     if (name === 'hub') { this.sessions.clear(); this.hubStatus = line(data.status); this.status = `hub ${this.hubStatus}`; }
-    if (name === 'session') this.sessions.set(data.sid, data);
+    if (name === 'session') storeRecord(this.sessions, data.sid, data);
     if (name === 'session') {
       const t = this.transcripts.get(data.sid), known = t?.controls().pending || [], offered = data.acp?.pending || [];
       const requestsChanged = known.length !== offered.length || known.some(p => !offered.some((q: Json) => q.req === p.req && q.kind === p.kind));
-      if (t && (t.head !== (data.acp?.headSeq || 0) || t.epoch !== data.createdAt || requestsChanged)) void this.replay(data.sid).catch(() => {});
-      const retry = this.retries.get(data.sid);
-      if (retry && retry.epoch !== data.createdAt) { this.clearRetry(data.sid); this.retryAttempts.delete(data.sid); }
+      if (t && !this.retries.has(data.sid) && (t.head !== (data.acp?.headSeq || 0) || t.epoch !== data.createdAt || requestsChanged))
+        void this.replay(data.sid).catch(() => {});
       if (this.listOpened) this.scheduleFacts(data.sid);
       for (const p of data.acp?.pending || []) {
         const key = `${data.sid}/${data.createdAt}/${p.req}`;
         if (!this.announced.has(key)) {
+          if (this.announced.size >= REGISTRY_LIMIT) throw new Error(REGISTRY_FULL);
           this.announced.add(key);
           for (const c of this.server.clients) if (c.hello && !c.closed && c.kind !== 'cli') c.send({ t: 'msg', level: 'info', text: `Agent ${line(data.sid)} awaits ${line(p.kind)}: ${line(p.title).slice(0, 256)} — M-x agent-session-answer` });
         }
       }
     }
     if (name === 'gone' && this.sessions.get(data.sid)?.createdAt === data.epoch) this.sessions.delete(data.sid);
-    if (name === 'observed') this.observed.set(data.id, data);
+    if (name === 'observed') storeRecord(this.observed, data.id, data);
     if (name === 'observed' && this.openedObserved.has(data.id)) void this.open(data.id, undefined, this.views.get(`name:*Agent Observed: ${data.id}*`)).catch(() => {});
     if (name === 'observed_gone') this.observed.delete(data.id);
     if (name === 'ready') this.status = 'connected';
@@ -330,18 +366,21 @@ export class AgentSessions implements AgentBackend {
         const [sid, epoch, req] = key.split('/'), s = this.sessions.get(sid);
         if (!s || s.createdAt !== Number(epoch) || !s.acp?.pending?.some((p: Json) => p.req === Number(req))) this.announced.delete(key);
       }
-      for (const sid of this.retries.keys()) if (!this.sessions.has(sid)) this.clearRetry(sid);
+      for (const queue of [this.retries, this.factRetries])
+        for (const sid of queue.keys()) if (!this.sessions.has(sid)) this.clearRetry(queue, sid);
     }
   }
   scheduleFacts(sid: string) {
     const s = this.sessions.get(sid), f = this.facts.get(sid);
-    if (s?.kind === 'acp' && (!f || f.epoch !== s.createdAt || f.head !== (s.acp?.headSeq || 0)))
+    if (!this.factRetries.has(sid) && s?.kind === 'acp' && (!f || f.epoch !== s.createdAt || f.head !== (s.acp?.headSeq || 0)))
       void this.refreshFacts(sid).catch(() => {});
   }
-  refreshFacts(sid: string): Promise<void> {
+  refreshFacts(sid: string, attempt = 0): Promise<void> {
     const existing = this.factReads.get(sid); if (existing) return existing;
+    if (this.factRetries.has(sid)) return Promise.resolve();
     const generation = this.listGeneration, valid = () => this.listOpened && this.listGeneration === generation;
     const work = (async () => {
+      let mismatches = 0;
       do {
         const s = this.sessions.get(sid); if (!s || !valid()) return;
         let f = this.facts.get(sid);
@@ -349,7 +388,10 @@ export class AgentSessions implements AgentBackend {
         const reply = await this.readEvents(sid, f.head, valid);
         const current = this.sessions.get(sid);
         if (!valid() || !current) return;
-        if (current.createdAt !== reply.epoch) continue;
+        if (current.createdAt !== reply.epoch) {
+          if (++mismatches >= EPOCH_READS) throw new EpochDisagreement();
+          continue;
+        }
         if (reply.reset || reply.epoch !== f.epoch) f = { epoch: reply.epoch, head: 0, model: '' };
         for (const e of reply.events) {
           if (e.sessionId) continue;
@@ -364,6 +406,9 @@ export class AgentSessions implements AgentBackend {
       const s = this.sessions.get(sid);
       if (valid() && s) {
         this.facts.set(sid, { epoch: s.createdAt, head: -1, model: `unavailable (${line(this.clean(String(e.message || e).slice(0, 512)))})` });
+        if (e instanceof EpochDisagreement) this.deferRead(this.factRetries, sid, attempt, () => {
+          if (valid()) void this.refreshFacts(sid, attempt + 1).catch(() => {});
+        });
         void this.queueList().catch(() => {});
       }
       throw e;
@@ -583,7 +628,7 @@ export class AgentSessions implements AgentBackend {
       (observed ? current.lastAt > s.lastAt : current.createdAt > s.createdAt ||
       current.createdAt === s.createdAt && (current.updatedAt > s.updatedAt || (current.acp?.headSeq || 0) > (s.acp?.headSeq || 0))))) s = current;
     if (epoch !== undefined && s.createdAt !== expectedEpoch(epoch)) throw replaced();
-    if (observed) this.observed.set(sid, s); else this.sessions.set(sid, s);
+    storeRecord(observed ? this.observed : this.sessions, sid, s);
     if (!observed && s.kind === 'acp') {
       // token() validates exactly 64 hexadecimal characters, including rotated tokens retained for redaction.
       if (!this.transcripts.has(sid)) this.transcripts.set(sid, new Transcript(sid, value => this.redactText(value), 63));
@@ -597,13 +642,14 @@ export class AgentSessions implements AgentBackend {
     await this.publish(name, 'agent-session-mode', `# ${sid}\n\n${observed ? 'Reported session: read-only; this hub cannot steer it. Only the reported record and bounded tail are available.\n\n' : 'PTY record: this HTTP API offers no terminal input.\n\n'}${JSON.stringify(s, null, 2)}\n`, { agentSession: { sid, observed: true, epoch: s.createdAt, spans: [] } }, valid);
     return 'name:' + name;
   }
-  replay(sid: string): Promise<void> {
+  replay(sid: string, attempt = 0): Promise<void> {
     const existing = this.replaying.get(sid); if (existing) return existing;
     const t = this.transcripts.get(sid), generation = this.views.get(`name:*Agent: ${sid}*`);
     if (!t || generation === undefined) return Promise.resolve();
     const valid = () => this.views.get(`name:*Agent: ${sid}*`) === generation && this.transcripts.get(sid) === t;
-    this.clearRetry(sid);
+    if (this.retries.has(sid)) return Promise.reject(new Error('Agent journal retry is backing off'));
     const work = (async () => {
+      let mismatches = 0;
       do {
         const wanted = this.sessions.get(sid);
         if (!valid() || !wanted) return;
@@ -611,7 +657,10 @@ export class AgentSessions implements AgentBackend {
         const reply = await this.readEvents(sid, t.head, valid);
         const current = this.sessions.get(sid);
         if (!valid() || !current) return;
-        if (current.createdAt !== reply.epoch) continue;
+        if (current.createdAt !== reply.epoch) {
+          if (++mismatches >= EPOCH_READS) throw new EpochDisagreement();
+          continue;
+        }
         t.apply(reply);
         // Only an equally current registry can declare a request absent; older/newer summaries cannot.
         if ((current.acp?.headSeq || 0) === reply.head) t.reconcilePending(current.acp?.pending || []);
@@ -622,7 +671,7 @@ export class AgentSessions implements AgentBackend {
         if (latest?.createdAt === t.epoch && ((latest.acp?.headSeq || 0) === t.head ||
           latest === current && current.acp?.headSeq === wanted.acp?.headSeq)) break;
       } while (!this.stopped);
-      if (valid()) { this.retryAttempts.delete(sid); this.replayErrors.delete(sid); }
+      if (valid()) this.replayErrors.delete(sid);
     })().catch(e => {
       const current = this.sessions.get(sid);
       if (!this.stopped && valid() && current) {
@@ -632,15 +681,10 @@ export class AgentSessions implements AgentBackend {
           for (const c of this.server.clients) if (c.hello && !c.closed && c.kind !== 'cli')
             c.send({ t: 'msg', level: 'error', text: `Agent ${sid} journal read failed: ${report}` });
         }
-        if (e.retryable !== false && (t.epoch !== current.createdAt || t.head !== (current.acp?.headSeq || 0))) {
-          const attempt = (this.retryAttempts.get(sid) || 0) + 1, epoch = current.createdAt;
-          this.retryAttempts.set(sid, attempt);
-          const timer = setTimeout(() => {
-            this.retries.delete(sid);
-            if (valid() && this.sessions.get(sid)?.createdAt === epoch) void this.replay(sid).catch(() => {});
-          }, Math.min(5000, 250 * 2 ** Math.min(attempt - 1, 5)));
-          timer.unref(); this.retries.set(sid, { timer, attempt, epoch, view: generation });
-        }
+        if (e.retryable !== false && (e instanceof EpochDisagreement || t.epoch !== current.createdAt || t.head !== (current.acp?.headSeq || 0)))
+          this.deferRead(this.retries, sid, attempt, () => {
+            if (valid()) void this.replay(sid, attempt + 1).catch(() => {});
+          });
       }
       throw e;
     }).finally(() => { if (this.replaying.get(sid) === work) this.replaying.delete(sid); });
@@ -657,10 +701,10 @@ export class AgentSessions implements AgentBackend {
   stop() {
     if (this.stopped) return;
     this.stopped = true; this.generation++; clearTimeout(this.reconnect);
-    for (const sid of this.retries.keys()) this.clearRetry(sid);
+    for (const queue of [this.retries, this.factRetries]) for (const sid of queue.keys()) this.clearRetry(queue, sid);
     for (const req of this.requests) req.destroy();
     this.offKill(); this.views.clear(); this.transcripts.clear(); this.openedObserved.clear();
-    this.facts.clear(); this.factReads.clear(); this.announced.clear(); this.retryAttempts.clear(); this.replayErrors.clear();
+    this.facts.clear(); this.factReads.clear(); this.announced.clear(); this.replayErrors.clear();
   }
 }
 export async function install(server: Server) {

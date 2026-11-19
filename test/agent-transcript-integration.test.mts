@@ -1,5 +1,5 @@
 // AS-C3/C4/C9: daemon replay, live OT, and actual frame folding, with no ACP connection.
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,9 +7,144 @@ import { createRequire } from 'node:module';
 import { FakeAgentHub } from './fake-agent-hub.mts';
 import { makeDir, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
 import { transcriptFixture } from './agent-render-fixture.mts';
+import { AgentSessions } from '../server/agent-sessions.mts';
+import { Transcript, type TranscriptReply } from '../server/agent-transcript.mts';
+import type { Server } from '../server/main.mts';
 const { createHost, loadEdwin } = createRequire(import.meta.url)('../src/host-node.cts');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function until(f: () => unknown) { for (let i = 0; i < 1200; i++) { if (f()) return; await sleep(10); } throw new Error('Journal state did not arrive'); }
+
+// These transport tests exercise actual HTTP/SSE connections; only presentation and credential
+// lookup are unnecessary. Timers can run on a shorter clock without changing socket inactivity.
+async function boundsFixture(t: TestContext) {
+  const stub = await new FakeAgentHub().start();
+  const backend = new AgentSessions({ cfg: { agentHub: { url: stub.url, tokenFile: '/unused' } },
+    buffers: { on: () => () => {}, byId: new Map() }, clients: [], log: { debug() {} } } as unknown as Server);
+  backend.token = () => stub.token;
+  t.after(async () => { backend.stop(); await stub.stop(); });
+  return { backend, stub };
+}
+function scaleTimers(t: TestContext, delay: (ms: number) => number) {
+  t.mock.method(globalThis, 'setTimeout', new Proxy(setTimeout, {
+    apply(original, self, args) { return Reflect.apply(original, self, [args[0], delay(args[1]), ...args.slice(2)]); }
+  }));
+}
+
+test('resource bounds: incremental journal flood keeps a marked recent tail, not every earlier event or span', async t => {
+  const { backend, stub } = await boundsFixture(t), tr = new Transcript('tail');
+  stub.add('tail'); let head = 0;
+  for (let page = 0; page < 4; page++) {
+    const events = Array.from({ length: 10000 }, (_, i) => {
+      const seq = ++head;
+      return i === 0 || i === 9999 ? { seq, e: 'prompt', prompt: ['text-' + seq + '!'] } : { seq, e: 'mode', modeId: seq };
+    });
+    stub.journals.set('tail', events); stub.sessions.get('tail')!.acp.headSeq = head;
+    tr.apply(await backend.readEvents('tail', tr.head, () => true));
+    tr.render(); // materialize caches and spans before crossing the retention limit
+  }
+  assert.ok(tr.journal.length <= 32768);
+  const r = tr.render();
+  assert.match(r.text, /oldest events dropped/i); assert.doesNotMatch(r.text, /text-1!/);
+  assert.match(r.text, /text-40000!/); assert.equal(r.head, 40000);
+  assert.ok(r.spans.every(s => s.seq >= tr.journal[0].seq));
+  tr.apply({ epoch: tr.epoch + 1, head: 0, from: 1, reset: true, truncated: false, events: [] });
+  assert.doesNotMatch(tr.render().text, /oldest events dropped/i);
+});
+
+for (const kind of ['session', 'observed']) test(`resource bounds: ${kind} stream flood cannot overfill its registry`, async t => {
+  const { backend, stub } = await boundsFixture(t);
+  backend.start(); await until(() => backend.status === 'connected');
+  const registry = kind === 'session' ? backend.sessions : backend.observed;
+  const key = kind === 'session' ? 'sid' : 'id';
+  for (let i = 0; i < 1050; i++) stub.emit(kind, { [key]: `record_${i}` });
+  await until(() => backend.status.startsWith('offline') || registry.size > 1024);
+  assert.ok(registry.size <= 1024); assert.match(backend.status, /registry.*limit/i);
+});
+
+test('resource bounds: a saturated journal queue refuses excess readers before scheduling HTTP', async t => {
+  const { backend, stub } = await boundsFixture(t), release = Promise.withResolvers<void>();
+  const handle = stub.handle.bind(stub); stub.add('slow');
+  stub.handle = async (req, res) => { await release.promise; await handle(req, res); };
+  const reads = Array.from({ length: 75 }, () => backend.readEvents('slow', 0, () => true));
+  const done = Promise.allSettled(reads);
+  const queued = backend.journalWaiters.length; release.resolve();
+  const results = await done;
+  assert.ok(queued <= 64);
+  const refused = results.filter(r => r.status === 'rejected');
+  assert.ok(refused.length > 0 && refused.every(r => /queue.*limit/i.test(String(r.reason))));
+  assert.equal(stub.calls.length, results.length - refused.length); assert.equal(backend.journalActive, 0);
+});
+
+for (const stream of [false, true]) test(`resource bounds: drip cannot prolong the absolute ${stream ? 'snapshot' : 'journal request'} deadline`, async t => {
+  const { backend, stub } = await boundsFixture(t);
+  scaleTimers(t, ms => ms >= 10000 ? 100 : ms);
+  const handle = stub.handle.bind(stub); let drips = 0;
+  stub.handle = async (req, res) => {
+    if (!(stream ? req.url === '/v1/stream' : req.url?.includes('/events?'))) return handle(req, res);
+    res.writeHead(200, { 'content-type': stream ? 'text/event-stream' : 'application/json' }); res.flushHeaders();
+    const drip = setInterval(() => {
+      drips++; res.write(stream ? ': heartbeat\n\n' : ' ');
+      if (drips === 40) { clearInterval(drip); res.end(stream ? 'event: ready\ndata: {}\n\n' : '{}'); }
+    }, 10);
+    res.on('close', () => clearInterval(drip));
+  };
+  if (stream) {
+    await backend.follow(backend.generation);
+    assert.match(backend.status, /snapshot.*deadline/i);
+  } else {
+    await assert.rejects(backend.readEvents('slow', 0, () => true), /deadline/i);
+    assert.equal(backend.journalActive, 0);
+  }
+  assert.ok(drips > 0 && drips < 40, 'stop the ongoing response, not just the caller');
+});
+
+for (const facts of [false, true]) test(`resource bounds: ${facts ? 'facts' : 'replay'} disagreement backs off, then recovers without a new summary`, async t => {
+  const { backend, stub } = await boundsFixture(t), s = stub.add('epoch', [{ seq: 1, e: 'mode', modeId: 'ready' }]);
+  const handle = stub.handle.bind(stub); let disagrees = true, reads = 0;
+  stub.handle = async (req, res) => {
+    if (!req.url?.includes('/events?')) return handle(req, res);
+    reads++;
+    if (!disagrees) return handle(req, res);
+    res.end(JSON.stringify({ epoch: s.createdAt - 1, head: 0, events: [], from: 1, reset: false, truncated: false } satisfies TranscriptReply));
+  };
+  backend.sessions.set(s.sid, s);
+  backend.queueList = async () => {};
+  if (facts) { backend.listOpened = true; void backend.refreshFacts(s.sid).catch(() => {}); }
+  else {
+    backend.transcripts.set(s.sid, new Transcript(s.sid)); backend.views.set(`name:*Agent: ${s.sid}*`, 1);
+    backend.publish = async () => ({} as Awaited<ReturnType<AgentSessions['publish']>>);
+    void backend.replay(s.sid).catch(() => {});
+  }
+  await until(() => reads >= 2);
+  await sleep(65); const immediate = reads;
+  // Repeated equivalent summaries must not defeat the retry timer.
+  for (let n = 0; n < 20; n++) backend.event('session', s);
+  await sleep(40); const flooded = reads;
+  disagrees = false;
+  assert.ok(immediate <= 3 && flooded === immediate, `backoff allowed ${immediate} then ${flooded} GETs`);
+  await until(() => facts ? backend.facts.get(s.sid)?.head === 1 : backend.transcripts.get(s.sid)?.head === 1);
+});
+
+test('resource bounds: reconnect uses capped jittered exponential delays and a fixed offline reason', async t => {
+  const { backend, stub } = await boundsFixture(t), delays: number[] = [], statuses: string[] = [];
+  scaleTimers(t, ms => {
+    if (ms >= 100 && ms < 10000) { delays.push(ms); statuses.push(backend.status); return 5; }
+    return ms;
+  });
+  let random = false; t.mock.method(Math, 'random', () => (random = !random) ? 0 : 1);
+  const handle = stub.handle.bind(stub); let overflow = false;
+  stub.handle = async (req, res) => {
+    if (req.url === '/v1/stream') { overflow = true; res.writeHead(200); res.end('x'.repeat(1024 * 1024 + 1)); }
+    else if (overflow) { res.writeHead(503); res.end('{}'); }
+    else await handle(req, res);
+  };
+  backend.start(); await until(() => delays.length >= 12); backend.stop();
+  assert.ok(delays[1] > delays[0] && delays[2] > delays[1]);
+  assert.notEqual(delays[1], delays[0] * 2, 'vary the exponential delay with jitter');
+  assert.ok(Math.max(...delays) <= 5000 && delays.at(-1)! >= 3750);
+  assert.match(statuses[0], /SSE event exceeds/); assert.equal(new Set(statuses.slice(1)).size, 1);
+  assert.ok(statuses.every(s => s.length <= 100));
+});
 
 test('AS-C3/C4/C9: long tool journal folds, assistant stays open, live OT preserves point and prompt boundaries, and replay survives reopen', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();

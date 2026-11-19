@@ -1061,7 +1061,7 @@ AS-C19/C20 fixtures and a served-frame/CLI smoke cover the real shapes; the dire
 | AS1.3 | `*Agent Sessions*` lists hub and observed sessions, including state, harness, model, host, project/directory, activity and waiting status. Waiting rows sort first. SSE snapshots replace stale registries; reconnect takes a fresh snapshot, and an outage is visible. Open, start (agent/host/directory), cancel and remove are commands. Only explicit start or revive may run anything. |
 | AS1.4 | `*Agent: SID*` is a read-only Markdown-style transcript, shared as `name:*Agent: SID*`. Observed-only records use `*Agent Observed: ID*` and explicitly cannot be steered. All record fields and available tail are inspectable. Closing a frame/buffer never cancels or removes a session. |
 | AS1.5 | Journal replay uses epoch plus seq, skips duplicates, handles reset and pinned pending requests, and follows changed headSeq through `events?since=N`. Structure is editor metadata, not Markdown parsing. Prompts and user/assistant messages start open regardless of length; thoughts, tools, their output and diffs start folded to one line. Only current plans are presented, open. Prompt navigation is unaffected by headings or fences inside a prompt. |
-| AS1.6 | Streaming uses sequenced edits without undo groups; point and window positions away from the changed end stay put. Every available event is retained, not summarized or dropped; oversized input/rendering follows the explicit AS1.16 limits. Reopening reconstructs from the hub journal. Measure a long replay and record event count, bytes, open time and folded visible lines. |
+| AS1.6 | Streaming uses sequenced edits without undo groups; point and window positions away from the changed end stay put. Each transcript retains at most 32,768 events. On overflow it drops the oldest batch, marks the last dropped sequence visibly and in metadata, and rebuilds spans from the retained tail. Reopening reconstructs from the hub journal subject to the same bound. |
 | AS1.7 | Transcript commands unfold, visit a tool's file and line, show its diffs, recall an immutable earlier prompt into a new draft, prompt quickly, cancel, revive, set mode and set a config option (`POST /config {id,value}`). Report 404/405/501 from config as unsupported by this hub. |
 | AS1.8 | Pending permissions and elicitations are announced to frames and reachable globally. The picker and details retain sid/createdAt/req; the answer also retains the displayed request's `requestKey`. Permission details show session, incarnation, request, tool and input before offered outcomes. Form elicitation supports string, number, boolean and string-array values; URLs are shown in full and never auto-opened. Stale/replaced/resolved replies fail, not retarget. |
 | AS1.9 | Compose in an ordinary shared Markdown buffer with a prompt minor mode: `C-c C-c` sends when steering is enabled, `C-c C-k` abandons the view, retaining the draft. Drafts survive buffer kills and daemon restart; their destinations persist as `{sid,epoch:createdAt}`. Persist a new draft's editor-journal index before exposing it, so acknowledged edits remain discoverable after a crash even if its Markdown write fails. Earlier prompts stay read-only. Only unsent and definitively refused destinations remain eligible in a multi-send. |
@@ -1071,7 +1071,7 @@ AS-C19/C20 fixtures and a served-frame/CLI smoke cover the real shapes; the dire
 | AS1.13 | A host can read a session buffer's pending requests, offered outcomes/forms/URLs, incarnation, state, mode and config options, and subscribe to changes. Reply with the req, epoch and requestKey captured when the control was drawn. A stale incarnation, changed question or no-longer-pending request fails; refresh and review rather than silently answering a different question. |
 | AS1.14 | Browser taps use the existing frame input route: a tap places point, tapping the rendered fold marker or double-tapping a foldable transcript line toggles its structural fold. Touch scrolling never places/clamps point or becomes a tap, and retains tail-follow eligibility. No agent-only gesture listeners or second renderer. |
 | AS1.15 | Every action based on displayed hub-session data carries sid and the shown `createdAt` (called `epoch` on Edwin's wire). Detail/answer, tool location/seq, recall, quick text, mode/config/cancel/remove/revive and durable targets reject a mismatch with “session was replaced”. A legacy SID-only draft is unbound and requires explicit retargeting; it never silently binds after restart. |
-| AS1.16 | A response body is at most **32 MiB** and an SSE event, including an unfinished line, at most **1 MiB**, counted as UTF-8 bytes. Abort and visibly report overflow. One rendered journal event contributes at most **1,048,576 UTF-16 code units**, shared by heading, summary, text, JSON and diff; clipping is visibly marked and an incomplete diff is not offered as complete. Preserve surrogate pairs and every ordinary event. No disk-backed history store. At most four journal GETs run concurrently across list facts and transcripts. |
+| AS1.16 | A response body is at most **32 MiB** and an SSE event, including an unfinished line, at most **1 MiB**, counted as UTF-8 bytes. Abort and visibly report overflow. One rendered journal event contributes at most **1,048,576 UTF-16 code units**, shared by heading, summary, text, JSON and diff; clipping is visibly marked and an incomplete diff is not offered as complete. Preserve surrogate pairs. No disk-backed history store. At most four journal GETs run concurrently, with at most 64 more waiting; excess readers get a queue-limit error. |
 | AS1.17 | Redact assembled text before offsets are materialized, preserving UTF-16 length. Cache immutable event/block presentation; active message updates publish only the new suffix (plus any changed redaction overlap), not their growing old body. Per-buffer text-plus-metadata publications are serialized and list redraws coalesce. |
 | AS1.18 | Before each draft POST, atomically move its `{sid,epoch}` from the sendable list to “possibly sent”; do not POST if this write fails. Replace that marker with an acknowledgement on success. Neither state can be retargeted for this draft, even after restart. A definite client-error refusal (e.g. busy) restores the destination for manual retry. |
 | AS1.19 | Retain a failed open transcript's desired journal head and retry GETs at 250 ms exponential backoff, capped at 5 s. A head decrease also reconciles journal and model facts. Only a same-incarnation, same-head authoritative pending snapshot can retire a request missing a resolution: show “no longer pending; resolution unavailable”, with no invented outcome or actionable stale request. A late matching summary must reconcile too. |
@@ -1100,7 +1100,7 @@ separate attached clients choose independently. Markdown is fontification only, 
 source of command targets. An event containing fences or headings cannot manufacture a prompt/tool span.
 Whole transcript buffers are read-only, so partial read-only spans are unnecessary. Existing sequenced edits,
 markers, metadata, folds and Markdown fontification are reused; missing seams are added, not a second renderer.
-Every supplied event remains in the in-memory journal. The text is its human presentation, not a JSON
+The bounded in-memory journal retains the latest events. The text is their human presentation, not a JSON
 dump: bookkeeping is projected into controls; superseded plans remain journal events but do not render.
 Tool/message/request spans carry their identities even though headings omit sequence numbers.
 The current plan is anchored at its latest update, while a tool keeps its original start across updates.
@@ -1114,6 +1114,12 @@ sequenced chunks, yielding between them rather than overflowing a frame's outbou
 buffer hook can veto teardown when draft persistence fails, preserving the acknowledged journal.
 The client bounds ingress before concatenating/parsing a complete body or SSE event (AS1.16).
 Per-event text is capped visibly during rendering, not silently omitted; the hub journal remains untouched.
+The HTTP request deadline is 45 seconds; the stream has 40 seconds to send its initial `ready` before
+it is closed. Bytes and SSE heartbeats do not extend either deadline. Each registry (hub, observed,
+pending announcements) holds at most 1,024 records; an overflowing stream disconnects with a fixed reason.
+Reconnect starts at 250 ms and doubles with ±25% jitter, never exceeding 5 s; five seconds ready resets
+the delay. Disagreement between the registry epoch and journal epoch gets three immediate reads in
+list facts or transcript replay, followed by 250 ms exponential backoff capped at 5 s.
 Immutable rendered blocks/fragments are reused. Growing assistant/thought/user messages render only new
 fragments and recheck at most token-length-minus-one old characters for cross-chunk redaction, before
 computing the suffix patch. Whole-buffer publication is serialized, including explicit list opens; at most
@@ -1460,8 +1466,10 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
   refuse an oversized response; per-event rendered clipping is visible. No disk-backed store is added.
   Reported sessions expose only their bounded tail, not transcriptPath contents over this API.
   No filesystem or direct-agent workaround invents a second record.
-  These are per-unit bounds, not a total-memory cap: retained history for an open journal still grows
-  in memory. Killing its daemon buffer releases that replay/presentation state.
+  Edwin's own event-count ceiling applies across incremental replies, not just the first read.
+  On overflow it keeps the latest 28,672 events (room for further appends) and marks the dropped
+  prefix; at most 1,024 recent hub gap descriptors are retained. This bounds event count per view,
+  not total daemon memory. Killing the buffer releases its replay/presentation state.
 - **Incarnation precondition:** every mutation of an existing session carries the selected `createdAt`
   as `epoch` in its JSON body, including draft prompt POSTs and DELETE. Edwin rechecks the session
   before sending. The hub enforces epoch for permission/elicitation answers; other routes may ignore it.
@@ -1473,9 +1481,9 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
   incarnation; they cannot reconstruct sends made before durable receipts were introduced.
 - **Config in flight:** the supplied `sessions.rs` has no config route. Send the specified new endpoint and
   explain unsupported responses; never pretend that changing a local model label steered the agent.
-- **Transport:** explicit HTTP URL means the operator chose the private encrypted mesh the API specifies;
-  unlike brain's localhost-only API this cannot be restricted to local addresses. Redirects are refused so
-  a token cannot move to another origin. No automatic authentication/terminal attach beyond the named API.
+- **Transport:** require HTTPS for non-loopback addresses unless `allowCleartext: true` explicitly
+  authorizes HTTP over an encrypted private network. Refuse redirects and validate the final origin
+  and API path before attaching a bearer token. No automatic terminal attach beyond the named API.
 - **Configuration authority:** `agent-hub-configure` runs only during trusted init. An attached Scheme client
   must not rebind an existing credential file to an arbitrary HTTP origin. Changing configuration thereafter
   requires the owner's normal daemon restart; the client never restarts it.
