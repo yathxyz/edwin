@@ -82,6 +82,14 @@ in
   # Edwin's editing core in Node with no browser and no page stand-ins (step E0 of the edwind plan).
   edwin-headless = suite "headless" [ "headless.test.mts" ];
 
+  # The real standalone page, in a private headless Chromium with no external requests.
+  edwin-standalone = pkgs.runCommand "edwin-standalone" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+    export HOME=$TMPDIR
+    export NO_SANDBOX=1 CHROMIUM=${pkgs.chromium}/bin/chromium
+    node --test ${edwin}/edwin/test/standalone.test.mts
+    touch $out
+  '';
+
   # Edwin's Scheme: the language (R4.3-R4.10, R4.31-R4.34), the editor-level forms (hooks, advice,
   # minor modes, buffer-locals, markers) and the shadow-stack cost bound (R4.34, at most 10%).
   edwin-scheme = suite "scheme" [ "scheme*.test.mts" ];

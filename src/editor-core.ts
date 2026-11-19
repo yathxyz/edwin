@@ -337,7 +337,8 @@ class Frame extends FrameState {
 /* Ed.makeFrame(el, {buffer, kind: 'card' | 'console', fontSize}) builds a frame's parts inside EL: the
    windows, the echo area, the hidden input textarea and the presence layer, with a menubar for a console
    (R9.2, R9.3). The older form makeFrame(root, parts) takes a page that already holds the parts
-   (index.html). The window tree starts with one window on BUFFER (else the current buffer).
+   (index.html); when created before boot, it gets its first window from boot. Otherwise a frame starts
+   with one window on BUFFER (else the current buffer).
    Ed.makeFrame(null, {backend, buffer, kind, theme}) makes a model frame (DT0): no page, no DOM; each redisplay
    lays the frame out on backend.size()'s cell grid and hands the result to backend.draw (display.ts). */
 function makeFrame(root: HTMLElement | null, opts?: EdMakeFrameOpts) {
@@ -347,7 +348,8 @@ function makeFrame(root: HTMLElement | null, opts?: EdMakeFrameOpts) {
   const f = new Frame(root, built ? {} : opts as Record<string, HTMLElement>);
   if (built) buildFrame(f, root, opts);
   const b = (opts.buffer && toBuffer(opts.buffer)) || E.current || E.buffers[0];
-  f.wroot = f.sel = new Window(b); f.sel.pt = b.pt;
+  if (b) f.wroot = f.sel = new Window(b);
+  else if (built || E.booted) signal('error', 'Ed.makeFrame: no buffer for the initial window');
   E.frames.push(f);
   E.headless = false;
   if (!E.frame) selectFrame(f);
