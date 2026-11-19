@@ -298,8 +298,25 @@ test('randomised convergence: 200 interleaved steps of frame and writer edits en
   await until(() => b.sver === w.sver, 'both replicas at the same version');
   assert.equal(b.text, w.text);
   assert.equal(b.text, await serverText(id));
-  assert.equal(b.sync.sverText, b.text);
+  assert.equal(String(b.sync.sverText), b.text);
   wc.close();
+});
+
+test('a refused later op leaves previously acknowledged text intact', async t => {
+  const id = note('shadow.txt', 'abc😀\n');
+  const b = await sync.open(id);
+  const w = await client(); await w.open(id);
+  assert.equal((await w.edit(id, 0, [[0, '', 'Z']])).t, 'ack');
+  await until(() => b.sver === 1);
+  const error = t.mock.method(console, 'error', () => {});
+  // The first op is valid, the second deletes the wrong text. Neither may enter the shadow.
+  sync.sock.onmessage({ data: JSON.stringify({ t: 'edits', buf: id, ver: 2, by: { kind: 'server' }, ops: [[1, 'a', 'xy'], [3, '?', '']] }) });
+  assert.equal(error.mock.callCount(), 1); error.mock.restore();
+  assert.equal(String(b.sync.sverText), 'Zabc😀\n'); assert.equal(b.text, 'Zabc😀\n'); assert.equal(b.sver, 1);
+  assert.equal((await w.edit(id, 1, [[1, 'a', 'xy'], [3, 'b', '']])).t, 'ack');
+  await until(() => b.sver === 2);
+  assert.equal(b.text, 'Zxyc😀\n'); assert.equal(String(b.sync.sverText), b.text);
+  w.close();
 });
 
 test('R6.15-R6.18 undo by group: u takes a whole group back, C-r redoes, a partial undo names the other writer', async () => {
@@ -343,6 +360,7 @@ test('R7.16 reconnect after edwind restarts: the unacknowledged batch is resent 
   /* Offline edits queue up: the mode line shows the dot. */
   await type('A2'); await keys('ESC');
   assert.ok(b.inflight, 'held while offline'); assert.equal(b.text, '1keep2\n');
+  assert.equal(sync.exportPending().find((p: Msg) => p.buf === id).sverText, '1keep\n', 'pending state exports text, not the rope');
   assert.ok(Ed.hooks.modeStatus(b).includes('•') && Ed.hooks.modeStatus(b).includes('offline'));
   child = await startEdwind(dir);
   await until(() => sync.state === 'online', 'online again', 15000);

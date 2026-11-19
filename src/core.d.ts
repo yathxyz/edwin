@@ -723,7 +723,8 @@ interface EdFold {
 
 /* A shared buffer's sync state (sync.ts). */
 interface EdBufferSync {
-  sverText: string;
+  /* A snapshot string until the first batch; the acknowledged text is then edited in chunks. */
+  sverText: EdText;
   seq: number;
   /* the seqs edwind acknowledged (null: an ack of a batch with no seq) */
   acked: Set<number | null>;
