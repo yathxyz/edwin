@@ -1484,9 +1484,9 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
 - **Transport:** require HTTPS for non-loopback addresses unless `allowCleartext: true` explicitly
   authorizes HTTP over an encrypted private network. Refuse redirects and validate the final origin
   and API path before attaching a bearer token. No automatic terminal attach beyond the named API.
-- **Configuration authority:** `agent-hub-configure` runs only during trusted init. An attached Scheme client
-  must not rebind an existing credential file to an arbitrary HTTP origin. Changing configuration thereafter
-  requires the owner's normal daemon restart; the client never restarts it.
+- **Configuration authority:** only edit.json enables the feature. Without `agentHub`, neither runtime
+  installs its commands or bindings, and the daemon leaves even an existing draft store untouched.
+  Changing the configuration requires restarting the daemon.
 - **Model availability:** summaries do not contain the model. A lightweight journal facts cursor follows
   advertised model config options for list rows; observed model data wins when supplied. An absent or
   literal `unknown` model renders as an empty cell, not a guessed agent default.

@@ -117,7 +117,7 @@ Since 2026-10-19 Edwin is its own repository, and Workbench depends on it, never
 replacement: it grows the features an Emacs user expects and loads no extensions. Workbench uses it as an
 edit.sock client.
 - **No default hub.** Process primitives use `hubSocket`; agent sessions independently use `agentHub`.
-  Without either configuration, edwind dials neither service and the corresponding commands explain why.
+  Without `agentHub`, edwind installs no session commands or key bindings and leaves the draft store untouched.
 - **The §5 session API is gone**: `wb.mts`, `scm/wb.scm` (sessions, cards, `acp-prompt`, `shell-run`, the `wb-*`
   hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
   `boardsDir` was ignored with a warning for one release; since Workbench's module stopped writing it, edwind
@@ -126,8 +126,7 @@ edit.sock client.
   messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
   server, without the ACP messages it served for the session API.
 - **Agent sessions** (Step AS1): `agentHub: {"url":"https://host-a:PORT","tokenFile":"/private/api-token"}`
-  in edit.json, or `(on-server (agent-hub-configure "http://mesh-host:PORT" "/private/api-token"))` in
-  init.scm, configures the mesh HTTP API. Never put token contents in init. `M-x agent-sessions` opens the
+  in edit.json configures the session API. Never put token contents in init. `M-x agent-sessions` opens the
   live shared list; RET opens a read-only, structurally folded journal. `p` composes an ordinary durable
   Markdown draft (`C-c C-p` preview, `C-c C-c` send, `C-c C-k` leave retaining it). `C-c a !` answers
   permissions/elicitations from any buffer. Resource attachments, named reuse and several destinations

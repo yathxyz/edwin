@@ -67,6 +67,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   function writable(d: Draft) { if (sending.has(d.key)) fail('This prompt is being sent'); }
   function meta(sb: SBuf, d: Draft) {
     owned.set(sb, d);
+    sb.replayMeta = true;
     const original = sb.meta.bind(sb);
     sb.meta = () => { const m = original(); m.locals = { ...m.locals, agentPrompt: { id: sb.id, targets: d.targets, possiblySent: d.possiblySent, name: d.name || null, resources: d.blocks.reduce((n, b) => n + Number(b.type !== 'text'), 0) } }; return m; };
   }
@@ -110,15 +111,20 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     return idOf(d);
   }
   for (const file of fs.readdirSync(dir)) {
+  const retained = new Map([...buffers.index.buffers.values()].filter(e => e.file && path.dirname(e.file) === dir).map(e => [e.id, e]));
     if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json') continue;
-    const d = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as Draft;
-    if (!object(d) || d.key !== file.slice(0, -5) || typeof d.baseText !== 'string') fail('Invalid persisted agent prompt');
-    d.acknowledged = targetsOf(d.acknowledged === undefined ? [] : d.acknowledged);
-    d.possiblySent = targetsOf(d.possiblySent === undefined ? [] : d.possiblySent);
-    d.targets = targetsOf(d.targets, true); d.blocks = blocksOf(d.blocks); drafts.set(d.key, d);
-    const live = buffers.live(idOf(d));
-    if (live) { server.Ed.switchMajorMode(live.ed, 'markdown-mode'); meta(live, d); durable(live, d); }
-    else open(d);
+    try {
+      const d = JSON.parse(store.read(file)) as Draft;
+      if (!object(d) || d.key !== file.slice(0, -5) || typeof d.baseText !== 'string') fail('Invalid persisted agent prompt');
+      d.acknowledged = targetsOf(d.acknowledged === undefined ? [] : d.acknowledged);
+      d.possiblySent = targetsOf(d.possiblySent === undefined ? [] : d.possiblySent);
+      d.targets = targetsOf(d.targets, true); d.blocks = blocksOf(d.blocks);
+      const indexed = retained.get(idOf(d));
+      const live = indexed?.file === markdown(d) ? buffers.reloadOne(indexed, markdown(d)) : undefined;
+      if (live) { server.Ed.switchMajorMode(live.ed, 'markdown-mode'); meta(live, d); durable(live, d); }
+      else open(d);
+      drafts.set(d.key, d);
+    } catch { server.log.warn('agent-prompt', { error: 'Skipped unreadable retained draft' }); }
   }
   const offBatch = buffers.on('afterBatch', sb => {
     const d = owned.get(sb);
@@ -241,13 +247,20 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   });
   const namedFile = path.join(dir, 'named.json');
   let named: Record<string, { blocks: Block[] }> = Object.create(null);
-  if (fs.existsSync(namedFile)) {
-    const value = JSON.parse(fs.readFileSync(namedFile, 'utf8'));
-    if (!object(value)) fail('Invalid saved agent prompts');
-    for (const [name, v] of Object.entries(value)) { if (!object(v)) fail('Invalid saved agent prompt'); named[name] = { blocks: blocksOf((v as Record<string, unknown>).blocks) }; }
+  let namedReadable = true;
+  if (entries.includes(namedFile)) {
+    try {
+      const value = JSON.parse(store.read(namedFile));
+      if (!object(value)) fail('Invalid saved agent prompts');
+      for (const [name, v] of Object.entries(value)) { if (!object(v)) fail('Invalid saved agent prompt'); named[name] = { blocks: blocksOf((v as Record<string, unknown>).blocks) }; }
+    } catch {
+      named = Object.create(null); namedReadable = false;
+      server.log.warn('agent-prompt', { error: 'Skipped unreadable named prompts' });
+    }
   }
   command('agent-prompt-list', () => Object.keys(named).sort());
   command('agent-prompt-save', async ([id, name]) => {
+    if (!namedReadable) fail('Cannot overwrite unreadable named prompts');
     const d = draft(id), label = text(name, 'Prompt name'), p = await snapshot(d);
     const next = Object.assign(Object.create(null), named, { [label]: { blocks: p.blocks } }); writeAtomic(namedFile, JSON.stringify(next) + '\n'); named = next;
     persist({ ...d, name: label }); d.name = label; buffers.sendMeta(open(d)); return label;

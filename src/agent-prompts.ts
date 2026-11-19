@@ -1,5 +1,5 @@
 // Agent steering and prompt engineering. Frame-side commands never hold an API credential.
-(function () {
+globalThis.Ed.installAgentPrompts = function () {
 'use strict';
 const Ed = globalThis.Ed, E = Ed.E, L = globalThis.L, H = Ed.hooks;
 const { CMD, signal, intern } = L;
@@ -77,9 +77,7 @@ H.bufferMeta = (b, locals, ver) => {
   if (!object(locals.agentPrompt)) return;
   Ed.makeLocal(b, 'agent-prompt-enabled'); b.locals!.set('agent-prompt-enabled', true);
 };
-const previousSetup = H.setup;
-H.setup = () => {
-  if (previousSetup) previousSetup();
+{
   const map = new Ed.Keymap('agent-prompt-mode-map');
   Ed.defineMinorMode({ name: 'agent-prompt-mode', keymap: map, lighter: ' Prompt', pretty: 'Agent prompt', doc: 'Ordinary Markdown editing, with C-c C-c send, C-c C-k leave retaining the draft, and C-c C-p exact JSON preview.' });
   for (const [key, cmd] of [['C-c C-c', 'agent-prompt-send'], ['C-c C-k', 'agent-prompt-abandon'], ['C-c C-p', 'agent-prompt-preview']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
@@ -88,7 +86,7 @@ H.setup = () => {
   // Answer requests from any buffer; no transcript needs to be selected.
   Ed.defineKey(L.get('global-map') as EdKeymap, Ed.kbd('C-c a !'), intern('agent-session-answer'));
   Ed.defineKey(L.get('global-map') as EdKeymap, Ed.kbd('C-c a p'), intern('agent-session-prompt'));
-};
+}
 
 // Steering stage: durable compose, exact preview, and globally reachable pending answers.
 CMD('agent-session-prompt', '', '&optional SID', 'Compose in a shared Markdown draft for SID; no existing journal text is changed.', async ([sid]: SchemeValue[]) => {
@@ -245,4 +243,4 @@ CMD('agent-prompt-load', '', '&optional NAME SID', 'Reuse a named prompt and its
   await showDraft(await rpc('agent-prompt-load', [label, [target]]) as string); return false;
 });
 CMD('agent-prompt-list', '', '', 'List saved prompt names; agent-prompt-load reuses one with completion.', async () => { jsonView('*Agent Named Prompts*', await rpc('agent-prompt-list')); return false; });
-})();
+};

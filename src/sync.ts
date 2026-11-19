@@ -248,9 +248,10 @@ function dispatch(msg: SyncServerMsg) {
   }
 }
 function onWelcome(msg: SyncWelcomeMsg) {
+  const previous = sync.welcome;
   sync.welcome = msg;
-  if (sync.epoch && msg.imageEpoch !== sync.epoch) {
-    /* R7.19: the image was reset or compacted; the page starts a fresh frame runtime. */
+  if (sync.epoch && (msg.imageEpoch !== sync.epoch || JSON.stringify(previous?.caps.agentHub) !== JSON.stringify(msg.caps.agentHub))) {
+    /* Either the image or the installed command surface changed; start a fresh frame runtime. */
     sync.epochChanged = true; sync.emit('epoch', { epoch: msg.imageEpoch, was: sync.epoch });
     return;
   }
@@ -954,7 +955,8 @@ async function bootServed({ sources, transport, device, cid, pending }: { source
   Ed.hooks.revertShared = revertShared as (b: EdBuffer) => unknown;
   Ed.hooks.killShared = b => closeBuffer(b as SyncBuffer);
   if (pending) importPending(pending as (SyncPending | null)[]);
-  await start({ transport, device, cid });
+  const welcome = await start({ transport, device, cid });
+  if (welcome?.caps.agentHub) { Ed.installAgentSessions(); Ed.installAgentTranscript(); Ed.installAgentPrompts(); }
   const ui = await call({ cmd: 'user-init' });
   if (ui && typeof ui.value === 'string' && ui.value.trim()) { try { for (const f of L.readAll(ui.value)) { L.resetOps(); L.ev(f); } } catch (e) { Ed.message(`Error in ~/.config/edwin/init.scm: ${Ed.errorText(e)}`); } }
   await imageQuery(0);

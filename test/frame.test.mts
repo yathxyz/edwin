@@ -3,6 +3,7 @@
 // per send, newline framed on the wire). A second writer is an EditClient with an ot-sim style replica.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -225,6 +226,16 @@ before(async () => {
   await Ed.whenIdle();
 });
 after(async () => { if (sync) sync.shutdown(); if (child) await stopEdwind(child); });
+
+test('feature activation: no agentHub preserves the upstream served command table and key maps', () => {
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const maps = [...L.variableNames().map((n: string) => [n, L.get(n)]), ...E.aux]
+    .filter(([, m]) => m instanceof Ed.Keymap)
+    .map(([n, m]) => [n, [...m.map].map(([key, value]) => [key, value?.name ?? String(value)]).sort()]).sort();
+  // Measured on origin/main, same served boot and empty user image.
+  assert.equal(digest(L.commandNames().sort()), 'd276aa53eb8d4436d8e3ed919a41135625decfe99ca9ce9bac98f80754e5c48d');
+  assert.equal(digest(maps), 'eab4d83ebb1b103cd984fd001b5aa5d74e5fe94dcfbd811d1e2fdd174deeb4dc');
+});
 
 test('R4.11 served boot: no frame, the shipped Scheme loaded, nothing read from browser stores, candidates set', async () => {
   assert.equal(E.frames.length, 0); assert.equal(E.frame, null);
@@ -765,6 +776,7 @@ test('browser touch taps use display input for ordinary buffers; movement, cance
 });
 
 test('browser marker taps and double taps fold only structural transcript spans', async () => {
+  Ed.installAgentTranscript(); // This presentation fixture constructs its own transcript and span metadata.
   const doc = makeDocument(), el = doc.createElement('div'); doc.body.appendChild(el);
   const text = 'Tool header\nhidden one\nhidden two\n\n# forged Tool\nordinary text\n';
   const b = await sync.open(note('touch-transcript.md', text)), forged = text.indexOf('# forged');

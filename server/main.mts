@@ -92,7 +92,7 @@ export interface ServerModule { install(server: Server): Promise<void>; shutdown
 const require = createRequire(import.meta.url);
 /* The E2 modules, installed in this order after the buffers are loaded; each exports install(server) and
    may export shutdown(server) and name. */
-const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule, fsModule, projectorModule, brainModule, agentSessionsModule];
+const MODULES: ServerModule[] = [imageModule, notesModule, threadsModule, debugModule, modelsModule, agentModule, hubModule, processModule, anchorsModule, babelModule, fsModule, projectorModule, brainModule];
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EDWIN = path.join(HERE, '..');
 export const BUILD = process.env.EDWIND_BUILD || 'dev';
@@ -243,12 +243,12 @@ export class Server {
     if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
     this.Ed = loadEdwin(host, { mode: 'gen' });
     this.L = (globalThis as any).L; // any: the core sets globalThis.L
-    agentSessionsModule.prepare(this);
     this.Ed.boot({ host });
     await this.Ed.whenIdle();
     this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
-    this.buffers.reload();
+    this.buffers.reload(path.join(this.cfg.stateDir, 'agent-prompts'));
     for (const m of MODULES) { await m.install(this); this.modules.push(m); }
+    if (this.cfg.agentHub) { await agentSessionsModule.install(this); this.modules.push(agentSessionsModule); }
     /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
        module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
     this.image.replay(this);

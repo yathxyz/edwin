@@ -95,16 +95,6 @@ function protect(server: Server, c: AgentHubConfig) {
   if (!server.auth.refuse.includes(c.tokenFile)) server.auth.refuse.push(c.tokenFile);
   if (!server.auth.realRefuse.includes(real)) server.auth.realRefuse.push(real);
 }
-// Installed before user init, which is evaluated before server modules. Only paths, never tokens, cross Scheme.
-export function prepare(server: Server) {
-  const f = server.L.D('agent-hub-configure', 'url token-file', 'Configure the mesh API address and private token file; never a token value.', ([url, tokenFile]: SchemeValue[]) => {
-    if (modules.has(server)) throw new Error('agent-hub-configure is init-only; runtime clients cannot rebind a credential to another origin');
-    const c = validateAgentHub({ url, tokenFile }); protect(server, c); server.cfg.agentHub = c;
-    return true;
-  });
-  f.where = 'server';
-}
-
 type RetryQueue = Map<string, NodeJS.Timeout>;
 export class AgentSessions implements AgentBackend {
   declare server: Server; declare config: AgentHubConfig | undefined;
@@ -463,9 +453,9 @@ export class AgentSessions implements AgentBackend {
       }
       check();
       sb.ed.undo = []; sb.ed.redo = []; sb.ed.modified = false;
-      const oldMeta = sb.meta.bind(sb);
-      if (!(sb as SBuf & { agentMeta?: boolean }).agentMeta) {
-        (sb as SBuf & { agentMeta?: boolean }).agentMeta = true;
+      if (!sb.replayMeta) {
+        const oldMeta = sb.meta.bind(sb);
+        sb.replayMeta = true;
         sb.meta = () => ({ ...oldMeta(), modified: false, locals: (sb!.ed.agentLocals || {}) });
       }
       const sid = locals.agentSession?.sid;
@@ -752,7 +742,8 @@ export async function install(server: Server) {
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });
   primitive.where = 'server';
   primitive.gen = function* ([sid]: SchemeValue[]): SchemeGen { return yield new server.L.S.Block(hub.open(sid), 'agent journal'); };
-  hub.stopPrompts = (await installPrompts(server, hub)).stop;
+  try { hub.stopPrompts = (await installPrompts(server, hub)).stop; }
+  catch { server.log.error('agent-prompt', { error: 'Draft store unavailable' }); }
   hub.start();
 }
 export async function shutdown(server: Server) { const hub = modules.get(server); hub?.stop(); await hub?.stopPrompts?.(); }

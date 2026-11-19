@@ -1,5 +1,5 @@
 /* Mesh session UI. Text and registries belong to edwind; frames hold no API token (Step AS1). */
-(function () {
+globalThis.Ed.installAgentSessions = function () {
 'use strict';
 const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
@@ -88,13 +88,11 @@ CMD('agent-session-cancel', '', '', 'Cancel the displayed session turn, without 
 CMD('agent-session-remove', '', '', 'End and forget the selected hub session, after confirmation.', async () => {
   const shown = identity(); if (await Ed.readMini(`Remove ${shown.sid} (createdAt ${shown.epoch})? (yes/no) `, '', null) === 'yes') await rpc('agent-session-remove', [shown.sid, { epoch: shown.epoch }]); return false;
 });
-const previousSetup = H.setup;
-H.setup = () => {
-  if (previousSetup) previousSetup();
+{
   const map = new Ed.Keymap(); L.set('agent-sessions-mode-map', map); Ed.modeParents.set('agent-sessions-mode', 'special-mode');
   E.aux.set('agent-sessions-mode:motion', map); E.aux.set('agent-sessions-mode:normal', map);
   for (const [key, cmd] of [['RET', 'agent-session-open-row'], ['TAB', 'agent-sessions-toggle-exited-row'], ['e', 'agent-sessions-toggle-exited'], ['r', 'agent-sessions-refresh'], ['g r', 'agent-sessions-refresh'], ['a', 'agent-session-start'], ['c', 'agent-session-cancel'], ['D', 'agent-session-remove'], ['p', 'agent-session-prompt'], ['!', 'agent-session-answer'], ['q', 'quit-window']]) Ed.defineKey(map, Ed.kbd(key), intern(cmd));
-};
+}
 const prevMeta = H.bufferMeta;
 H.bufferMeta = (b, locals, ver) => {
   if (prevMeta) prevMeta(b, locals, ver);
@@ -108,4 +106,4 @@ H.bufferMeta = (b, locals, ver) => {
   }
 };
 Ed.MODE_NAMES['agent-sessions-mode'] = 'Agent Sessions';
-})();
+};

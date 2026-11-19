@@ -218,24 +218,41 @@ test('AS-C8: token and symlink are refused; API-echoed token is redacted from bu
   assert.ok(!child.logs.includes(hub.token));
 });
 
-test('AS-C1/C8: unconfigured commands explain; a runtime client cannot bind credentials to its own origin', async t => {
-  const dir = makeDir(), child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+for (const enabled of [false, true]) test(`feature activation: malformed retained store, hub ${enabled ? 'on' : 'off'}`, async t => {
+  const dir = makeDir(), store = path.join(dir.dirs.state, 'agent-prompts'), trace = path.join(dir.root, 'access');
+  fs.mkdirSync(store, { mode: 0o750 });
+  for (const file of ['draft.json', 'named.json']) fs.writeFileSync(path.join(store, file), '{');
+  const preload = path.join(dir.root, 'trace.cjs');
+  fs.writeFileSync(preload, `
+    const fs = require('node:fs'), store = ${JSON.stringify(store)}, trace = ${JSON.stringify(trace)};
+    for (const name of ['openSync','readFileSync','readdirSync','mkdirSync','chmodSync','statSync','lstatSync','existsSync','renameSync','writeFileSync']) {
+      const original = fs[name];
+      fs[name] = function(p, ...rest) {
+        if (p === store || typeof p === 'string' && p.startsWith(store + '/')) fs.appendFileSync(trace, name + '\\n');
+        return original.call(this, p, ...rest);
+      };
+    }
+  `);
+  if (enabled) {
+    const hub = await new FakeAgentHub().start(); t.after(() => hub.stop());
+    const tokenFile = path.join(dir.root, 'token'); fs.writeFileSync(tokenFile, hub.token);
+    dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  } else {
+    fs.writeFileSync(path.join(dir.dirs.state, 'index.json'), JSON.stringify({ buffers: [{ id: 'name:*Agent Prompt: draft*', jid: 'decaf', file: path.join(store, 'draft.md') }] }));
+  }
+  const child = await startEdwind(dir, { nodeArgs: ['--require', preload] }), c = new EditClient(dir.cfg.socket);
   t.after(async () => { c.close(); await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
-  assert.match((await c.call('agent-sessions')).error.report, /No agent hub configured/);
-  const hub = await new FakeAgentHub().start(); t.after(() => hub.stop());
-  const tokenFile = path.join(dir.root, 'token'); fs.writeFileSync(tokenFile, hub.token);
-  const r = await c.form(`(agent-hub-configure ${JSON.stringify(hub.url)} ${JSON.stringify(tokenFile)})`);
-  assert.match(r.error.report, /init-only/); assert.equal(hub.calls.length, 0);
-});
-
-test('AS-C1: trusted user init configures only the URL and token-file path', async t => {
-  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');
-  fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
-  fs.writeFileSync(path.join(dir.dirs.config, 'init.scm'), `(on-server (agent-hub-configure ${JSON.stringify(hub.url)} ${JSON.stringify(tokenFile)}))`);
-  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
-  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
-  assert.equal((await c.call('agent-sessions')).value, 'name:*Agent Sessions*');
-  assert.ok(!child.logs.includes(hub.token));
+  await c.connect(); await c.hello();
+  if (enabled) {
+    assert.deepEqual((await c.call('agent-prompt-drafts')).value, []);
+    assert.deepEqual((await c.call('agent-prompt-list')).value, []);
+  } else {
+    assert.equal(fs.existsSync(trace), false, 'the disabled feature must not touch its store');
+    assert.equal((await c.call('agent-sessions')).t, 'error');
+    const file = path.join(dir.dirs.notes, 'ordinary.md'); fs.writeFileSync(file, 'ordinary');
+    const opened = await c.open(file);
+    assert.equal((await c.open(file, { since: opened.ver! })).meta, null, 'ordinary history replay sends no metadata message');
+  }
 });
 
 test('AS-C1: a non-object API error is reported and does not hang the daemon', async t => {

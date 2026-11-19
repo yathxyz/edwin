@@ -1,6 +1,6 @@
 /* Transcript interaction is entirely structural. Markdown only supplies faces: headings, fences and paths
    inside an agent's text cannot manufacture command targets. Fold choices live in this runtime, not edwind. */
-(function () {
+globalThis.Ed.installAgentTranscript = function () {
 'use strict';
 const Ed = globalThis.Ed, L = globalThis.L, E = Ed.E, H = Ed.hooks;
 const { CMD, signal, intern } = L;
@@ -38,8 +38,7 @@ function folds(b: EdBuffer, p: Presentation) {
     if (typeof from !== 'number' || typeof to !== 'number' || from < 0 || to <= from || to >= b.rope.length) continue;
     if (p.choices.get(s.id) ?? s.folded === true) list.push({ s: from, e: to });
   }
-  /* Server spans are ordered and disjoint. Keep the editor's existing sorted, non-overlapping fold format. */
-  b.folds = list; b._foldVer = (b._foldVer || 0) + 1;
+  Ed.setBufferFolds(b, list);
 }
 function install(b: EdBuffer, m: Meta, ver: number) {
   if (typeof b.sver === 'number' && ver !== b.sver) return;
@@ -142,9 +141,7 @@ Ed.modeParents.set(MODE, 'markdown-mode'); Ed.MODE_NAMES[MODE] = 'Agent Transcri
 CMD(MODE, '', '', 'Use structural read-only agent transcript commands and Markdown fontification.', () => {
   const b = E.current; Ed.switchMajorMode(b, MODE); b.readOnly = true; b.evilState = 'motion'; return false;
 });
-const previousSetup = H.setup;
-H.setup = () => {
-  if (previousSetup) previousSetup();
+{
   const map = new Ed.Keymap(MODE + '-map'); L.set(MODE + '-map', map);
   E.aux.set(MODE + ':motion', map); E.aux.set(MODE + ':normal', map);
   for (const [key, cmd] of [
@@ -155,7 +152,7 @@ H.setup = () => {
   ]) {
     Ed.defineKey(map, key, intern(cmd));
   }
-};
+}
 for (const name of ['agent-session-toggle-fold', 'agent-session-open-folds', 'agent-session-close-folds', 'agent-session-next-prompt', 'agent-session-previous-prompt', 'agent-session-visit-location', 'agent-session-diff', 'agent-session-recall']) L.put(intern(name), 'evil-repeat', intern('abort'));
 (Ed as typeof Ed & { agentTranscript: { metadata: typeof metadata; spanAt: typeof spanAt; install: typeof install; toggleFold: typeof toggleFold } }).agentTranscript = { metadata, spanAt, install, toggleFold };
-})();
+};

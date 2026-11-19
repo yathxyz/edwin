@@ -81,6 +81,7 @@ export class SBuf {
   declare clients: Set<Client>; declare journal: Journal | null; declare autosave: NodeJS.Timeout | null; declare lastOpen: number;
   declare special: boolean; declare writers: By[]; declare serverEdit: ServerEdit | null;
   declare anchors: Anchor[]; declare anchorsDirty: boolean;
+  declare replayMeta?: boolean;
   declare hold?: Hold | null; declare heldQueue?: (() => void)[] | null;
   constructor(owner: Buffers, { id, jid, name, file, ed }: SBufInit) {
     this.owner = owner; this.id = id; this.jid = jid; this.name = name; this.file = file; this.ed = ed;
@@ -185,8 +186,10 @@ export class Buffers {
   autosaves(sb: SBuf): boolean { return !!sb.file && !sb.special && !sb.big && sb.file.startsWith(this.auth.realNotesDir() + '/'); }
 
   /* ---------- start: reload what the index names (R8.4, R8.6) ---------- */
-  reload(): void {
+  reload(privateStore?: string): void {
     for (const e of [...this.index.buffers.values()]) {
+      // Only the store's owner may restore a draft, after validating its retained record.
+      if (privateStore && (e.id.startsWith('name:*Agent Prompt: ') || e.file && path.resolve(e.file).startsWith(privateStore + path.sep))) continue;
       try { this.reloadOne(e); }
       catch (err) { this.log.error('reload', { jid: e.jid, id: e.id, error: err.message }); }
     }
@@ -348,7 +351,7 @@ export class Buffers {
     sb.lastOpen = Date.now();
     if (since !== undefined && since <= sb.ver && this.seq.inHistory(sb, since)) {
       this.seq.replay(client, sb, since);
-      client.send({ t: 'meta', buf: sb.id, ...sb.meta() });
+      if (sb.replayMeta) client.send({ t: 'meta', buf: sb.id, ...sb.meta() });
     } else {
       this.snapshot(client, sb, rid);
     }

@@ -2080,11 +2080,11 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
       if (k === le) {
         flush(k);
         if (le < n && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
+        if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
         break;
       }
       if (k > start && kb[k - ls] !== kb[start - ls]) { flush(k); start = k; }
     }
-    if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
     const val: EcLineVal = !R ? html : wantHtml ? { html, runs: R } : R;
     if (ck !== null) next!.set(ck, val);
     pushLine(val, le);
