@@ -9,7 +9,6 @@ import path from 'node:path';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
 import { lockdown } from './lockdown.mts';
-import { Authority } from './paths.mts';
 
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 export const NOTE_EXT = /\.(md|org)$/i;
@@ -329,9 +328,10 @@ export type NoteRead =
   | { text: string; mtimeMs: number; size: number; skipped?: undefined }
   | { skipped: 'missing' | 'error' }
   | { skipped: 'big' | 'not_text'; mtimeMs: number; size: number };
-function readNote(auth: Authority, abs: string): NoteRead {
+type NoteReader = <T>(file: string, use: (fd: number, stat: fs.Stats) => T) => T;
+function readNote(read: NoteReader, abs: string): NoteRead {
   try {
-    return auth.withRead(abs, (fd, st): NoteRead => {
+    return read(abs, (fd, st): NoteRead => {
       if (!st.isFile()) return { skipped: 'missing' };
       if (st.size > MAX_FILE_BYTES) return { skipped: 'big', mtimeMs: st.mtimeMs, size: st.size };
       const bytes = fs.readFileSync(fd);
@@ -363,7 +363,7 @@ export function ignoreMatcher(patterns: readonly unknown[] | null | undefined): 
 /* Every *.md and *.org under ROOT (R11.1): no dot-directories, no symlinks out of ROOT, no file over 4 MiB,
    nothing matching IGNORE. Returns [{id, mtimeMs, size}] with notesDir-relative ids. */
 export interface ScanEntry { id: string; mtimeMs: number; size: number }
-function scanTree(auth: Authority, root: string, ignorePatterns: readonly unknown[] | null | undefined): ScanEntry[] {
+function scanTree(read: NoteReader, root: string, ignorePatterns: readonly unknown[] | null | undefined): ScanEntry[] {
   const ignored = ignoreMatcher(ignorePatterns);
   let realRoot;
   try { realRoot = fs.realpathSync.native(root); } catch (e) { return []; }
@@ -387,7 +387,7 @@ function scanTree(auth: Authority, root: string, ignorePatterns: readonly unknow
         if (name.startsWith('.') || ignored(r, true)) continue;
         stack.push({ dir: abs, rel: r });
       } else if (isFile && NOTE_EXT.test(name) && !ignored(r, false)) {
-        let st; try { st = auth.withRead(abs, (_fd, stat) => stat); } catch { continue; }
+        let st; try { st = read(abs, (_fd, stat) => stat); } catch { continue; }
         if (st.size > MAX_FILE_BYTES) continue;
         out.push({ id: r, mtimeMs: st.mtimeMs, size: st.size });
       }
@@ -430,14 +430,14 @@ export type ParseOutcome =
   | ParsedFile
   | { id: string; skipped: SkipReason; error?: undefined }
   | { id: string; error: string; skipped?: undefined };
-function parseItem(auth: Authority, item: ParseItem, G: Grammar): ParseOutcome {
+function parseItem(read: NoteReader, item: ParseItem, G: Grammar): ParseOutcome {
   try {
     if (typeof item.text === 'string') {
       const rec = parseFile(item.id, item.text, G);
       rec.file.mtime = item.mtimeMs ?? null;
       return { id: item.id, mtimeMs: item.mtimeMs ?? -1, size: item.text.length, rec, fromBuffer: true };
     }
-    const r = readNote(auth, item.file!);
+    const r = readNote(read, item.file!);
     if (r.skipped) return { id: item.id, skipped: r.skipped };
     const rec = parseFile(item.id, r.text, G);
     rec.file.mtime = r.mtimeMs;
@@ -457,22 +457,37 @@ export interface ScannedReply { t: 'scanned'; jobId: number; files: ScanEntry[] 
 export interface GreppedReply { t: 'grepped'; jobId: number; hits: GrepHit[] }
 export interface ErrorReply { t: 'error'; jobId: number; error: string }
 export type WorkerReply = ParsedReply | ScannedReply | GreppedReply | ErrorReply;
-/* The one reply on the synchronous channel. */
+/* On the synchronous channel the worker requests authorization of a still-open descriptor, or replies
+   to a synchronous grep. The sequence wakes the daemon in either case; the decision wakes the worker. */
+export const WAKE_SEQUENCE = 0, READ_DECISION = 1;
+export interface ReadRequest { t: 'check-read'; file: string; fd: number }
 export type SyncReply = { jobId: number; hits: GrepHit[]; error?: undefined } | { jobId: number; error: string; hits?: undefined };
 
 if (!isMainThread && workerData && workerData.notesWorker) {
   lockdown();
-  const auth = new Authority(workerData.authority);
-  if (workerData.tokenFile) auth.protectCredential(workerData.tokenFile);
+  const { syncPort, signal }: { syncPort: MessagePort; signal: Int32Array } = workerData;
+  const wakeDaemon = () => { Atomics.add(signal, WAKE_SEQUENCE, 1); Atomics.notify(signal, WAKE_SEQUENCE); };
+  const read: NoteReader = (file, use) => {
+    const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    try {
+      // Keep this descriptor pinned until the daemon has checked this exact object. No pathname reopen
+      // for data, and no worker-local copy of the daemon's private-file history.
+      Atomics.store(signal, READ_DECISION, 0);
+      syncPort.postMessage({ t: 'check-read', file, fd } satisfies ReadRequest);
+      wakeDaemon();
+      Atomics.wait(signal, READ_DECISION, 0);
+      if (Atomics.load(signal, READ_DECISION) !== 1) throw new Error('Private file: access refused');
+      return use(fd, fs.fstatSync(fd));
+    } finally { fs.closeSync(fd); }
+  };
   let G = compileGrammar(workerData.grammar);
-  const { syncPort, signal }: { syncPort?: MessagePort; signal: Int32Array } = workerData;
   /* A grep job over MSG.files (live text or a file to read): the hits, at most MSG.max. */
   const grepJob = (msg: GrepJob) => {
     const re = new RegExp(msg.source, msg.flags.includes('g') ? msg.flags : msg.flags + 'g');
     const out: GrepHit[] = [];
     for (const f of msg.files) {
       if (out.length >= msg.max) break;
-      const text = typeof f.text === 'string' ? f.text : (() => { const r = readNote(auth, f.file!); return r.skipped ? null : r.text; })();
+      const text = typeof f.text === 'string' ? f.text : (() => { const r = readNote(read, f.file!); return r.skipped ? null : r.text; })();
       if (text === null) continue;
       grepText(f.id, text, re, { excludeLinks: msg.excludeLinks, wiki: G.wiki, ref: G.ref, max: msg.max }, out);
     }
@@ -482,8 +497,8 @@ if (!isMainThread && workerData && workerData.notesWorker) {
     try {
       switch (msg.t) {
         case 'grammar': G = compileGrammar(msg.grammar); parentPort!.postMessage({ t: 'grammar', ok: true }); break;
-        case 'parse': parentPort!.postMessage({ t: 'parsed', jobId: msg.jobId, results: msg.items.map(it => parseItem(auth, it, G)) }); break;
-        case 'scan': parentPort!.postMessage({ t: 'scanned', jobId: msg.jobId, files: scanTree(auth, msg.root, msg.ignore) }); break;
+        case 'parse': parentPort!.postMessage({ t: 'parsed', jobId: msg.jobId, results: msg.items.map(it => parseItem(read, it, G)) }); break;
+        case 'scan': parentPort!.postMessage({ t: 'scanned', jobId: msg.jobId, files: scanTree(read, msg.root, msg.ignore) }); break;
         case 'grep': parentPort!.postMessage({ t: 'grepped', jobId: msg.jobId, hits: grepJob(msg) }); break; // a thread waits (R4.42)
         default: parentPort!.postMessage({ t: 'error', jobId: (msg as { jobId: number }).jobId, error: `unknown job ${(msg as { t: string }).t}` });
       }
@@ -491,13 +506,13 @@ if (!isMainThread && workerData && workerData.notesWorker) {
   });
   /* The synchronous channel (callers outside a thread): the main thread posts a job, waits on SIGNAL and
      reads the one reply. */
-  if (syncPort) syncPort.on('message', (msg: { t: string; jobId: number } & Partial<GrepJob>) => {
+  syncPort.on('message', (msg: { t: string; jobId: number } & Partial<GrepJob>) => {
     let reply: SyncReply;
     try {
       if (msg.t === 'grep') reply = { jobId: msg.jobId, hits: grepJob(msg as GrepJob) };
       else reply = { jobId: msg.jobId, error: `unknown sync job ${msg.t}` };
     } catch (e) { reply = { jobId: msg.jobId, error: e.message }; }
     syncPort.postMessage(reply);
-    Atomics.store(signal, 0, 1); Atomics.notify(signal, 0);
+    wakeDaemon();
   });
 }

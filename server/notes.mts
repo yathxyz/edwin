@@ -12,7 +12,7 @@ import { randomBytes } from 'node:crypto';
 import { ProtoError } from './proto.mts';
 import { writeAtomic } from './files.mts';
 import { PathError, under, realPath } from './paths.mts';
-import { parseFile, compileGrammar, NOTE_EXT, ignoreMatcher } from './notes-parse.mts';
+import { parseFile, compileGrammar, NOTE_EXT, ignoreMatcher, WAKE_SEQUENCE, READ_DECISION } from './notes-parse.mts';
 import type { MessagePort } from 'node:worker_threads';
 import type { Authority, ParsedId } from './paths.mts';
 import type { By, CallResult } from './proto.mts';
@@ -21,7 +21,7 @@ import type { Client } from './session.mts';
 import type { SBuf, Moved } from './buffers.mts';
 import type {
   ParsedFile, RawGrammar, Grammar, ParseResult, ParseOutcome, ParseItem, FileRec, HeadingRec, BlockRec, LinkRec, TaskRec, CardRec,
-  ScanEntry, GrepHit, ParseJob, ScanJob, GrepJob, GrepFile, WorkerReply, ScannedReply, GreppedReply, SyncReply,
+  ScanEntry, GrepHit, ParseJob, ScanJob, GrepJob, GrepFile, WorkerReply, ScannedReply, GreppedReply, SyncReply, ReadRequest,
 } from './notes-parse.mts';
 
 export const name = 'notes';
@@ -203,18 +203,18 @@ export class Notes {
   /* ---------- the worker (R11.5) ---------- */
   startWorker() {
     if (this.worker) return;
-    const sab = new SharedArrayBuffer(4);
-    this.signal = new Int32Array(sab);
+    const signal = this.signal = new Int32Array(new SharedArrayBuffer(2 * Int32Array.BYTES_PER_ELEMENT));
     const { port1, port2 } = new MessageChannel();
     this.syncPort = port1;
-    const { notesDir, stateDir, configDir, agentHub } = this.server.cfg, refusePaths = this.server.auth.refuse;
-    const w = new Worker(PARSER, { workerData: { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal,
-      authority: { notesDir, stateDir, configDir, refusePaths }, tokenFile: agentHub?.tokenFile }, transferList: [port2] });
+    const w = new Worker(PARSER, { workerData: { notesWorker: true, grammar: this.grammar, syncPort: port2, signal }, transferList: [port2] });
+    port1.on('message', (msg: ReadRequest | SyncReply) => { if ('t' in msg) this.authorizeRead(msg, signal); });
+    port1.unref();
     this.worker = w; this.workerStarts++;
     w.unref();
     w.on('message', msg => this.onWorkerMessage(msg));
     w.on('error', e => { this.log.error('notes', { worker: 'error', error: e.message }); });
     w.on('exit', code => {
+      port1.close();
       if (this.worker !== w) return;
       this.worker = null;
       for (const j of this.jobs.values()) j.reject(new Error(`notes worker exited with ${code}`));
@@ -222,6 +222,20 @@ export class Notes {
       if (!this.stopped && this.workerStarts < 5) { this.log.warn('notes', { worker: 'restart', code }); this.startWorker(); }
       else if (!this.stopped) this.log.error('notes', { worker: 'gave up', code });
     });
+  }
+  private authorizeRead({ file, fd }: ReadRequest, signal: Int32Array): void {
+    let allowed = false;
+    try {
+      // The worker owns FD and holds it open until we answer. Apply the full authority for FILE,
+      // including private-store rules; a concurrent replacement must not authorize a different object.
+      allowed = this.server.auth.withRead(file, (checked, _, real) => {
+        if (fs.readlinkSync(`/proc/self/fd/${fd}`) !== real) return false;
+        const a = fs.fstatSync(checked, { bigint: true }), b = fs.fstatSync(fd, { bigint: true });
+        return a.dev === b.dev && a.ino === b.ino;
+      });
+    } catch { /* fail closed without passing a private name back */ }
+    Atomics.store(signal, READ_DECISION, allowed ? 1 : -1);
+    Atomics.notify(signal, READ_DECISION);
   }
   onWorkerMessage(msg: WorkerReply) {
     const j = this.jobs.get(msg.jobId);
@@ -240,14 +254,20 @@ export class Notes {
   syncJob(msg: GrepJob): Extract<SyncReply, { hits: GrepHit[] }> {
     if (!this.worker) this.startWorker();
     const jobId = ++this.jobSeq;
-    Atomics.store(this.signal, 0, 0);
+    const deadline = Date.now() + SYNC_TIMEOUT_MS;
     this.syncPort.postMessage({ ...msg, jobId });
-    const r = Atomics.wait(this.signal, 0, 0, SYNC_TIMEOUT_MS);
-    if (r === 'timed-out') throw new Error('the notes worker did not answer in time');
-    const m = receiveMessageOnPort(this.syncPort);
-    if (!m || !m.message) throw new Error('the notes worker sent no reply');
-    if (m.message.error) throw new Error(m.message.error);
-    return m.message;
+    // We own the authority even while Scheme is waiting synchronously. Service checks from any
+    // in-flight worker job, not just this grep. Sample the sequence before dequeueing to avoid lost wakes.
+    while (Date.now() < deadline) {
+      const seq = Atomics.load(this.signal, WAKE_SEQUENCE);
+      const msg: ReadRequest | SyncReply | undefined = receiveMessageOnPort(this.syncPort)?.message;
+      if (!msg) { Atomics.wait(this.signal, WAKE_SEQUENCE, seq, deadline - Date.now()); continue; }
+      if ('t' in msg) { this.authorizeRead(msg, this.signal); continue; }
+      if (msg.jobId !== jobId) continue; // a late reply to an earlier timed-out grep
+      if (msg.error !== undefined) throw new Error(msg.error);
+      return msg;
+    }
+    throw new Error('the notes worker did not answer in time');
   }
 
   /* ---------- the index ---------- */

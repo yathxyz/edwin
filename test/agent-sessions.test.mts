@@ -14,6 +14,7 @@ import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { sessionsFixture } from './agent-render-fixture.mts';
 import type { Server } from '../server/main.mts';
 import { Authority } from '../server/paths.mts';
+import { Notes } from '../server/notes.mts';
 const require = createRequire(import.meta.url);
 const { createHost, loadEdwin } = require('../src/host-node.cts');
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -286,6 +287,37 @@ test('review 5 config source: editor reads and binary attachments refuse aliases
   const entries = (await c.call('fs-list', [{ dir: dir.dirs.notes }])).value.entries;
   assert.ok(!entries.some((e: { name: string }) => [path.basename(alias), path.basename(hard)].includes(e.name)));
   assert.deepEqual((await c.call('agent-prompt-preview', [draft])).value.blocks, [{ type: 'text', text: 'ordinary draft' }]);
+});
+
+test('notes worker: middle rotation hard link stays private during parse, scan and grep', async t => {
+  const dir = makeDir(), tokenFile = path.join(dir.root, 'fixture'), auth = new Authority(dir.cfg);
+  const cfg = { ...dir.cfg, agentHub: { tokenFile } };
+  fs.writeFileSync(tokenFile, 'first fixture'); auth.protectCredential(tokenFile);
+  const notes = new Notes({ cfg, auth, L: {}, buffers: { byFile: () => null }, clients: [], log: console } as unknown as Server);
+  notes.grammar = JSON.parse(fs.readFileSync(new URL('./fixtures/notes/golden/grammar.json', import.meta.url), 'utf8'));
+  t.after(async () => { await notes.shutdown(); fs.rmSync(dir.root, { recursive: true, force: true }); });
+
+  const id = 'middle.md', file = path.join(dir.dirs.notes, id);
+  const ordinary = { id: 'ordinary.md', file: path.join(dir.dirs.notes, 'ordinary.md') };
+  fs.writeFileSync(ordinary.file, '# Ordinary\n');
+  await notes.job({ t: 'parse', items: [ordinary] }); // worker is running before either rotation
+  assert.equal(notes.files.get(ordinary.id)?.rec.file.title, 'Ordinary');
+  const next = path.join(dir.root, 'replacement');
+  for (const label of ['middle fixture', 'last fixture']) {
+    fs.writeFileSync(next, label); fs.renameSync(next, tokenFile);
+    assert.equal(auth.readCredential(), label);
+    if (label === 'middle fixture') fs.linkSync(tokenFile, file);
+  }
+  const items = [{ id, file }];
+  const [result] = await notes.job({ t: 'parse', items });
+  assert.equal(result.skipped, 'error');
+  assert.ok(!notes.files.has(id));
+  const scan = await notes.job({ t: 'scan', root: dir.dirs.notes, ignore: [] });
+  assert.deepEqual(scan.map(entry => entry.id), [ordinary.id]);
+  const grep = { t: 'grep' as const, files: [ordinary, ...items], source: 'Ordinary|middle', flags: '', excludeLinks: false, max: 10 };
+  const pending = notes.job(grep); // sync grep must also work while an asynchronous disk job is outstanding
+  assert.deepEqual(notes.syncJob(grep).hits.map(hit => hit[0]), [ordinary.id]);
+  assert.deepEqual((await pending).hits.map(hit => hit[0]), [ordinary.id]);
 });
 
 test('protected reader: credential identities are refused by editor reads, metadata, completion and binary attach', async t => {
