@@ -1,60 +1,36 @@
-// With agentHub configured, Edwin's file commands cannot access the hub token or daemon config
-// by name, including symlinked parents and leaves. Content operations also check device and inode.
-//
-// A process running as the daemon user already has direct access. This is not a defense against
-// edited state, external links/renames, permission changes or check/use races. Recovery trusts state
-// and uses the same code as a daemon without agentHub.
+// Prevent accidental editor reads and writes of the configured token and daemon config.
 import fs from 'node:fs';
 import path from 'node:path';
-import { Authority, PathError, under, type AuthorityConfig } from './paths.mts';
+import { Authority, PathError, type AuthorityConfig } from './paths.mts';
 import { FileError, readText, writeAtomic, type TextFile } from './files.mts';
 
 export class ProtectedFileError extends PathError {
   constructor() { super('refused_path', 'Private file: access refused'); }
 }
 
-const identity = (st: fs.BigIntStats) => `${st.dev}:${st.ino}`;
-export interface FileExclusions { names: string[]; ids: string[] }
+export type FileExclusions = readonly { path: string; dev: bigint; ino: bigint }[];
 
-function canonicalNames(file: string): string[] {
-  const names = [path.isAbsolute(file) ? file : process.cwd() + path.sep + file];
-  // realpath needs an existing leaf; resolve its parent separately for names that can be created.
-  try { names.push(path.join(fs.realpathSync.native(path.dirname(file)), path.basename(file))); } catch { /* absent or inaccessible parent */ }
-  try { names.push(fs.realpathSync.native(file)); }
-  catch (e) {
-    // A dangling leaf can still name a protected file that doesn't exist yet.
-    if (e.code === 'ENOENT') {
-      let leaf = names.at(-1)!;
-      for (let hops = 0; hops < 40; hops++) {
-        try { leaf = path.resolve(path.dirname(leaf), fs.readlinkSync(leaf)); } catch { break; }
-        try { leaf = path.join(fs.realpathSync.native(path.dirname(leaf)), path.basename(leaf)); } catch { /* absent parent */ }
-        names.push(leaf);
-      }
-    }
-  }
-  return names;
+export function checkProtected(files: FileExclusions, file: string, fd?: number): void {
+  let real: string | undefined;
+  try { real = fs.realpathSync.native(file); } catch { /* let the caller handle filesystem errors */ }
+  if (files.some(f => f.path === real)) throw new ProtectedFileError();
+  let st: fs.BigIntStats;
+  try { st = fd === undefined ? fs.statSync(file, { bigint: true }) : fs.fstatSync(fd, { bigint: true }); }
+  catch { return; }
+  if (files.some(f => f.dev === st.dev && f.ino === st.ino)) throw new ProtectedFileError();
 }
 
-function checkIdentity(exclusions: FileExclusions, stat: fs.BigIntStats): void {
-  if (exclusions.ids.includes(identity(stat))) throw new ProtectedFileError();
+export function readProtected<T>(files: FileExclusions, file: string, use: (fd: number) => T): T {
+  const fd = fs.openSync(file, 'r');
+  try { checkProtected(files, file, fd); return use(fd); } finally { fs.closeSync(fd); }
 }
 
-function checkNames(exclusions: FileExclusions, names: string[]): void {
-  if (names.some(name => exclusions.names.includes(name))) throw new ProtectedFileError();
-}
-
-export function checkProtected(exclusions: FileExclusions, file: string, stat?: fs.BigIntStats): void {
-  checkNames(exclusions, canonicalNames(file));
-  if (stat) checkIdentity(exclusions, stat);
-}
-
-function protect(files: string[]): FileExclusions {
-  const names = new Set<string>(), ids = new Set<string>();
-  for (const file of files) {
-    for (const name of canonicalNames(file)) names.add(name);
-    try { ids.add(identity(fs.statSync(file, { bigint: true }))); } catch { /* still protected by name */ }
-  }
-  return { names: [...names], ids: [...ids] };
+function protectedFile(file: string | undefined, setting: string): FileExclusions[number] {
+  try {
+    const real = fs.realpathSync.native(file!);
+    const { dev, ino } = fs.statSync(real, { bigint: true });
+    return { path: real, dev, ino };
+  } catch { throw new Error(`Cannot resolve ${setting}`); }
 }
 
 export class AgentAuthority extends Authority {
@@ -64,11 +40,13 @@ export class AgentAuthority extends Authority {
   promptStore?: PrivateStore;
   private readonly credential: string;
 
-  constructor(config: AuthorityConfig, credential: string, configFile?: string) {
+  constructor(config: AuthorityConfig, credential: string, configFile: string | null | undefined) {
     super(config);
     this.credential = credential;
     this.promptDir = path.join(this.stateDir, 'agent-prompts');
-    this.exclusions = protect(configFile === undefined ? [credential] : [credential, configFile]);
+    this.exclusions = configFile === null
+      ? [protectedFile(credential, 'agentHub.tokenFile')] // The read-only inspector has no daemon config.
+      : [protectedFile(credential, 'agentHub.tokenFile'), protectedFile(configFile, '--config')];
   }
 
   // The configured backend, not an Edwin file command, is the intended reader.
@@ -77,47 +55,8 @@ export class AgentAuthority extends Authority {
     try { return fs.readFileSync(fd, 'utf8'); } finally { fs.closeSync(fd); }
   }
 
-  override refused(real: string): boolean {
-    // An entry mutation on a containing directory would move or remove the protected name too.
-    return super.refused(real) || this.exclusions.names.some(name => under(name, real) || under(real, name));
-  }
-
-  checkNamed(file: string, kind: 'content' | 'entry' = 'content'): void {
-    checkProtected(this.exclusions, file);
-    if (kind === 'entry') return; // The operation acts on the link itself, not on its target.
-    let stat: fs.BigIntStats;
-    try { stat = fs.statSync(file, { bigint: true }); }
-    catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR' || e.code === 'ELOOP') return; throw e; }
-    checkIdentity(this.exclusions, stat);
-  }
-
-  override checkRead(real: string): string {
-    const names = canonicalNames(real);
-    checkNames(this.exclusions, names);
-    if (names.some(name => super.refused(name))) throw new PathError('refused_path', `${real}: refused`);
-    return real;
-  }
-
-  withRead<T>(file: string, use: (fd: number) => T): T {
-    this.checkRead(file);
-    const fd = fs.openSync(file, 'r');
-    try {
-      // Check the file actually opened before any bytes reach the caller.
-      checkIdentity(this.exclusions, fs.fstatSync(fd, { bigint: true }));
-      return use(fd);
-    } finally { fs.closeSync(fd); }
-  }
-
-  override checkWrite(real: string, kind: 'content' | 'entry' = 'content'): string {
-    this.checkNamed(real, kind);
-    return super.checkWrite(real);
-  }
-
-  readSource(file: string, root: string): string {
-    const real = fs.realpathSync.native(file);
-    if (!under(real, root) || real === root || !fs.statSync(real).isFile()) throw new ProtectedFileError();
-    return this.withRead(file, fd => fs.readFileSync(fd, 'utf8'));
-  }
+  checkNamed(file: string): void { checkProtected(this.exclusions, file); }
+  withRead<T>(file: string, use: (fd: number) => T): T { return readProtected(this.exclusions, file, use); }
 
   readText(file: string): TextFile {
     try { return this.withRead(file, fd => readText(file, fd)); }

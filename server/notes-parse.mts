@@ -9,7 +9,7 @@ import path from 'node:path';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
 import { lockdown } from './lockdown.mts';
-import { checkProtected, type FileExclusions } from './agent-files.mts';
+import { readProtected, type FileExclusions } from './agent-files.mts';
 
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 export const NOTE_EXT = /\.(md|org)$/i;
@@ -335,16 +335,8 @@ export function readNote(abs: string, exclusions?: FileExclusions): NoteRead {
   if (!st.isFile()) return { skipped: 'missing' };
   if (st.size > MAX_FILE_BYTES) return { skipped: 'big', mtimeMs: st.mtimeMs, size: st.size };
   let bytes;
-  try {
-    if (exclusions) {
-      const fd = fs.openSync(abs, 'r');
-      try {
-        // Neither parsing nor grepping a note may expose the token or config through a file alias.
-        checkProtected(exclusions, abs, fs.fstatSync(fd, { bigint: true }));
-        bytes = fs.readFileSync(fd);
-      } finally { fs.closeSync(fd); }
-    } else bytes = fs.readFileSync(abs);
-  } catch (e) { return { skipped: e.code === 'ENOENT' ? 'missing' : 'error' }; }
+  try { bytes = exclusions ? readProtected(exclusions, abs, fd => fs.readFileSync(fd)) : fs.readFileSync(abs); }
+  catch (e) { return { skipped: e.code === 'ENOENT' ? 'missing' : 'error' }; }
   let text;
   try { text = decoder.decode(bytes); } catch (e) { return { skipped: 'not_text', mtimeMs: st.mtimeMs, size: st.size }; }
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);

@@ -238,7 +238,7 @@ export class Server {
   private initState(cfg: Config) {
     fs.mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(cfg.configDir, { recursive: true, mode: 0o700 });
-    this.image = new ImageLog(path.join(cfg.stateDir, 'image.jsonl'));
+    this.image = new ImageLog(path.join(cfg.stateDir, 'image.jsonl'), this.auth.agent);
     this.image.ensureEpoch(() => randomId(8));
   }
   /* Load Edwin's core headless and boot it (host-node.cts), then replay the image log (R4.19) and the journals. */
@@ -252,18 +252,15 @@ export class Server {
       const storageFile = path.join(this.cfg.stateDir, 'storage.json');
       /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
       const safe = this.image.bootGuard();
-      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: guardedStorage ?? fileStorage(storageFile, this.log) });
+      const scmDir = path.join(EDWIN, 'scm');
+      const host = createHost({ scmDir, configDir: this.cfg.configDir, storage: guardedStorage ?? fileStorage(storageFile, this.log) });
       if (agent) {
-        // Scheme load/include/require can name a local file without going through a buffer.
+        const read = (file: string) => agent.withRead(file, fd => fs.readFileSync(fd, 'utf8'));
         host.readFile = (file: string) => {
-          try { return agent.withRead(file, fd => fs.readFileSync(fd, 'utf8')); }
-          catch (e) { if (e instanceof ProtectedFileError) throw e; return null; }
+          try { return read(file); } catch (e) { if (e instanceof ProtectedFileError) throw e; return null; }
         };
-        // Boot must not interpret a protected file reached through init.scm.
-        host.userConfig = (name: string) => {
-          try { return agent.withRead(path.join(this.cfg.configDir, name), fd => fs.readFileSync(fd, 'utf8')); }
-          catch { return null; }
-        };
+        host.config = (name: string) => { try { return read(path.join(scmDir, name)); } catch { return null; } };
+        host.userConfig = (name: string) => { try { return read(path.join(this.cfg.configDir, name)); } catch { return null; } };
       }
       if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
       this.Ed = loadEdwin(host, { mode: 'gen' });
@@ -485,12 +482,8 @@ function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
       if (e instanceof ProtectedFileError) throw new Error('storage.json conflicts with a protected file');
       throw e;
     }
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      try { map = new Map(Object.entries(JSON.parse(text))); }
-      catch { log.warn('storage', { error: 'Invalid storage JSON' }); }
-    } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
-  } else try { map = new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))); } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
+  }
+  try { map = new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))); } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
   let timer: NodeJS.Timeout | null = null;
   const flush = () => { timer = null; try { fs.writeFileSync(file, JSON.stringify(Object.fromEntries(map)), { mode: 0o600 }); } catch (e) { log.warn('storage', { error: e.message }); } };
   const schedule = () => { if (!timer) timer = setTimeout(flush, 500); };
@@ -498,14 +491,14 @@ function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
   if (!agent) return storage;
   // insert-file-contents and write-region use the host's virtual file namespace.
   const checkKey = (k: string) => {
-    const prefix = 'lmacs:file:';
-    if (k.startsWith(prefix)) agent.checkNamed(path.resolve(agent.notesDir, expandHome(k.slice(prefix.length))));
+    if (!k.startsWith('lmacs:file:')) return;
+    const name = k.slice('lmacs:file:'.length);
+    agent.checkNamed(path.isAbsolute(name) ? name : name === '~' || name.startsWith('~/') ? expandHome('~') + name.slice(1) : `${agent.notesDir}/${name}`);
   };
   return {
     ...storage,
     get: (k: string) => { checkKey(k); return storage.get(k); },
     set: (k: string, v: unknown) => { checkKey(k); return storage.set(k, v); },
-    remove: (k: string) => { checkKey(k); storage.remove(k); },
   };
 }
 
@@ -593,11 +586,15 @@ export async function main(argv: string[]): Promise<number | undefined> {
     return 0;
   }
   if (isMainThread && !process.env.EDWIND_NO_THREAD) return runInThread(argv, log);
-  const server = new Server(cfg, log);
-  try { await server.start(); await server.listen(); }
-  catch (e) { process.stderr.write(`edwind: ${e.message}\n`); log.error('start', { error: e.message }); return e instanceof PromptStoreBusy ? e.exitCode : 1; }
+  let server = cfg.agentHub ? undefined : new Server(cfg, log);
+  try { server ??= new Server(cfg, log); await server.start(); await server.listen(); }
+  catch (e) {
+    process.stderr.write(`edwind: ${e.message}\n`);
+    if (server) log.error('start', { error: e.message });
+    return e instanceof PromptStoreBusy ? e.exitCode : 1;
+  }
   let stopping: Promise<void> | null = null;
-  const stop = (sig: string) => { if (stopping) return; log.info('signal', { sig }); stopping = server.stop().then(() => process.exit(0), e => { log.error('stop', { error: e.message }); process.exit(1); }); };
+  const stop = (sig: string) => { if (stopping) return; log.info('signal', { sig }); stopping = server!.stop().then(() => process.exit(0), e => { log.error('stop', { error: e.message }); process.exit(1); }); };
   if (isMainThread) { process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT')); }
   else parentPort!.on('message', m => { if (m && m.t === 'stop') stop(m.sig); });
   process.on('uncaughtException', e => { log.error('uncaught', { error: e.stack || String(e) }); });

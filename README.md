@@ -139,15 +139,9 @@ edit.sock client.
   named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
   Only configured prompt-store writers take the exclusive lock. Without `agentHub`, startup, recovery
   and live export use the ordinary editor paths; nothing reserves `stateDir/agent-prompts/`.
-  With `agentHub`, Edwin commands refuse to read, write, rename or delete the hub token and the daemon
-  config by name, including through symlinked parents or leaves. Content operations also check the file's
-  device and inode for aliases. Directory listings may show both entries, not their contents. Startup
-  refuses a `storage.json` that aliases either file.
-
-  This does not protect against someone who can run commands as the daemon user; they can read the files
-  directly. Hand-edited journals, snapshots and index rows, external links or renames after startup,
-  permission changes that hide identity, and file swaps between check and use are out of scope. Recovery
-  trusts its state and follows the same path with or without `agentHub`.
+  With `agentHub` configured, the daemon's file commands refuse to open or write the hub token and daemon
+  config, to keep their contents out of buffers, journals and other frames. This is not a security boundary:
+  clients admitted to the daemon have its user's file access. Protect the token with file permissions.
 
   The stock NixOS units do not configure `agentHub`. If you supply an agent-enabled `edit.json` to a
   systemd service, set `RestartPreventExitStatus=73` on that service to stop retrying when another writer owns the store.

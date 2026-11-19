@@ -8,7 +8,6 @@ import { createRequire } from 'node:module';
 import { ProtoError, CHUNK } from './proto.mts';
 import { PathError, expandHome, under } from './paths.mts';
 import { readText, saveAtomic, writeAtomic, fsyncDir, sha256, diskState, FileError, BIG } from './files.mts';
-import { ProtectedFileError } from './agent-files.mts';
 import { Journal, readJournal, healTail, header as journalHeader, Index, randomId, jidPath, SNAP_NEW } from './journal.mts';
 import { Sequencer } from './sequencer.mts';
 import { Watcher, diffOps, merge3 } from './watch.mts';
@@ -331,7 +330,6 @@ export class Buffers {
       return nb;
     }
     let r: TextFile;
-    // Opening a file reads its contents: with agentHub, reject the token, config and their inode aliases.
     try { r = this.auth.agent ? this.auth.agent.readText(p.real) : readText(p.real); } catch (e) { if (e instanceof FileError || e instanceof PathError) throw new ProtoError(e.code, e.message); throw e; }
     const nb = this.create({ id: canon, jid: randomId(), name: path.basename(p.real), file: p.real, text: r.text, eol: r.eol });
     nb.disk = diskState(r.stat);
@@ -371,18 +369,11 @@ export class Buffers {
   close(client: Client, sb: SBuf): void { sb.clients.delete(client); client.buffers.delete(sb); }
   detachAll(client: Client): void { for (const sb of client.buffers) sb.clients.delete(client); client.buffers.clear(); }
   /* A loaded buffer by id, else no_buffer. */
-  get(id: string, fileOperation?: true): SBuf {
+  get(id: string): SBuf {
     const sb = this.live(id);
     if (!sb) {
       /* An id in another spelling of the same file. */
-      try {
-        const p = this.auth.parseId(id);
-        if (p.kind === 'file') {
-          // Save/revert by an unopened name must still refuse protected files, not report no_buffer.
-          if (fileOperation) this.auth.agent?.checkNamed(p.real);
-          const b = this.byFile(p.real); if (b) return b;
-        }
-      } catch (e) { throw new ProtoError(e.code || 'bad_id', e.message); }
+      try { const p = this.auth.parseId(id); if (p.kind === 'file') { const b = this.byFile(p.real); if (b) return b; } } catch (e) { throw new ProtoError(e.code || 'bad_id', e.message); }
       throw new ProtoError('no_buffer', `no buffer ${JSON.stringify(id)}`);
     }
     return sb;
@@ -398,8 +389,7 @@ export class Buffers {
   async save(sb: SBuf): Promise<{ buf: string; ver: number; saved: true }> {
     if (!sb.file) throw new ProtoError('bad_request', `${sb.id} visits no file`);
     if (sb.big) throw new ProtoError('read_only', sb.readOnly as string);
-    // saveAtomic inspects the existing file's final newline; checkWrite also excludes private inodes.
-    try { this.auth.checkWrite(sb.file); } catch (e) { throw new ProtoError('refused_path', e.message); }
+    try { this.auth.checkWrite(sb.file); this.auth.agent?.checkNamed(sb.file); } catch (e) { throw new ProtoError('refused_path', e.message); }
     const text = sb.text, ver = sb.ver;
     let r: ReturnType<typeof saveAtomic>;
     try { r = saveAtomic(sb.file, text, { eol: sb.eol }); }
@@ -419,7 +409,6 @@ export class Buffers {
   async revert(sb: SBuf): Promise<{ buf: string; ver: number; saved: true }> {
     if (!sb.file) throw new ProtoError('bad_request', `${sb.id} visits no file`);
     let r: TextFile;
-    // Revert reads the named backing file again, so use the same protected read as open.
     try { r = this.auth.agent ? this.auth.agent.readText(sb.file) : readText(sb.file); } catch (e) { throw new ProtoError(e.code === 'no_buffer' ? 'no_buffer' : e.code, e.message); }
     sb.disk = diskState(r.stat); sb.eol = r.eol;
     await this.replaceText(sb, r.text, DISK_BY);
@@ -469,18 +458,13 @@ export class Buffers {
     if (p.kind === 'name') throw new ProtoError('bad_request', `${id} names no file`);
     const loaded = this.byFile(p.real);
     if (loaded) return { buf: loaded.id, readOnly: loaded.readOnly || false };
-    try { this.auth.checkRead(p.real); } catch (e) { throw new ProtoError('refused_path', e.message); }
+    try { this.auth.checkRead(p.real); this.auth.agent?.checkNamed(p.real); } catch (e) { throw new ProtoError('refused_path', e.message); }
     let st: fs.Stats;
     try { st = fs.statSync(p.real); } catch (e) { throw new ProtoError('no_buffer', `no file ${p.real}`); }
     if (!st.isFile()) throw new ProtoError('not_text', `${p.real}: not a regular file`);
     const buf = this.auth.idOf(p.real);
-    try { this.auth.checkWrite(p.real); } catch (e) {
-      // Other out-of-root files can be visited read-only, but not the protected token/config or a hard link.
-      if (e instanceof ProtectedFileError) throw new ProtoError(e.code, e.message);
-      return { buf, readOnly: 'outside the writable paths' };
-    }
+    try { this.auth.checkWrite(p.real); } catch (e) { return { buf, readOnly: 'outside the writable paths' }; }
     if (st.size > BIG) return { buf, readOnly: `file larger than ${BIG >> 20} MiB: read-only` };
-    // A writable visit checks whether the content can be decoded, so check its opened inode too.
     try { if (this.auth.agent) this.auth.agent.readText(p.real); else readText(p.real); }
     catch (e) { if (e instanceof FileError || e instanceof PathError) throw new ProtoError(e.code, e.message); throw e; }
     return { buf, readOnly: false };
@@ -508,11 +492,7 @@ export class Buffers {
     const srcReal = real(srcAbs);
     let st: fs.Stats;
     try { st = fs.lstatSync(srcReal); } catch (e) { throw new ProtoError('bad_request', osMessage(e)); }
-    try {
-      // A rename acts on entries (including dangling links), not file contents; still protect both names.
-      if (auth.agent) { auth.agent.checkWrite(srcReal, 'entry'); auth.agent.checkWrite(dstReal, 'entry'); }
-      else { auth.checkWrite(srcReal); auth.checkWrite(dstReal); }
-    } catch (e) { throw new ProtoError('refused_path', e.message); }
+    try { auth.checkWrite(srcReal); auth.checkWrite(dstReal); } catch (e) { throw new ProtoError('refused_path', e.message); }
     /* A root, or a source, may be a symlink (notesDir linked into a synced folder, configDir linked by home-manager):
        both spellings of each are compared, so neither the link nor its target moves. */
     for (const root of [auth.notesDir, auth.stateDir, auth.configDir]) {

@@ -283,6 +283,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     // Embedded resources send local bytes to the hub; read only from the checked descriptor.
     const block = auth.withRead(absolute, fd => {
       const st = fs.fstatSync(fd), real = fs.realpathSync.native(absolute);
+      auth.checkRead(absolute); auth.checkRead(real);
       const isText = mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType);
       const limit = isText ? backend.requestBodyLimit : 3 * Math.floor(backend.requestBodyLimit / 4);
       if (st.size > limit) fail('Embedded file exceeds the agent request body limit');
