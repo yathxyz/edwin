@@ -5,7 +5,6 @@ import { pathToFileURL } from 'node:url';
 import { randomId } from './journal.mts';
 import { sha256, diskState } from './files.mts';
 import { lexicalPath } from './buffers.mts';
-import { PrivateStore } from './paths.mts';
 import type { SBuf } from './buffers.mts';
 import type { Server } from './main.mts';
 import type { AgentBackend } from './agent-sessions.mts';
@@ -57,11 +56,12 @@ const nameOf = (d: Draft) => `*Agent Prompt: ${d.key}*`;
 const idOf = (d: Draft) => `name:${nameOf(d)}`;
 
 export async function installPrompts(server: Server, backend: AgentBackend): Promise<{ stop(): Promise<void> }> {
-  const buffers = server.buffers, store = new PrivateStore(server.auth), dir = store.dir;
-  server.auth.promptStore = store;
+  const buffers = server.buffers, auth = server.auth.agent!;
+  const store = auth.promptStore ?? fail('Agent prompt store is not locked');
+  const dir = store.dir;
   const drafts = new Map<string, Draft>(), sending = new Set<string>(), owned = new Map<SBuf, Draft>();
   const markdown = (d: Draft) => path.join(dir, `${d.key}.md`);
-  const persist = <T extends Delivery,>(d: T) => store.write(`${d.key}.json`, JSON.stringify(d) + '\n');
+  const persist = <T extends Delivery,>(d: T) => store.writeReceipt(`${d.key}.json`, JSON.stringify(d) + '\n');
   function draft(v: unknown): Draft { const d = drafts.get(keyOf(v)); return d || fail('No such agent prompt draft'); }
   function writable(d: Delivery) { if (sending.has(d.key)) fail('This prompt is being sent'); }
   function meta(sb: SBuf, d: Draft) {
@@ -272,8 +272,8 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
       const uri = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(name) ? new URL(name).href : name.startsWith('/') ? pathToFileURL(name).href : fail('An agent file link needs an absolute path or URI');
       return attach(d, { type: 'resource_link', uri, name: path.basename(name), mimeType });
     }
-    const absolute = lexicalPath(server.auth, name); server.auth.checkRead(absolute);
-    const block = server.auth.withRead(absolute, (fd, st, real) => {
+    const absolute = lexicalPath(auth, name); auth.checkRead(absolute);
+    const block = auth.withRead(absolute, (fd, st, real) => {
       if (!st.isFile()) fail('Not a regular file');
       const isText = mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType);
       const limit = isText ? backend.requestBodyLimit : 3 * Math.floor(backend.requestBodyLimit / 4);

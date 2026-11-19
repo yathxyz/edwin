@@ -2,7 +2,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import type { Authority } from './paths.mts';
 
 export const BIG = 32 * 1024 * 1024;
 
@@ -21,16 +20,10 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 /* Read a text file: {text, eol, big, stat}. text has \n inside (R8.10). Not UTF-8 → FileError not_text.
    Over 32 MiB → big: true, read anyway (the buffer opens read-only, R6.24). Missing → FileError no_buffer. */
 export interface TextFile { text: string; eol: Eol; big: boolean; stat: fs.Stats; bytes: number }
-export function readText(auth: Authority, file: string): TextFile {
-  try { return auth.withRead(file, readTextFd); }
-  catch (e) {
-    if (e instanceof FileError) throw e;
-    throw new FileError(e.code === 'ENOENT' ? 'no_buffer' : 'refused_path', e.code === 'refused_path' ? e.message : `Cannot read file: ${e.code}`);
-  }
-}
-export function readTextFd(fd: number, stat: fs.Stats, real: string): TextFile {
-  if (!stat.isFile()) throw new FileError('not_text', `${real}: not a regular file`);
-  const bytes = fs.readFileSync(fd);
+export function readText(real: string): TextFile {
+  let bytes: Buffer, stat: fs.Stats;
+  try { stat = fs.statSync(real); bytes = fs.readFileSync(real); }
+  catch (e) { throw new FileError(e.code === 'ENOENT' ? 'no_buffer' : 'refused_path', `${real}: ${e.code}`); }
   let text: string;
   try { text = decoder.decode(bytes); } catch (e) { throw new FileError('not_text', `${real}: not UTF-8 text`); }
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -51,22 +44,17 @@ export function encodeText(text: string, eol: Eol, trailingNewline: boolean): st
    file (new files 0600), rename, fsync of the directory. Returns the bytes written and their hash (of the
    text as the buffer holds it). Throws the fs error (ENOSPC among them) with nothing half-written. */
 export interface Saved { bytes: number; stat: fs.Stats; hash: string; trailing: boolean }
-export function saveAtomic(auth: Authority, real: string, text: string, { eol = 'lf' }: { eol?: Eol } = {}): Saved {
+export function saveAtomic(real: string, text: string, { eol = 'lf' }: { eol?: Eol } = {}): Saved {
   const dir = path.dirname(real);
   let existing: fs.Stats | null = null;
-  let mode = 0o600;
+  try { existing = fs.statSync(real); } catch (e) { if (e.code !== 'ENOENT') throw e; }
   let trailing = true;
-  try {
-    auth.withRead(real, (fd, st) => {
-      existing = st; mode = st.mode & 0o7777;
-      if (st.size) { const b = Buffer.allocUnsafe(1); trailing = fs.readSync(fd, b, 0, 1, st.size - 1) === 1 && b[0] === 10; }
-    });
-  } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  const data = encodeText(text, eol, trailing);
-  if (auth.promptStore && dir === auth.promptStore.dir) {
-    const stat = auth.promptStore.write(path.basename(real), data);
-    return { bytes: stat.size, stat, hash: sha256(text), trailing };
+  if (existing && existing.size) {
+    /* The trailing newline policy follows the file: no newline at the end stays that way. */
+    const fd = fs.openSync(real, 'r');
+    try { const b = Buffer.alloc(1); fs.readSync(fd, b, 0, 1, existing.size - 1); trailing = b[0] === 10; } finally { fs.closeSync(fd); }
   }
+  const data = encodeText(text, eol, trailing);
   const tmp = path.join(dir, `.${path.basename(real)}.edwind-${process.pid}-${randomBytes(4).toString('hex')}~`);
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try {
@@ -76,7 +64,7 @@ export function saveAtomic(auth: Authority, real: string, text: string, { eol = 
     if (process.env.EDWIND_FAULT === 'enospc-save') { fs.writeSync(fd, buf, 0, buf.length >> 1); throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }); }
     while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
     fs.fsyncSync(fd);
-    if (existing) fs.fchmodSync(fd, mode);
+    if (existing) fs.fchmodSync(fd, existing.mode & 0o7777);
   } catch (e) {
     try { fs.closeSync(fd); } catch (x) { /* already closed */ }
     try { fs.unlinkSync(tmp); } catch (x) { /* nothing to remove */ }
@@ -90,8 +78,9 @@ export function saveAtomic(auth: Authority, real: string, text: string, { eol = 
 }
 
 export function fsyncDir(dir: string): void {
-  const fd = fs.openSync(dir, fs.constants.O_DIRECTORY);
-  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  let fd: number;
+  try { fd = fs.openSync(dir, 'r'); } catch (e) { return; }
+  try { fs.fsyncSync(fd); } catch (e) { /* some filesystems refuse; the rename is still durable enough */ } finally { fs.closeSync(fd); }
 }
 
 /* Write a whole file atomically with mode 0600 (state files: index, snapshots, saved copies). */
@@ -100,15 +89,12 @@ export function writeAtomic(real: string, data: string | Buffer): void {
   const tmp = path.join(dir, `.${path.basename(real)}.${process.pid}-${randomBytes(4).toString('hex')}~`);
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try {
-    try {
-      fs.writeFileSync(fd, data);
-      fs.fsyncSync(fd);
-    } finally { fs.closeSync(fd); }
-    fs.renameSync(tmp, real);
-  } catch (e) {
-    try { fs.unlinkSync(tmp); } catch { /* preserve the write, sync, close or rename error */ }
-    throw e;
-  }
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
+    let off = 0; while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
+    fs.fsyncSync(fd);
+  } catch (e) { try { fs.closeSync(fd); } catch (x) { /* closed */ } try { fs.unlinkSync(tmp); } catch (x) { /* gone */ } throw e; }
+  fs.closeSync(fd);
+  try { fs.renameSync(tmp, real); } catch (e) { try { fs.unlinkSync(tmp); } catch (x) { /* gone */ } throw e; }
   fsyncDir(dir);
 }
 

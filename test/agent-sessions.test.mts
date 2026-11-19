@@ -13,7 +13,7 @@ import type { TestDir } from './edit-client.mts';
 import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { sessionsFixture } from './agent-render-fixture.mts';
 import type { Server } from '../server/main.mts';
-import { Authority } from '../server/paths.mts';
+import { AgentAuthority, PrivateStore } from '../server/agent-files.mts';
 import { Notes } from '../server/notes.mts';
 const require = createRequire(import.meta.url);
 const { createHost, loadEdwin } = require('../src/host-node.cts');
@@ -249,10 +249,50 @@ test('review 5 config source: protect the inode parsed at startup, not just the 
   fs.symlinkSync(dir.file, source); fs.linkSync(dir.file, original);
   const config = loadConfig(source);
   fs.unlinkSync(dir.file); fs.writeFileSync(dir.file, 'replacement fixture');
-  const auth = new Server(config, makeLog('error')).auth;
+  const auth = new Server(config, makeLog('error')).auth.agent;
+  assert.ok(auth instanceof AgentAuthority);
   for (const file of [original, source, dir.file]) {
     assert.throws(() => auth.withRead(file, fd => fs.readFileSync(fd)), { code: 'refused_path' });
   }
+});
+
+test('guarded shipped-source reads require an in-tree regular file and refuse private hard links', t => {
+  const d = makeDir(), root = d.dirs.notes, token = path.join(d.root, 'credential');
+  t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  fs.writeFileSync(token, 'synthetic marker');
+  const auth = new AgentAuthority(d.cfg, token);
+  const source = path.join(root, 'shipped.scm'), alias = path.join(root, 'alias.scm');
+  fs.writeFileSync(source, '(define example 1)\n'); fs.symlinkSync(source, alias);
+  assert.equal(auth.readSource(alias, root), '(define example 1)\n');
+  fs.unlinkSync(alias); fs.symlinkSync(d.file, alias);
+  assert.throws(() => auth.readSource(alias, root), { code: 'refused_path' });
+  fs.unlinkSync(alias); fs.linkSync(token, alias);
+  assert.throws(() => auth.readSource(alias, root), { code: 'refused_path' });
+  fs.mkdirSync(path.join(root, 'subdir'));
+  assert.throws(() => auth.readSource(path.join(root, 'subdir'), root), { code: 'refused_path' });
+});
+
+test('generic file reads and saves cannot use a prompt store without its writer', t => {
+  const d = makeDir(), stateAlias = path.join(d.root, 'state-alias'), storeAlias = path.join(d.root, 'store-alias');
+  t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  fs.symlinkSync(d.dirs.state, stateAlias);
+  const auth = new AgentAuthority({ ...d.cfg, stateDir: stateAlias }, path.join(d.root, 'absent-token'));
+  const real = path.join(d.dirs.state, 'agent-prompts');
+  fs.mkdirSync(real, 0o700); fs.symlinkSync(real, storeAlias);
+  fs.writeFileSync(path.join(real, 'draft.md'), 'original');
+  const checkUnavailable = () => {
+    for (const root of [auth.promptDir, real, storeAlias]) {
+      assert.throws(() => auth.readText(path.join(root, 'draft.md')), { code: 'refused_path' });
+      for (const leaf of ['draft.md', 'new.md'])
+        assert.throws(() => auth.saveAtomic(path.join(root, leaf), 'replacement'), { code: 'refused_path' });
+    }
+    assert.deepEqual(fs.readdirSync(real), ['draft.md']);
+    assert.equal(fs.readFileSync(path.join(real, 'draft.md'), 'utf8'), 'original');
+  };
+  checkUnavailable();
+  auth.promptStore = new PrivateStore(auth);
+  auth.promptStore.close();
+  checkUnavailable();
 });
 
 test('review 5 config source: editor reads and binary attachments refuse aliases without logging private ids', async t => {
@@ -290,9 +330,10 @@ test('review 5 config source: editor reads and binary attachments refuse aliases
 });
 
 test('notes worker: middle rotation hard link stays private during parse, scan and grep', async t => {
-  const dir = makeDir(), tokenFile = path.join(dir.root, 'fixture'), auth = new Authority(dir.cfg);
+  const dir = makeDir(), tokenFile = path.join(dir.root, 'fixture');
   const cfg = { ...dir.cfg, agentHub: { tokenFile } };
-  fs.writeFileSync(tokenFile, 'first fixture'); auth.protectCredential(tokenFile);
+  fs.writeFileSync(tokenFile, 'first fixture');
+  const auth = new AgentAuthority(dir.cfg, tokenFile);
   const notes = new Notes({ cfg, auth, L: {}, buffers: { byFile: () => null }, clients: [], log: console } as unknown as Server);
   notes.grammar = JSON.parse(fs.readFileSync(new URL('./fixtures/notes/golden/grammar.json', import.meta.url), 'utf8'));
   t.after(async () => { await notes.shutdown(); fs.rmSync(dir.root, { recursive: true, force: true }); });
@@ -354,9 +395,13 @@ test('protected reader: credential identities are refused by editor reads, metad
   }
   const watched = path.join(dir.dirs.notes, 'watched.txt'); fs.writeFileSync(watched, 'prior text');
   assert.equal((await c.open(watched)).text, 'prior text');
+  const logMark = child.logs.length;
   fs.unlinkSync(watched); fs.linkSync(tokenFile, watched);
   const revert = await c.request({ t: 'revert', buf: watched }); assert.equal(revert.t, 'error'); privateReply(revert);
-  await sleep(120); privateReply(await c.open(watched)); privateReply(c.queue);
+  await until(() => /^warn disk .*refused_path/m.test(child.logs.slice(logMark)));
+  const refusals = child.logs.slice(logMark).split('\n').filter(line => line.startsWith('warn disk '));
+  assert.ok(refusals.every(line => !line.includes('watched.txt') && !line.includes(tokenFile)), 'a private watch refusal must log neither the alias id nor its target');
+  privateReply(await c.open(watched)); privateReply(c.queue);
   assert.deepEqual((await c.call('agent-prompt-preview', [draft])).value.blocks, [{ type: 'text', text: 'unchanged' }]);
 });
 
@@ -1046,8 +1091,7 @@ test('review 12: rejected streaming responses close immediately and stop destroy
     await handle(req, res);
   };
   // Only construction dependencies are inert; HTTP requests, SSE bodies, sockets and shutdown are real.
-  const auth = new Authority({ stateDir: dir.dirs.state, configDir: dir.dirs.config, notesDir: dir.dirs.notes });
-  auth.protectCredential(tokenFile);
+  const auth = new AgentAuthority(dir.cfg, tokenFile);
   const server = { cfg: { agentHub: { url: hub.url, tokenFile } }, buffers: { all: () => [], on: () => () => {} },
     auth, log: { debug: () => {} }, clients: [] } as unknown as Server;
   const backend = new AgentSessions(server);

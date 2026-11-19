@@ -102,6 +102,7 @@ export class AgentSessions implements AgentBackend {
   declare reconnect: NodeJS.Timeout | undefined; declare generation: number;
   reconnectAttempt = 0;
   declare listOpened: boolean;
+  private openingLists = 0;
   listGeneration = 0;
   listDirty = false;
   listJob?: Promise<void>;
@@ -144,7 +145,7 @@ export class AgentSessions implements AgentBackend {
   }
   token(): string {
     if (!this.config) throw new Error('No agent hub configured');
-    let token: string; try { token = this.server.auth.readCredential().trimEnd(); } catch { throw new Error('Agent hub token file is not readable'); }
+    let token: string; try { token = this.server.auth.agent!.readCredential().trimEnd(); } catch { throw new Error('Agent hub token file is not readable'); }
     if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('Agent hub token file must contain 64 lowercase hexadecimal characters');
     this.#secrets.add(token); return token;
   }
@@ -317,6 +318,7 @@ export class AgentSessions implements AgentBackend {
     this.views.delete(id);
     if (id === 'name:*Agent Sessions*') {
       this.listOpened = false; this.listGeneration++; this.listDirty = false; this.listJob = undefined;
+      this.openingLists = 0;
       this.exitedExpanded = false;
       this.facts.clear(); this.factReads.clear();
       for (const sid of this.factRetries.keys()) this.clearRetry(this.factRetries, sid);
@@ -335,6 +337,8 @@ export class AgentSessions implements AgentBackend {
     if ((name === 'session' || name === 'gone') && !validSid(data?.sid) ||
       (name === 'observed' || name === 'observed_gone') && !validSid(data?.id)) return;
     this.registryRevision++;
+    // A live registry can satisfy a pending open before either fallback GET finishes.
+    if (this.openingLists && this.streamActive && (name === 'session' || name === 'observed' || name === 'ready')) this.listOpened = true;
     if (name === 'hub') { this.sessions.clear(); this.hubStatus = line(data.status); this.status = `hub ${this.hubStatus}`; }
     if (name === 'session') storeRecord(this.sessions, data.sid, data);
     if (name === 'session') {
@@ -521,20 +525,23 @@ export class AgentSessions implements AgentBackend {
   }
   async list() {
     this.token();
-    if (!this.listOpened) { this.listOpened = true; this.listGeneration++; }
     const generation = this.listGeneration;
     const revision = this.registryRevision;
-    const [sessions, observed] = await Promise.allSettled([this.request('GET', 'sessions'), this.request('GET', 'observed')]);
+    this.openingLists++;
+    const [sessions, observed] = await Promise.allSettled([this.request('GET', 'sessions'), this.request('GET', 'observed')])
+      .finally(() => { if (this.listGeneration === generation) this.openingLists--; });
+    if (this.listGeneration !== generation) throw new Error('Agent list was closed; reopen it');
+    const liveRegistry = this.streamActive && (this.status === 'connected' || this.sessions.size > 0 || this.observed.size > 0);
+    if (!liveRegistry && sessions.status === 'rejected' && observed.status === 'rejected') throw sessions.reason;
     // A snapshot begun or updated during this listing is newer, even before its ready event.
     if (!this.streamActive && revision === this.registryRevision) {
-      if (sessions.status === 'rejected' && observed.status === 'rejected') throw sessions.reason;
       this.sessions = new Map((sessions.status === 'fulfilled' ? sessions.value.sessions || [] : []).map((s: Json) => [s.sid, s]));
       this.observed = new Map((observed.status === 'fulfilled' ? observed.value.sessions || [] : []).map((s: Json) => [s.id, s]));
       if (sessions.status === 'rejected' || observed.status === 'rejected') this.status = 'partial — hub or observed registry unavailable';
     }
+    this.listOpened = true;
     this.changed();
     for (const sid of this.sessions.keys()) this.scheduleFacts(sid);
-    if (!this.listOpened || this.listGeneration !== generation) throw new Error('Agent list was closed; reopen it');
     await this.queueList(); return 'name:*Agent Sessions*';
   }
   async requireSession(sid: string, epoch?: number): Promise<Json> {
@@ -723,7 +730,7 @@ export class AgentSessions implements AgentBackend {
     this.facts.clear(); this.factReads.clear(); this.announced.clear(); this.replayErrors.clear();
   }
 }
-export async function install(server: Server) {
+export async function install(server: Server, registryOnly = false) {
   const hub = new AgentSessions(server); modules.set(server, hub);
   const cmd = (name: string, fn: (args: any[]) => unknown) => server.defineCommand(name, async (_c, args) => { // any: API command arguments validated per command
     try { return { value: hub.clean(await fn(args)) }; } catch (e) { return fail(hub.clean(String(e.message || e))); }
@@ -744,7 +751,7 @@ export async function install(server: Server) {
     if (s.host !== server.cfg.host) throw new Error(`Tool file is on ${line(s.host)}, not this edwind host; open it there`);
     if (!location || typeof location.path !== 'string') throw new Error('Tool has no file location');
     const file = path.resolve(s.cwd, location.path);
-    server.auth.withRead(file, (_fd, st) => { if (!st.isFile()) throw new Error('Tool location is not a file'); });
+    server.auth.agent!.withRead(file, (_fd, st) => { if (!st.isFile()) throw new Error('Tool location is not a file'); });
     const found = server.buffers.resolve(file, false);
     if (!('id' in found)) throw new Error('Tool file moved');
     return found.id;
@@ -767,6 +774,7 @@ export async function install(server: Server) {
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });
   primitive.where = 'server';
   primitive.gen = function* ([sid]: SchemeValue[]): SchemeGen { return yield new server.L.S.Block(hub.open(sid), 'agent journal'); };
+  if (registryOnly) return;
   try { hub.stopPrompts = (await installPrompts(server, hub)).stop; }
   catch { server.log.error('agent-prompt', { error: 'Draft store unavailable' }); }
   hub.start();

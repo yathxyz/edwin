@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild } from './edit-client.mts';
-import { Authority } from '../server/paths.mts';
+import { AgentAuthority } from '../server/agent-files.mts';
 import { Fs } from '../server/fs.mts';
 import type { Server } from '../server/main.mts';
 
@@ -164,8 +164,7 @@ test('fs-copy: serves a second command before an ordinary recursive copy finishe
 });
 
 test('fs-copy: a guarded copy yields between entries and keeps its source directory pinned', async () => {
-  const auth = new Authority(dir.cfg);
-  auth.protectCredential(put('guarded-copy-marker'));
+  const auth = new AgentAuthority(dir.cfg, put('guarded-copy-marker'));
   const ops = new Fs({ buffers: { auth, all: () => [] }, log: { info() {} } } as unknown as Server);
   const src = at('guarded-tree'), dst = src + '-copy', count = 128;
   fs.mkdirSync(src);
@@ -191,9 +190,9 @@ test('fs-copy: a guarded copy yields between entries and keeps its source direct
 });
 
 test('fs-copy: guarded recursive reads refuse aliases to a protected fixture', async () => {
-  const auth = new Authority(dir.cfg), ops = new Fs({ buffers: { auth, all: () => [] } } as unknown as Server);
   const protectedFile = put('protected-copy-fixture', 'synthetic marker');
-  auth.protectCredential(protectedFile);
+  const auth = new AgentAuthority(dir.cfg, protectedFile);
+  const ops = new Fs({ buffers: { auth, all: () => [] } } as unknown as Server);
   for (const kind of ['hard', 'symbolic']) {
     const src = at(`guarded-${kind}`), dst = src + '-copy';
     fs.mkdirSync(src);

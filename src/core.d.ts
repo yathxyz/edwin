@@ -1349,6 +1349,9 @@ interface EdHooks {
   modeFor?: ((name: string) => string | null | undefined) | null;
   /* Versioned non-text special-buffer structure, installed after shared metadata. */
   bufferMeta?: ((b: EdBuffer, locals: Record<string, unknown>, ver: number) => void) | null;
+  /* Only installed by the served agent UI: pending draft acks and touch-scrolled viewports. */
+  syncBufferState?: (m: { t: string; buf?: string; msg?: string }) => void;
+  keepWindowStart?: (w: EdWindow, selected: boolean) => boolean;
   /* after edits were applied to B (sync.ts sends them) */
   applied?: ((b: EdBuffer, ops: EdAppliedOp[], origin: unknown) => void) | null;
   /* a buffer's text changed (org.ts, markdown.ts drop caches) */
@@ -1614,7 +1617,7 @@ interface EdApi {
   percent(w: EdWindow): string;
   foldsOf(b: EdBuffer): EdFold[] | null;
   onScroll(w: EdWindow): void;
-  scrollWindow(w: EdWindow, lines: number, preservePoint?: boolean): void;
+  scrollWindow(w: EdWindow, lines: number): void;
   /* lines of a buffer, and shown lines (folds hide some) */
   lineIndex(b: EdBuffer): number[];
   lineNoB(b: EdBuffer, p: number): number;
@@ -1691,11 +1694,10 @@ interface EdSyncApi {
   calls: Map<unknown, unknown>;
   spinning: number;
   start(opts?: { transport?: () => EdTransport; device?: string; cid?: string }): void;
-  open(id: string, opts?: { create?: boolean }): Promise<EdBuffer>;
+  open(id: string, opts?: { create?: boolean }): Promise<EdBuffer | null>;
   close(id: string): unknown;
   shutdown(): void;
   call(opts: { cmd?: string; form?: string; args?: unknown[]; buf?: string; ctx?: unknown }): Promise<EdServerReply>;
-  whenSynced(b: EdBuffer): Promise<void>;
   /* FN is called on EV: 'state' with the new state, 'tasks' when a task changed in brain. The result removes it. */
   on(ev: string, fn: (...args: unknown[]) => unknown): () => void;
   save(b: EdBuffer | string): Promise<EdServerReply>;
@@ -2027,11 +2029,11 @@ type EdDisplayEvent =
   | { type: 'key'; key: string }
   | { type: 'paste'; text: string }
   | { type: 'focus'; focused: boolean }
-  | { type: 'mouse'; action: 'down' | 'drag' | 'up' | 'wheel' | 'tap' | 'scroll'; x: number; y: number; button?: number; dy?: number; shift?: boolean; meta?: boolean; ctrl?: boolean; clicks?: number; event?: MouseEvent }
+  | { type: 'mouse'; action: 'down' | 'drag' | 'up' | 'wheel'; x: number; y: number; button?: number; dy?: number; shift?: boolean; meta?: boolean; ctrl?: boolean }
   | { type: 'resize' };
 /* What is at a cell of a model frame. */
 type EdDisplayHit =
-  | { area: 'text'; window: EdWindow; pos: number; fold?: boolean }
+  | { area: 'text'; window: EdWindow; pos: number }
   | { area: 'modeline'; window: EdWindow }
   | { area: 'divider' | 'echo'; window?: undefined }
   | null;

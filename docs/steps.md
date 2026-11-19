@@ -1261,9 +1261,9 @@ dispose(); // when the card is unmounted
 
 Notifications use the existing versioned buffer-metadata path, including state-only SSE changes with no
 text edit. Repeated equivalent metadata is not a change; unsubscribe stops callbacks. Fold choices stay
-local to the existing frame runtime. Browser gestures extend the existing generic frame input wiring,
-not these agent modules: a movement/cancel/multi-touch is not a tap, and touch scroll keeps point while
-the next journal append resumes tail following if point was at the tail.
+local to the existing frame runtime. Only an agent-enabled frame installs the agent gesture handlers,
+and only agent buffers use them. There a movement/cancel/multi-touch is not a tap, and touch scroll
+keeps point while the next journal append resumes tail following if point was at the tail.
 
 ### Checks
 
@@ -1280,7 +1280,7 @@ the next journal append resumes tail following if point was at the tail.
 | AS-C9 | Run affected Node suites/type checks at stage boundaries; exercise an actual model frame's displayed folded surface and keys. At the end run the repository's full available suite once and quote its final lines. No external network or real credentials. |
 | AS-C10 | A host RPC targets an explicit transcript while another buffer is current: toggle/open/close folds, navigate structural prompts despite injected headings/fences, recall exact immutable blocks, send text without a draft, cancel and set mode/config. Invalid offsets and prompt boundaries fail plainly. |
 | AS-C11 | Read/subscription exposes complete offered permission/elicitation and mode/config data; state-only summaries notify without text edits. Replies use the captured req/epoch/requestKey. Changed content fails even after same-epoch request reuse; incarnation reset clears choices, and unsubscribe stops notifications. |
-| AS-C12 | Browser-frame tests dispatch actual DOM touch events for tap point, marker/double-tap folds, scroll without point movement (then live tail append), cancelled/multi-touch gestures, and listener teardown. Ordinary buffers use the same input route. |
+| AS-C12 | Served-frame input tests dispatch tap, drag, cancel, double-tap and scroll through the registered handlers. Agent text supports point placement and fold toggles; modelines and ordinary buffers retain native input. A physical mouse press immediately after a tap is not suppressed. |
 | AS-C13 | Reuse the same SID/req under a new createdAt while frame pickers are open and across a retained-draft restart. Details, answers, quick sends, mode/config, recall, file jumps and draft sends reject replacement before action. Permission UI shows authoritative tool/input. Explicit retarget alone binds a new incarnation. |
 | AS-C14 | Both Content-Length and chunked responses exceed 32 MiB; an unfinished SSE event exceeds 1 MiB: connections close, refusal is visible and edwind remains usable. Render huge prompts/outputs/plans/diffs/Unicode with the shared per-event budget; incomplete diffs are not complete views. Saturated list facts and transcript opens never exceed four journal GETs. |
 | AS-C15 | Split a token across message chunks and recalled prompt text blocks: no buffer/log contains it, and later prompt, fold, location and diff offsets still target displayed text. Growing messages emit suffix-only patches. |
@@ -1510,8 +1510,12 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
   authorizes HTTP over an encrypted private network. Refuse redirects and validate the final origin
   and API path before attaching a bearer token. No automatic terminal attach beyond the named API.
 - **Configuration authority:** only edit.json enables the feature. Without `agentHub`, neither runtime
-  installs its commands or bindings, and the daemon leaves even an existing draft store untouched.
-  Changing the configuration requires restarting the daemon.
+  installs its commands or bindings. No prompt store is opened or locked; ordinary indexed journals
+  are recovered and exported as usual, including files under `stateDir/agent-prompts/`. Changing
+  the configuration requires restarting the daemon. A configured writer holds the private directory
+  lock until shutdown. A competing writer exits 73; a supervising unit must not restart it on 73.
+  `--export` and `--primitives` do not take the writer lock. Configured export omits private drafts;
+  it does not open the store or copy drafts into the export directory.
 - **Model availability:** summaries do not contain the model. A lightweight journal facts cursor follows
   advertised model config options for list rows; observed model data wins when supplied. An absent or
   literal `unknown` model renders as an empty cell, not a guessed agent default.

@@ -23,8 +23,7 @@ export class Client {
   declare server: Server;
   declare socket: net.Socket;
   declare log: Log;
-  private hiddenPath?: string;
-  private pathMask?: string;
+  private readonly encode: (obj: OutMessage) => string;
   /* Set by hello (§7.2). */
   declare cid: string | null;
   declare kind: ClientKind | null;
@@ -43,10 +42,9 @@ export class Client {
   declare reader: LineReader;
   declare helloTimer: NodeJS.Timeout;
   declare pinger: NodeJS.Timeout;
-  constructor(server: Server, socket: net.Socket) {
+  constructor(server: Server, socket: net.Socket, encoder: (obj: OutMessage) => string = encode) {
     this.server = server; this.socket = socket; this.log = server.log;
-    const file = server.cfg.agentHub?.tokenFile;
-    if (file) { this.hiddenPath = JSON.stringify(file).slice(1, -1); this.pathMask = '*'.repeat(file.length); }
+    this.encode = encoder;
     this.cid = null; this.kind = null; this.device = null; this.session = null; this.caps = {};
     this.buffers = new Set(); this.closed = false; this.hello = false;
     this.queue = []; this.queued = 0; this.writing = false; this.bulk = [];
@@ -70,12 +68,6 @@ export class Client {
   deadlineMs(): number { return this.kind === 'cli' ? DEADLINE_CLI_MS : DEADLINE_FRAME_MS; }
 
   /* ---------- sending ---------- */
-  private encode(obj: OutMessage): string {
-    const line = encode(obj);
-    // Scheme conditions, backtraces and protocol correlation fields can echo a caller-supplied path.
-    // Keep text offsets stable; do not alter the authoritative buffer or journal.
-    return this.hiddenPath && line.includes(this.hiddenPath) ? line.replaceAll(this.hiddenPath, this.pathMask!) : line;
-  }
   /* Small frames: queued and written as the socket allows. */
   send(obj: OutMessage): void { if (this.closed) return; this.queue.push(this.encode(obj)); this.pump(); }
   /* edits, sel and msg count toward the slow-client cap (R14.14). */
@@ -165,8 +157,7 @@ export class Client {
     this.cid = cid; this.kind = kind as ClientKind; this.device = str(msg, 'device', true) || kind + ':' + cid.slice(0, 8);
     this.session = str(msg, 'session', true) || null; this.caps = isObj(msg.caps) ? msg.caps : {};
     this.hello = true; clearTimeout(this.helloTimer);
-    const hub = this.server.cfg.agentHub;
-    this.send({ t: 'welcome', proto: PROTO, build: this.server.build, boot: this.server.boot, imageEpoch: this.server.image.servedEpoch(), gen: this.server.image.gen, caps: hub ? { agentHub: { steer: hub.steer === true } } : {} });
+    this.send({ t: 'welcome', proto: PROTO, build: this.server.build, boot: this.server.boot, imageEpoch: this.server.image.servedEpoch(), gen: this.server.image.gen, caps: {} });
     this.log.info('client', { event: 'connect', cid, kind, device: this.device });
     if (this.server.stopping) { this.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); this.destroy(); }
   }

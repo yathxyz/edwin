@@ -199,8 +199,14 @@ export class Anchors {
   /* The user's init.scm (R4.11), read through the authority: its text, or null when absent. */
   userInit(): string | null {
     const file = path.join(this.server.cfg.configDir, 'init.scm');
-    try { return this.server.auth.withRead(file, fd => fs.readFileSync(fd, 'utf8')); }
-    catch (e) { if (e.code === 'ENOENT') return null; throw new ProtoError('refused_path', 'Cannot read user init'); }
+    if (this.server.auth.agent) {
+      try { return this.server.auth.agent.withRead(file, fd => fs.readFileSync(fd, 'utf8')); }
+      catch (e) { if (e.code === 'ENOENT') return null; throw new ProtoError('refused_path', 'Cannot read user init'); }
+    }
+    let real;
+    try { real = fs.realpathSync.native(file); } catch (e) { if (e.code === 'ENOENT') return null; throw new ProtoError('refused_path', `${file}: ${e.code}`); }
+    try { this.server.auth.checkRead(real); } catch (e) { throw new ProtoError('refused_path', e.message); }
+    try { return fs.readFileSync(real, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return null; throw new ProtoError('refused_path', `${file}: ${e.code}`); }
   }
   /* Completion candidates for the frames' cache (R10.9): for kind wiki, the note titles and aliases and the
      folder names of the notes index, sorted and unique; [] without an index. */

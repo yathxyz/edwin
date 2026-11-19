@@ -1441,73 +1441,34 @@ function wire(f: EdFrame) {
     if (!s) return;
     E.pasteText = s; Ed.feedKey('<cmd:clipboard-yank>');
   });
-  /* Mouse and touch share display.ts hit testing and point/fold handling. Do not place point at touch
-     start: the same contact may become an editor swipe, page scroll, pinch, or cancelled gesture. */
-  let suppressMouseUntil = 0;
-  const syntheticMouse = (e: MouseEvent) => Date.now() < suppressMouseUntil || (e as MouseEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } }).sourceCapabilities?.firesTouchEvents;
+  let dragFrom: number | null = null, dragWin: EdWindow | null = null;
   on(root, 'mousedown', e => {
-    if (syntheticMouse(e)) { e.preventDefault(); return; }
     if (e.button !== 0 || e.shiftKey) return;   // Shift-drag moves the card (R9.9)
     e.preventDefault(); focus();
-    Ed.display.input(f, { type: 'mouse', action: 'down', x: e.clientX, y: e.clientY, button: e.button, event: e });
+    if (E.frames.includes(f) && E.frame !== f) Ed.selectFrame(f);
+    if (E.mini) return;
+    const w = Ed.windowAt(e.clientX, e.clientY);
+    if (!w) return;
+    if (w !== E.sel) { Ed.selectWindow(w); }
+    const p = Ed.posFromPoint(e.clientX, e.clientY, w);
+    if (p === null) { Ed.render(); return; }
+    const b = w.buffer;
+    if (E.isearch) E.isearch = null;
+    /* The hook gets the event too (modifier keys, the button); older two-argument hooks ignore it. */
+    if (Ed.hooks.mouseDown) Ed.hooks.mouseDown(b, p, e);
+    else { b.pt = p; b.markActive = false; }
+    dragFrom = p; dragWin = w; Ed.frameEvent('point', f, b); Ed.render();
   });
   on(win, 'mousemove', e => {
-    if (!(e.buttons & 1) || syntheticMouse(e)) return;
-    Ed.display.input(f, { type: 'mouse', action: 'drag', x: e.clientX, y: e.clientY });
+    if (dragFrom === null || !(e.buttons & 1) || dragWin !== E.sel || E.frame !== f) return;
+    const p = Ed.posFromPoint(e.clientX, e.clientY, dragWin!);
+    if (p === null) return;
+    const b = dragWin!.buffer;
+    if (Ed.hooks.mouseDrag) Ed.hooks.mouseDrag(b, dragFrom, p);
+    else { b.mark = dragFrom; b.pt = p; b.markActive = p !== dragFrom; }
+    Ed.render();
   });
-  on(win, 'mouseup', () => Ed.display.input(f, { type: 'mouse', action: 'up', x: 0, y: 0 }));
-  type Contact = { id: number; x: number; y: number; lastY: number; acc: number; window: EdWindow | null; moved: boolean; page: boolean };
-  let contact: Contact | null = null;
-  let lastTap: { time: number; x: number; y: number; window: EdWindow; line: number } | null = null;
-  const forgetTap = () => { lastTap = null; suppressMouseUntil = Date.now() + 800; };
-  on(root, 'touchstart', e => {
-    suppressMouseUntil = Date.now() + 800;
-    if (e.touches.length !== 1) { contact = null; lastTap = null; return; }
-    const t = e.touches[0], hit = Ed.display.posAt(f, t.clientX, t.clientY);
-    contact = { id: t.identifier, x: t.clientX, y: t.clientY, lastY: t.clientY, acc: 0, window: hit?.area === 'text' ? hit.window : null, moved: false, page: false };
-  }, { passive: true });
-  on(root, 'touchmove', e => {
-    const c = contact;
-    if (!c) return;
-    if (e.touches.length !== 1) { contact = null; forgetTap(); return; }
-    const t = e.touches[0];
-    if (t.identifier !== c.id) { contact = null; forgetTap(); return; }
-    const dx = t.clientX - c.x, dy = t.clientY - c.y, delta = c.lastY - t.clientY;
-    c.lastY = t.clientY;
-    if (!c.moved && Math.hypot(dx, dy) <= 8) return;
-    if (!c.moved) {
-      c.moved = true; lastTap = null; c.acc = -dy;
-      c.page = Math.abs(dx) > Math.abs(dy);
-    } else c.acc += delta;
-    const w = c.window;
-    if (c.page || !w?.view || !delta) return;
-    const locals = w.buffer.meta?.locals;
-    if (!locals?.agentSession && !locals?.agentList && !locals?.agentPrompt) return;
-    /* At an editor boundary, or in a short card, let the browser scroll the host page normally. */
-    if ((delta < 0 && w.start === 0) || (delta > 0 && (w.lastLine || 0) >= Ed.lineCountB(w.buffer))) { c.page = true; return; }
-    if (!e.cancelable) { c.page = true; return; }
-    e.preventDefault();
-    const lines = Math.trunc(c.acc / (Ed.metrics(w).lh * Ed.frameScale(f)));
-    if (lines) {
-      c.acc -= lines * Ed.metrics(w).lh * Ed.frameScale(f);
-      Ed.display.input(f, { type: 'mouse', action: 'scroll', x: c.x, y: c.y, dy: lines });
-    }
-  }, { passive: false });
-  on(root, 'touchend', e => {
-    const c = contact; contact = null; suppressMouseUntil = Date.now() + 800;
-    if (!c || c.moved || e.touches.length) { lastTap = null; return; }
-    const t = Array.from(e.changedTouches).find(t => t.identifier === c.id);
-    if (!t || Math.hypot(t.clientX - c.x, t.clientY - c.y) > 8) { lastTap = null; return; }
-    const hit = Ed.display.posAt(f, t.clientX, t.clientY);
-    if (hit?.area !== 'text') { lastTap = null; return; }
-    e.preventDefault(); focus();
-    const line = Ed.bol(hit.window.buffer.rope, hit.pos), time = e.timeStamp;
-    const twice = lastTap && time >= lastTap.time && time - lastTap.time <= 350 && hit.window === lastTap.window && line === lastTap.line && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) <= 24;
-    lastTap = twice || hit.fold ? null : { time, x: t.clientX, y: t.clientY, window: hit.window, line };
-    Ed.display.input(f, { type: 'mouse', action: 'tap', x: t.clientX, y: t.clientY, clicks: twice ? 2 : 1 });
-  }, { passive: false });
-  on(root, 'touchcancel', () => { contact = null; forgetTap(); }, { passive: true });
-  on(win, 'scroll', () => { if (contact) { contact.moved = true; contact.page = true; } lastTap = null; }, { passive: true, capture: true });
+  on(win, 'mouseup', () => { dragFrom = null; dragWin = null; });
   on(frame, 'mousedown', e => { if (!root.contains(e.target as Node) && !(e.target as Element).closest('button')) { e.preventDefault(); focus(); } });
   for (const btn of frame.querySelectorAll<HTMLElement>('[data-key], [data-cmd]')) {
     on(btn, 'mousedown', e => e.preventDefault());

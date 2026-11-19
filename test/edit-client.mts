@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
@@ -63,6 +63,18 @@ export function makeDir(extra: Record<string, unknown> = {}): TestDir {
    the Scheme evaluator 2.3 times slower; every thread of edwind runs lockdown.mts instead. */
 export function nodeFlags(): string[] {
   return ['--disallow-code-generation-from-strings', '--no-warnings=ExperimentalWarning'];
+}
+
+/* A regular stdout file matches the packaged registry generator: the CLI exits explicitly and
+   a POSIX pipe's asynchronous final write need not have drained by then. */
+export function readPrimitiveRegistry(dir: TestDir, config = dir.file): { name: string }[] {
+  const out = path.join(dir.root, 'primitives.json.out'), fd = fs.openSync(out, 'wx', 0o600);
+  try {
+    execFileSync(process.execPath, [...nodeFlags(), MAIN, '--config', config, '--primitives'], {
+      stdio: ['ignore', fd, 'pipe'], env: { ...process.env, HOME: dir.dirs.home, CREDENTIALS_DIRECTORY: undefined },
+    });
+    return JSON.parse(fs.readFileSync(out, 'utf8'));
+  } finally { fs.closeSync(fd); fs.unlinkSync(out); }
 }
 
 /* Every edwind this process started dies with it, whatever the test did. */

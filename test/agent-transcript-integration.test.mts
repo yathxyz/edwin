@@ -40,6 +40,20 @@ function viewFixture(t: TestContext) {
 }
 const absent = () => Object.assign(new Error('absent fixture'), { status: 404 });
 
+test('list reservation: failed initial registries leave no list to redraw; a failed refresh keeps the open list', async t => {
+  const hub = viewFixture(t);
+  hub.token = () => 'fixture';
+  hub.drawList = async valid => { assert.ok(valid()); };
+  hub.request = async () => { throw absent(); };
+  await assert.rejects(hub.list(), /absent/);
+  await assert.rejects(hub.toggleExited(), /Open the agent session list first/);
+  hub.request = async () => ({ sessions: [] });
+  await hub.list();
+  hub.request = async () => { throw absent(); };
+  await assert.rejects(hub.list(), /absent/);
+  assert.equal(await hub.toggleExited(), 'name:*Agent Sessions*');
+});
+
 test('view reservation: missing sessions and rejected detail replies leave no retained views', async t => {
   const hub = viewFixture(t), routes: string[] = [];
   hub.request = async (_method, route) => { routes.push(route); throw absent(); };

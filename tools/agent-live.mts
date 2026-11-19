@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { Buffers } from '../server/buffers.mts';
-import { Authority } from '../server/paths.mts';
+import { AgentAuthority } from '../server/agent-files.mts';
 import type { Ed, EdBuffer, Log, Server } from '../server/main.mts';
 
 const { createHost, coreSource, FILES } = createRequire(import.meta.url)('../src/host-node.cts');
@@ -91,8 +91,7 @@ async function main() {
     Ed.boot({ host }); await Ed.whenIdle();
     Ed.installAgentTranscript(false);
     const log: Log = { debug() {}, info() {}, warn() {}, error() {} };
-    const auth = new Authority({ stateDir, configDir, notesDir });
-    auth.protectCredential(config.tokenFile);
+    const auth = new AgentAuthority({ stateDir, configDir, notesDir }, config.tokenFile);
     buffers = new Buffers({ Ed, auth, stateDir, log });
     // Deliberately no defineCommand, module installer, listener socket, user image or prompt store.
     const server = { cfg: { agentHub: config }, buffers, auth, log, clients: [] } as unknown as Server;

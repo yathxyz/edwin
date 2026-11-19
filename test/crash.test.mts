@@ -6,16 +6,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { makeDir, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { makeDir, readPrimitiveRegistry, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
 import { writeAtomic } from '../server/files.mts';
-import { Authority, PrivateStore } from '../server/paths.mts';
+import { AgentAuthority, PrivateStore } from '../server/agent-files.mts';
+import { openPromptWriter, PromptStoreBusy } from '../server/agent-startup.mts';
 import { rng, randOp, Client as SimClient } from './ot-sim.mts';
 import type { Msg } from './edit-client.mts';
 import type { OTModule, Server, SimMsg } from './ot-sim.mts';
 
 const require = createRequire(import.meta.url);
 const OT = require('../src/ot.ts') as OTModule;
-const { check, loadConfig, makeLog } = await import(MAIN) as typeof import('../server/main.mts');
+const { check, loadConfig, makeLog, Server: Daemon } = await import(MAIN) as typeof import('../server/main.mts');
 const ROUNDS = Number(process.env.CRASH_ROUNDS || 1000);
 const SEED = Number(process.env.CRASH_SEED || 7);
 const quiet = makeLog('error');
@@ -326,36 +329,115 @@ test('R16.7 a journal write that fails after its bytes landed is truncated, so a
   fs.rmSync(dir.root, { recursive: true, force: true });
 });
 
-test('stateDir lock refuses a live second daemon before writes and releases on SIGKILL', async t => {
+test('configured bootstrap validates every field from the identity-pinned second read', t => {
+  const d = makeDir(); t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  const agentHub = { url: 'http://127.0.0.1:1', tokenFile: path.join(d.root, 'absent') };
+  const initial = JSON.stringify({ ...d.cfg, agentHub }), moved = d.file + '.old';
+  let replacement = '';
+  const read = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', (p: fs.PathOrFileDescriptor, encoding: BufferEncoding) => {
+    const data = read(p, encoding);
+    if (p === d.file) { fs.renameSync(d.file, moved); fs.writeFileSync(d.file, replacement); }
+    return data;
+  });
+  fs.writeFileSync(d.file, initial);
+  replacement = JSON.stringify({ ...d.cfg, host: 'replacement', agentHub });
+  const cfg = loadConfig(d.file);
+  assert.equal(cfg.host, 'replacement');
+  const alias = path.join(d.root, 'parsed'); fs.linkSync(d.file, alias);
+  fs.unlinkSync(d.file); fs.writeFileSync(d.file, initial);
+  const auth = new Daemon(cfg, quiet).auth.agent!;
+  assert.throws(() => auth.withRead(alias, () => {}), { code: 'refused_path' });
+  replacement = JSON.stringify({ ...d.cfg, agentHub, typo: true });
+  assert.throws(() => loadConfig(d.file), /unknown field \"typo\"/);
+  fs.writeFileSync(d.file, initial); replacement = JSON.stringify(d.cfg);
+  assert.throws(() => loadConfig(d.file), /changed while reading/);
+});
+
+test('prompt store lock excludes only configured writers; live metadata commands and stale-owner recovery', async t => {
   const firstDir = makeDir(), secondDir = makeDir();
   t.after(() => { for (const d of [firstDir, secondDir]) fs.rmSync(d.root, { recursive: true, force: true }); });
   const alias = path.join(secondDir.root, 'shared-state');
   fs.symlinkSync(firstDir.dirs.state, alias);
   secondDir.cfg.stateDir = alias;
   fs.rmdirSync(secondDir.dirs.config);
-  fs.writeFileSync(secondDir.file, JSON.stringify(secondDir.cfg));
+  for (const d of [firstDir, secondDir]) {
+    d.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile: path.join(d.root, 'absent') };
+    fs.writeFileSync(d.file, JSON.stringify(d.cfg));
+  }
 
   const first = await startEdwind(firstDir);
   try {
     await assert.rejects(async () => {
       const unexpected = await startEdwind(secondDir);
       await stopEdwind(unexpected, 'SIGKILL');
-    }, /stateDir.*(locked|in use)/i);
+    }, /edwind exited with 73:.*prompt store is already in use/is);
     assert.equal(fs.existsSync(secondDir.dirs.config), false, 'the contender did not initialize its config directory');
     assert.equal(fs.existsSync(secondDir.cfg.socket), false);
+    const client = new EditClient(firstDir.cfg.socket); await client.connect(); await client.hello();
+    try {
+      await client.open('name:ordinary', { create: true }); await client.edit('name:ordinary', 0, [[0, '', 'export me']]);
+      const draft = await client.call('agent-prompt-create', [{ text: 'private draft' }]); assert.ok(draft.value, JSON.stringify(draft));
+      const dirOut = path.join(firstDir.root, 'export');
+      const cli = (args: string[]) => promisify(execFile)(process.execPath, [MAIN, '--config', firstDir.file, ...args], { env: { ...process.env, HOME: firstDir.dirs.home }, maxBuffer: 16 << 20 });
+      await cli(['--export', dirOut]);
+      const exported = fs.readdirSync(dirOut).map(f => fs.readFileSync(path.join(dirOut, f), 'utf8'));
+      assert.ok(exported.includes('export me')); assert.ok(!exported.includes('private draft'));
+      assert.ok(readPrimitiveRegistry(firstDir).some(p => p.name === 'agent-session-open'));
+      const fresh = new EditClient(firstDir.cfg.socket);
+      try { await fresh.connect(); await fresh.hello(); } finally { fresh.close(); }
+      assert.deepEqual((await client.call('agent-prompt-preview', [draft.value])).value.blocks, [{ type: 'text', text: 'private draft' }]);
+    } finally { client.close(); }
   } finally { await stopEdwind(first, 'SIGKILL'); }
   assert.equal(first.signalCode, 'SIGKILL');
   const restarted = await startEdwind(secondDir);
   await stopEdwind(restarted);
 });
 
-for (const privateStore of [false, true]) {
-  test(`stateDir atomic write (${privateStore ? 'private store' : 'state file'}) syncs both inodes and surfaces ENOSPC`, t => {
+test('prompt store lock: Server.stop releases the lease and revokes late writes without process exit', async t => {
+  const d = makeDir(); t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  const token = path.join(d.root, 'absent');
+  d.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile: token }; fs.writeFileSync(d.file, JSON.stringify(d.cfg));
+  const server = new Daemon(loadConfig(d.file), quiet);
+  await server.start();
+  const captured = server.auth.agent!.promptStore!;
+  const acquire = () => openPromptWriter(new AgentAuthority(d.cfg, token), quiet);
+  try { await assert.rejects(acquire, PromptStoreBusy); } finally { await server.stop(); }
+  assert.throws(() => captured.writeReceipt('late.json', 'late'), { code: 'refused_path' });
+  const contenders = await Promise.allSettled(Array.from({ length: 8 }, acquire));
+  const winners = contenders.filter(x => x.status === 'fulfilled');
+  try {
+    assert.equal(winners.length, 1);
+    assert.ok(winners[0].value);
+    for (const r of contenders) if (r.status === 'rejected') assert.ok(r.reason instanceof PromptStoreBusy);
+  } finally { for (const winner of winners) await winner.value?.(); }
+});
+
+test('prompt store lock refuses substituted directories and non-socket lock entries without following them', async t => {
+  const d = makeDir(); t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  const outside = path.join(d.root, 'outside'), dir = path.join(d.dirs.state, 'agent-prompts');
+  fs.mkdirSync(outside, 0o755); fs.symlinkSync(outside, dir);
+  const auth = new AgentAuthority(d.cfg, d.file), acquire = () => openPromptWriter(auth, quiet);
+  assert.equal(await acquire(), undefined);
+  assert.deepEqual(fs.readdirSync(outside), []); assert.equal(fs.statSync(outside).mode & 0o777, 0o755);
+  fs.unlinkSync(dir); fs.mkdirSync(dir);
+  const entry = path.join(dir, '.writer-0.sock');
+  for (const link of [fs.symlinkSync, fs.linkSync]) {
+    link(d.file, entry);
+    assert.equal(await acquire(), undefined); assert.equal(auth.promptStore, undefined);
+    assert.deepEqual(fs.readdirSync(dir), ['.writer-0.sock']);
+    assert.equal(fs.readFileSync(d.file, 'utf8'), JSON.stringify(d.cfg));
+    fs.unlinkSync(entry);
+  }
+});
+
+for (const target of ['state', 'markdown', 'receipt'] as const) {
+  test(`stateDir atomic write: only a prompt receipt requires directory fsync (${target})`, t => {
     const d = makeDir();
     t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
-    const store = privateStore ? new PrivateStore(new Authority(d.cfg)) : null;
-    const dir = store?.dir ?? d.dirs.state, file = path.join(dir, 'entry.md');
-    const write = (text: string) => store ? store.write('entry.md', text) : writeAtomic(file, text);
+    const store = target === 'state' ? null : new PrivateStore(new AgentAuthority(d.cfg, path.join(d.root, 'absent')));
+    const leaf = target === 'receipt' ? 'entry.json' : 'entry.md', dir = store?.dir ?? d.dirs.state, file = path.join(dir, leaf);
+    const write = (text: string) => store ? target === 'receipt' ? store.writeReceipt(leaf, text) : store.write(leaf, text) : writeAtomic(file, text);
     fs.writeFileSync(file, 'prior', { mode: 0o600 });
     const fsync = fs.fsyncSync;
     let fail: 'file' | 'directory' | undefined;
@@ -384,10 +466,11 @@ for (const privateStore of [false, true]) {
     previous = replacement;
     for (fail of ['file', 'directory'] as const) {
       calls.length = 0; replacement = `fail ${fail}`;
-      assert.throws(() => write(replacement), { code: 'ENOSPC' });
+      if (fail === 'directory' && target !== 'receipt') write(replacement);
+      else assert.throws(() => write(replacement), { code: 'ENOSPC' });
       assert.deepEqual(calls, fail === 'file' ? ['file'] : ['file', 'directory']);
       assert.equal(fs.readFileSync(file, 'utf8'), fail === 'file' ? previous : replacement);
-      assert.deepEqual(fs.readdirSync(dir), ['entry.md'], 'no abandoned temporary file');
+      assert.deepEqual(fs.readdirSync(dir), [leaf], 'no abandoned temporary file');
     }
   });
 }

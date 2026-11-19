@@ -32,7 +32,7 @@ async function rpc(cmd: string, args: unknown[] = []): Promise<unknown> {
   return r.value;
 }
 async function show(id: string): Promise<EdBuffer> {
-  const b = await Ed.sync.open(id); Ed.setWindowBuffer(b); E.current = b; Ed.scheduleRender(); return b;
+  const b = (await Ed.sync.open(id))!; Ed.setWindowBuffer(b); E.current = b; Ed.scheduleRender(); return b;
 }
 async function open(sid: string, epoch?: number): Promise<EdBuffer> { return show(await rpc('agent-session-open', epoch === undefined ? [sid] : [sid, epoch]) as string); }
 function row(): Row | undefined {
@@ -109,4 +109,5 @@ H.bufferMeta = (b, locals, ver) => {
   }
 };
 Ed.MODE_NAMES['agent-sessions-mode'] = 'Agent Sessions';
+Ed.installAgentTranscript(steer); Ed.installAgentPrompts(steer);
 };

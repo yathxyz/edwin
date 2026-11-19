@@ -155,5 +155,96 @@ CMD(MODE, '', '', 'Use structural read-only agent transcript commands and Markdo
   }
 }
 for (const name of ['agent-session-toggle-fold', 'agent-session-open-folds', 'agent-session-close-folds', 'agent-session-next-prompt', 'agent-session-previous-prompt', 'agent-session-visit-location', 'agent-session-diff', 'agent-session-recall']) L.put(intern(name), 'evil-repeat', intern('abort'));
+/* Touch only takes over the text surface of an agent view. Modelines, other buffers and physical
+   mouse input stay with the editor's ordinary DOM handlers, including on hybrid devices. */
+const anchors = new WeakMap<EdWindow, { buffer: EdBuffer; point: number; ver: number; start: number }>();
+const windowPoint = (w: EdWindow) => w === (E.frame || E.implicit).sel ? w.buffer.pt : w.pt;
+H.keepWindowStart = (w, selected) => {
+  const a = anchors.get(w);
+  if (!a) return false;
+  if (!(selected && E.recenter) && w.buffer === a.buffer && w.buffer.ver === a.ver && windowPoint(w) === a.point && w.start === a.start) return true;
+  anchors.delete(w); return false;
+};
+function wireTouch(f: EdFrame) {
+  const root = f.el('windows'), win = root?.ownerDocument.defaultView;
+  if (!root || !win) return;
+  const on = <K extends keyof HTMLElementEventMap>(el: EventTarget, type: K, fn: (e: HTMLElementEventMap[K]) => void, opts: AddEventListenerOptions) => {
+    el.addEventListener(type, fn as EventListener, opts); f.listeners.push([el, type, fn, opts]);
+  };
+  const hit = (x: number, y: number) => Ed.withFrame(f, () => {
+    const w = Ed.windowAt(x, y), el = root.ownerDocument.elementFromPoint(x, y);
+    if (!w?.view || !el || !w.view.contains(el)) return null;
+    const locals = w.buffer.meta?.locals;
+    if (!locals?.agentSession && !locals?.agentList && !locals?.agentPrompt && !presentations.has(w.buffer)) return null;
+    const line = el.closest('.oe')?.closest<HTMLElement>('.ln');
+    const pos = line ? Ed.eol(w.buffer.rope, +line.dataset.o!) : Ed.posFromPoint(x, y, w);
+    return pos === null ? null : { w, pos, marker: !!line };
+  });
+  type Contact = { id: number; x: number; y: number; lastY: number; acc: number; w: EdWindow; moved: boolean; page: boolean };
+  let contact: Contact | null = null;
+  let lastTap: { time: number; x: number; y: number; w: EdWindow; line: number } | null = null;
+  on(root, 'touchstart', e => {
+    contact = null;
+    if (e.touches.length !== 1) { lastTap = null; return; }
+    const t = e.touches[0], at = hit(t.clientX, t.clientY);
+    if (!at) { lastTap = null; return; }
+    contact = { id: t.identifier, x: t.clientX, y: t.clientY, lastY: t.clientY, acc: 0, w: at.w, moved: false, page: false };
+  }, { passive: true });
+  on(root, 'touchmove', e => {
+    const c = contact;
+    if (!c) return;
+    if (e.touches.length !== 1 || e.touches[0].identifier !== c.id) { contact = lastTap = null; return; }
+    const t = e.touches[0], dx = t.clientX - c.x, dy = t.clientY - c.y, delta = c.lastY - t.clientY;
+    c.lastY = t.clientY;
+    if (!c.moved && Math.hypot(dx, dy) <= 8) return;
+    if (!c.moved) { c.moved = true; lastTap = null; c.acc = -dy; c.page = Math.abs(dx) > Math.abs(dy); }
+    else c.acc += delta;
+    const w = c.w;
+    if (c.page || !delta) return;
+    if (!e.cancelable || (delta < 0 && w.start === 0) || (delta > 0 && (w.lastLine || 0) >= Ed.lineCountB(w.buffer))) { c.page = true; return; }
+    e.preventDefault();
+    const height = Ed.metrics(w).lh * Ed.frameScale(f), lines = Math.trunc(c.acc / height);
+    if (lines) {
+      c.acc -= lines * height; Ed.scrollWindow(w, lines);
+      anchors.set(w, { buffer: w.buffer, point: windowPoint(w), ver: w.buffer.ver, start: w.start });
+      Ed.frameRender();
+    }
+  }, { passive: false });
+  on(root, 'touchend', e => {
+    const c = contact; contact = null;
+    if (!c || c.moved || e.touches.length) { lastTap = null; return; }
+    const t = Array.from(e.changedTouches).find(t => t.identifier === c.id);
+    if (!t || Math.hypot(t.clientX - c.x, t.clientY - c.y) > 8) { lastTap = null; return; }
+    const at = hit(t.clientX, t.clientY);
+    if (!at || at.w !== c.w) { lastTap = null; return; }
+    e.preventDefault(); f.focus(); if (E.frame !== f) Ed.selectFrame(f);
+    if (E.mini) { lastTap = null; return; }
+    const { w, pos, marker } = at, b = w.buffer;
+    if (w !== E.sel) Ed.selectWindow(w);
+    if (E.isearch) E.isearch = null;
+    if (H.mouseDown) H.mouseDown(b, pos, { button: 0, shiftKey: false, ctrlKey: false, altKey: false });
+    else { b.pt = pos; b.markActive = false; }
+    const line = Ed.bol(b.rope, pos), time = e.timeStamp;
+    const twice = lastTap && time >= lastTap.time && time - lastTap.time <= 350 && w === lastTap.w && line === lastTap.line && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) <= 24;
+    lastTap = twice || marker ? null : { time, x: t.clientX, y: t.clientY, w, line };
+    if (twice || marker) {
+      const s = spanAt(b, pos);
+      if (typeof s?.foldStart === 'number' && typeof s.foldEnd === 'number' && s.foldEnd > s.foldStart) toggleFold(b, pos);
+    }
+    Ed.frameEvent('point', f, b); Ed.render();
+  }, { passive: false });
+  on(root, 'touchcancel', () => { contact = lastTap = null; }, { passive: true });
+  on(win, 'scroll', () => { if (contact) { contact.moved = true; contact.page = true; } lastTap = null; }, { passive: true, capture: true });
+  /* Cancelling touchend prevents the corresponding compatibility click. If the browser still sends
+     one, ignore only events it identifies as touch-derived on our own text surface, never by time. */
+  on(root, 'mousedown', e => {
+    if ((e as MouseEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } }).sourceCapabilities?.firesTouchEvents && hit(e.clientX, e.clientY)) {
+      e.preventDefault(); e.stopImmediatePropagation();
+    }
+  }, { capture: true });
+}
+const wire = H.wireFrame;
+H.wireFrame = f => { wire?.(f); wireTouch(f); };
+for (const f of E.frames) wireTouch(f);
 (Ed as typeof Ed & { agentTranscript: { metadata: typeof metadata; spanAt: typeof spanAt; install: typeof install; toggleFold: typeof toggleFold } }).agentTranscript = { metadata, spanAt, install, toggleFold };
 };

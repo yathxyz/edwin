@@ -27,7 +27,7 @@ See [performance measurements](docs/performance.md) for the private text, redisp
 
 ## TypeScript
 
-edwind (`server/*.mts`), the suites (`test/*.mts`) and tools (`tools/*.mts`) are TypeScript that Node 24 runs as it is: Node strips
+edwind (`server/*.mts`) and the suites (`test/*.mts`) are TypeScript that Node 24 runs as it is: Node strips
 the types at load, and `tsc -p .` (flake check `edwin-typecheck`, `--strict`) checks them. The rules that keep
 that working:
 - **Erasable syntax only** (`erasableSyntaxOnly`): no `enum`, `namespace`, parameter properties or `import =`.
@@ -116,8 +116,8 @@ the source.
 Since 2026-10-19 Edwin is its own repository, and Workbench depends on it, never the reverse. Edwin is the Emacs
 replacement: it grows the features an Emacs user expects and loads no extensions. Workbench uses it as an
 edit.sock client.
-- **No default hub.** Process primitives use `hubSocket`; agent sessions independently use `agentHub`.
-  Without `agentHub`, edwind installs no session commands or key bindings and leaves the draft store untouched.
+- **No default hub.** edwind connects to a process hub only when edit.json names `hubSocket`. With none, as under
+  `edwin --daemon`, it dials no process hub, and process primitives raise `hub-error` (code `unconfigured`) at once.
 - **The §5 session API is gone**: `wb.mts`, `scm/wb.scm` (sessions, cards, `acp-prompt`, `shell-run`, the `wb-*`
   hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
   `boardsDir` was ignored with a warning for one release; since Workbench's module stopped writing it, edwind
@@ -136,6 +136,8 @@ edit.sock client.
   the question is still the same when it accepts the answer.
   `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
   named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
+  Only configured prompt-store writers take the exclusive lock. Without `agentHub`, startup, recovery
+  and live export use the ordinary editor paths; nothing reserves `stateDir/agent-prompts/`.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
   `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
   For HTTP outside loopback, explicitly set `allowCleartext: true` **only on an encrypted private network**.

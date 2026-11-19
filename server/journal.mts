@@ -8,7 +8,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { writeAtomic, sha256 } from './files.mts';
 import type { By, Op, Undo } from './proto.mts';
-import type { Authority } from './paths.mts';
+import type { AgentAuthority } from './agent-files.mts';
 
 export const FORMAT = 1;
 export const GROUP_COMMIT_MS = 2;
@@ -164,13 +164,15 @@ export class Index {
   declare buffers: Map<string, IndexEntry>;
   declare moved: Map<string, MovedRecord>;
   declare timer: NodeJS.Timeout | null;
-  readonly auth: Authority;
-  constructor(file: string, auth: Authority) { this.auth = auth; this.file = file; this.buffers = new Map(); this.moved = new Map(); this.timer = null; this.load(); }
-  load(): void {
+  constructor(file: string, agent?: AgentAuthority) { this.file = file; this.buffers = new Map(); this.moved = new Map(); this.timer = null; this.load(agent); }
+  load(agent?: AgentAuthority): void {
     try {
-      const o = JSON.parse(this.auth.withRead(this.file, fd => fs.readFileSync(fd, 'utf8'), 'state'));
+      const o = JSON.parse(agent ? agent.withRead(this.file, fd => fs.readFileSync(fd, 'utf8'), 'state') : fs.readFileSync(this.file, 'utf8'));
       if (o.format !== undefined && o.format > FORMAT) throw new Error(`index format ${o.format} is newer than this edwind (${FORMAT})`);
-      for (const b of o.buffers || []) this.buffers.set(b.jid, b);
+      for (const b of o.buffers || []) {
+        if (agent && (typeof b?.jid !== 'string' || !/^[A-Za-z0-9_-]+$/.test(b.jid))) continue;
+        this.buffers.set(b.jid, b);
+      }
       for (const m of o.moved || []) if (m && typeof m.from === 'string' && typeof m.to === 'string' && Number.isFinite(m.at)) this.moved.set(m.from, { to: m.to, at: m.at, dir: !!m.dir });
     } catch (e) { if (e.code !== 'ENOENT') throw e; }
   }

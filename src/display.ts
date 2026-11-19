@@ -45,10 +45,6 @@ interface DispEcho { rows: DispPainter[]; cursor: { x: number; row: number } | n
 /* f._layout: what posAt reads. */
 interface DispLayout { rects: DispRect[]; winH: number; cols: number; rows: number; echoRows: number }
 type DispMouseEvent = Extract<EdDisplayEvent, { type: 'mouse' }>;
-type DispTranscript = typeof globalThis.Ed & { agentTranscript?: {
-  metadata(b: EdBuffer): { spans: { start: number; end: number; foldStart?: number; foldEnd?: number }[] } | null;
-  toggleFold(b: EdBuffer, position: number): unknown;
-} };
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks, host = Ed.host;
 const { truthy } = L;
 
@@ -639,20 +635,10 @@ H.renderModel = f => {
   f.backend!.draw(model);
 };
 
-/* What is at X, Y as last drawn: cells for model backends, client pixels for the DOM backend.
-   Fold markers are renderer-owned hit targets, never inferred from the buffer's Markdown. */
+/* What is at cell X, Y of model frame F as last drawn: {area: 'text', window, pos} (pos the buffer position
+   under the cell, or the end of the row past its text), {area: 'modeline', window}, {area: 'divider'},
+   {area: 'echo'}, or null outside the frame. A backend maps a mouse click with it. */
 function posAt(f: EdFrame, x: number, y: number): EdDisplayHit {
-  if (f.root) return Ed.withFrame(f, () => {
-    const w = Ed.windowAt(x, y);
-    if (!w || !w.view) return null;
-    const el = f.root!.ownerDocument.elementFromPoint(x, y);
-    if (el && w.ml?.contains(el)) return { area: 'modeline', window: w };
-    if (!el || !w.view.contains(el)) return null;
-    const marker = el.closest<HTMLElement>('.oe'), line = marker?.closest<HTMLElement>('.ln');
-    if (line && w.view.contains(line)) return { area: 'text', window: w, pos: Ed.eol(w.buffer.rope, +line.dataset.o!), fold: true };
-    const p = Ed.posFromPoint(x, y, w);
-    return p === null ? null : { area: 'text', window: w, pos: p };
-  });
   const lay = f && f._layout as DispLayout | undefined;
   if (!lay || x < 0 || y < 0 || x >= lay.cols || y >= lay.rows) return null;
   if (y >= lay.winH) return { area: 'echo' };
@@ -672,13 +658,16 @@ function posAt(f: EdFrame, x: number, y: number): EdDisplayHit {
 function redraw(f: EdFrame) { if (f && f.backend) { f._rkey = null; Ed.scheduleRender(); } }
 function setTheme(f: EdFrame, theme: string | null) { f.theme = theme === 'dark' ? 'dark' : theme === 'light' ? 'light' : null; redraw(f); }
 
-/* ---------- input shared by cell backends and the browser's DOM backend ----------
-   Coordinates are cells for model frames and client pixels for DOM frames. Browser touch gestures
-   become tap (clicks = 1 or 2) or scroll (dy in lines), only after distinguishing them from movement.
-   Native mouse events can accompany down/drag for existing hooks that inspect the original event. */
+/* ---------- input: what a backend reports, as the page's frame wiring does it (wire in editor-prims) ----------
+   input(f, ev) takes one event in cell terms:
+     {type: 'key', key}                     an Emacs key description ("C-x", "M-f", "<up>", "a")
+     {type: 'paste', text}                  pasted text (bracketed paste), yanked as one insertion
+     {type: 'focus', focused}               the window system's focus came or went
+     {type: 'mouse', action, x, y, button}  action down, drag, up or wheel (dy: +1 down, -1 up), button 0 = left
+     {type: 'resize'}                       backend.size() changed */
 const WHEEL_LINES = 3;
 function input(f: EdFrame, ev: EdDisplayEvent) {
-  if (!f || !(f.backend || f.root) || !ev) return;
+  if (!f || !f.backend || !ev) return;
   const take = () => { if (E.frames.includes(f) && E.frame !== f) Ed.selectFrame(f); };
   const hook = (name: string) => { try { L.resetOps(); L.runHook(name); } catch (e) { Ed.reportError(e); } };
   switch (ev.type) {
@@ -697,11 +686,6 @@ function mouse(f: EdFrame, ev: DispMouseEvent, take: () => void) {
   const st = f._mouse || (f._mouse = { from: null, win: null });
   if (ev.action === 'up') { st.from = null; st.win = null; return; }
   const at = posAt(f, ev.x, ev.y);
-  if (ev.action === 'scroll') {
-    const w = at && at.window; if (!w || !ev.dy) return;
-    Ed.scrollWindow(w, ev.dy, true);
-    Ed.frameRender(); return;
-  }
   if (ev.action === 'wheel') {
     const w = at && at.window; if (!w || !ev.dy) return;
     Ed.scrollWindow(w, ev.dy * WHEEL_LINES);
@@ -716,25 +700,16 @@ function mouse(f: EdFrame, ev: DispMouseEvent, take: () => void) {
     else { b.mark = st.from; b.pt = at.pos; b.markActive = at.pos !== st.from; }
     Ed.render(); return;
   }
-  if ((ev.action !== 'down' && ev.action !== 'tap') || (ev.button || 0) !== 0) return;
+  if (ev.action !== 'down' || (ev.button || 0) !== 0) return;
   take();
   if (E.mini || !at || !at.window) return;
   if (at.window !== f.sel) Ed.selectWindow(at.window);
   if (at.area !== 'text') { Ed.render(); return; }
   const b = at.window.buffer;
   if (E.isearch) E.isearch = null;
-  if (H.mouseDown) H.mouseDown(b, at.pos, ev.event || { button: 0, shiftKey: !!ev.shift, ctrlKey: !!ev.ctrl, altKey: !!ev.meta });
+  if (H.mouseDown) H.mouseDown(b, at.pos, { button: 0, shiftKey: !!ev.shift, ctrlKey: !!ev.ctrl, altKey: !!ev.meta });
   else { b.pt = at.pos; b.markActive = false; }
-  if (ev.action === 'tap' && (at.fold || ev.clicks === 2)) {
-    const transcript = (Ed as DispTranscript).agentTranscript;
-    const span = transcript?.metadata(b)?.spans.find(s => s.start <= at.pos && at.pos < s.end);
-    if (span && typeof span.foldStart === 'number' && typeof span.foldEnd === 'number' && span.foldEnd > span.foldStart) {
-      transcript!.toggleFold(b, at.pos);
-      Ed.frameEvent('point', f, b); Ed.render(); return;
-    }
-  }
-  if (ev.action === 'down') { st.from = at.pos; st.win = at.window; }
-  Ed.frameEvent('point', f, b); Ed.render();
+  st.from = at.pos; st.win = at.window; Ed.frameEvent('point', f, b); Ed.render();
 }
 
 Ed.display = { PALETTE, FACES, resolveFace, parseColor, charWidth, strWidth, glyphsOf, wrap, frameModel, posAt, redraw, setTheme, input };

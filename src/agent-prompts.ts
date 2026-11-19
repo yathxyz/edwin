@@ -46,10 +46,28 @@ async function chooseDraft(given?: unknown): Promise<string> {
   const picked = await Ed.readMini('Prompt draft: ', '', () => labels, { require: true });
   return list[labels.indexOf(picked)].id;
 }
+/* A draft consumer waits for the daemon's ack, not just for the local command to finish. */
+const pending = new Map<string, Set<(error?: string) => void>>();
+H.syncBufferState = m => {
+  if (!m.buf || (m.t !== 'ack' && m.t !== 'opened' && m.t !== 'error' && m.t !== 'killed' && m.t !== 'closed')) return;
+  const checks = pending.get(m.buf);
+  if (checks) for (const check of checks) check(m.t === 'error' ? m.msg || 'edwind refused the buffer edit' : undefined);
+};
 async function synced(id: string): Promise<EdBuffer> {
-  const b = E.buffers.find(b => b.shared && b.id === id) || await Ed.sync.open(id);
-  await Ed.sync.whenSynced(b);
-  return b;
+  const sync = Ed.sync, b = E.buffers.find(b => b.shared && b.id === id) || (await sync.open(id))!;
+  const { promise, resolve, reject } = Promise.withResolvers<EdBuffer>();
+  const checks = pending.get(id) || new Set<(error?: string) => void>(); pending.set(id, checks);
+  const check = (error?: string) => {
+    if (!error && (sync.state !== 'online' || !b.shared || sync.buffers.get(id) !== b)) error = 'Buffer is not connected to edwind';
+    if (!error && (b.sync?.opening || b.inflight || b.queue?.length)) {
+      if (!b.readOnly || b.sync?.opening) return;
+      error = 'Buffer is read-only';
+    }
+    off(); checks.delete(check); if (!checks.size) pending.delete(id);
+    if (error) reject(new Error(error)); else resolve(b);
+  };
+  const off = sync.on('state', () => check());
+  checks.add(check); check(); return promise;
 }
 async function showDraft(id: string) {
   const previous = Ed.winConfig(), b = await api().show(id);

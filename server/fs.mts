@@ -5,7 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ProtoError } from './proto.mts';
-import { PathError, home, under } from './paths.mts';
+import { PathError, home, realPath, under } from './paths.mts';
+import { guardedCopy, guardedList, guardedStat } from './agent-fs.mts';
 import { REFUSED_DST, lexicalPath, osMessage, realEntry } from './buffers.mts';
 import { fsyncDir } from './files.mts';
 import type { Server } from './main.mts';
@@ -18,60 +19,19 @@ export const MAX_ENTRIES = 10000;
    when it leads to a directory); mode is the permission bits; mtime is in milliseconds. */
 export interface FsEntry { name: string; kind: 'dir' | 'file' | 'link' | 'other'; size: number; mtime: number; mode: number; target?: string; dir?: true }
 
-function entryOf(auth: Authority, full: string, name: string): { entry: FsEntry; real: string } | null {
-  let own: fs.Stats;
-  try { own = fs.lstatSync(full); } catch { return null; }
-  const link = own.isSymbolicLink(), target = link ? fs.readlinkSync(full) : undefined;
-  if (target !== undefined) {
-    // Authorize the captured link text too: the link may have been replaced before its fd opens.
-    const dst = path.resolve(path.dirname(full), target);
-    try { auth.withRead(dst, () => {}, 'entry'); } catch (e) { if (e.code === 'refused_path') throw e; }
+function entryOf(full: string, name: string): FsEntry | null {
+  let st: fs.Stats;
+  try { st = fs.lstatSync(full); } catch (e) { return null; }
+  const e: FsEntry = { name, kind: st.isDirectory() ? 'dir' : st.isFile() ? 'file' : st.isSymbolicLink() ? 'link' : 'other', size: st.size, mtime: Math.floor(st.mtimeMs), mode: st.mode & 0o7777 };
+  if (e.kind === 'link') {
+    try { e.target = fs.readlinkSync(full); } catch (err) { /* gone since the lstat */ }
+    try { if (fs.statSync(full).isDirectory()) e.dir = true; } catch (err) { /* a dangling link */ }
   }
-  let real = full, st = own, dir = false;
-  try {
-    auth.withRead(full, (_fd, opened, resolved) => {
-      real = resolved; dir = opened.isDirectory();
-      if (!link) st = opened;
-    }, 'entry');
-  } catch (e) {
-    if (e.code === 'refused_path') throw e;
-    if (!link || e.code !== 'ENOENT') return null;
-    // A link may outlast a removed credential; don't publish a protected target spelling either.
-    if (auth.inRefused(path.resolve(path.dirname(full), target!))) throw new PathError('refused_path', 'Private file: access refused');
-  }
-  const entry: FsEntry = { name, kind: link ? 'link' : st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other', size: st.size, mtime: Math.floor(st.mtimeMs), mode: st.mode & 0o7777 };
-  if (link) { entry.target = target; if (dir) entry.dir = true; }
-  return { entry, real };
+  return e;
 }
 
 const bad = (e: unknown): ProtoError => (e instanceof ProtoError ? e : e instanceof PathError ? new ProtoError(e.code, e.message) : new ProtoError('bad_request', osMessage(e as NodeJS.ErrnoException)));
 const arg = (args: unknown[]): Record<string, unknown> => (args[0] && typeof args[0] === 'object' ? args[0] as Record<string, unknown> : {});
-
-/* Every file read while copying a tree is a read under the same authority as a visit. A source
-   replaced after open cannot change what is copied. Never follow a directory through a child name. */
-async function copyGuardedEntry(auth: Authority, src: string, dst: string): Promise<void> {
-  const entry = entryOf(auth, src, path.basename(src))?.entry;
-  if (!entry) throw new ProtoError('bad_request', 'Missing copy source');
-  if (entry.kind === 'link') { await fs.promises.symlink(entry.target!, dst); return; }
-  // withRead lends its descriptor only during the callback. Take a reference to the checked
-  // inode before returning, never reopening src after an await.
-  const { held, st } = auth.withRead(src, (fd, st) => {
-    if (!st.isDirectory() && !st.isFile()) throw new ProtoError('bad_request', 'Unsupported copy source');
-    return { held: fs.openSync(`/proc/self/fd/${fd}`, fs.constants.O_RDONLY), st };
-  });
-  try {
-    const pinned = `/proc/self/fd/${held}`;
-    if (st.isFile()) { await fs.promises.copyFile(pinned, dst, fs.constants.COPYFILE_EXCL); return; }
-    await fs.promises.mkdir(dst, 0o700);
-    const target = await fs.promises.open(dst, fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
-    try {
-      const into = `/proc/self/fd/${target.fd}`;
-      for await (const { name } of await fs.promises.opendir(pinned))
-        await copyGuardedEntry(auth, path.join(pinned, name), path.join(into, name));
-      await target.chmod(st.mode & 0o777);
-    } finally { await target.close(); }
-  } finally { fs.closeSync(held); }
-}
 
 /* REAL may be written by a file operation: inside a write root and not refused (checkWrite), not one of
    edwind's directories or a write root or anything holding one, and not inside stateDir. */
@@ -93,20 +53,18 @@ export class Fs {
      symlink to a directory lists what it leads to and dir names where that is. */
   list(dir: unknown): { dir: string; home: string; entries: FsEntry[]; truncated?: true } {
     const auth = this.auth;
-    const absolute = dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir);
-    try {
-      return auth.withRead(absolute, (fd, _st, real) => {
-        if (auth.inRefused(real)) throw new ProtoError('refused_path', `${real}: refused`);
-        const root = `/proc/self/fd/${fd}`, names = fs.readdirSync(root);
-        const r: { dir: string; home: string; entries: FsEntry[]; truncated?: true } = { dir: real, home: home(), entries: [] };
-        if (names.length > MAX_ENTRIES) { names.length = MAX_ENTRIES; r.truncated = true; }
-        for (const name of names) {
-          try { const e = entryOf(auth, path.join(root, name), name); if (e) r.entries.push(e.entry); }
-          catch (e) { if (e.code !== 'refused_path' && e.code !== 'ENOENT') throw e; }
-        }
-        return r;
-      }, 'entry');
-    } catch (e) { throw bad(e); }
+    if (auth.agent) {
+      try { return guardedList(auth.agent, dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir), MAX_ENTRIES); } catch (e) { throw bad(e); }
+    }
+    let real: string;
+    try { real = fs.realpathSync.native(dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir)); } catch (e) { throw bad(e); }
+    if (auth.inRefused(real)) throw new ProtoError('refused_path', `${real}: refused`);
+    let names: string[];
+    try { names = fs.readdirSync(real); } catch (e) { throw bad(e); }
+    const r: { dir: string; home: string; entries: FsEntry[]; truncated?: true } = { dir: real, home: home(), entries: [] };
+    if (names.length > MAX_ENTRIES) { names.length = MAX_ENTRIES; r.truncated = true; }
+    for (const name of names) { const e = entryOf(path.join(real, name), name); if (e) r.entries.push(e); }
+    return r;
   }
 
   /* fs-stat [{path}]: what PATH names. path is its real place, the last component left as written; entry is
@@ -115,10 +73,10 @@ export class Fs {
   stat(p: unknown): { path: string; id: string | null; entry: FsEntry | null } {
     const abs = lexicalPath(this.auth, p), real = realEntry(abs);
     if (this.auth.inRefused(real)) throw new ProtoError('refused_path', `${real}: refused`);
-    let found: ReturnType<typeof entryOf>;
-    try { found = entryOf(this.auth, real, path.basename(real)); } catch (e) { throw bad(e); }
-    const entry = found?.entry ?? null;
-    const id = entry?.kind === 'dir' || entry?.dir ? null : this.auth.idOf(found?.real ?? real);
+    if (this.auth.agent) { try { return guardedStat(this.auth.agent, real); } catch (e) { throw bad(e); } }
+    const entry = entryOf(real, path.basename(real));
+    let id: string | null = null;
+    if (!entry || !(entry.kind === 'dir' || entry.dir)) { try { id = this.auth.idOf(realPath(abs).real); } catch (e) { /* nothing a buffer could visit */ } }
     return { path: real, id, entry };
   }
 
@@ -162,10 +120,8 @@ export class Fs {
     try { fs.lstatSync(dstReal); } catch (e) { if (e.code !== 'ENOENT') throw bad(e); there = false; }
     if (there || this.server.buffers.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
     try {
-      // Ordinary copies use asynchronous recursive I/O. With protected identities, cp's
-      // pathname-based content reads cannot substitute for copying the checked, pinned source.
-      if (auth.guardsCredential) await copyGuardedEntry(auth, srcReal, dstReal);
-      else await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true, mode: fs.constants.COPYFILE_EXCL });
+      if (auth.agent) await guardedCopy(auth.agent, srcReal, dstReal);
+      else await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true });
     } catch (e) { throw bad(e); }
     fsyncDir(path.dirname(dstReal));
     this.server.log.info('fs-copy', { src: srcReal, dst: dstReal, dir });

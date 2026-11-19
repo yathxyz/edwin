@@ -14,8 +14,10 @@ import os from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import { DatabaseSync } from 'node:sqlite';
-import { Authority, configSource, expandHome } from './paths.mts';
+import { Authority, expandHome } from './paths.mts';
+import { AgentAuthority, type configSource } from './agent-files.mts';
+import { openPromptWriter, PromptStoreBusy, readAgentConfig } from './agent-startup.mts';
+import { agentEncoder } from './agent-wire.mts';
 import { Buffers } from './buffers.mts';
 import { Client } from './session.mts';
 import { ImageLog, randomId, readJournal, jidPath, SNAP_NEW } from './journal.mts';
@@ -118,13 +120,8 @@ const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDi
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
   let source: Config['configSource'];
-  try {
-    const fd = fs.openSync(file, 'r');
-    try {
-      cfg = JSON.parse(fs.readFileSync(fd, 'utf8'));
-      if (cfg?.agentHub !== undefined) source = configSource(file, fd);
-    } finally { fs.closeSync(fd); }
-  } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
+  try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
+  if (cfg?.agentHub !== undefined) ({ cfg, source } = readAgentConfig(file));
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: not an object`);
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
@@ -188,47 +185,6 @@ export function loadConfig(file: string): Config {
   return out;
 }
 
-/* The kernel owns the live AF_UNIX listener. Pathname sockets work across network namespaces, and the
-   directory fd keeps the address short even for a deep stateDir. SIGKILL leaves a dead socket name:
-   serialize its probe/unlink/bind with a short SQLite filesystem transaction (no PID or stale timeout).
-   Don't use a POSIX database lock for the lifetime lock: closing an unrelated reader of its inode in
-   this same process can release it. No server code is running yet while we hold the startup transaction. */
-async function lockStateDir(dir: string): Promise<void> {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const fd = fs.openSync(dir, fs.constants.O_DIRECTORY);
-  const root = `/proc/self/fd/${fd}`, addr = `${root}/.edwind-owner.sock`;
-  const busy = () => new Error('stateDir is already in use');
-  try {
-    const gate = new DatabaseSync(`${root}/.edwind-startup-lock`);
-    try {
-      try { gate.exec('BEGIN EXCLUSIVE'); }
-      catch (e) { if (e.errcode === 5) throw busy(); throw e; } // SQLITE_BUSY
-      const entry = fs.lstatSync(addr, { throwIfNoEntry: false });
-      if (entry) {
-        if (!entry.isSocket()) throw new Error('invalid stateDir owner socket');
-        const live = await new Promise<boolean>((resolve, reject) => {
-          const probe = net.connect(addr);
-          probe.once('connect', () => { probe.destroy(); resolve(true); });
-          probe.once('error', (e: NodeJS.ErrnoException) => {
-            if (e.code === 'ECONNREFUSED' || e.code === 'ENOENT') resolve(false); else reject(e);
-          });
-        });
-        if (live) throw busy();
-        fs.rmSync(addr, { force: true });
-      }
-      const owner = net.createServer(socket => socket.destroy());
-      await new Promise<void>((resolve, reject) => {
-        owner.once('error', reject);
-        owner.listen(addr, () => { owner.removeListener('error', reject); resolve(); });
-      });
-      // Keep ownership through shutdown callbacks and late writes, not just until the edit socket closes.
-      owner.unref();
-      owner.once('close', () => fs.closeSync(fd));
-      process.once('exit', () => owner.close());
-    } finally { gate.close(); }
-  } catch (e) { fs.closeSync(fd); throw e; }
-}
-
 /* ---------- the server ---------- */
 export class Server {
   declare cfg: Config;
@@ -245,6 +201,7 @@ export class Server {
   declare disconnects: ((client: Client) => void)[];
   declare started: number;
   declare image: ImageLog;
+  private releasePromptWriter?: () => Promise<void>;
   /* Set by start(). */
   declare Ed: Ed;
   declare L: Lisp;
@@ -266,8 +223,8 @@ export class Server {
     /* The credential files are edwind's to read and nobody's to visit: a buffer of one would hand a key to every
        frame, and to a model through pi's tools (R14.6). */
     const credentials = modelsModule.credentialsDirectory();
-    this.auth = new Authority(credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg);
-    if (cfg.agentHub) this.auth.protectCredential(cfg.agentHub.tokenFile, cfg.configSource);
+    const roots = credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg;
+    this.auth = cfg.agentHub ? new AgentAuthority(roots, cfg.agentHub.tokenFile, cfg.configSource) : new Authority(roots);
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */
@@ -277,13 +234,22 @@ export class Server {
     /* Told each client that disconnected (onDisconnect). */
     this.disconnects = [];
     this.started = Date.now();
+    if (!this.auth.agent) this.initState(cfg);
+  }
+  private initState(cfg: Config) {
+    fs.mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(cfg.configDir, { recursive: true, mode: 0o700 });
+    this.image = new ImageLog(path.join(cfg.stateDir, 'image.jsonl'));
+    this.image.ensureEpoch(() => randomId(8));
   }
   /* Load Edwin's core headless and boot it (host-node.cts), then replay the image log (R4.19) and the journals. */
-  async start() {
-    await lockStateDir(this.cfg.stateDir);
-    fs.mkdirSync(this.cfg.configDir, { recursive: true, mode: 0o700 });
-    this.image = new ImageLog(path.join(this.cfg.stateDir, 'image.jsonl'));
-    this.image.ensureEpoch(() => randomId(8));
+  async start(mode: 'run' | 'metadata' = 'run') {
+    if (!this.auth.agent) return this.bootImage();
+    if (mode === 'run') this.releasePromptWriter = await openPromptWriter(this.auth.agent, this.log);
+    try { this.initState(this.cfg); await this.bootImage(mode === 'metadata'); }
+    catch (e) { await this.releasePromptWriter?.(); throw e; }
+  }
+  private async bootImage(registryOnly = false) {
     const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
     const storageFile = path.join(this.cfg.stateDir, 'storage.json');
     /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
@@ -295,9 +261,9 @@ export class Server {
     this.Ed.boot({ host });
     await this.Ed.whenIdle();
     this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
-    this.buffers.reload(path.join(this.cfg.stateDir, 'agent-prompts'));
+    this.buffers.reload();
     for (const m of MODULES) { await m.install(this); this.modules.push(m); }
-    if (this.cfg.agentHub) { await agentSessionsModule.install(this); this.modules.push(agentSessionsModule); }
+    if (this.auth.agent) { await agentSessionsModule.install(this, registryOnly); this.modules.push(agentSessionsModule); }
     /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
        module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
     this.image.replay(this);
@@ -331,8 +297,9 @@ export class Server {
     if ((dst.mode & 0o777) !== 0o700) throw new Error(`${dir} has mode ${(dst.mode & 0o777).toString(8)}, not 700`);
     try { const st = fs.lstatSync(sock); if (st.isSymbolicLink() || !st.isSocket()) throw new Error(`${sock} exists and is not a socket`); fs.unlinkSync(sock); }
     catch (e) { if (e.code !== 'ENOENT') { if (e instanceof Error && !(e as NodeJS.ErrnoException).code) throw e; throw new Error(`${sock}: ${e.code}`); } }
+    const encode = this.cfg.agentHub && agentEncoder(this.cfg.agentHub);
     const server = net.createServer({ allowHalfOpen: false }, socket => {
-      const c = new Client(this, socket);
+      const c = new Client(this, socket, encode);
       this.clients.add(c);
     });
     return new Promise<net.Server>((resolve, reject) => {
@@ -356,6 +323,9 @@ export class Server {
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
+    try { await this.stopImage(); } finally { await this.releasePromptWriter?.(); }
+  }
+  private async stopImage() {
     this.log.info('stop', {});
     const closed = this.net ? new Promise<void>(r => this.net!.close(() => r())) : null;
     for (const c of [...this.clients]) { c.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); c.destroy(); }
@@ -363,7 +333,7 @@ export class Server {
     for (const m of [...this.modules].reverse()) if (m.shutdown) { try { await m.shutdown(this); } catch (e) { this.log.error('shutdown', { module: m.name || '?', error: e.message }); } }
     await this.buffers.shutdown();
     try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
-    try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+    if (!this.auth.agent || this.net) try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
   }
 
   /* Stop cleanly and exit with RESTART_EXIT, after the caller's result has gone out: the service manager
@@ -527,7 +497,7 @@ export function check(cfg: Config, out = (s: string): unknown => process.stdout.
 }
 export async function exportAll(cfg: Config, dir: string, log: Log): Promise<number> {
   const server = new Server(cfg, log);
-  await server.start();
+  await server.start('metadata');
   fs.mkdirSync(dir, { recursive: true });
   let n = 0;
   for (const sb of server.buffers.all()) {
@@ -577,7 +547,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   if (mode === 'primitives') {
     /* The registry (R4.48) needs the image with every module installed; nothing listens. */
     const server = new Server(cfg, makeLog('error'));
-    await server.start();
+    await server.start('metadata');
     process.stdout.write(JSON.stringify(server.debugger.registry(), null, 1) + '\n');
     await server.stop();
     return 0;
@@ -585,7 +555,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   if (isMainThread && !process.env.EDWIND_NO_THREAD) return runInThread(argv, log);
   const server = new Server(cfg, log);
   try { await server.start(); await server.listen(); }
-  catch (e) { process.stderr.write(`edwind: ${e.message}\n`); log.error('start', { error: e.message }); return 1; }
+  catch (e) { process.stderr.write(`edwind: ${e.message}\n`); log.error('start', { error: e.message }); return e instanceof PromptStoreBusy ? e.exitCode : 1; }
   let stopping: Promise<void> | null = null;
   const stop = (sig: string) => { if (stopping) return; log.info('signal', { sig }); stopping = server.stop().then(() => process.exit(0), e => { log.error('stop', { error: e.message }); process.exit(1); }); };
   if (isMainThread) { process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT')); }

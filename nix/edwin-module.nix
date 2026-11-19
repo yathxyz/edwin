@@ -63,6 +63,7 @@ in
         Type = "exec";
         ExecStart = "${cfg.package}/bin/edwin --fg-daemon";
         Restart = "on-failure";
+        RestartPreventExitStatus = [ 73 ]; # Another configured daemon owns the prompt store.
         RestartSec = 1;
         UMask = "0077";
         # The server's worker thread sizes its own stack (32 MiB) for the Scheme cap.
