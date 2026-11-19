@@ -78,6 +78,7 @@ try {
     let t = now(), bytes = other.sock.bytesRead; const first = await other.open(id); timed('open', now() - t);
     assert.equal(first.text, text); resources[`${name}.firstOpenPeerWireBytes`] = other.sock.bytesRead - bytes;
     t = now(); const b = await sync.open(id); timed('attach', now() - t); assert.equal(b.text, text);
+    resources[`${name}.clientRssKiBAfterAttach`] = process.memoryUsage.rss() / 1024;
     Ed.setWindowBuffer(b); Ed.E.current = b; b.pt = size >> 1;
     Ed.feedKey('i'); await Ed.whenIdle();
     let ver = 0, x = 0, y = 0;
@@ -85,6 +86,10 @@ try {
       const ack = nextVersion(b, ++ver), delivered = fanout ? other!.next(m => m.t === 'edits' && m.buf === id).then(msg => ({ msg, at: now() })) : null;
       const begin = now(); Ed.feedKey('x'); await Ed.whenIdle();
       const a = await ack; x++;
+      if (ver === 1) {
+        timed('firstKeyToAppliedAck', a.at - begin); timed('firstAckHandler', a.handlerMs);
+        resources[`${name}.clientRssKiBAfterFirstKey`] = process.memoryUsage.rss() / 1024;
+      }
       if (delivered) {
         const d = await delivered; assert.equal(d.msg.ver, ver); assert.equal(d.msg.ops[0][2], 'x');
         if (observe) { timed('keyToAppliedAck', a.at - begin); timed('keyToPeerFanout', d.at - begin); timed('ackHandler', a.handlerMs); }
@@ -121,12 +126,39 @@ try {
   }
 
   // Enough quiet time for the ten-second file stat sweep; file-backed buffers stay attached to one reader.
+  const beforeIdleOpen = meters(pid), startedIdleOpen = now();
   for (let i = 0; i < idleBuffers; i++) {
     const file = `idle-${i}.txt`; fs.writeFileSync(path.join(dir.dirs.home, file), 'idle\n');
     assert.equal((await other.open('~/' + file)).text, 'idle\n');
   }
+  resources.idleOpen = { ...delta(beforeIdleOpen, meters(pid)), elapsedMs: now() - startedIdleOpen,
+    clientRssDeltaKiB: process.memoryUsage.rss() / 1024 - beforeIdleOpen.clientRssKiB, daemonRssBeforeKiB: beforeIdleOpen.rssKiB };
   await sleep(200); const a = meters(pid), t = now(); await sleep(idleMs);
   resources.idle = { ...delta(a, meters(pid)), elapsedMs: now() - t };
+
+  // Connections and daemon-side subscriptions, not 32 independent editor heaps or rendered frames.
+  const subscribers: EditClient[] = [], shared = '~/idle-0.txt';
+  try {
+    let a = meters(pid), t = now();
+    for (let i = 0; i < 32; i++) {
+      const p = await peer(); subscribers.push(p);
+      assert.equal((await p.open(shared)).text, 'idle\n');
+    }
+    let z = meters(pid);
+    resources.sharedAttach = { count: subscribers.length, ...delta(a, z), elapsedMs: now() - t,
+      daemonRssDeltaKiB: z.rssKiB - a.rssKiB, clientRssDeltaKiB: z.clientRssKiB - a.clientRssKiB,
+      peerBytesRead: subscribers.reduce((n, p) => n + p.sock.bytesRead, 0) };
+    const bytes = subscribers.reduce((n, p) => n + p.sock.bytesRead, 0), j = journalBytes();
+    const fanout = Promise.all(subscribers.map(p => p.next(m => m.t === 'edits' && m.buf === shared))).then(all => {
+      for (const m of all) { assert.equal(m.ver, 1); assert.deepEqual(m.ops, [[0, '', 'x']]); } return now();
+    });
+    a = meters(pid); t = now();
+    const ack = await other.edit(shared, 0, [[0, '', 'x']]); const ackMs = now() - t;
+    assert.equal(ack.t, 'ack'); assert.equal(ack.ver, 1); const allAt = await fanout;
+    z = meters(pid);
+    resources.sharedEdit = { ...delta(a, z), durableAckMs: ackMs, allFanoutMs: allAt - t, journalBytes: journalBytes() - j,
+      peerBytesRead: subscribers.reduce((n, p) => n + p.sock.bytesRead, 0) - bytes };
+  } finally { for (const p of subscribers) p.close(); }
   const summary = Object.fromEntries(Object.entries(samples).map(([k, v]) => {
     const sorted = v.toSorted((a, b) => a - b), at = (q: number) => sorted[Math.ceil(q * v.length) - 1];
     return [k, { n: v.length, min: sorted[0], p50: at(.5), p95: at(.95), p99: at(.99), max: sorted.at(-1) }];
