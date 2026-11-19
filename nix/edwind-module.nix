@@ -404,9 +404,16 @@ in
       environment.etc."edwind/edit.json".source = editJson;
 
       # The state and config directories exist before the unit starts (R14.10); the parents are the user's, left
-      # as they are when present.
+      # as they are when present. Each parent is named: one that tmpfiles makes implicitly is root's, and
+      # tmpfiles then refuses the path below it, in a home that has no ~/.local/state/edwin yet.
       systemd.tmpfiles.rules =
-        map (d: "d ${d} - ${cfg.user} ${userCfg.group} -") (pinnedPaths ++ [ "${home}/.local/state" ])
+        map (d: "d ${d} - ${cfg.user} ${userCfg.group} -") (
+          pinnedPaths
+          ++ [
+            "${home}/.local/state"
+            "${home}/.local/state/edwin"
+          ]
+        )
         ++ map (d: "d ${d} 0700 ${cfg.user} ${userCfg.group} -") (
           refusePaths
           ++ [
