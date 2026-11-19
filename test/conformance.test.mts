@@ -436,11 +436,17 @@ test('R15.12 edwind --check verifies the journals; --export writes the buffers',
   assert.match(r.out, /chk\.md: ok, 1 batches, version 1/);
   assert.match(r.out, /0 with problems/);
   const dirOut = path.join(dir.root, 'export');
+  // Export boots a full image and can write state. It is an offline operation, unlike --check.
+  const busy = await run(['--export', dirOut]);
+  assert.equal(busy.code, 1, busy.out); assert.match(busy.out, /stateDir.*(locked|in use)/i);
+  assert.equal(fs.existsSync(dirOut), false);
+  await stopEdwind(child);
   const ex = await run(['--export', dirOut]);
   assert.equal(ex.code, 0, ex.out);
   const files = fs.readdirSync(dirOut);
   assert.ok(files.some(f => f.endsWith('chk.md')));
   assert.equal(fs.readFileSync(path.join(dirOut, files.find(f => f.endsWith('chk.md'))!), 'utf8'), 'C c\n');
+  child = await startEdwind(dir);
 });
 
 test('R16.17 limits: 500 open buffers, a flood of edits and a deep recursion leave edwind serving', async () => {

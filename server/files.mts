@@ -90,9 +90,8 @@ export function saveAtomic(auth: Authority, real: string, text: string, { eol = 
 }
 
 export function fsyncDir(dir: string): void {
-  let fd: number;
-  try { fd = fs.openSync(dir, 'r'); } catch (e) { return; }
-  try { fs.fsyncSync(fd); } catch (e) { /* some filesystems refuse; the rename is still durable enough */ } finally { fs.closeSync(fd); }
+  const fd = fs.openSync(dir, fs.constants.O_DIRECTORY);
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
 /* Write a whole file atomically with mode 0600 (state files: index, snapshots, saved copies). */
@@ -101,12 +100,15 @@ export function writeAtomic(real: string, data: string | Buffer): void {
   const tmp = path.join(dir, `.${path.basename(real)}.${process.pid}-${randomBytes(4).toString('hex')}~`);
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try {
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8');
-    let off = 0; while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
-    fs.fsyncSync(fd);
-  } catch (e) { try { fs.closeSync(fd); } catch (x) { /* closed */ } try { fs.unlinkSync(tmp); } catch (x) { /* gone */ } throw e; }
-  fs.closeSync(fd);
-  try { fs.renameSync(tmp, real); } catch (e) { try { fs.unlinkSync(tmp); } catch (x) { /* gone */ } throw e; }
+    try {
+      fs.writeFileSync(fd, data);
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, real);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* preserve the write, sync, close or rename error */ }
+    throw e;
+  }
   fsyncDir(dir);
 }
 

@@ -7,6 +7,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { makeDir, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
+import { writeAtomic } from '../server/files.mts';
+import { Authority, PrivateStore } from '../server/paths.mts';
 import { rng, randOp, Client as SimClient } from './ot-sim.mts';
 import type { Msg } from './edit-client.mts';
 import type { OTModule, Server, SimMsg } from './ot-sim.mts';
@@ -323,3 +325,69 @@ test('R16.7 a journal write that fails after its bytes landed is truncated, so a
   c.close(); await stopEdwind(child);
   fs.rmSync(dir.root, { recursive: true, force: true });
 });
+
+test('stateDir lock refuses a live second daemon before writes and releases on SIGKILL', async t => {
+  const firstDir = makeDir(), secondDir = makeDir();
+  t.after(() => { for (const d of [firstDir, secondDir]) fs.rmSync(d.root, { recursive: true, force: true }); });
+  const alias = path.join(secondDir.root, 'shared-state');
+  fs.symlinkSync(firstDir.dirs.state, alias);
+  secondDir.cfg.stateDir = alias;
+  fs.rmdirSync(secondDir.dirs.config);
+  fs.writeFileSync(secondDir.file, JSON.stringify(secondDir.cfg));
+
+  const first = await startEdwind(firstDir);
+  try {
+    await assert.rejects(async () => {
+      const unexpected = await startEdwind(secondDir);
+      await stopEdwind(unexpected, 'SIGKILL');
+    }, /stateDir.*(locked|in use)/i);
+    assert.equal(fs.existsSync(secondDir.dirs.config), false, 'the contender did not initialize its config directory');
+    assert.equal(fs.existsSync(secondDir.cfg.socket), false);
+  } finally { await stopEdwind(first, 'SIGKILL'); }
+  assert.equal(first.signalCode, 'SIGKILL');
+  const restarted = await startEdwind(secondDir);
+  await stopEdwind(restarted);
+});
+
+for (const privateStore of [false, true]) {
+  test(`stateDir atomic write (${privateStore ? 'private store' : 'state file'}) syncs both inodes and surfaces ENOSPC`, t => {
+    const d = makeDir();
+    t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+    const store = privateStore ? new PrivateStore(new Authority(d.cfg)) : null;
+    const dir = store?.dir ?? d.dirs.state, file = path.join(dir, 'entry.md');
+    const write = (text: string) => store ? store.write('entry.md', text) : writeAtomic(file, text);
+    fs.writeFileSync(file, 'prior', { mode: 0o600 });
+    const fsync = fs.fsyncSync;
+    let fail: 'file' | 'directory' | undefined;
+    let previous = 'prior', replacement = 'first';
+    const calls: string[] = [];
+    t.mock.method(fs, 'fsyncSync', (fd: number) => {
+      const st = fs.fstatSync(fd);
+      const at = fs.readlinkSync(`/proc/self/fd/${fd}`);
+      const stage = st.isDirectory() ? 'directory' : 'file';
+      calls.push(stage);
+      if (stage === 'file') {
+        assert.equal(st.mode & 0o777, 0o600);
+        assert.equal(path.dirname(at), dir);
+        assert.notEqual(at, file);
+        assert.equal(fs.readFileSync(at, 'utf8'), replacement);
+        assert.equal(fs.readFileSync(file, 'utf8'), previous, 'rename follows file fsync');
+      } else {
+        assert.equal(at, dir);
+        assert.equal(fs.readFileSync(file, 'utf8'), replacement, 'directory fsync follows rename');
+      }
+      if (stage === fail) throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      fsync(fd);
+    });
+    write(replacement);
+    assert.deepEqual(calls, ['file', 'directory']);
+    previous = replacement;
+    for (fail of ['file', 'directory'] as const) {
+      calls.length = 0; replacement = `fail ${fail}`;
+      assert.throws(() => write(replacement), { code: 'ENOSPC' });
+      assert.deepEqual(calls, fail === 'file' ? ['file'] : ['file', 'directory']);
+      assert.equal(fs.readFileSync(file, 'utf8'), fail === 'file' ? previous : replacement);
+      assert.deepEqual(fs.readdirSync(dir), ['entry.md'], 'no abandoned temporary file');
+    }
+  });
+}

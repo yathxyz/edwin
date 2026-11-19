@@ -14,6 +14,7 @@ import os from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
+import { DatabaseSync } from 'node:sqlite';
 import { Authority, configSource, expandHome } from './paths.mts';
 import { Buffers } from './buffers.mts';
 import { Client } from './session.mts';
@@ -187,6 +188,47 @@ export function loadConfig(file: string): Config {
   return out;
 }
 
+/* The kernel owns the live AF_UNIX listener. Pathname sockets work across network namespaces, and the
+   directory fd keeps the address short even for a deep stateDir. SIGKILL leaves a dead socket name:
+   serialize its probe/unlink/bind with a short SQLite filesystem transaction (no PID or stale timeout).
+   Don't use a POSIX database lock for the lifetime lock: closing an unrelated reader of its inode in
+   this same process can release it. No server code is running yet while we hold the startup transaction. */
+async function lockStateDir(dir: string): Promise<void> {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const fd = fs.openSync(dir, fs.constants.O_DIRECTORY);
+  const root = `/proc/self/fd/${fd}`, addr = `${root}/.edwind-owner.sock`;
+  const busy = () => new Error('stateDir is already in use');
+  try {
+    const gate = new DatabaseSync(`${root}/.edwind-startup-lock`);
+    try {
+      try { gate.exec('BEGIN EXCLUSIVE'); }
+      catch (e) { if (e.errcode === 5) throw busy(); throw e; } // SQLITE_BUSY
+      const entry = fs.lstatSync(addr, { throwIfNoEntry: false });
+      if (entry) {
+        if (!entry.isSocket()) throw new Error('invalid stateDir owner socket');
+        const live = await new Promise<boolean>((resolve, reject) => {
+          const probe = net.connect(addr);
+          probe.once('connect', () => { probe.destroy(); resolve(true); });
+          probe.once('error', (e: NodeJS.ErrnoException) => {
+            if (e.code === 'ECONNREFUSED' || e.code === 'ENOENT') resolve(false); else reject(e);
+          });
+        });
+        if (live) throw busy();
+        fs.rmSync(addr, { force: true });
+      }
+      const owner = net.createServer(socket => socket.destroy());
+      await new Promise<void>((resolve, reject) => {
+        owner.once('error', reject);
+        owner.listen(addr, () => { owner.removeListener('error', reject); resolve(); });
+      });
+      // Keep ownership through shutdown callbacks and late writes, not just until the edit socket closes.
+      owner.unref();
+      owner.once('close', () => fs.closeSync(fd));
+      process.once('exit', () => owner.close());
+    } finally { gate.close(); }
+  } catch (e) { fs.closeSync(fd); throw e; }
+}
+
 /* ---------- the server ---------- */
 export class Server {
   declare cfg: Config;
@@ -235,13 +277,13 @@ export class Server {
     /* Told each client that disconnected (onDisconnect). */
     this.disconnects = [];
     this.started = Date.now();
-    fs.mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(cfg.configDir, { recursive: true, mode: 0o700 });
-    this.image = new ImageLog(path.join(cfg.stateDir, 'image.jsonl'));
-    this.image.ensureEpoch(() => randomId(8));
   }
   /* Load Edwin's core headless and boot it (host-node.cts), then replay the image log (R4.19) and the journals. */
   async start() {
+    await lockStateDir(this.cfg.stateDir);
+    fs.mkdirSync(this.cfg.configDir, { recursive: true, mode: 0o700 });
+    this.image = new ImageLog(path.join(this.cfg.stateDir, 'image.jsonl'));
+    this.image.ensureEpoch(() => randomId(8));
     const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
     const storageFile = path.join(this.cfg.stateDir, 'storage.json');
     /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
