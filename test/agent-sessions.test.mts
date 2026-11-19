@@ -404,7 +404,7 @@ test('host answers require the exact request kind and epoch, accept only offered
   t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
   const state = (await c.call('agent-session-state', ['host_answers'])).value;
   const shown = state.pending.find((p: { req: number }) => p.req === permission.seq);
-  const answer = { req: shown.req, epoch: shown.epoch, outcome: { outcome: 'selected', optionId: 'once' } };
+  const answer = { req: shown.req, epoch: shown.epoch, requestKey: shown.requestKey, outcome: { outcome: 'selected', optionId: 'once' } };
   assert.equal(shown.epoch, session.createdAt);
   for (const body of [{ ...answer, req: undefined }, { ...answer, req: '1' }]) {
     assert.match((await c.call('agent-session-permission', ['host_answers', body])).error.report, /exact.*request id/i);
@@ -421,9 +421,10 @@ test('host answers require the exact request kind and epoch, accept only offered
   assert.equal(hub.calls.filter(call => call.method === 'POST').length, 0, 'invalid captures never reach a mutation route');
   assert.equal((await c.call('agent-session-permission', ['host_answers', answer])).error, undefined);
   const sent = hub.calls.filter(call => call.path.endsWith('/permission'));
-  assert.equal(sent.length, 1); assert.deepEqual(sent[0].body, answer);
+  assert.equal(sent.length, 1); assert.deepEqual(sent[0].body, { req: answer.req, epoch: answer.epoch, outcome: answer.outcome });
   assert.match((await c.call('agent-session-permission', ['host_answers', answer])).error.report, /already|resolved/i);
-  const response = { req: elicitation.seq, epoch: session.createdAt, response: { action: 'accept', content: { count: 2.5 } } };
+  const form = state.pending.find((p: { req: number }) => p.req === elicitation.seq);
+  const response = { req: form.req, epoch: form.epoch, requestKey: form.requestKey, response: { action: 'accept', content: { count: 2.5 } } };
   assert.match((await c.call('agent-session-elicitation', ['host_answers', { ...response, req: permission.seq }])).error.report, /already|resolved/i);
   assert.equal((await c.call('agent-session-elicitation', ['host_answers', response])).error, undefined);
   assert.match((await c.call('agent-session-elicitation', ['host_answers', response])).error.report, /already|resolved/i);
@@ -437,10 +438,42 @@ test('host answers require the exact request kind and epoch, accept only offered
     }
     await handle(req, res);
   };
-  const refused = await c.call('agent-session-permission', ['host_answers', { req: next.seq, epoch: session.createdAt, outcome: { outcome: 'cancelled' } }]);
+  const detail = (await c.call('agent-session-request', ['host_answers', next.seq, session.createdAt])).value;
+  const refused = await c.call('agent-session-permission', ['host_answers', { req: next.seq, epoch: session.createdAt, requestKey: detail.requestKey, outcome: { outcome: 'cancelled' } }]);
   assert.match(refused.error.report, /409.*already_resolved.*competing answer \[redacted\]/);
   assert.equal(attempts, 1); assert.ok(!JSON.stringify(refused).includes(hub.token));
 });
+
+for (const kind of ['permission', 'elicitation'] as const) {
+  test(`same-epoch request reuse: a ${kind} answer is bound to the displayed content`, async t => {
+    const { hub, c } = await reviewFixture(t), sid = 'request_reset', session = hub.add(sid);
+    const question = (path: string) => kind === 'permission'
+      ? { toolCall: { title: 'Read file', rawInput: { path } }, options: [{ optionId: 'once', name: 'Allow once' }] }
+      : { request: { mode: 'url', message: 'Confirm request', url: `https://service.example.invalid${path}` } };
+    const first = hub.append(sid, { e: kind, ...question('/old') });
+    hub.append(sid, { e: 'turn_end', stopReason: 'end_turn' });
+    const details = [sid, first.seq, session.createdAt], shown = (await c.call('agent-session-request', details)).value;
+    const body = { req: shown.req, epoch: shown.epoch, ...(kind === 'permission' ? { outcome: { outcome: 'selected', optionId: 'once' } } : { response: { action: 'accept' } }) };
+    // Rewind the journal under the same session, reusing even the title, timestamp and offered choice.
+    hub.journals.set(sid, [{ ...first, ...question('/new') }]);
+    session.acp.headSeq = first.seq; session.updatedAt++; hub.emit('session', session);
+    const stale = await c.call('agent-session-' + kind, [sid, { ...body, requestKey: shown.requestKey }]);
+    assert.match(stale.error?.report || '', /request.*changed/i);
+    const missing = await c.call('agent-session-' + kind, [sid, body]);
+    assert.ok(missing.error, 'a request reference without its content identity must not act');
+    assert.equal(hub.calls.filter(call => call.method === 'POST').length, 0);
+    const fresh = (await c.call('agent-session-request', details)).value;
+    assert.notEqual(fresh.requestKey, shown.requestKey);
+    // The summary and the daemon's cached replay may still look current after an unobserved reset.
+    hub.journals.set(sid, [{ ...first, ...question('/different-but-same-head') }]);
+    const cached = await c.call('agent-session-' + kind, [sid, { ...body, requestKey: fresh.requestKey }]);
+    assert.match(cached.error?.report || '', /request.*changed/i);
+    assert.equal(hub.calls.filter(call => call.method === 'POST').length, 0);
+    hub.journals.set(sid, [{ ...first, ...question('/new') }]);
+    assert.equal((await c.call('agent-session-' + kind, [sid, { ...body, requestKey: fresh.requestKey }])).error, undefined);
+    assert.deepEqual(hub.calls.find(call => call.method === 'POST')!.body, body, 'the Edwin content identity stays local');
+  });
+}
 
 test('a summary-only incarnation reset immediately clears stale controls while its new journal replay is in flight', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'token');

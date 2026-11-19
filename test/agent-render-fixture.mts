@@ -35,7 +35,7 @@ export function transcriptFixture(): TranscriptReply {
   ] };
 }
 export function sessionsFixture() {
-  const row = (sid: string, state: string, updatedAt: number) => ({ sid, kind: 'acp', host: 'ex44', cwd: '/work/session-config', state, alive: !['done', 'exited'].includes(state), createdAt: 100, updatedAt,
+  const row = (sid: string, state: string, updatedAt: number) => ({ sid, kind: 'acp', host: 'host-a', cwd: '/work/session-config', state, alive: !['done', 'exited'].includes(state), createdAt: 100, updatedAt,
     acp: { agent: 'omp', title: '', activity: 'none', pending: [] as { req: number; kind: string; title: string }[], headSeq: 0 } });
   const waiting = row('needs-answer', 'running', 1); waiting.acp.title = 'Approve the browser check'; waiting.acp.pending.push({ req: 7, kind: 'permission', title: 'Run browser' });
   const running = row('api_14e7_live', 'running', 2); running.acp.title = ('A long activity summary with several paragraphs.\n\n' + 'More detail. ').repeat(36); running.acp.activity = 'turn';

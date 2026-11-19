@@ -165,14 +165,15 @@ async function fieldValue(name: string, schema: Json, required: boolean): Promis
   if (schema.type && schema.type !== 'string') signal('user-error', `Unsupported elicitation field type: ${schema.type}`);
   return v;
 }
-CMD('agent-session-answer', '', '', 'Answer a pending permission or elicitation globally, capturing its exact request id and epoch. URLs are shown in full and never opened.', async () => {
+CMD('agent-session-answer', '', '', 'Answer the displayed permission or elicitation while its request content is still current. URLs are shown in full and never opened.', async () => {
   const pending = await rpc('agent-session-pending') as Json[];
   if (!pending.length) signal('user-error', 'No pending agent requests');
   const labels = pending.map(p => `${p.sid} #${p.req} ${p.kind}: ${p.title || ''}`);
   const chosen = pending.length === 1 ? pending[0] : pending[labels.indexOf(await Ed.readMini('Pending request: ', '', () => labels, { require: true }))];
   const request = await rpc('agent-session-request', [chosen.sid, chosen.req, chosen.epoch]) as Json;
-  if (request.epoch !== chosen.epoch || (request.req !== undefined && request.req !== chosen.req)) signal('user-error', 'Agent session was replaced; refresh pending requests');
-  const captured = { req: chosen.req, epoch: chosen.epoch }, kind = request.kind || request.e || chosen.kind;
+  if (request.epoch !== chosen.epoch || request.req !== chosen.req || request.kind !== chosen.kind || typeof request.requestKey !== 'string')
+    signal('user-error', 'Agent request changed; refresh pending requests');
+  const captured = { req: request.req, epoch: request.epoch, requestKey: request.requestKey }, kind = request.kind;
   if (kind === 'permission') {
     const previous = Ed.winConfig();
     try {

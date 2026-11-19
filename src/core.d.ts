@@ -738,7 +738,7 @@ interface EdAgentSessionState {
   configOptions: unknown;
   usage: unknown;
   sessionInfo: unknown;
-  pending: Record<string, unknown>[];
+  pending: Array<Record<string, unknown> & { sid: string; req: number; kind: 'permission' | 'elicitation'; epoch: number; requestKey: string }>;
 }
 
 /* A shared buffer's sync state (sync.ts). */

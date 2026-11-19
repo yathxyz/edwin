@@ -1063,12 +1063,12 @@ AS-C19/C20 fixtures and a served-frame/CLI smoke cover the real shapes; the dire
 | AS1.5 | Journal replay uses epoch plus seq, skips duplicates, handles reset and pinned pending requests, and follows changed headSeq through `events?since=N`. Structure is editor metadata, not Markdown parsing. Prompts and user/assistant messages start open regardless of length; thoughts, tools, their output and diffs start folded to one line. Only current plans are presented, open. Prompt navigation is unaffected by headings or fences inside a prompt. |
 | AS1.6 | Streaming uses sequenced edits without undo groups; point and window positions away from the changed end stay put. Every available event is retained, not summarized or dropped; oversized input/rendering follows the explicit AS1.16 limits. Reopening reconstructs from the hub journal. Measure a long replay and record event count, bytes, open time and folded visible lines. |
 | AS1.7 | Transcript commands unfold, visit a tool's file and line, show its diffs, recall an immutable earlier prompt into a new draft, prompt quickly, cancel, revive, set mode and set a config option (`POST /config {id,value}`). Report 404/405/501 from config as unsupported by this hub. |
-| AS1.8 | Pending permissions and elicitations are announced to frames and reachable globally, not just at point. The picker, authoritative detail request and answer retain the same sid/createdAt/req. Permission details show session, incarnation, request, tool and input before offered outcomes. Form elicitation supports string, number, boolean and string-array values; URLs are shown in full and never auto-opened. Stale/replaced/resolved replies fail, not retarget. |
+| AS1.8 | Pending permissions and elicitations are announced to frames and reachable globally. The picker and details retain sid/createdAt/req; the answer also retains the displayed request's `requestKey`. Permission details show session, incarnation, request, tool and input before offered outcomes. Form elicitation supports string, number, boolean and string-array values; URLs are shown in full and never auto-opened. Stale/replaced/resolved replies fail, not retarget. |
 | AS1.9 | Compose in an ordinary shared Markdown buffer with a prompt minor mode: `C-c C-c` sends when steering is enabled, `C-c C-k` abandons the view, retaining the draft. Drafts survive buffer kills and daemon restart; their destinations persist as `{sid,epoch:createdAt}`. Persist a new draft's editor-journal index before exposing it, so acknowledged edits remain discoverable after a crash even if its Markdown write fails. Earlier prompts stay read-only. Only unsent and definitively refused destinations remain eligible in a multi-send. |
 | AS1.10 | Attach files as ACP resource links or embedded resources; attach regions and buffers as embedded resources, not pasted text. Preview is the exact JSON blocks and destinations that send uses. Persist attachments with the draft; named prompts can be saved, listed and reused, and one draft can target several sessions. |
 | AS1.11 | Any attached terminal/browser/card may open `name:*Agent: SID*` after `agent-session-open SID`; that command returns its canonical buffer id. Browser `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)` show it; terminal `edwinclient -e '(agent-session-open "SID")'` materialises it and a frame visits its returned name (or runs `M-x agent-session-open`). No second page-side API token. |
 | AS1.12 | A host page needs no Ctrl/Meta keys or Edwin minibuffer. Every transcript presentation action and every session mutation is a named command with explicit buffer/session arguments, through `Ed.agentSessions.rpc`. Presentation stays local; journal reads and mutations stay daemon-owned. Host text-field prompts use the direct text endpoint without creating a draft buffer. |
-| AS1.13 | A host can read a session buffer's pending requests, offered outcomes/forms/URLs, incarnation, state, mode and config options, and subscribe to changes. Reply with the req and epoch actually shown, never a newly fetched replacement. A stale incarnation or no-longer-pending request fails; a page must refresh its controls rather than silently answering a different question. |
+| AS1.13 | A host can read a session buffer's pending requests, offered outcomes/forms/URLs, incarnation, state, mode and config options, and subscribe to changes. Reply with the req, epoch and requestKey captured when the control was drawn. A stale incarnation, changed question or no-longer-pending request fails; refresh and review rather than silently answering a different question. |
 | AS1.14 | Browser taps use the existing frame input route: a tap places point, tapping the rendered fold marker or double-tapping a foldable transcript line toggles its structural fold. Touch scrolling never places/clamps point or becomes a tap, and retains tail-follow eligibility. No agent-only gesture listeners or second renderer. |
 | AS1.15 | Every action based on displayed hub-session data carries sid and the shown `createdAt` (called `epoch` on Edwin's wire). Detail/answer, tool location/seq, recall, quick text, mode/config/cancel/remove/revive and durable targets reject a mismatch with “session was replaced”. A legacy SID-only draft is unbound and requires explicit retargeting; it never silently binds after restart. |
 | AS1.16 | A response body is at most **32 MiB** and an SSE event, including an unfinished line, at most **1 MiB**, counted as UTF-8 bytes. Abort and visibly report overflow. One rendered journal event contributes at most **1,048,576 UTF-16 code units**, shared by heading, summary, text, JSON and diff; clipping is visibly marked and an incomplete diff is not offered as complete. Preserve surrogate pairs and every ordinary event. No disk-backed history store. At most four journal GETs run concurrently across list facts and transcripts. |
@@ -1186,19 +1186,21 @@ For a particular unselected card, pass `frame.point()` as the position and apply
 | `agent-session-previous-prompt` / `agent-session-next-prompt` | `[id, position]` (position defaults to that buffer's point) | The same result with point at the previous/next structural prompt. No such prompt is a rejected `user-error`. |
 | `agent-session-recall` | `[sid, promptSeq, epoch]` | Canonical id of a new durable prompt draft. Get seq and epoch from the displayed `buffer.meta.locals.agentSession`; no Markdown parsing. |
 | `agent-session-state` | `[sid]` | The state snapshot described below, refreshed from the daemon/hub. |
-| `agent-session-request` | `[sid, req, epoch]` | Authoritative pending request details, including tool/input or elicitation form/URL and offered choices. Reject a replaced incarnation before fetching/using another request. |
+| `agent-session-request` | `[sid, req, epoch]` | Current pending request details, including an opaque `requestKey`, tool/input or elicitation form/URL, and offered choices. Reject a replaced incarnation before fetching/using another request. |
 | `agent-session-location` | `[{sid, epoch, seq, location}]` | Canonical file buffer id after validating the structural tool event/location and local host; rejects replacement before filesystem access. |
-| `agent-session-permission` | `[sid, {req, epoch, outcome}]` | Hub JSON acknowledgement. `outcome` is `{outcome:'selected', optionId}` from the shown options, or `{outcome:'cancelled'}`. |
-| `agent-session-elicitation` | `[sid, {req, epoch, response}]` | Hub JSON acknowledgement. `response` is `{action:'accept', content:{...}}`, `{action:'decline'}` or `{action:'cancel'}`; use the shown form schema. URL requests remain explicit and are never automatically opened. |
+| `agent-session-permission` | `[sid, {req, epoch, requestKey, outcome}]` | Hub JSON acknowledgement. `outcome` is `{outcome:'selected', optionId}` from the shown options, or `{outcome:'cancelled'}`. |
+| `agent-session-elicitation` | `[sid, {req, epoch, requestKey, response}]` | Hub JSON acknowledgement. `response` is `{action:'accept', content:{...}}`, `{action:'decline'}` or `{action:'cancel'}`; use the shown form schema. URL requests remain explicit and are never automatically opened. |
 | `agent-session-cancel` / `agent-session-remove` / `agent-session-revive` | `[sid, {epoch}]` | Hub JSON acknowledgement (remove ends the session; cancel only cancels its turn). |
 | `agent-session-mode` | `[sid, {epoch, modeId}]` | Hub JSON acknowledgement; choose from the shown `modes.availableModes`. |
 | `agent-session-config` | `[sid, {epoch, id:optionId, value}]` | Hub JSON acknowledgement; choose from the shown `configOptions`. An old hub's 404/405/501 rejects with an explicit unsupported-config explanation. |
 | `agent-session-prompt` | `[sid, {epoch, text}]` | Hub JSON acknowledgement; direct text without a draft. The host retains its text until success and must not automatically retry an ambiguous/lost reply. |
 
 RPC failure rejects with Edwin's `user-error` condition and its redacted report. Permission/elicitation
-answers require the exact shown req, kind and epoch; an already resolved/replaced request or stale
-incarnation is an error, never success or retargeting. The hub still arbitrates an answer racing another
-client after Edwin's check. Observed records cannot be steered. Mutation acknowledgements are the hub's
+answers require the `requestKey` captured with the exact request the user saw. The daemon rereads the
+pending journal event and rejects a changed tool, input, option, URL or form even if a journal reset
+reused the same request id, kind and epoch. Refresh and review the new request; do not retry with a new
+key automatically. The hub receives the normal `req` and `epoch`, not Edwin's key: only the hub can
+arbitrate changes between the final check and the write. Observed records cannot be steered. Mutation acknowledgements are the hub's
 JSON, `{}` in the stub; they do not fabricate a new local mode/state before the journal/summary confirms it.
 The local replacement report is `Agent session was replaced (stale incarnation); refresh and explicitly select it again`;
 resolved requests report `Request is already resolved or no longer pending; refresh the session`.
@@ -1208,8 +1210,8 @@ Other hub refusals retain their HTTP status/code in the redacted report.
 `{sid, bufferId, epoch, state, steerable, connection, modeId, modes, configOptions, usage, sessionInfo, pending}`.
 `usage` and `sessionInfo` are the latest main-session update payloads without `sessionUpdate`,
 or `null` when unavailable; they are also under `buffer.meta.locals.agentSession`.
-`pending` contains full permission options or elicitation request/schema/URL plus `req`, `kind` and
-`epoch`, not just the registry's short title. Treat snapshots as read-only. Incarnation changes clear
+`pending` contains full permission options or elicitation request/schema/URL plus `req`, `kind`,
+`epoch` and `requestKey`, not just the registry's short title. Treat snapshots as read-only. Incarnation changes clear
 obsolete choices; disconnected/removed/observed sessions are not steerable. `connection` is the daemon's
 hub status string, not an invented agent state. A page can additionally listen to `Ed.sync.on('state', ...)`
 for its own connection to edwind.
@@ -1221,7 +1223,7 @@ const dispose = Ed.agentSessions.onChange(buffer, snapshot => {
 // A permission button retains the request it was drawn for:
 const shown = Ed.agentSessions.state(buffer).pending.find(p => p.kind === 'permission');
 await Ed.agentSessions.rpc('agent-session-permission', [
-  shown.sid, { req: shown.req, epoch: shown.epoch,
+  shown.sid, { req: shown.req, epoch: shown.epoch, requestKey: shown.requestKey,
     outcome: { outcome: 'selected', optionId: shown.options[0].optionId } }
 ]);
 dispose(); // when the card is unmounted
@@ -1247,7 +1249,7 @@ the next journal append resumes tail following if point was at the tail.
 | AS-C8 | A distinctive stub token, including one echoed maliciously in an error/record, appears in no buffer, wire result or daemon log; opening its file (including a symlink) is refused. |
 | AS-C9 | Run affected Node suites/type checks at stage boundaries; exercise an actual model frame's displayed folded surface and keys. At the end run the repository's full available suite once and quote its final lines. No external network or real credentials. |
 | AS-C10 | A host RPC targets an explicit transcript while another buffer is current: toggle/open/close folds, navigate structural prompts despite injected headings/fences, recall exact immutable blocks, send text without a draft, cancel and set mode/config. Invalid offsets and prompt boundaries fail plainly. |
-| AS-C11 | Read/subscription exposes complete offered permission/elicitation and mode/config data; state-only summaries notify without text edits. Replies use the captured req/epoch, stale/resolved/replaced requests fail, incarnation reset clears choices, and unsubscribe stops notifications. |
+| AS-C11 | Read/subscription exposes complete offered permission/elicitation and mode/config data; state-only summaries notify without text edits. Replies use the captured req/epoch/requestKey. Changed content fails even after same-epoch request reuse; incarnation reset clears choices, and unsubscribe stops notifications. |
 | AS-C12 | Browser-frame tests dispatch actual DOM touch events for tap point, marker/double-tap folds, scroll without point movement (then live tail append), cancelled/multi-touch gestures, and listener teardown. Ordinary buffers use the same input route. |
 | AS-C13 | Reuse the same SID/req under a new createdAt while frame pickers are open and across a retained-draft restart. Details, answers, quick sends, mode/config, recall, file jumps and draft sends reject replacement before action. Permission UI shows authoritative tool/input. Explicit retarget alone binds a new incarnation. |
 | AS-C14 | Both Content-Length and chunked responses exceed 32 MiB; an unfinished SSE event exceeds 1 MiB: connections close, refusal is visible and edwind remains usable. Render huge prompts/outputs/plans/diffs/Unicode with the shared per-event budget; incomplete diffs are not complete views. Saturated list facts and transcript opens never exceed four journal GETs. |
@@ -1388,7 +1390,7 @@ agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header out
   ```
 
   The failures are `debug.test.mts` R4.50/R4.48: `server/debug.mts:343` requires `/edwin/` in a captured
-  absolute source path, but this worktree is `/home/yanni/proj/edwin-wt/agent-sessions`.
+  absolute source path, but this worktree's path had no such component.
   `nix/checks.nix:30` documents its check tree's required `edwin` name. Copying the same sources and running
   only `node --test test/debug.test.mts` in `/tmp/edwin-agent-gate.*/edwin` gave 7 passed, 0 failed.
   No debugger code/test was changed. An earlier full-run attempt was cancelled before completion when

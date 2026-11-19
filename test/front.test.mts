@@ -28,7 +28,9 @@ fs.writeFileSync(path.join(web, '.hidden'), 'no');
 /* A fake edwind: every line it reads comes back as `echo:LINE`; it greets each connection first. */
 const sockPath = path.join(dir, 'edit.sock');
 const peers = new Set<net.Socket>();
+let daemonConnections = 0;
 const edwind = net.createServer(s => {
+  daemonConnections++;
   peers.add(s);
   s.on('close', () => peers.delete(s));
   s.on('error', () => {}); // the front drops connections it ends; the greeting may meet a closed peer
@@ -105,7 +107,9 @@ test('the floor: secret, Host and Origin on requests', async () => {
 
 test('the floor on the upgrade: Origin required and exact', async () => {
   await assert.rejects(open(good).opened, /HTTP 403/, 'no Origin');
+  const before = daemonConnections;
   await assert.rejects(open({ ...good, origin: 'https://evil.example' }).opened, /HTTP 403/, 'wrong Origin');
+  assert.equal(daemonConnections, before, 'the foreign-origin page did not even connect to the daemon dispatcher');
   await assert.rejects(open({ host: 'edwin.example', origin: ORIGIN }).opened, /HTTP 403/, 'no secret');
   await assert.rejects(open({ ...good, origin: ORIGIN }, '/other').opened, /HTTP 404/, 'only /edit upgrades');
 });

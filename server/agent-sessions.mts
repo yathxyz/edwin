@@ -4,6 +4,7 @@ import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
 import { randomId } from './journal.mts';
+import { sha256 } from './files.mts';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
 import { diffOps } from './watch.mts';
 import { Transcript } from './agent-transcript.mts';
@@ -182,7 +183,16 @@ export class AgentSessions implements AgentBackend {
           if (generation !== this.generation) { reject(new Error('Agent hub configuration changed during the request')); return; }
           const status = res.statusCode || 0;
           this.server.log.debug('agent-api', { method, status });
-          let answer: Json; try { answer = this.clean(JSON.parse(Buffer.concat(chunks).toString())); } catch { reject(new Error(`Agent hub answered ${status} with invalid JSON`)); return; }
+          let answer: Json;
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString());
+            // Identify the original pinned request before redaction; never accept a hub-provided key.
+            if (method === 'GET' && route.includes('/events?') && Array.isArray(parsed?.events)) {
+              for (const e of parsed.events) if (e?.e === 'permission' || e?.e === 'elicitation')
+                e.requestKey = sha256(JSON.stringify([parsed.sid, parsed.epoch, e]));
+            }
+            answer = this.clean(parsed);
+          } catch { reject(new Error(`Agent hub answered ${status} with invalid JSON`)); return; }
           if (status >= 200 && status < 300) {
             if (method === 'GET' && (route === 'sessions' || route === 'observed') && Array.isArray(answer?.sessions))
               answer.sessions = answer.sessions.filter((s: Json) => validSid(route === 'sessions' ? s?.sid : s?.id));
@@ -522,16 +532,23 @@ export class AgentSessions implements AgentBackend {
     if (this.sessions.has(sid) || !this.transcripts.has(sid)) await this.open(sid);
     return this.snapshot(sid);
   }
+  async pendingRequest(sid: string, req: number, epoch: number, kind?: string): Promise<Json> {
+    if (!Number.isSafeInteger(req) || req < 1) throw new Error('An exact pending request id is required');
+    const s = await this.requireSession(sid, expectedEpoch(epoch));
+    const offered = s.acp?.pending?.find((p: Json) => p.req === req && (!kind || p.kind === kind));
+    if (!offered) throw new Error('Request is already resolved or no longer pending; refresh the session');
+    // Pending requests are pinned even at the current head. Read the pin itself: the folded transcript
+    // deduplicates seqs and may not yet have observed a same-incarnation journal rewind.
+    const journal = await this.readEvents(sid, s.acp.headSeq, () => !this.stopped);
+    if (journal.epoch !== epoch) throw replaced();
+    const event = journal.events.find(e => e.seq === req && e.e === offered.kind);
+    if (!event || journal.head !== s.acp.headSeq) throw new Error('Request changed or is no longer pending; refresh the session');
+    return { ...event, sid, req, kind: offered.kind, epoch, status: 'pending' };
+  }
   async answer(sid: string, kind: 'permission' | 'elicitation', body: Json): Promise<Json> {
-    sidOf(sid);
-    if (!body || typeof body !== 'object' || !Number.isInteger(body.req) || body.req < 1) throw new Error('An exact pending request id is required');
-    const epoch = expectedEpoch(body.epoch), s = await this.requireSession(sid, epoch);
-    if (!s.acp?.pending?.some((p: Json) => p.req === body.req && p.kind === kind)) throw new Error('Request is already resolved or no longer pending; refresh the session');
-    await this.open(sid, epoch);
-    const state = this.snapshot(sid);
-    if (epoch !== state.epoch) throw replaced();
-    const pending = state.pending.find((p: Json) => p.req === body.req && p.kind === kind);
-    if (!pending) throw new Error('Request is already resolved or no longer pending; refresh the session');
+    const pending = await this.pendingRequest(sid, body?.req, body?.epoch, kind);
+    if (typeof body.requestKey !== 'string' || body.requestKey !== pending.requestKey)
+      throw new Error('Request changed; refresh and review its details before answering');
     if (kind === 'permission') {
       const outcome = body.outcome;
       if (!outcome || (outcome.outcome !== 'cancelled' && (outcome.outcome !== 'selected' ||
@@ -539,7 +556,8 @@ export class AgentSessions implements AgentBackend {
         throw new Error('Permission outcome must select an offered option or cancel the request');
       }
     }
-    return this.request('POST', `sessions/${sid}/${kind}`, body);
+    const wire = { req: pending.req, epoch: pending.epoch, ...(kind === 'permission' ? { outcome: body.outcome } : { response: body.response }) };
+    return this.request('POST', `sessions/${sid}/${kind}`, wire);
   }
   async open(sid: string, epoch?: number, followingView?: number): Promise<string> {
     sidOf(sid);
@@ -659,12 +677,7 @@ export async function install(server: Server) {
   cmd('agent-session-details', async a => { await hub.open(a[0], a[1]); return hub.transcripts.get(a[0])?.controls(); });
   cmd('agent-session-state', a => hub.state(a[0]));
   cmd('agent-session-pending', () => [...hub.sessions.values()].flatMap(s => (s.acp?.pending || []).map((p: Json) => ({ ...p, sid: s.sid, epoch: s.createdAt }))));
-  cmd('agent-session-request', async a => {
-    await hub.open(a[0], expectedEpoch(a[2]));
-    const r = hub.snapshot(a[0]).pending.find((p: Json) => p.req === a[1]);
-    if (!r) throw new Error('Request is no longer pending; refresh the session');
-    return { ...r, sid: a[0] };
-  });
+  cmd('agent-session-request', a => hub.pendingRequest(a[0], a[1], a[2]));
   cmd('agent-session-location', async a => {
     const { sid, epoch, seq, location } = a[0], s = await hub.requireSession(sid, expectedEpoch(epoch));
     const t = hub.transcripts.get(sid), span = t && t.epoch === epoch ? t.render().spans.find(p => p.seq === seq && p.kind === 'tool') : undefined;
