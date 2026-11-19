@@ -129,12 +129,14 @@ test('R8.12 after a disk revert an anchor is relocated by prefix and quote, anno
   await a.open(id);
   await a.call('anchor-add', [id, 8, 'ink', 'ink-3']); // the start of "three"
   await a.call('anchor-add', [id, 0, null, 'top']);
-  await a.next(m => m.t === 'meta' && m.buf === id); await sync(a); a.queue = a.queue.filter(m => m.t !== 'meta');
+  // Anchor-add broadcasts can still be queued. Match the version of the disk batch, not the anchor count.
+  const metaAt = (ver: number) => a.next(m => m.t === 'meta' && m.buf === id && m.ver === ver);
   // The lines above change and move: the diff alone could leave the anchor on another line.
   externalWrite(p, 'four\ntwo\nthree\none\nzero\n');
   const ed = await a.next(m => m.t === 'edits' && m.buf === id);
   assert.deepEqual(ed.by, { kind: 'disk' });
-  const meta = await a.next(m => m.t === 'meta' && m.buf === id && m.anchors.length === 2);
+  const meta = await metaAt(ed.ver);
+  assert.equal(meta.anchors.length, 2);
   const text = 'four\ntwo\nthree\none\nzero\n';
   assert.equal(meta.anchors.find((x: Msg) => x.id === 'ink-3').pos, text.indexOf('three'));
   const top = meta.anchors.find((x: Msg) => x.id === 'top').pos;
@@ -144,12 +146,11 @@ test('R8.12 after a disk revert an anchor is relocated by prefix and quote, anno
   // A modified buffer: the three-way merge is a disk batch as well.
   await a.edit(id, 1, [[0, 'four', 'FOUR']]);
   externalWrite(p, 'four\ntwo\nthree\none\nzero\nfive\n');
-  await a.next(m => m.t === 'edits' && m.buf === id && m.by.kind === 'disk');
+  const merge = await a.next(m => m.t === 'edits' && m.buf === id && m.by.kind === 'disk');
+  const mergedMeta = await metaAt(merge.ver);
   assert.equal((await a.open(id)).text, 'FOUR\ntwo\nthree\none\nzero\nfive\n');
-  // The watcher may see the external write in two parts (two disk batches): read the anchors once the last one landed.
-  let ink3;
-  for (let i = 0; i < 200 && ink3 !== 9; i++) { if (i) await sleep(25); ink3 = (await anchorsOf(a, id)).find((x: Msg) => x.id === 'ink-3').pos; }
-  assert.equal(ink3, 9);
+  assert.equal(mergedMeta.anchors.find((x: Msg) => x.id === 'ink-3').pos, 9);
+  assert.deepEqual(await anchorsOf(a, id), mergedMeta.anchors);
   // The relocation is in the journal: the last anchors line names the current version and the positions.
   // The append is fsynced after the batch is announced, so wait for it instead of a fixed pause.
   let last;
