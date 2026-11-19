@@ -27,7 +27,6 @@ export function reloadGuarded(buffers: Buffers): void {
   const dir = path.join(buffers.stateDir, 'agent-prompts');
   for (const e of [...buffers.index.buffers.values()]) {
     try {
-      if (typeof e.id !== 'string' || !e.id || (e.file != null && typeof e.file !== 'string')) throw refused();
       if (indexedDraft(dir, e)) continue; // the prompt installer alone reads and verifies this journal
       buffers.reloadOne(e);
     } catch (err) {
@@ -36,22 +35,43 @@ export function reloadGuarded(buffers: Buffers): void {
   }
 }
 
+// EACCES opening the backing path does not imply a private inode. A PathError from the
+// authority still means refusal, including when the authority cannot check its own exclusions.
+function inspectBacking(agent: AgentAuthority, file: string): boolean {
+  agent.checkRead(file);
+  try { agent.withRead(file, () => {}, 'inspect'); }
+  catch (e) { if (e.code === 'EACCES') return false; if (e.code !== 'ENOENT') throw e; }
+  return true;
+}
+
+const validId = (id: unknown) => typeof id === 'string' && !!id && !id.includes('\0');
+const validFile = (file: unknown) => file === null ||
+  typeof file === 'string' && path.isAbsolute(file) && !file.includes('\0') && path.normalize(file) === file;
+
 /* Only the prompt installer can recover a store journal. Both the index and the journal must
    identify the same private draft; a stale/corrupt row cannot launder its snapshot into an
    ordinary buffer. A similarly named buffer outside this directory remains ordinary. */
-export function checkRecovery(agent: AgentAuthority, e: IndexEntry, read: JournalContents, file: string | null, expected?: string): void {
+export function checkRecovery(agent: AgentAuthority, e: IndexEntry, read: JournalContents, id: string, file: string | null, expected?: string): boolean {
+  const { header, mv } = read;
+  if (header.jid !== e.jid || !validId(id) || !validId(header.id) || !validFile(header.file) || !validFile(file) ||
+      (file === null) !== (header.file === null) || (e.file != null && !validFile(e.file)) ||
+      mv.some(m => !validId(m.id) || (m.file !== undefined && (!validFile(m.file) || (m.file === null) !== (file === null))))) throw refused();
   const dir = path.join(agent.stateDir, 'agent-prompts');
-  const inside = (f: string | null) => typeof f === 'string' && under(path.resolve(f), dir);
+  const inside = (f: string | null) => typeof f === 'string' && under(f, dir);
   if (expected) {
     if (!agent.promptStore || !indexedDraft(dir, e) || expected !== e.file || file !== expected ||
-        read.header.id !== e.id || read.header.file !== expected || read.mv.some(m => m.id !== e.id || m.file !== expected)) throw refused();
+        header.id !== e.id || header.file !== expected || mv.some(m => m.id !== e.id || m.file !== expected)) throw refused();
     agent.promptStore.withRead(path.basename(expected), () => {});
-  } else if (inside(e.file) || inside(read.header.file) || read.mv.some(m => inside(m.file))) {
+  } else if (inside(e.file) || inside(header.file) || mv.some(m => inside(m.file))) {
     throw refused();
-  } else if (file) {
-    // Check identity before touching snapshots; inspecting an inode needs no content access.
-    try { agent.withRead(file, () => {}, 'inspect'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+  } else if (file && !inspectBacking(agent, file)) {
+    // Only replay local state here, never read the unchecked backing. If the file moved,
+    // the journal must still record a non-excluded origin and an independently checkable history.
+    if (!header.file || (header.file !== file && !inspectBacking(agent, header.file))) throw refused();
+    for (const m of mv) if (m.file && m.file !== file && m.file !== header.file && !inspectBacking(agent, m.file)) throw refused();
+    return false;
   }
+  return true;
 }
 
 export function checkedLive(agent: AgentAuthority, sb: SBuf): SBuf {
@@ -59,7 +79,7 @@ export function checkedLive(agent: AgentAuthority, sb: SBuf): SBuf {
     try {
       const store = agent.promptStore;
       if (store && path.dirname(sb.file) === store.dir) store.checkLive(path.basename(sb.file));
-      else agent.withRead(sb.file, () => {}, 'entry');
+      else inspectBacking(agent, sb.file); // an already loaded buffer can outlive backing permissions
     } catch (e) { if (e.code !== 'ENOENT') throw new ProtoError('refused_path', 'Private file: access refused'); }
   }
   return sb;

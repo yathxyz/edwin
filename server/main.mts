@@ -252,7 +252,7 @@ export class Server {
       const storageFile = path.join(this.cfg.stateDir, 'storage.json');
       /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
       const safe = this.image.bootGuard();
-      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log) });
+      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log, agent) });
       if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
       this.Ed = loadEdwin(host, { mode: 'gen' });
       this.L = (globalThis as any).L; // any: the core sets globalThis.L
@@ -463,9 +463,15 @@ export class Server {
 }
 
 /* Edwin's key-value store, kept as one JSON file in stateDir (settings and recentf; buffers are not in it). */
-function fileStorage(file: string, log: Log) {
+function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
   let map = new Map<string, string>();
-  try { map = new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))); } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
+  if (agent) {
+    try {
+      const text = agent.withRead(file, fd => fs.readFileSync(fd, 'utf8'), 'state');
+      try { map = new Map(Object.entries(JSON.parse(text))); }
+      catch { log.warn('storage', { error: 'Invalid storage JSON' }); }
+    } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
+  } else try { map = new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))); } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
   let timer: NodeJS.Timeout | null = null;
   const flush = () => { timer = null; try { fs.writeFileSync(file, JSON.stringify(Object.fromEntries(map)), { mode: 0o600 }); } catch (e) { log.warn('storage', { error: e.message }); } };
   const schedule = () => { if (!timer) timer = setTimeout(flush, 500); };

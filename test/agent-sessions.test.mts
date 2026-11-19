@@ -362,6 +362,124 @@ test('notes worker: middle rotation hard link stays private during parse, scan a
   assert.deepEqual((await pending).hits.map(hit => hit[0]), [ordinary.id]);
 });
 
+test('configured startup does not read or report protected storage contents', async t => {
+  for (const kind of ['same path', 'symlink', 'hard link', 'ordinary malformed JSON']) await t.test(kind, async t => {
+    const dir = makeDir(), storage = path.join(dir.dirs.state, 'storage.json');
+    t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
+    const tokenFile = kind === 'same path' ? storage : path.join(dir.root, 'credential');
+    // Invalid fixture bytes, never a bearer token, and never printed even on failure.
+    const canary = 'STORAGE_CANARY';
+    fs.writeFileSync(kind === 'ordinary malformed JSON' ? storage : tokenFile, canary);
+    if (kind === 'symlink') fs.symlinkSync(tokenFile, storage);
+    if (kind === 'hard link') fs.linkSync(tokenFile, storage);
+    dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
+    fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+    const child = await startEdwind(dir, { env: { EDWIND_LOG: undefined } }), c = new EditClient(dir.cfg.socket);
+    try {
+      await c.connect();
+      const welcome = await c.hello();
+      const reply = await c.call('status');
+      assert.ok(!JSON.stringify([welcome, reply, c.queue]).includes(canary), 'startup exposed storage bytes on the wire');
+    } finally { c.close(); await stopEdwind(child); }
+    assert.ok(!child.logs.includes(canary), 'startup logged storage bytes');
+    assert.ok(child.logs.includes(kind === 'ordinary malformed JSON' ? 'Invalid storage JSON' : 'Private file: access refused'),
+      'startup must distinguish an access refusal from a parse error');
+  });
+});
+
+test('configured recovery uses trusted journal origins when the backing directory is not searchable',
+  { skip: process.getuid?.() === 0 && 'root bypasses directory search permissions' }, async t => {
+  const dir = makeDir(), parent = path.join(dir.dirs.config, 'not-searchable');
+  const ordinary = path.join(parent, 'ordinary.txt'), privateOrigin = path.join(dir.dirs.config, 'old.txt');
+  const moved = path.join(parent, 'moved.txt'), tokenFile = path.join(dir.root, 'credential');
+  fs.mkdirSync(parent);
+  t.after(() => { fs.chmodSync(parent, 0o700); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  fs.writeFileSync(tokenFile, 'invalid fixture');
+  dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    for (const file of [ordinary, privateOrigin]) {
+      fs.writeFileSync(file, 'base');
+      assert.equal((await c.open(file)).text, 'base');
+      assert.equal((await c.edit(file, 0, [[0, '', 'journal ']])).t, 'ack');
+    }
+    assert.equal((await c.call('rename-file', [privateOrigin, moved])).value?.ok, true);
+  } finally { c.close(); await stopEdwind(child); }
+  const index = JSON.parse(fs.readFileSync(path.join(dir.dirs.state, 'index.json'), 'utf8'));
+  const { jid } = index.buffers.find((row: { id: string }) => row.id === ordinary);
+  fs.unlinkSync(path.join(dir.dirs.state, 'buffers', jid + '.saved'));
+  fs.writeFileSync(ordinary, 'new backing');
+  fs.linkSync(tokenFile, privateOrigin);
+  fs.chmodSync(parent, 0o600);
+  assert.throws(() => fs.statSync(ordinary), { code: 'EACCES' });
+  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    const ids = (await c.call('buffer-list')).value.map((row: { id: string }) => row.id);
+    assert.ok(ids.includes(ordinary), 'the snapshot was not recovered at startup');
+    assert.ok(!ids.includes(moved), 'an excluded journal origin cannot authorize offline recovery');
+    const opened = await c.open(ordinary);
+    assert.equal(opened.text, 'journal base');
+    assert.equal(opened.ver, 1);
+    assert.equal(opened.meta?.modified, true);
+  } finally { c.close(); await stopEdwind(child); }
+});
+
+test('configured recovery takes a jid-only row identity from its journal and still excludes private aliases', async t => {
+  const dir = makeDir(), tokenFile = path.join(dir.root, 'credential');
+  const ordinary = 'name:ordinary', alias = path.join(dir.dirs.config, 'will-be-private');
+  t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
+  fs.writeFileSync(tokenFile, 'invalid fixture');
+  fs.writeFileSync(alias, 'old file');
+  dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    assert.equal((await c.open(ordinary, { create: true })).text, '');
+    assert.equal((await c.open(alias)).text, 'old file');
+    for (const id of [ordinary, alias]) assert.equal((await c.edit(id, 0, [[0, '', 'journal']])).t, 'ack');
+  } finally { c.close(); await stopEdwind(child); }
+  const indexPath = path.join(dir.dirs.state, 'index.json');
+  const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+  index.buffers = index.buffers.map(({ jid }: { jid: string }) => ({ jid }));
+  fs.writeFileSync(indexPath, JSON.stringify(index));
+  fs.unlinkSync(alias); fs.linkSync(tokenFile, alias);
+  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    const ids = (await c.call('buffer-list')).value.map((row: { id: string }) => row.id);
+    assert.ok(ids.includes(ordinary), 'the jid-only row was not recovered');
+    assert.ok(!ids.includes(alias), 'a jid-only row cannot restore a private alias');
+    assert.equal((await c.open(ordinary)).text, 'journal');
+    assert.equal((await c.open(alias)).error?.code, 'refused_path');
+  } finally { c.close(); await stopEdwind(child); }
+});
+
+test('configured rename and delete act on an ordinary self-link, not its target', async t => {
+  const dir = makeDir(), link = path.join(dir.dirs.config, 'loop'), renamed = link + '-renamed';
+  t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
+  fs.symlinkSync('loop', link);
+  dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile: path.join(dir.root, 'absent') };
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    await t.test('rename', async () => {
+      assert.deepEqual((await c.call('rename-file', [link, renamed])).value, { ok: true, src: link, dst: renamed, from: link, to: renamed });
+      assert.throws(() => fs.lstatSync(link), { code: 'ENOENT' });
+      assert.equal(fs.readlinkSync(renamed), 'loop');
+    });
+    await t.test('delete', async () => {
+      const other = link + '-delete'; fs.symlinkSync(path.basename(other), other);
+      assert.deepEqual((await c.call('fs-delete', [{ path: other }])).value, { deleted: true, path: other });
+      assert.throws(() => fs.lstatSync(other), { code: 'ENOENT' });
+    });
+  } finally { c.close(); await stopEdwind(child); }
+});
+
 test('configured ordinary file I/O follows main without admitting private aliases', async t => {
   const dir = makeDir({ writablePaths: [] }), { config, state } = dir.dirs;
   const tokenFile = path.join(dir.root, 'bearer');

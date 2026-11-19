@@ -36,7 +36,7 @@ const arg = (args: unknown[]): Record<string, unknown> => (args[0] && typeof arg
 /* REAL may be written by a file operation: inside a write root and not refused (checkWrite), not one of
    edwind's directories or a write root or anything holding one, and not inside stateDir. */
 function checkOperand(auth: Authority, real: string): void {
-  try { auth.checkWrite(real); } catch (e) { throw bad(e); }
+  try { if (auth.agent) auth.agent.checkWrite(real, 'entry-no-follow'); else auth.checkWrite(real); } catch (e) { throw bad(e); }
   for (const root of new Set([auth.notesDir, auth.stateDir, auth.configDir, ...auth.writeRootsForFlags()])) {
     let r = root; try { r = fs.realpathSync.native(root); } catch (e) { /* not made yet */ }
     if (under(root, real) || under(r, real)) throw new ProtoError('refused_path', `${real}: holds ${root}, a directory edwind is configured with`);

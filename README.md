@@ -139,6 +139,8 @@ edit.sock client.
   named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
   Only configured prompt-store writers take the exclusive lock. Without `agentHub`, startup, recovery
   and live export use the ordinary editor paths; nothing reserves `stateDir/agent-prompts/`.
+  With `agentHub`, startup refuses `storage.json` if it aliases the credential or config file. If an ordinary
+  backing directory loses search permission, recovery uses the checked local journal and snapshot, not the backing file.
   The stock NixOS units do not configure `agentHub`. If you supply an agent-enabled `edit.json` to a
   systemd service, set `RestartPreventExitStatus=73` on that service to stop retrying when another writer owns the store.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through

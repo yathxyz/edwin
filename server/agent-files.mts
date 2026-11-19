@@ -105,8 +105,8 @@ export class AgentAuthority extends Authority {
     if (this.protectedNames.has(real)) throw denied();
     return super.checkRead(real);
   }
-  override checkWrite(real: string): string {
-    try { this.withRead(real, () => {}, 'entry'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  override checkWrite(real: string, kind: 'entry' | 'entry-no-follow' = 'entry'): string {
+    try { this.withRead(real, () => {}, kind); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     return super.checkWrite(real);
   }
   // The directory is reserved even before a writer acquires it, and after shutdown. Compare
@@ -123,15 +123,15 @@ export class AgentAuthority extends Authority {
     return this.promptStore;
   }
   /* No callback may reopen the pathname for its data. */
-  withRead<T>(file: string, use: Reader<T>, kind: 'read' | 'inspect' | 'entry' | 'state' | 'private' | 'private-live' = 'read'): T {
+  withRead<T>(file: string, use: Reader<T>, kind: 'read' | 'inspect' | 'entry' | 'entry-no-follow' | 'state' | 'private' | 'private-live' = 'read'): T {
     const privateEntry = kind === 'private' || kind === 'private-live';
     if (!privateEntry) {
       const store = this.storeFor(path.dirname(file));
       if (store) return store.withRead(path.basename(file), use);
     }
     if (this.protectedNames.has(file)) throw denied();
-    const flags = kind === 'entry' || kind === 'inspect' ? O_PATH : fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
-    const fd = fs.openSync(file, flags | (privateEntry ? fs.constants.O_NOFOLLOW : 0));
+    const flags = kind === 'entry' || kind === 'entry-no-follow' || kind === 'inspect' ? O_PATH : fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
+    const fd = fs.openSync(file, flags | (privateEntry || kind === 'entry-no-follow' ? fs.constants.O_NOFOLLOW : 0));
     try {
       const real = fs.readlinkSync(fdPath(fd));
       // An indirect alias must not turn a private leaf into a generic fd read.

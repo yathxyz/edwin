@@ -211,7 +211,7 @@ export class Buffers {
     }
     const id = last ? last.id : header.id;
     const file = last && last.file !== undefined ? last.file : header.file;
-    if (agent) checkRecovery(agent, e, read, file, privateFile);
+    const inspectable = !agent || checkRecovery(agent, e, read, id, file, privateFile);
     let base: string | null = null, baseWhy = '';
     const saved = jidPath(this.stateDir, e.jid, '.saved'), snap = jidPath(this.stateDir, e.jid, '.snap'), next = jidPath(this.stateDir, e.jid, SNAP_NEW);
     /* A compaction killed after its journal was in place left the snapshot of that journal in SNAP_NEW: it
@@ -223,7 +223,7 @@ export class Buffers {
       if (f !== next) baseWhy = `${path.basename(f)} does not match the journal base`;
     }
     let eol: Eol = 'lf', disk: DiskState | null = null, savedText: string | null = null;
-    if (file) {
+    if (file && inspectable) {
       try { const r = agent ? agent.readText(file) : readText(file); eol = r.eol; disk = diskState(r.stat); savedText = r.text; if (base === null && sha256(r.text) === header.base.sha256) base = r.text; }
       catch (err) { if (err instanceof PathError) throw err; if (err.code !== 'no_buffer') baseWhy = `${file}: ${err.message}`; }
     }
@@ -497,7 +497,10 @@ export class Buffers {
     const srcReal = real(srcAbs);
     let st: fs.Stats;
     try { st = fs.lstatSync(srcReal); } catch (e) { throw new ProtoError('bad_request', osMessage(e)); }
-    try { auth.checkWrite(srcReal); auth.checkWrite(dstReal); } catch (e) { throw new ProtoError('refused_path', e.message); }
+    try {
+      if (auth.agent) { auth.agent.checkWrite(srcReal, 'entry-no-follow'); auth.agent.checkWrite(dstReal, 'entry-no-follow'); }
+      else { auth.checkWrite(srcReal); auth.checkWrite(dstReal); }
+    } catch (e) { throw new ProtoError('refused_path', e.message); }
     /* A root, or a source, may be a symlink (notesDir linked into a synced folder, configDir linked by home-manager):
        both spellings of each are compared, so neither the link nor its target moves. */
     for (const root of [auth.notesDir, auth.stateDir, auth.configDir]) {
