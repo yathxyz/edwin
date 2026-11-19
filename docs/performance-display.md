@@ -2,7 +2,7 @@
 
 The comparisons below use the same page workload and command driver from `tools/display-bench.mts`. Node 24.21.0, Chromium 156.0.8078.79, Linux 6.18.60, Core i5-13500 (6 performance + 8 efficiency cores), shared machine. Viewport 1280×800, device scale 1, 14px local font (fontconfig monospace fallback: DejaVu Sans). Each run starts a new headless Chromium process with a private profile, GPU disabled, private debugging pipe and ephemeral loopback HTTP server. The harness strips TS from the selected root on request and boots a console-kind page/frame. No existing browser, edwind, external service or packaged startup.
 
-**What ships:** exact search, incremental search and the acknowledged-text changes; **no redisplay change**. The entire redisplay path, including the row-cache keys, is byte-identical to `c1fe9eec` (arm **R**, not **V**). No new display measurements were needed. The data below record why neither the shortcut nor the later cache guards were kept.
+**What ships:** the row-cache fix below, without the plain-row shortcut. The older comparisons explain why the shortcut and the earlier cache guards were reverted.
 
 ## Measurement
 
@@ -10,13 +10,31 @@ The comparisons below use the same page workload and command driver from `tools/
 - Scenarios: many-type inserts/deletes in a 40k-line doc scrolled halfway down; many-motion sends 100 down keys while the viewport tracks; long-type edits at col 6000 of ~12.3k-character lines in a 3.15M-unit doc; split-markdown-type uses two windows onto different parts of the same Markdown buffer (lists, inline markup, links, tags); folded-org-motion moves within a headline in Org overview (160 folds × 128 body lines); small-type fits all 24 lines in the viewport; stream-reader-motion is mid-doc, with producer appending to EOF. All truncate-lines; no native grid/desktop, giant wrapped line, IME, or application networking claim. Fixtures measure changed text on every typing key (half inserts and half Backspaces).
 - Renderer CPU is summed `SystemInfo.getProcessInfo` CPU time delta (ms/100 keys, includes renderer work around frame boundaries), not process wall clock. Layout time is the CDP `LayoutDuration` delta for the measured keys. RSS sums private Chromium renderer processes at scenario end (Linux `/proc`, not PSS, peak or tab-only memory). `lexSeg` counts units *offered*, not necessarily analyzed; Markdown also counts classified units. Each run/scenario has 20 warmup keys followed by 100 measured keys, with nearest-rank percentiles.
 
+## Row-cache fix
+
+Ten pairs of runs compared **B** (`d691a98889`, before the fix) with **C** (the cache fix in `bf980f5807`, before the byte-table and key-prefix changes). Order alternated BC, CB. Each browser ran all seven scenarios, with 20 warmup and 100 measured keys per scenario. The benchmark sends a synthetic key through the editor and checks the drawn cursor. DOM time ends when the edit and redisplay are idle; frame time ends at the next animation-frame callback, **before paint**. Neither measures physical keyboard-to-screen latency.
+
+Frame time in milliseconds, **p50 / p95 / p99**. Before and after are medians of the ten runs' percentiles. The last column takes the difference *within each pair* first; positive means slower.
+
+| Scenario | Before | After | Median paired change |
+|---|---:|---:|---:|
+| Large-document typing | 15.40 / 17.70 / 19.20 | 15.55 / 17.50 / 18.75 | +0.25 / −0.20 / −0.45 |
+| Long-line typing | 22.45 / 34.00 / 40.85 | 22.75 / 34.15 / 38.25 | +0.55 / −0.45 / −4.10 |
+| Split Markdown typing | 15.00 / 17.30 / 19.40 | 14.70 / 16.85 / 18.65 | −0.25 / −0.50 / −0.30 |
+| Small-document typing | 15.35 / 17.75 / 19.50 | 15.50 / 17.30 / 19.10 | 0 / −0.75 / +0.10 |
+| Large-document motion | 14.45 / 17.95 / 20.60 | 14.70 / 16.85 / 18.60 | +0.30 / −0.85 / −2.25 |
+| Folded Org motion | 15.10 / 17.10 / 19.15 | 15.05 / 16.70 / 18.40 | +0.05 / −0.55 / −0.80 |
+| Streaming-reader motion | 15.40 / 17.75 / 19.30 | 15.40 / 17.25 / 19.60 | 0 / −0.25 / +0.45 |
+
+Large-document typing reached the next frame later at p50 in **7/10 pairs** (median **+0.25 ms**), despite better p95 and p99. Split Markdown took longer to finish DOM redisplay at p99 in **6/10 pairs** (median **+1.40 ms**), even though its frame p99 did not rise overall. We accepted that tradeoff to fix five wrong-row cases, not as a typing speedup. See `row-cache` in the [per-run measurements](performance-display-pairs.csv) and [paired differences](performance-display-contrasts.csv).
+
 ## Isolating the redisplay change
 
 | Arm | Source served to the browser |
 |---|---|
 | A | Pristine baseline `c1fe9eec` |
 | H | Reviewed branch head `d8c8a65f` |
-| R | H minus the production changes in `409a0fc` and `16fcd79`, in that order. This is the shipped combination: the baseline renderer with H's exact search, incremental search and sync changes. |
+| R | H minus the production changes in `409a0fc` and `16fcd79`, in that order: the renderer used before the row-cache fix, with H's exact search, incremental search and sync changes. |
 | G | Candidate based on H: ordinary rows use per-character classification; only visible text rows ≥8,192 UTF-16 units qualify for plain-row shortcut. No shortcut for styled rows. The reviewed cache separation remains, with a shorter key encoding. |
 | F | Baseline row builder on **all** rows, including long unstyled ones. R plus a render-context guard and HTML-offset distinction to retain row-cache correctness. |
 | V | Rejected guard-only version `270691ef`: R's row builder with altered cache keys and a snapshot check for mutable external lexer class names. No plain-row shortcut. |
@@ -136,7 +154,7 @@ Historical baseline scouting pass (not pooled below): long-type had the largest 
 
 Scrolling remained a separate candidate (283 samples in `getBoundingClientRect`, 41 in `insertBefore` on downward motion). There is no timed prototype showing that changing node reuse or layout decisions pays off. No reconciliation, Markdown lexing or fold semantics were changed.
 
-## Baseline cache issues to file separately
+## Five cache failures on the baseline
 
 These are correctness reproductions, not timing runs. Each compares `Ed.renderBuffer` with and without the previous draw's cache. All five assertions failed on pristine `c1fe9eec` and passed with the removed guards (`270691ef`). The first three use `hooks.lexSeg`; the last two request HTML and runs together. They demonstrate behavior of that renderer API, not the frequency of these inputs in stock frames.
 
