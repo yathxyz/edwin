@@ -6,7 +6,9 @@
 //! would (DA1, background colour), types keys and waits for the exit status.
 
 use std::ffi::CString;
-use std::os::fd::RawFd;
+use std::io::{BufRead, BufReader, Write};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -774,6 +776,154 @@ fn edwinclient_without_an_edwind_says_so_and_leaves_the_terminal_alone() {
         tail(&t.out)
     );
     assert!(!contains(&t.out, b"\x1b[?1049h"), "the terminal was taken");
+}
+
+const TEST_WELCOME_MS: u64 = 500;
+const WELCOME: &[u8] = b"{\"t\":\"welcome\",\"proto\":1,\"build\":\"test\",\"boot\":\"boot\",\"imageEpoch\":\"epoch\",\"gen\":0,\"caps\":{}}\n";
+
+fn accept_peer(listener: &UnixListener) -> BufReader<UnixStream> {
+    let mut fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid listener; a missing reconnect must fail the test, not hang it.
+    assert_eq!(unsafe { libc::poll(&mut fd, 1, 5000) }, 1, "no connection");
+    let (stream, _) = listener.accept().unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    BufReader::new(stream)
+}
+
+fn expect_message(peer: &mut BufReader<UnixStream>, field: &str) {
+    let mut line = String::new();
+    peer.read_line(&mut line).unwrap();
+    assert!(line.contains(field), "expected {field}, got {line:?}");
+}
+
+/// A private socket for this client. Return when the stub has seen hello, not when the process starts.
+fn hello(name: &str, eval: bool) -> (Pty, UnixListener, BufReader<UnixStream>) {
+    let d = workdir(name);
+    let socket = d.join("edit.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut args = vec!["--socket", socket.to_str().unwrap()];
+    if eval {
+        args.extend(["-e", "1"]);
+    }
+    let t = Pty::spawn_program(
+        &d,
+        &client(&d),
+        &args,
+        &[("EDWIN_TEST_WELCOME_MS", &TEST_WELCOME_MS.to_string())],
+    );
+    let mut peer = accept_peer(&listener);
+    expect_message(&mut peer, "\"t\":\"ping\"");
+    peer.get_mut()
+        .write_all(b"{\"t\":\"error\",\"code\":\"hello\",\"msg\":\"hello first\"}\n")
+        .unwrap();
+    expect_message(&mut peer, "\"t\":\"hello\"");
+    (t, listener, peer)
+}
+
+/// The ping proves reachability, not that hello will get a welcome. Both a frame and -e must give up, name
+/// the daemon and return the terminal when it stalls or closes after hello.
+fn welcome_failure(closes: bool) {
+    use std::io::Read;
+
+    for eval in [false, true] {
+        let name = if closes { "welcome-close" } else { "welcome-timeout" };
+        let (mut t, listener, mut peer) = hello(name, eval);
+        if closes {
+            drop(peer);
+        } else {
+            let mut rest = Vec::new();
+            peer.read_to_end(&mut rest).expect("no timeout after hello");
+            assert!(rest.is_empty(), "sent requests before welcome: {rest:?}");
+        }
+        assert_eq!(t.exit(), 1, "screen tail: {:?}", tail(&t.out));
+        t.pump(100);
+        let why = if closes {
+            "connection closed before welcome"
+        } else {
+            "no welcome in 0.5 s"
+        };
+        let addr = listener.local_addr().unwrap();
+        let socket = addr.as_pathname().unwrap().display();
+        let said = format!("edwinclient: cannot attach to edwind at {socket}: {why}\r\n");
+        if eval {
+            assert_eq!(String::from_utf8_lossy(&t.out), said);
+        } else {
+            assert!(
+                contains(&t.out, b"\x1b[?1049h"),
+                "the terminal was not taken"
+            );
+            let reset = b"\x1b[<u\x1b[?1004l\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+            assert!(contains(&t.out, reset), "terminal modes not reset");
+            let leave = t
+                .out
+                .windows(8)
+                .position(|w| w == b"\x1b[?1049l")
+                .expect("alternate screen not left");
+            assert!(
+                contains(&t.out[leave + 8..], said.as_bytes()),
+                "{:?}",
+                tail(&t.out)
+            );
+            // SAFETY: tcgetattr writes a termios to our pty master's local buffer.
+            let mut term = std::mem::MaybeUninit::<libc::termios>::uninit();
+            assert_eq!(unsafe { libc::tcgetattr(t.fd, term.as_mut_ptr()) }, 0);
+            let term = unsafe { term.assume_init() };
+            let modes = libc::ECHO | libc::ICANON | libc::ISIG;
+            assert_eq!(term.c_lflag & modes, modes, "tty still raw");
+        }
+    }
+}
+
+#[test]
+fn edwinclient_times_out_waiting_for_welcome() {
+    welcome_failure(false);
+}
+
+#[test]
+fn edwinclient_reports_close_before_welcome() {
+    welcome_failure(true);
+}
+
+#[test]
+fn frame_answers_ping_after_welcome_deadline() {
+    let (mut t, _listener, mut peer) = hello("welcome-frame", false);
+    peer.get_mut().write_all(WELCOME).unwrap();
+    expect_message(&mut peer, "\"t\":\"call\"");
+    t.pump(TEST_WELCOME_MS + 100);
+    assert_eq!(t.status, None, "{:?}", tail(&t.out));
+    peer.get_mut()
+        .write_all(b"{\"t\":\"ping\",\"rid\":\"late\"}\n")
+        .unwrap();
+    expect_message(&mut peer, "\"t\":\"pong\",\"rid\":\"late\"");
+}
+
+#[test]
+fn eval_prints_result_after_welcome_deadline() {
+    let (mut t, _listener, mut peer) = hello("welcome-eval", true);
+    peer.get_mut().write_all(WELCOME).unwrap();
+    expect_message(&mut peer, "\"rid\":\"e0\"");
+    t.pump(TEST_WELCOME_MS + 100);
+    assert_eq!(t.status, None, "{:?}", tail(&t.out));
+    peer.get_mut()
+        .write_all(b"{\"t\":\"result\",\"rid\":\"e0\",\"value\":\"1\"}\n")
+        .unwrap();
+    assert_eq!(t.exit(), 0);
+    t.pump(20);
+    assert_eq!(t.out, b"1\r\n");
+}
+
+#[test]
+fn frame_reconnects_when_welcome_is_immediately_followed_by_close() {
+    let (_t, listener, mut peer) = hello("welcome-reconnect", false);
+    peer.get_mut().write_all(WELCOME).unwrap();
+    drop(peer);
+    expect_message(&mut accept_peer(&listener), "\"t\":\"hello\"");
 }
 
 /// edwinclient -e: each form evaluated in edwind as a client of kind cli and its value printed, with no terminal;
