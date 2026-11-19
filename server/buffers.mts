@@ -188,9 +188,12 @@ export class Buffers {
   /* ---------- start: reload what the index names (R8.4, R8.6) ---------- */
   reload(privateStore?: string): void {
     for (const e of [...this.index.buffers.values()]) {
-      // Only the store's owner may restore a draft, after validating its retained record.
-      if (privateStore && (e.id.startsWith('name:*Agent Prompt: ') || e.file && path.resolve(e.file).startsWith(privateStore + path.sep))) continue;
-      try { this.reloadOne(e); }
+      try {
+        if (typeof e.id !== 'string' || !e.id || (e.file != null && typeof e.file !== 'string')) throw new Error('Invalid buffer index entry');
+        // Only the store's owner restores its files. A named buffer need not belong to the store.
+        if (privateStore && e.file && path.resolve(e.file).startsWith(privateStore + path.sep)) continue;
+        this.reloadOne(e);
+      }
       catch (err) { this.log.error('reload', { jid: e.jid, id: e.id, error: err.message }); }
     }
   }

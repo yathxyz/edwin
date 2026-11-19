@@ -301,6 +301,21 @@ test('AS-C8: token and symlink are refused; API-echoed token is redacted from bu
   assert.ok(!child.logs.includes(hub.token));
 });
 
+for (const malformed of [false, true]) test(`index recovery: agent-looking ordinary buffer, malformed neighbour ${malformed}`, async t => {
+  const dir = makeDir(), id = 'name:*Agent Prompt: ordinary*';
+  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  t.after(async () => { c.close(); await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  await c.connect(); await c.hello(); await c.open(id, { create: true }); await c.edit(id, 0, [[0, '', 'kept']]);
+  c.close(); await stopEdwind(child);
+  if (malformed) {
+    const file = path.join(dir.dirs.state, 'index.json'), index = JSON.parse(fs.readFileSync(file, 'utf8'));
+    index.buffers.unshift({ jid: 'decaf' }); fs.writeFileSync(file, JSON.stringify(index));
+  }
+  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket);
+  await c.connect(); await c.hello();
+  assert.equal((await c.open(id)).text, 'kept');
+});
+
 for (const enabled of [false, true]) test(`feature activation: malformed retained store, hub ${enabled ? 'on' : 'off'}`, async t => {
   const dir = makeDir(), store = path.join(dir.dirs.state, 'agent-prompts'), trace = path.join(dir.root, 'access');
   fs.mkdirSync(store, { mode: 0o750 });

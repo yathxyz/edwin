@@ -109,7 +109,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     return idOf(d);
   }
   const entries = store.entries();
-  const retained = new Map([...buffers.index.buffers.values()].filter(e => e.file && path.dirname(e.file) === dir).map(e => [e.id, e]));
+  const retained = new Map([...buffers.index.buffers.values()].filter(e => typeof e.file === 'string' && path.dirname(e.file) === dir).map(e => [e.id, e]));
   for (const file of entries) {
     if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json') continue;
     try {
