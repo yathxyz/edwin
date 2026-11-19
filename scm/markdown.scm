@@ -66,11 +66,12 @@ empty item outdent it or end the list; elsewhere a plain newline."
   (%markdown-shift-lines -1))
 
 (define-command (markdown-tab)
-  "TAB in Normal state: fold the heading at point as org-cycle does, indent a list item, else reveal."
+  "TAB in Normal state: toggle an owner fold, cycle a heading, indent a list item, else reveal."
   (interactive)
-  (when (or (org-at-heading-p) (not (%markdown-shift-lines 1)))
-    (set! this-command 'org-cycle)          ; org-cycle's TAB sequence (folded, children, subtree) reads last-command
-    (org-cycle)))
+  (unless (and %owner-folds-present (%toggle-owner-fold))
+    (when (or (org-at-heading-p) (not (%markdown-shift-lines 1)))
+      (set! this-command 'org-cycle)          ; org-cycle's TAB sequence (folded, children, subtree) reads last-command
+      (org-cycle))))
 
 (define-command (markdown-todo-cycle)
   "Step the task at point to the next state of markdown-todo-cycle-order (C-c C-t, S-<right>)."

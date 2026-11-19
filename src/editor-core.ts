@@ -12,8 +12,6 @@ type EcWinConfig = EcWinLeaf | EcWinSplit;
 type EcMoved = [m: EdMarker | EdTempMarker, pos: number, dead: boolean, to: number][];
 type EcLexInfo = { dirty?: boolean };
 type EcIsearchFrame = { pt: number; str: string; failing: boolean; match: [number, number] | null; dir: number; wrapped: boolean };
-type EcFoldPre = { ver: number | undefined; n: number; pre: Int32Array };
-type EcFoldBuffer = { _foldPre?: EcFoldPre | null };
 type EcLineBoth = { html: string; runs: EdRun[] };
 type EcLineVal = string | EdRun[] | EcLineBoth;
 type EcLine = { o: number; n: number | null; cl: boolean; html: string | undefined; pulse: boolean; runs?: EdRun[]; text?: string };
@@ -565,6 +563,12 @@ function logEdit(b: EdBuffer, pos: number, del: string, ins: string) {
   const log = b.log;
   log.push({ v: ++b.ver, pos, del, ins, len: b.rope.length, o: E.editOrigin });
   if (log.length > 512 && (log.length & 127) === 0) trimLog(b);
+  // Owner offsets describe exactly one version of the text. Mode folds still follow the edit.
+  if (b._ownerFolds) {
+    b.folds = b.folds === b._ownerFolds ? [] : b.folds?.filter(f => !f.owner);
+    b._ownerFolds = undefined;
+    b._foldVer = (b._foldVer || 0) + 1;
+  }
   if (hooks.edited) hooks.edited(b);
 }
 function trimLog(b: EdBuffer) {
@@ -1106,6 +1110,9 @@ function activeMaps(b?: EdBuffer | null) {
   if (minorModes.size) out.push(...minorMaps(b));
   const mm = KM(b.mode + '-map'); if (mm) out.push(mm);
   const g = KM('global-map'); if (g) out.push(g);
+  if (b._ownerFolds && E.evil && !b.minibuf && (b.evilState === 'normal' || b.evilState === 'motion')) {
+    const f = KM('owner-fold-map'); if (f) out.push(f);
+  }
   return out;
 }
 function lookupWith(maps: EdKeymap[], seq: string) {
@@ -1545,6 +1552,8 @@ function recordUndo(b: EdBuffer, before: EdSnap) {
 }
 /* Bring the text back to its content at snapshot S, then put point at the first changed position. */
 function restoreSnap(b: EdBuffer, s: EdSnap) {
+  // Restoring the text discards owner ranges; a pending command may not redraw for some time.
+  const hadOwnerFolds = !!b._ownerFolds;
   const log = b.log, ops: EdLogEntry[] = [];
   let k = log.length - 1;
   while (k >= 0 && log[k].v > s.ver) ops.push(log[k--]);
@@ -1578,6 +1587,7 @@ function restoreSnap(b: EdBuffer, s: EdSnap) {
   b.modified = s.modified; b.pt = Math.min(i, newLen);
   b.mark = s.mark === null ? null : Math.min(s.mark, newLen);
   for (const m of b.markers) if (m.pos !== null && m.pos > newLen) m.pos = newLen;
+  if (hadOwnerFolds) scheduleRender();
 }
 /* The buffer now matches its file. Every snapshot in its history differs from the file, so undoing or redoing
    to one leaves the buffer modified, and undoing back to this state leaves it unmodified again. */
@@ -1743,23 +1753,47 @@ function lastMatch(str: string, re: RegExp, from: number, len: number, win?: num
   }
   return -1;
 }
+/* Probe around point before materializing a recently edited buffer. A far search still
+   gets the native flat-string scan and subsequent prefixes can reuse the joined text.
+   Overlap by len - 1 so a match starting at the last probed offset is complete. */
+function isearchIndex(b: EdBuffer, re: RegExp | null, needle: string, from: number, dir: number) {
+  const r = b.rope, len = needle.length;
+  // Only integer buffer offsets are chunk coordinates. Otherwise preserve the flat search's coercions.
+  const indexed = Number.isInteger(from) && from >= 0 && from <= r.length;
+  if (!re) {
+    const text = indexed ? r : b.text;
+    return dir > 0 ? text.indexOf(needle, from) : text.lastIndexOf(needle, from);
+  }
+  if (indexed && r.flat === null) {
+    const lo = dir > 0 ? from : Math.max(0, from - 2047);
+    const hi = dir > 0 ? Math.min(r.length, from + 2047) : from;
+    const sub = r.slice(lo, Math.min(r.length, hi + len));
+    const hit = dir > 0 ? re.exec(sub)?.index ?? -1 : lastMatch(sub, re, hi - lo, len);
+    if (hit >= 0) return lo + hit;
+    if (dir > 0 ? hi + len >= r.length : lo === 0) return -1;
+    from = dir > 0 ? hi + 1 : lo - 1;
+  }
+  if (dir < 0) return lastMatch(b.text, re, from, len);
+  re.lastIndex = Math.max(0, from);
+  return re.exec(b.text)?.index ?? -1;
+}
 function isearchFind(next: boolean) {
   const s = E.isearch!, b = E.current;
   if (!s.str) { s.match = null; s.failing = false; return; }
   /* Case folding with a regular expression, not by lowercasing a copy of the whole buffer. */
   const fold = s.str === s.str.toLowerCase();
-  const hay = b.text, needle = s.str;
+  const needle = s.str;
   const re = fold ? new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi') : null;
   let i: number;
   if (s.dir > 0) {
     const from = s.failing && next ? 0 : next ? b.pt : (s.match ? s.match[0] : s.origin);
     if (s.failing && next) s.wrapped = true;
-    if (re) { re.lastIndex = Math.max(0, from); const m = re.exec(hay); i = m ? m.index : -1; } else i = hay.indexOf(needle, from);
+    i = isearchIndex(b, re, needle, from, 1);
     if (i >= 0) { s.match = [i, i + needle.length]; b.pt = s.match[1]; s.failing = false; } else s.failing = true;
   } else {
-    const from = s.failing && next ? hay.length : next ? (s.match ? s.match[0] - 1 : b.pt - 1) : (s.match ? s.match[0] : s.origin);
+    const from = s.failing && next ? b.rope.length : next ? (s.match ? s.match[0] - 1 : b.pt - 1) : (s.match ? s.match[0] : s.origin);
     if (s.failing && next) s.wrapped = true;
-    i = from < 0 ? -1 : re ? lastMatch(hay, re, from, needle.length) : hay.lastIndexOf(needle, from);
+    i = from < 0 ? -1 : isearchIndex(b, re, needle, from, -1);
     if (i >= 0) { s.match = [i, i + needle.length]; b.pt = i; s.failing = false; } else s.failing = true;
   }
 }
@@ -1862,7 +1896,7 @@ function spanClass(cls: string, f: number) {
   const d = (f >> 5) & 7; if (d) cn += ' d' + (d - 1);
   return cn.trim();
 }
-/* Folds: B.folds is a sorted list of {s, e} ranges that org.ts keeps, S the end of the line that stays
+/* Folds: B.folds is a sorted list of closed {s, e} ranges, S the end of the line that stays
    shown and E the end of the last hidden line. The lines that start after S and at or before E are
    not shown; the line that ends at S shows an ellipsis in their place. */
 function foldAt(folds: EdFold[], ls: number) {
@@ -1876,16 +1910,53 @@ function foldEndingAt(folds: EdFold[], le: number) {
   return null;
 }
 const foldsOf = (b: EdBuffer) => b.folds && b.folds.length ? b.folds : null;
+function clearFoldWindowCaches(b: EdBuffer, f: EdFrame | null) {
+  for (const w of leaves((f || E.implicit).wroot)) if (w.buffer === b) {
+    w._lcache = w._mcache = null;
+    if (f) f._rkey = null;
+  }
+}
+function setBufferFolds(b: EdBuffer, ranges: readonly EdFoldRange[]) {
+  if (!Array.isArray(ranges)) throw new TypeError('Expected an array of fold ranges');
+  // Read caller properties before validating: a getter can resize the input or edit the buffer.
+  const n = ranges.length;
+  if (!Number.isInteger(n) || n < 0) throw new RangeError('Expected a non-negative integer fold array length');
+  if (n === 0 && !b._ownerFolds && !foldsOf(b)) return;
+  const folds = new Array<EdFold>(n);
+  for (let i = 0; i < n; i++) {
+    const { s, e } = ranges[i];
+    folds[i] = { s, e, owner: true };
+  }
+  const r = b.rope;
+  let prev = -1;
+  for (let i = 0; i < n; i++) {
+    const { s, e } = folds[i];
+    if (!Number.isInteger(s) || !Number.isInteger(e) || s <= prev || e <= s || e >= r.length ||
+        r.charCodeAt(s) !== 10 || r.charCodeAt(e) !== 10)
+      throw new RangeError(`Invalid fold at index ${i}: expected ordered, disjoint newline offsets`);
+    prev = e;
+  }
+  b.folds = folds;
+  b._ownerFolds = folds.length ? folds : undefined;
+  b._foldVer = (b._foldVer || 0) + 1;
+  b._cycle = b._gcycle = null;
+  clearFoldWindowCaches(b, null);
+  for (const f of E.frames) clearFoldWindowCaches(b, f);
+  scheduleRender();
+}
+function getBufferFolds(b: EdBuffer): EdFoldRange[] {
+  return b.folds ? b.folds.map(({ s, e }) => ({ s, e })) : [];
+}
 /* Lines hidden by F, counted once: an edit inside a fold removes it and one before it shifts it. */
 function foldLines(b: EdBuffer, f: EdFold) { if (f.n === undefined) f.n = lineNoB(b, f.e) - lineNoB(b, f.s); return f.n; }
-/* Hidden lines before each fold, cumulative, so a shown line number is a binary search away. org.ts keeps
-   the folds sorted and bumps b._foldVer when the list changes; an edit before a fold only shifts it. */
+/* Hidden lines before each fold, cumulative, so a shown line number is a binary search away.
+   Changing the closed list bumps _foldVer; an edit before a mode fold only shifts it. */
 function foldPrefix(b: EdBuffer, F: EdFold[]) {
-  let c = (b as EcFoldBuffer)._foldPre;
+  let c = b._foldPre;
   if (!c || c.ver !== b._foldVer || c.n !== F.length) {
     const pre = new Int32Array(F.length + 1);
     for (let i = 0; i < F.length; i++) pre[i + 1] = pre[i] + foldLines(b, F[i]);
-    c = (b as EcFoldBuffer)._foldPre = { ver: b._foldVer, n: F.length, pre };
+    c = b._foldPre = { ver: b._foldVer, n: F.length, pre };
   }
   return c.pre;
 }
@@ -2027,8 +2098,23 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     ls = le >= n ? n + 1 : le + 1;
     if (folds && ls <= n) { const f = foldAt(folds, ls); if (f) { ls = f.e + 1; if (ls > n) ls = n + 1; else ln = lineNoB(b, ls) - 1; } }
   }
+  if (b._ownerFolds && folds) completeOwnerIndicators(out, folds, from, to, pt, o.avy, ell, ellT);
   if (lines || wantRuns) { out.seg = folds ? vis : seg; out.cache = next; return out; }
   return out.map(x => x.html).join('\n');
+}
+/* The native renderer gives the heading newline to point or an Avy label instead of the ellipsis.
+   Only those offsets need an extra indicator. Leave the native cached HTML and runs untouched. */
+function completeOwnerIndicators(out: EcRendered, folds: EdFold[], from: number, to: number, pt: number,
+                                 avy: EcRenderOpts['avy'], html: string, text: string) {
+  function add(p: number) {
+    if (p < from || p >= to || !foldEndingAt(folds, p)?.owner) return;
+    // Closed folds are disjoint: a heading newline in the rendered interval belongs to a visible row.
+    const line = out.findLast(row => row.o <= p)!;
+    if (line.html !== undefined) line.html += html;
+    if (line.runs) line.runs = line.runs.concat({ s: p - line.o, e: p - line.o, cls: 'oe', k: 'ell', t: text });
+  }
+  add(pt);
+  if (avy) for (const p of avy.keys()) if (p !== pt) add(p);
 }
 function syncLines(view: EcView, lines: EcLine[]) {
   const kids = view.children as HTMLCollectionOf<EcLineEl>;
@@ -2365,7 +2451,11 @@ function render() {
 }
 function frameKey(f: EdFrame) {
   let k = (f.mini ? 'm' : '') + f.echo + '|' + f.miniFlash + '|' + E.metricsGen + '|' + E.sizeGen + '|' + (hooks.statusKey ? hooks.statusKey() : '') + (f.backend ? '|' + f.focused + ':' + f.theme + ':' + JSON.stringify(f.backend.size()) : '');
-  for (const w of leaves(f.wroot)) { const b = w.buffer; k += `|${w.id}:${b.id}:${b.ver}:${w.pt}:${w.start}:${b.presence ? b.presence.length + ':' + (b._presTick || 0) : ''}`; }
+  for (const w of leaves(f.wroot)) {
+    const b = w.buffer;
+    k += `|${w.id}:${b.id}:${b.ver}:${w.pt}:${w.start}:${b.presence ? b.presence.length + ':' + (b._presTick || 0) : ''}`;
+    if (b._ownerFolds) k += ':f' + b._foldVer;
+  }
   return k;
 }
 function renderFrame(f: EdFrame) {
@@ -2465,6 +2555,7 @@ ${parenDepths}`;
 globalThis.Ed = {
   E, hooks, host, Frame, FrameState, makeFrame, selectFrame, deleteFrame, onFrameEvent, frameEvent, frameScale, withFrame, allWindows, allMinibufs, renderFrame, rectAt, scheduleRender, FRAME_CSS,
   Marker, shiftMarkers, editText, applyOps, withOrigin, runHookSafely, removeHookEverywhere,
+  setBufferFolds, getBufferFolds,
   localized, localize, makeLocal, localValue, defaultValue, setDefault, minorModes, minorOn, modeParents, modeChain, lighters, LEX_SOURCE, Store, Buffer, Keymap, PREFIX, C, SENTINEL, getBuffer, getBufferCreate, toBuffer, setWindowBuffer, otherBuffer, checkRO,
   insertText, deleteText, replaceText, spanOf, changedSince, installLex, metrics, lastMatch, bol, eol, lineNo, column, posAtColumn, lastLineStart, lineStartOf, lex, lexOf, markDocstrings,
   forwardSexp, backwardSexp, upList, matchParen, indentLine, lispIndentFor, isLisp, modeFor, MODE_NAMES,

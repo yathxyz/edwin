@@ -305,8 +305,98 @@ test('randomised convergence: 200 interleaved steps of frame and writer edits en
   await until(() => b.sver === w.sver, 'both replicas at the same version');
   assert.equal(b.text, w.text);
   assert.equal(b.text, await serverText(id));
-  assert.equal(b.sync.sverText, b.text);
+  assert.equal(String(b.sync.sverText), b.text);
   wc.close();
+});
+
+// Exercise slices spanning a real chunk seam, not merely offset 2048 of a flat string.
+function assertShadowSeam(b: EdwinCore, left: string, right: string) {
+  const shadow = b.sync.sverText;
+  assert.equal(shadow.ch[0].at(-1), left);
+  assert.equal(shadow.ch[1][0], right);
+  assert.equal(shadow.flat, null);
+}
+
+test('remote CRLF replacement and hashed acks agree with a flat shadow through both pending batches', async t => {
+  const p = 2047, prefix = 'x'.repeat(p), suffix = 'AB' + 'y'.repeat(2400);
+  const id = note('shadow-crlf.txt', prefix + '\n' + suffix);
+  const w = await client(); t.after(() => w.close()); await w.open(id);
+  // A disk open normalizes CRLF. Put a literal CR into the server text *before* the frame snapshots it.
+  assert.equal((await w.edit(id, 0, [[p, '', '\r']])).t, 'ack');
+  const b = await sync.open(id);
+  const initial = prefix + '\r\n' + suffix + '!';
+  assert.equal((await w.edit(id, 1, [[initial.length - 1, '', '!']])).t, 'ack');
+  await until(() => b.sver === 2);
+  assertShadowSeam(b, '\r', '\n');
+
+  const remote: EditOp[] = [[p, '\r\n', '<remote>']], local: EditOp[] = [[p + 2, 'A', 'ii']], queued: EditOp[] = [[p + 3, 'iB', 'q']];
+  const [remoteAfterLocal, ip] = OT.transformOps(remote, local, initial);
+  const [, qp] = OT.transformOps(remoteAfterLocal, queued, OT.apply(initial, local));
+  const afterRemote = OT.apply(initial, remote), afterLocal = OT.apply(afterRemote, ip), final = OT.apply(afterLocal, qp);
+
+  // Hold the sequenced edits in the receive path. Both local edits then really go through local(); the
+  // daemon must rebase the first on its stale base, and only its durable ack can send the queued one.
+  const inbox: Msg[] = [], receive = sync.sock.onmessage;
+  t.mock.method(sync.sock, 'onmessage', (e: { data: string }) => {
+    const m = JSON.parse(e.data);
+    if (m.buf === id && (m.t === 'edits' || m.t === 'ack')) inbox.push(m); else receive(e);
+  });
+  async function deliver(kind: 'edits' | 'ack', ver: number, text: string) {
+    await until(() => inbox.length, `${kind} v${ver}`);
+    const m = inbox.shift()!; assert.equal(m.t, kind); assert.equal(m.ver, ver);
+    const h = OT.hash(text); // the flat reference, not the frame's current shadow or display
+    receive({ data: JSON.stringify({ ...m, h }) });
+    assert.equal(b.sver, ver); assert.equal(b.sync.opening, null, 'the reference hash was accepted without a resnapshot');
+    assert.equal(OT.hash(b.sync.sverText), h);
+    assert.equal(String(b.sync.sverText), text); assert.equal(b.text, final);
+  }
+  assert.equal((await w.edit(id, 2, remote)).t, 'ack');
+  Ed.applyOps(b, local, 'local'); Ed.applyOps(b, queued, 'local');
+  assert.deepEqual(b.inflight.ops, local); assert.deepEqual(b.queue.map((q: Batch) => q.ops), [queued]);
+  await deliver('edits', 3, afterRemote);
+  assert.equal(b.inflight.base, 3); assert.deepEqual(b.inflight.ops, ip); assert.deepEqual(b.queue.map((q: Batch) => q.ops), [qp]);
+  await deliver('ack', 4, afterLocal);
+  assert.equal(b.inflight.base, 4); assert.deepEqual(b.inflight.ops, qp); assert.deepEqual(b.queue, []);
+  await deliver('ack', 5, final);
+  assert.equal(b.inflight, null); assert.equal(await serverText(id), final);
+});
+
+test('a refused later op leaves previously acknowledged text intact', async t => {
+  const id = note('shadow.txt', 'abc😀\n');
+  const b = await sync.open(id);
+  const w = await client(); await w.open(id);
+  assert.equal((await w.edit(id, 0, [[0, '', 'Z']])).t, 'ack');
+  await until(() => b.sver === 1);
+  const shadow = b.sync.sverText; assert.notEqual(typeof shadow, 'string', 'rollback on an already published mutable rope');
+  const error = t.mock.method(console, 'error', (..._args: unknown[]) => {});
+  // The second replacement consumes part of the first. The third deletes the wrong text;
+  // restoring the original requires undoing both successful ops in reverse order.
+  sync.sock.onmessage({ data: JSON.stringify({ t: 'edits', buf: id, ver: 2, by: { kind: 'server' }, ops: [[1, 'a', 'xy'], [2, 'yb', 'Q'], [3, '?', '']] }) });
+  assert.equal(error.mock.callCount(), 1);
+  assert.match(String(error.mock.calls[0].arguments[2]), /text at 3 is not the one the op deletes/); error.mock.restore();
+  assert.equal(String(b.sync.sverText), 'Zabc😀\n'); assert.equal(b.text, 'Zabc😀\n'); assert.equal(b.sver, 1);
+  assert.equal((await w.edit(id, 1, [[1, 'a', 'xy'], [3, 'b', '']])).t, 'ack');
+  await until(() => b.sver === 2);
+  assert.equal(b.text, 'Zxyc😀\n'); assert.equal(String(b.sync.sverText), b.text);
+  w.close();
+});
+
+test('a remote deletion spans a surrogate pair split across acknowledged chunks', async t => {
+  const p = 2046, prefix = 'x'.repeat(p), suffix = 'y'.repeat(2400), hi = '\ud83d', lo = '\ude00';
+  const id = note('shadow-surrogate.txt', '');
+  const w = await client(); t.after(() => w.close()); await w.open(id);
+  // chunkify normally keeps a pair together. Delete its separator *after* chunking to make a legal
+  // pair across the seam: [... high _] [low ...] → [... high] [low ...].
+  assert.equal((await w.edit(id, 0, [[0, '', prefix + hi + '_' + lo + suffix]])).t, 'ack');
+  const b = await sync.open(id);
+  assert.equal((await w.edit(id, 1, [[p + 1, '_', '']])).t, 'ack');
+  await until(() => b.sver === 2); assertShadowSeam(b, hi, lo);
+  const error = t.mock.method(console, 'error', (..._args: unknown[]) => {});
+  sync.sock.onmessage({ data: JSON.stringify({ t: 'edits', buf: id, ver: 3, by: { kind: 'server' }, ops: [[p, hi, '']] }) });
+  assert.equal(error.mock.callCount(), 1); assert.match(String(error.mock.calls[0].arguments[2]), /splits a surrogate pair/);
+  error.mock.restore(); assert.equal(b.sver, 2);
+  assert.equal((await w.edit(id, 2, [[p, '😀', '']])).t, 'ack'); await until(() => b.sver === 3);
+  assert.equal(String(b.sync.sverText), prefix + suffix); assert.equal(b.text, prefix + suffix);
 });
 
 test('R6.15-R6.18 undo by group: u takes a whole group back, C-r redoes, a partial undo names the other writer', async () => {
@@ -350,6 +440,8 @@ test('R7.16 reconnect after edwind restarts: the unacknowledged batch is resent 
   /* Offline edits queue up: the mode line shows the dot. */
   await type('A2'); await keys('ESC');
   assert.ok(b.inflight, 'held while offline'); assert.equal(b.text, '1keep2\n');
+  assert.ok(b.sync.sverText instanceof b.rope.constructor, 'the acknowledged text is a rope before export');
+  assert.equal(sync.exportPending().find((p: Msg) => p.buf === id).sverText, '1keep\n', 'pending state exports text, not the rope');
   assert.ok(Ed.hooks.modeStatus(b).includes('•') && Ed.hooks.modeStatus(b).includes('offline'));
   child = await startEdwind(dir);
   await until(() => sync.state === 'online', 'online again', 15000);
