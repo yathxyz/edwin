@@ -296,14 +296,15 @@ test('unstyled lines retain the same spans and runs at point, line ends and fold
   const b = await show('plain.txt', 'fundamental-mode', text);
   const eol = text.indexOf('\n', 1);
   b.folds = [{ s: text.indexOf('\nhidden'), e: text.indexOf('\nend') }];
+  type Rendered = unknown[] & { seg: unknown; cache: Map<string, unknown> };
   for (const format of [{}, { runs: true }, { runs: true, html: false }]) {
     let cache: Map<string, unknown> | null = null;
     for (const pt of [0, 1, 2.5, 7, eol, eol + 124, b.folds[0].s, text.length]) {
       b.pt = pt;
       const o = { active: pt % 2 === 0, numbers: 'relative', count: 12, cursorClass: 'bar', ...format };
-      const rows = Ed.renderBuffer(b, { ...o, cache });
+      const rows: Rendered = Ed.renderBuffer(b, { ...o, cache });
       // A regexp that never matches exercises the classified path but must not change its output.
-      const classified = Ed.renderBuffer(b, { ...o, hl: /(?!)/g, cache: rows.cache });
+      const classified: Rendered = Ed.renderBuffer(b, { ...o, hl: /(?!)/g, cache: rows.cache });
       assert.deepEqual([...rows], [...classified]);
       assert.equal(rows.seg, classified.seg);
       cache = rows.cache;
