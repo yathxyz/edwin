@@ -554,6 +554,25 @@ test('a warm row cache preserves spans and runs across cursor moves, folds and h
   b.markActive = false;
 });
 
+for (const change of ['rename', 'shift sparse table', 'wide cursor ID']) {
+  test(`cached lexer faces on the grid: ${change}`, async () => {
+    await show('lexer-faces.txt', 'fundamental-mode', 'xy');
+    const lex = Ed.hooks.lexSeg, names = ['fn', 'kw'];
+    const wide = change === 'wide cursor ID', cls = wide ? Uint16Array.of(1, 1) : Uint8Array.of(1, 1);
+    if (wide) names[257] = 'fn';
+    Ed.hooks.lexSeg = () => ({ cls, names });
+    try {
+      const colors = () => { const m = draw(); return [faceAt(m, 0, 0).fg, faceAt(m, 1, 0).fg]; };
+      const { kw, fn } = D.PALETTE.light;
+      assert.deepEqual(colors(), [kw, kw]);
+      if (change === 'rename') names[1] = 'fn';
+      else if (change === 'shift sparse table') { names.unshift(''); delete names[0]; }
+      else cls[0] = 257; // Same low byte as 1, but the cursor uses the full ID.
+      assert.deepEqual(colors(), [fn, change === 'wide cursor ID' ? kw : fn]);
+    } finally { Ed.hooks.lexSeg = lex; }
+  });
+}
+
 test('a cached folded row uses the current ellipsis', async () => {
   const b = await show('class-cache.txt', 'fundamental-mode', 'a\0|b\nhidden\nend');
   b.folds = [{ s: 4, e: 11 }];

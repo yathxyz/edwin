@@ -14,6 +14,7 @@ type EcLexInfo = { dirty?: boolean };
 type EcIsearchFrame = { pt: number; str: string; failing: boolean; match: [number, number] | null; dir: number; wrapped: boolean };
 type EcLineBoth = { html: string; runs: EdRun[] };
 type EcLineVal = string | EdRun[] | EcLineBoth;
+type EcLineCache = Map<string, EcLineVal> & { names?: string[] };
 type EcLine = { o: number; n: number | null; cl: boolean; html: string | undefined; pulse: boolean; runs?: EdRun[]; text?: string };
 type EcRendered = EcLine[] & { seg?: string; cache?: Map<string, EcLineVal> | null };
 type EcLexSeg = { cls: ArrayLike<number>; names: string[] };
@@ -1980,6 +1981,12 @@ function vLineStart(b: EdBuffer, n: number) {
   return lineStartB(b, n + pre[lo]);
 }
 function vLineCount(b: EdBuffer) { const F = foldsOf(b); if (!F) return lineCountB(b); return lineCountB(b) - foldPrefix(b, F)[F.length]; }
+// Compare by index: array iteration methods such as every() skip sparse slots.
+function sameClassNames(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 /* Render the lines of B from the line at O.from, at most O.count lines (every line when o.lines is
    false: the minibuffer). Span offsets are relative to the line start, so an edit changes only the
    lines it touches. Returns [{o, n, cl, html}], or one HTML string without lines.
@@ -2030,9 +2037,15 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
   const out: EcRendered = [];
   const wantRuns = !!o.runs, wantHtml = o.html !== false || !wantRuns;
   let R: EdRun[] | null = null;
-  const cache = (lines || wantRuns) && !o.avy ? o.cache || null : null, next = (lines || wantRuns) && !o.avy ? new Map<string, EcLineVal>() : null;
-  /* The cache key also names the class table (a mode's own lexer numbers its classes differently) and
-     the fold ellipsis, which change a line's html without changing its text or keys. */
+  // Absolute HTML offsets and lexer IDs wider than the packed byte are not in the row key.
+  const cacheable = (lines || !wantHtml) && !o.avy && (!ext || ecls instanceof Uint8Array);
+  const next: EcLineCache | null = cacheable ? new Map() : null;
+  let cache: EcLineCache | null = next ? o.cache || null : null;
+  if (next && ext) {
+    const prev = cache?.names;
+    if (prev && sameClassNames(prev, names)) next.names = prev;
+    else { next.names = names.slice(); cache = null; }
+  }
   const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
   for (; ls <= n && made < count; ln++, made++) {

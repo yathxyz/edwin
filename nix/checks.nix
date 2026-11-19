@@ -86,7 +86,7 @@ in
   edwin-standalone = pkgs.runCommand "edwin-standalone" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR
     export NO_SANDBOX=1 CHROMIUM=${pkgs.chromium}/bin/chromium
-    node --test ${edwin}/edwin/test/standalone.test.mts
+    node --test ${edwin}/edwin/test/standalone.test.mts ${edwin}/edwin/test/row-offsets.test.mts
     touch $out
   '';
 
