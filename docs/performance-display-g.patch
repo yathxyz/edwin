@@ -1,0 +1,92 @@
+--- a/src/editor-core.ts
++++ b/src/editor-core.ts
+@@ -1953,6 +1953,7 @@
+   for (const name of names) key += name === undefined ? '-' : rowKeyPart(name);
+   return key;
+ }
++const CACHE_ROW_LIMIT = 8192, NO_FLAGS = new Uint8Array(0);
+ let KBUF = new Uint16Array(1024);
+ function renderBuffer(b: EdBuffer, o: EcRenderOpts & { runs: true }): EcRendered;
+ function renderBuffer(b: EdBuffer, o: EcRenderOpts): EcRendered | string;
+@@ -1965,9 +1966,11 @@
+   let ls = lines ? bol(r, Math.max(0, Math.min(o.from || 0, n))) : 0;
+   if (folds) { const f = foldAt(folds, ls); if (f) ls = Math.min(n, f.e + 1); }
+   const count = lines ? (o.count || 1e9) : 1e9;
+-  let endPos = ls, cnt = 0;
++  let endPos = ls, cnt = 0, hasLongRow = false;
+   for (let p = ls; cnt < count; cnt++) {
+-    const le = eol(r, p); endPos = Math.min(n, le + 1); if (le >= n) { endPos = n; break; }
++    const le = eol(r, p);
++    if (le - p >= CACHE_ROW_LIMIT) hasLongRow = true;
++    endPos = Math.min(n, le + 1); if (le >= n) { endPos = n; break; }
+     p = le + 1;
+     if (folds) { const f = foldAt(folds, p); if (f) { p = f.e + 1; if (p > n) { endPos = n; break; } } }
+   }
+@@ -1985,11 +1988,11 @@
+   const ell = folds ? `<span class="oe">${esc(ellT)}</span>` : '';
+   /* Without syntax, overlays or selection, all span keys are zero. Only point and end-of-line
+      break a plain line's span; do not materialize and scan a key per character to find them. */
+-  const plain = !cls && !ecls && !o.hl && !o.isearch && !o.current && !o.avy && !b.visual && !b.markActive && Number.isInteger(pt);
+-  const flags = plain ? null : computeFlags(b, o, from, to, seg);
+-  if (cls && o.active) parenFlags(b, cls, flags!, o.onChar, from, to);
++  const plainSegment = hasLongRow && !cls && !ecls && !o.hl && !o.isearch && !o.current && !o.avy && !b.visual && !b.markActive && Number.isInteger(pt);
++  const flags = plainSegment ? NO_FLAGS : computeFlags(b, o, from, to, seg);
++  if (cls && o.active) parenFlags(b, cls, flags, o.onChar, from, to);
+   const depths = cls && b._ld && truthy(L.get('rainbow-delimiters-enabled')) ? b._ld as Uint8Array : null;
+-  const key = (k: number) => ((cls && k < n ? cls[k] : ecls ? ecls[k - from] || 0 : 0) << 8) | flags![k - from] | (depths && cls![k] === C.PAR ? (depths[k] + 1) << 5 : 0);
++  const key = (k: number) => ((cls && k < n ? cls[k] : ecls ? ecls[k - from] || 0 : 0) << 8) | flags[k - from] | (depths && cls![k] === C.PAR ? (depths[k] + 1) << 5 : 0);
+   const last = lastLineStart(r);
+   const showPhantom = pt === n || n === 0;
+   const out: EcRendered = [];
+@@ -1997,7 +2000,7 @@
+   let R: EdRun[] | null = null;
+   // Tags have fixed width. Length-prefix arbitrary strings: even packed class bytes can contain NUL.
+   const next = (lines || wantRuns) && !o.avy ? new EcRowCache(
+-    (o.active ? '1' : '0') + (wantRuns ? wantHtml ? 'B' : 'R' : 'H') + (plain ? 'p' : ext ? 'x' : 'c') +
++    (o.active ? '1' : '0') + (wantRuns ? wantHtml ? 'B' : 'R' : 'H') + (lines ? 'L' : 'M') + (ext ? 'x' : 'c') +
+     rowKeyPart(o.cursorClass || '') + rowKeyPart(ellT) + (ext ? rowClassTableKey(names) : '')
+   ) : null;
+   const cache = next && o.cache instanceof EcRowCache && o.cache.context === next.context ? o.cache : null;
+@@ -2011,18 +2014,17 @@
+     const rel = lines ? ls : 0;
+     /* The keys (class, flags, depth) of the line's characters and of its end, read once. */
+     const len = le - ls + 1;
++    const plain = plainSegment && len > CACHE_ROW_LIMIT;
+     if (!plain && KBUF.length < len) KBUF = new Uint16Array(len + (len >> 1) + 1024);
+     const kb = KBUF;
+     if (!plain) for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
+     let ck: string | null = null;
+-    if (next && len <= 8192) {
+-      // A cacheable row is short enough to encode its cursor (+1, zero means absent) in one code unit.
++    if (next && len <= CACHE_ROW_LIMIT) {
++      // One length prefixes both fields: text has len-1 units, packed keys have len.
+       const cursor = Number.isInteger(pt) && pt >= ls && pt <= le ? pt - ls + 1 : 0;
+-      ck = String.fromCharCode(cursor) + (le < n ? '1' : '0') + (folds && foldEndingAt(folds, le) ? 'E' : '-') +
+-        rowKeyPart(String(ls - rel)) + rowKeyPart(t.slice(ls, le)) +
+-        (plain ? '' : rowKeyPart(String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]))) +
+-        // Spans use the packed class byte; the cursor uses the mode's original class number.
+-        (ecls && cursor && pt < le ? rowKeyPart(String(ecls[pt - from])) : '');
++      ck = String.fromCharCode(cursor, (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 2 : 0), len) +
++        (lines ? '' : ls + ':') + t.slice(ls, le) + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]) +
++        (ecls && cursor && pt < le ? String(ecls[pt - from]) : '');
+       const hit = cache ? cache.get(ck) : undefined;
+       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
+     }
+@@ -2046,7 +2048,7 @@
+         flush(k);
+         const ch = t.charAt(k), atEnd = k === le;
+         const kc = atEnd ? '' : cls ? CLS_NAMES[cls[k]] : ecls ? names[ecls[k - from]] || '' : '';
+-        const fk = flags?.[k - from] || 0;
++        const fk = flags[k - from] || 0;
+         const ccls = `cur ${o.cursorClass || ''}${o.active ? '' : ' ghost'}${kc ? ' ' + kc : ''}${fk & FLAG.REGION ? ' rg' : ''}${fk & FLAG.PAREN ? ' pm' : ''}`;
+         if (R) R.push({ s: k - ls, e: atEnd ? k - ls : k - ls + 1, cls: ccls, k: 'cur' });
+         if (wantHtml) html += `<span class="${ccls}" data-o="${k - rel}" data-len="${atEnd ? 0 : 1}">${atEnd ? ' ' : esc(ch)}</span>`;
+@@ -2056,7 +2058,7 @@
+       }
+       if (k === le) {
+         flush(k);
+-        if (le < n && flags && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
++        if (le < n && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
+         if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
+         break;
+       }

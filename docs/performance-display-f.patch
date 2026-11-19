@@ -1,0 +1,50 @@
+--- a/src/editor-core.ts
++++ b/src/editor-core.ts
+@@ -1942,6 +1942,17 @@
+    line start and the class string of the span, plus k: 'cur' (the cursor; e === s at the end of a line),
+    'avy' and 'ell' (t: the label or the fold ellipsis shown instead), 'eol' (the region past the end).
+    The two never share a cache; o.html === false skips the html. */
++// Entries can only be reused in a rendering context with the same faces and output format.
++class EcRowCache extends Map<string, EcLineVal> {
++  context: string;
++  constructor(context: string) { super(); this.context = context; }
++}
++function rowKeyPart(s: string) { return s.length + ':' + s; }
++function rowClassTableKey(names: string[]) {
++  let key = '';
++  for (const name of names) key += name === undefined ? '-' : rowKeyPart(name);
++  return key;
++}
+ let KBUF = new Uint16Array(1024);
+ function renderBuffer(b: EdBuffer, o: EcRenderOpts & { runs: true }): EcRendered;
+ function renderBuffer(b: EdBuffer, o: EcRenderOpts): EcRendered | string;
+@@ -1981,10 +1992,15 @@
+   const out: EcRendered = [];
+   const wantRuns = !!o.runs, wantHtml = o.html !== false || !wantRuns;
+   let R: EdRun[] | null = null;
+-  const cache = (lines || wantRuns) && !o.avy ? o.cache || null : null, next = (lines || wantRuns) && !o.avy ? new Map<string, EcLineVal>() : null;
+-  /* The cache key also names the class table (a mode's own lexer numbers its classes differently) and
+-     the fold ellipsis, which change a line's html without changing its text or keys. */
+-  const ckPre = (o.active ? 1 : 0) + '|' + (o.cursorClass || '') + '|' + (ext ? 'x' : '') + '|' + ell + '|' + (wantRuns ? 'R' + (wantHtml ? 'H' : '') + '|' : '');
++  // Compare arbitrary cursor, fold and lexer strings once, outside the per-row cache key.
++  // Spans pack class numbers in one byte; the external lexer's cursor face uses the full number.
++  const cursorClassNo = ecls && Number.isInteger(pt) && pt >= from && pt < to ? ecls[pt - from] : 0;
++  const next = (lines || wantRuns) && !o.avy ? new EcRowCache(
++    (o.active ? '1' : '0') + (wantRuns ? wantHtml ? 'B' : 'R' : 'H') + (lines ? 'L' : 'M') +
++    rowKeyPart(o.cursorClass || '') + rowKeyPart(ellT) +
++    (ext ? 'x' + rowKeyPart(cursorClassNo === (cursorClassNo & 255) ? '' : String(cursorClassNo)) + rowClassTableKey(names) : '')
++  ) : null;
++  const cache = next && o.cache instanceof EcRowCache && o.cache.context === next.context ? o.cache : null;
+   let ln = lines ? lineNoB(b, ls) : 1, made = 0, vis = '';
+   for (; ls <= n && made < count; ln++, made++) {
+     const le = eolS(ls);
+@@ -2000,7 +2016,8 @@
+     for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
+     let ck: string | null = null;
+     if (next && len <= 8192) {
+-      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
++      // The tail is text, NUL, and exactly text.length + 1 packed keys: its length fixes the split.
++      ck = (lines ? '' : ls + ':') + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
+       const hit = cache ? cache.get(ck) : undefined;
+       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
+     }

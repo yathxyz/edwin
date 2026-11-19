@@ -525,6 +525,53 @@ test('runs reproduce the html renderer: same text, same classes, and the html is
   b.markActive = false;
 });
 
+test('a warm row cache preserves spans and runs across cursor moves, folds and highlighting', async () => {
+  const long = 'x'.repeat(12000), text = '\n<&>"\t😀\0\n' + long + '\nhidden\nend\n';
+  const b = await show('plain.txt', 'fundamental-mode', text);
+  const eol = text.indexOf('\n', 1);
+  b.folds = [{ s: text.indexOf('\nhidden'), e: text.indexOf('\nend') }];
+  type Rendered = unknown[] & { seg: unknown; cache: Map<string, unknown> };
+  for (const format of [{}, { runs: true }, { runs: true, html: false }]) {
+    let cache: Map<string, unknown> | null = null;
+    for (const pt of [0, 1, 2.5, 7, eol, eol + 124, b.folds[0].s, text.length]) {
+      b.pt = pt;
+      const o = { active: pt % 2 === 0, numbers: 'relative', count: 12, cursorClass: 'bar', ...format };
+      const rows: Rendered = Ed.renderBuffer(b, { ...o, cache });
+      // A fresh render with a highlight that matches nothing must draw exactly the same rows.
+      const classified: Rendered = Ed.renderBuffer(b, { ...o, hl: /(?!)/g });
+      assert.deepEqual([...rows], [...classified]);
+      assert.equal(rows.seg, classified.seg);
+      cache = rows.cache;
+    }
+  }
+  assert.equal(Ed.renderBuffer(b, { lines: false }), Ed.renderBuffer(b, { lines: false, hl: /(?!)/g }));
+  // Cached rows must not mask later search highlighting or a selection past end-of-line.
+  const before = Ed.renderBuffer(b, { count: 2 });
+  b.mark = 1; b.pt = eol + 1; b.markActive = true;
+  const marked = Ed.renderBuffer(b, { count: 2, hl: /</g, cache: before.cache });
+  assert.match(marked[1].html, /class="rg lz"/);
+  assert.match(marked[1].html, /class="rg eolsel"/);
+  b.markActive = false;
+});
+
+test('a cached folded row uses the current ellipsis', async () => {
+  const b = await show('class-cache.txt', 'fundamental-mode', 'a\0|b\nhidden\nend');
+  b.folds = [{ s: 4, e: 11 }];
+  const { ellipsis } = Ed.hooks;
+  let label = 'first\0|';
+  try {
+    Ed.hooks.ellipsis = () => label;
+    const opts = { pt: 0, runs: true };
+    const before = Ed.renderBuffer(b, opts);
+    label = '\0|<&>';
+    const reused = Ed.renderBuffer(b, { ...opts, cache: before.cache });
+    assert.deepEqual([...reused], [...Ed.renderBuffer(b, opts)]);
+    assert.equal(reused[0].runs.at(-1).t, label);
+  } finally {
+    Ed.hooks.ellipsis = ellipsis;
+  }
+});
+
 /* ---------- the face tables mirror the stylesheets ---------- */
 /* var(--a, var(--b, #c)) -> ['a', 'b', '#c']; a plain colour -> [it]. */
 function chain(v: string) {
