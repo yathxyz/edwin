@@ -131,6 +131,9 @@ edit.sock client.
   Markdown draft (`C-c C-p` preview, `C-c C-k` leave retaining it). By default clients can read sessions
   and write and keep drafts, but cannot send them. With `agentHub.steer: true`, **every client admitted to
   the daemon can steer**. Admission already permits editing the user's files through the daemon.
+  **Keep steering off until the hub atomically checks both the request version and the session incarnation
+  when accepting an answer.** Edwin checks what the user saw before sending; the hub does not verify that
+  the question is still the same when it accepts the answer.
   `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
   named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
