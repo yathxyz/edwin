@@ -200,6 +200,7 @@ export class Anchors {
   userInit(): string | null {
     const file = path.join(this.server.cfg.configDir, 'init.scm');
     if (this.server.auth.agent) {
+      // user-init returns the actual init text, including when its path is a symlink.
       try { return this.server.auth.agent.withRead(file, fd => fs.readFileSync(fd, 'utf8')); }
       catch (e) { if (e.code === 'ENOENT') return null; throw new ProtoError('refused_path', 'Cannot read user init'); }
     }

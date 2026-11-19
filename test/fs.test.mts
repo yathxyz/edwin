@@ -8,9 +8,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild } from './edit-client.mts';
-import { AgentAuthority } from '../server/agent-files.mts';
-import { Fs } from '../server/fs.mts';
-import type { Server } from '../server/main.mts';
 
 let dir: TestDir, child: EdwindChild, c: EditClient, outside: string;
 const at = (p: string) => path.join(dir.dirs.home, p);
@@ -163,45 +160,37 @@ test('fs-copy: serves a second command before an ordinary recursive copy finishe
   else assert.ok(seen.value.entries.length < count, 'the daemon could not inspect the destination until every file was copied');
 });
 
-test('fs-copy: a guarded copy yields between entries and keeps its source directory pinned', async () => {
-  const auth = new AgentAuthority(dir.cfg, put('guarded-copy-marker'));
-  const ops = new Fs({ buffers: { auth, all: () => [] }, log: { info() {} } } as unknown as Server);
-  const src = at('guarded-tree'), dst = src + '-copy', count = 128;
-  fs.mkdirSync(src);
-  for (let i = 0; i < count; i++) fs.writeFileSync(path.join(src, String(i)), String(i));
-
-  let done = false, renamed = false;
-  const copy = ops.copy(src, dst).finally(() => { done = true; });
-  const observe = async () => {
-    while (!done) {
-      await new Promise<void>(resolve => setImmediate(resolve));
-      if (!fs.existsSync(dst)) continue;
-      const n = fs.readdirSync(dst).length;
-      if (n > 0 && n < count) {
-        fs.renameSync(src, src + '-moved');
-        renamed = true;
-        break;
-      }
+test('configured fs-copy refuses protected operands and tree entries but copies ordinary entries unchanged', async t => {
+  const d = makeDir(), tokenFile = path.join(d.root, 'private-fixture');
+  t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  fs.writeFileSync(tokenFile, 'not a bearer token');
+  d.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile };
+  fs.writeFileSync(d.file, JSON.stringify(d.cfg));
+  const daemon = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: undefined } }), client = new EditClient(d.cfg.socket);
+  try {
+    await client.connect(); await client.hello();
+    const copy = (src: string, dst: string) => client.call('fs-copy', [{ src, dst }]);
+    const occupied = path.join(d.root, 'occupied'); fs.writeFileSync(occupied, 'ordinary');
+    for (const kind of ['hard', 'symbolic']) {
+      const src = path.join(d.root, kind), dst = src + '-copy';
+      fs.mkdirSync(src);
+      const leaf = path.join(src, 'alias');
+      if (kind === 'hard') fs.linkSync(tokenFile, leaf);
+      else fs.symlinkSync(tokenFile, leaf);
+      assert.equal((await copy(leaf, occupied)).code, 'refused_path', 'check the source even when the destination exists');
+      assert.equal((await copy(occupied, leaf)).code, 'refused_path', 'a protected destination is not an ordinary existing file');
+      assert.equal((await copy(src, dst)).code, 'refused_path');
+      assert.equal(fs.lstatSync(path.join(dst, 'alias'), { throwIfNoEntry: false }), undefined);
     }
-  };
-  await Promise.all([copy, observe()]);
-  assert.ok(renamed, 'no turn of the event loop ran while the tree was partially copied');
-  for (let i = 0; i < count; i++) assert.equal(fs.readFileSync(path.join(dst, String(i)), 'utf8'), String(i));
-});
-
-test('fs-copy: guarded recursive reads refuse aliases to a protected fixture', async () => {
-  const protectedFile = put('protected-copy-fixture', 'synthetic marker');
-  const auth = new AgentAuthority(dir.cfg, protectedFile);
-  const ops = new Fs({ buffers: { auth, all: () => [] } } as unknown as Server);
-  for (const kind of ['hard', 'symbolic']) {
-    const src = at(`guarded-${kind}`), dst = src + '-copy';
+    const src = path.join(d.root, 'ordinary'), dst = src + '-copy';
     fs.mkdirSync(src);
-    const leaf = path.join(src, 'alias');
-    if (kind === 'hard') fs.linkSync(protectedFile, leaf);
-    else fs.symlinkSync(protectedFile, leaf);
-    await assert.rejects(ops.copy(src, dst), { code: 'refused_path' });
-    assert.equal(fs.lstatSync(path.join(dst, 'alias'), { throwIfNoEntry: false }), undefined);
-  }
+    fs.writeFileSync(path.join(src, 'file'), 'ordinary text', { mode: 0o600 });
+    fs.symlinkSync('file', path.join(src, 'link'));
+    assert.equal((await copy(src, dst)).t, 'result');
+    assert.equal(fs.readFileSync(path.join(dst, 'file'), 'utf8'), 'ordinary text');
+    assert.equal(fs.statSync(path.join(dst, 'file')).mode & 0o777, 0o600);
+    assert.equal(fs.readlinkSync(path.join(dst, 'link')), 'file');
+  } finally { client.close(); await stopEdwind(daemon); }
 });
 
 test('fs-copy refuses a source in a refused path, a tree that holds one, and every destination a rename would refuse', async () => {

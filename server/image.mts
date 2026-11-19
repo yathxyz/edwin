@@ -360,6 +360,7 @@ export class ImageLog {
       let names: string[] = []; try { names = fs.readdirSync(path.join(EDWIN_TREE, 'scm')).filter(f => f.endsWith('.scm')).sort(); } catch (e) { return false; }
       for (const f of names) {
         const file = path.join(EDWIN_TREE, 'scm', f);
+        // The source browser can encounter a protected file installed under a shipped name.
         const lines = (server.auth.agent ? server.auth.agent.readSource(file, EDWIN_TREE) : fs.readFileSync(file, 'utf8')).split('\n');
         const i = lines.findIndex(l => re.test(l));
         if (i >= 0) return S.listOf([`edwin/scm/${f}`, BigInt(i + 1)]);
@@ -371,6 +372,7 @@ export class ImageLog {
       const real = path.resolve(EDWIN_TREE, rel);
       if (!real.startsWith(EDWIN_TREE + path.sep) || rel.split('/').includes('node_modules')) throw new S.SchemeError('error', `%edwin-source: ${rel} is not in the shipped tree`, []);
       let text: string;
+      // This primitive returns source bytes to the caller.
       try { text = server.auth.agent ? server.auth.agent.readSource(real, EDWIN_TREE) : fs.readFileSync(real, 'utf8'); }
       catch (e) { throw new S.SchemeError('error', `%edwin-source: no file ${rel}`, []); }
       const lines = text.split('\n'), from = Math.max(1, Number(ln) || 1), count = Math.min(400, Math.max(1, n === undefined ? 40 : Number(n) || 40));
@@ -522,6 +524,7 @@ export class ImageLog {
   /* Append the live entries to <configDir>/init.scm, then reset (R4.20). Failed entries go in as comments. */
   saveToInit(configDir: string) {
     const file = path.join(configDir, 'init.scm');
+    this.server?.auth.agent?.checkNamed(file); // Saving the image to init must not append to a protected alias.
     const lines = [`\n;;; image log saved ${stamp(Date.now())} (${this.entries.length} entries)`];
     let saved = 0;
     for (const e of this.entries) {

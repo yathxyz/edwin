@@ -15,8 +15,8 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { Authority, expandHome } from './paths.mts';
-import { AgentAuthority, type configSource } from './agent-files.mts';
-import { openPromptWriter, PromptStoreBusy, readAgentConfig } from './agent-startup.mts';
+import { AgentAuthority, ProtectedFileError } from './agent-files.mts';
+import { openPromptWriter, PromptStoreBusy } from './agent-startup.mts';
 import { agentEncoder } from './agent-wire.mts';
 import { Buffers } from './buffers.mts';
 import { Client } from './session.mts';
@@ -37,6 +37,7 @@ import * as fsModule from './fs.mts';
 import * as projectorModule from './projector.mts';
 import * as brainModule from './brain.mts';
 import * as agentSessionsModule from './agent-sessions.mts';
+import { isPromptDraft } from './agent-prompts.mts';
 import { TAG } from './projector.mts';
 import { lockdown, lockdownState } from './lockdown.mts';
 import type { By, CallCtx, CallResult, Condition, WireMessage } from './proto.mts';
@@ -82,7 +83,7 @@ export interface Config {
      one, that part is off. */
   brain?: { url: string; credential?: string; readCredential?: string; taskCredential?: string; tags: string[] };
   agentHub?: agentSessionsModule.AgentHubConfig;
-  configSource?: ReturnType<typeof configSource>;
+  configFile?: string;
 }
 
 /* A server command (§4.6): the result object, a promise of one, or undefined for a delayed result. */
@@ -119,9 +120,7 @@ export function makeLog(level: string = 'info'): Log {
 const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'brain', 'agentHub', 'host', 'logLevel']);
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
-  let source: Config['configSource'];
   try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
-  if (cfg?.agentHub !== undefined) ({ cfg, source } = readAgentConfig(file));
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: not an object`);
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
@@ -180,7 +179,7 @@ export function loadConfig(file: string): Config {
   }
   if (cfg.agentHub !== undefined) {
     out.agentHub = agentSessionsModule.validateAgentHub(cfg.agentHub);
-    out.configSource = source;
+    out.configFile = file; // Preserve the pathname that was opened, including '..' after a symlink.
   }
   return out;
 }
@@ -224,7 +223,7 @@ export class Server {
        frame, and to a model through pi's tools (R14.6). */
     const credentials = modelsModule.credentialsDirectory();
     const roots = credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg;
-    this.auth = cfg.agentHub ? new AgentAuthority(roots, cfg.agentHub.tokenFile, cfg.configSource) : new Authority(roots);
+    this.auth = cfg.agentHub ? new AgentAuthority(roots, cfg.agentHub.tokenFile, cfg.configFile) : new Authority(roots);
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */
@@ -245,6 +244,7 @@ export class Server {
   /* Load Edwin's core headless and boot it (host-node.cts), then replay the image log (R4.19) and the journals. */
   async start(mode: 'run' | 'metadata' = 'run') {
     const agent = this.auth.agent;
+    const guardedStorage = agent && fileStorage(path.join(this.cfg.stateDir, 'storage.json'), this.log, agent);
     if (agent && mode === 'run') this.releasePromptWriter = await openPromptWriter(agent, this.log);
     try {
       if (agent) this.initState(this.cfg);
@@ -252,14 +252,27 @@ export class Server {
       const storageFile = path.join(this.cfg.stateDir, 'storage.json');
       /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
       const safe = this.image.bootGuard();
-      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log, agent) });
+      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: guardedStorage ?? fileStorage(storageFile, this.log) });
+      if (agent) {
+        // Scheme load/include/require can name a local file without going through a buffer.
+        host.readFile = (file: string) => {
+          try { return agent.withRead(file, fd => fs.readFileSync(fd, 'utf8')); }
+          catch (e) { if (e instanceof ProtectedFileError) throw e; return null; }
+        };
+        // Boot must not interpret a protected file reached through init.scm.
+        host.userConfig = (name: string) => {
+          try { return agent.withRead(path.join(this.cfg.configDir, name), fd => fs.readFileSync(fd, 'utf8')); }
+          catch { return null; }
+        };
+      }
       if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
       this.Ed = loadEdwin(host, { mode: 'gen' });
       this.L = (globalThis as any).L; // any: the core sets globalThis.L
       this.Ed.boot({ host });
       await this.Ed.whenIdle();
       this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
-      this.buffers.reload();
+      if (agent && !agent.promptStore) this.buffers.reload(e => isPromptDraft(agent.promptDir, e));
+      else this.buffers.reload();
       for (const m of MODULES) { await m.install(this); this.modules.push(m); }
       if (agent) { await agentSessionsModule.install(this, mode === 'metadata'); this.modules.push(agentSessionsModule); }
       /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
@@ -466,8 +479,14 @@ export class Server {
 function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
   let map = new Map<string, string>();
   if (agent) {
+    // Refuse the startup collision before constructing a store whose flush would overwrite it.
+    try { agent.checkNamed(file); }
+    catch (e) {
+      if (e instanceof ProtectedFileError) throw new Error('storage.json conflicts with a protected file');
+      throw e;
+    }
     try {
-      const text = agent.withRead(file, fd => fs.readFileSync(fd, 'utf8'), 'state');
+      const text = fs.readFileSync(file, 'utf8');
       try { map = new Map(Object.entries(JSON.parse(text))); }
       catch { log.warn('storage', { error: 'Invalid storage JSON' }); }
     } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
@@ -475,7 +494,19 @@ function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
   let timer: NodeJS.Timeout | null = null;
   const flush = () => { timer = null; try { fs.writeFileSync(file, JSON.stringify(Object.fromEntries(map)), { mode: 0o600 }); } catch (e) { log.warn('storage', { error: e.message }); } };
   const schedule = () => { if (!timer) timer = setTimeout(flush, 500); };
-  return { get: (k: string) => (map.has(k) ? map.get(k) : null), set: (k: string, v: unknown) => { map.set(k, String(v)); schedule(); return true; }, remove: (k: string) => { map.delete(k); schedule(); }, keys: () => [...map.keys()], flush };
+  const storage = { get: (k: string) => (map.has(k) ? map.get(k)! : null), set: (k: string, v: unknown) => { map.set(k, String(v)); schedule(); return true; }, remove: (k: string) => { map.delete(k); schedule(); }, keys: () => [...map.keys()], flush };
+  if (!agent) return storage;
+  // insert-file-contents and write-region use the host's virtual file namespace.
+  const checkKey = (k: string) => {
+    const prefix = 'lmacs:file:';
+    if (k.startsWith(prefix)) agent.checkNamed(path.resolve(agent.notesDir, expandHome(k.slice(prefix.length))));
+  };
+  return {
+    ...storage,
+    get: (k: string) => { checkKey(k); return storage.get(k); },
+    set: (k: string, v: unknown) => { checkKey(k); return storage.set(k, v); },
+    remove: (k: string) => { checkKey(k); storage.remove(k); },
+  };
 }
 
 /* ---------- --check and --export (R15.12) ---------- */

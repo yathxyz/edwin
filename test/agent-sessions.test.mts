@@ -14,7 +14,7 @@ import type { TestDir } from './edit-client.mts';
 import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { sessionsFixture } from './agent-render-fixture.mts';
 import type { Server } from '../server/main.mts';
-import { AgentAuthority, PrivateStore } from '../server/agent-files.mts';
+import { AgentAuthority } from '../server/agent-files.mts';
 import { Notes } from '../server/notes.mts';
 const require = createRequire(import.meta.url);
 const { createHost, loadEdwin } = require('../src/host-node.cts');
@@ -241,22 +241,6 @@ async function checkListRendering(hub: FakeAgentHub, c: EditClient, Ed: ReturnTy
 }
 
 
-test('review 5 config source: protect the inode parsed at startup, not just the current path', async t => {
-  const { loadConfig, Server, makeLog } = await import('../server/main.mts');
-  const dir = makeDir(); t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
-  dir.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile: path.join(dir.root, 'absent') };
-  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-  const source = path.join(dir.root, 'daemon-config'), original = path.join(dir.root, 'retained');
-  fs.symlinkSync(dir.file, source); fs.linkSync(dir.file, original);
-  const config = loadConfig(source);
-  fs.unlinkSync(dir.file); fs.writeFileSync(dir.file, 'replacement fixture');
-  const auth = new Server(config, makeLog('error')).auth.agent;
-  assert.ok(auth instanceof AgentAuthority);
-  for (const file of [original, source, dir.file]) {
-    assert.throws(() => auth.withRead(file, fd => fs.readFileSync(fd)), { code: 'refused_path' });
-  }
-});
-
 test('guarded shipped-source reads require an in-tree regular file and refuse private hard links', t => {
   const d = makeDir(), root = d.dirs.notes, token = path.join(d.root, 'credential');
   t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
@@ -273,188 +257,115 @@ test('guarded shipped-source reads require an in-tree regular file and refuse pr
   assert.throws(() => auth.readSource(path.join(root, 'subdir'), root), { code: 'refused_path' });
 });
 
-test('generic file reads and saves cannot use a prompt store without its writer', t => {
-  const d = makeDir(), stateAlias = path.join(d.root, 'state-alias'), storeAlias = path.join(d.root, 'store-alias');
-  t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
-  fs.symlinkSync(d.dirs.state, stateAlias);
-  const auth = new AgentAuthority({ ...d.cfg, stateDir: stateAlias }, path.join(d.root, 'absent-token'));
-  const real = path.join(d.dirs.state, 'agent-prompts');
-  fs.mkdirSync(real, 0o700); fs.symlinkSync(real, storeAlias);
-  fs.writeFileSync(path.join(real, 'draft.md'), 'original');
-  const checkUnavailable = () => {
-    for (const root of [auth.promptDir, real, storeAlias]) {
-      assert.throws(() => auth.readText(path.join(root, 'draft.md')), { code: 'refused_path' });
-      for (const leaf of ['draft.md', 'new.md'])
-        assert.throws(() => auth.saveAtomic(path.join(root, leaf), 'replacement'), { code: 'refused_path' });
-    }
-    assert.deepEqual(fs.readdirSync(real), ['draft.md']);
-    assert.equal(fs.readFileSync(path.join(real, 'draft.md'), 'utf8'), 'original');
-  };
-  checkUnavailable();
-  auth.promptStore = new PrivateStore(auth);
-  auth.promptStore.close();
-  checkUnavailable();
-});
-
-test('review 5 config source: editor reads and binary attachments refuse aliases without logging private ids', async t => {
-  const dir = makeDir(), tokenFile = path.join(dir.root, 'private-id-for-reload');
-  fs.writeFileSync(tokenFile, 'dummy fixture; not a bearer token');
-  const alias = path.join(dir.dirs.notes, 'alias.txt'), hard = path.join(dir.dirs.notes, 'copy.txt');
-  fs.symlinkSync(dir.file, alias); fs.linkSync(dir.file, hard);
-  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
-  t.after(async () => { c.close(); await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
-  await c.connect(); await c.hello();
-  assert.equal((await c.open(hard)).text, JSON.stringify(dir.cfg), 'without agentHub the config is ordinary');
-  assert.equal((await c.open(tokenFile)).text, 'dummy fixture; not a bearer token');
-  c.close(); await stopEdwind(child);
-
-  // The invalid fixture token prevents all hub I/O. Only the local editor socket is used.
-  dir.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile };
-  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
-  assert.match(child.logs, /error reload /, 'an indexed private file was refused');
-  assert.ok(!child.logs.includes(tokenFile) && !child.logs.includes(path.basename(hard)), 'no refused buffer id in logs');
-  const draft = (await c.call('agent-prompt-create', [{ text: 'ordinary draft' }])).value;
-  for (const file of [dir.file, alias, hard]) {
-    assert.equal((await c.open(file)).error?.code, 'refused_path');
-    assert.equal((await c.call('visit-id', [file])).code, 'refused_path');
-    assert.equal((await c.call('fs-stat', [{ path: file }])).code, 'refused_path');
-    assert.ok((await c.form(`(insert-file-contents ${JSON.stringify(file)})`)).error);
-    for (const mimeType of ['text/plain', 'application/octet-stream']) {
-      const r = await c.call('agent-prompt-attach-file', [draft, file, { embed: true, mimeType }]);
-      assert.ok(r.error, `attachment should refuse ${mimeType}`);
-    }
-  }
-  const entries = (await c.call('fs-list', [{ dir: dir.dirs.notes }])).value.entries;
-  assert.ok(!entries.some((e: { name: string }) => [path.basename(alias), path.basename(hard)].includes(e.name)));
-  assert.deepEqual((await c.call('agent-prompt-preview', [draft])).value.blocks, [{ type: 'text', text: 'ordinary draft' }]);
-});
-
-test('notes worker: middle rotation hard link stays private during parse, scan and grep', async t => {
-  const dir = makeDir(), tokenFile = path.join(dir.root, 'fixture');
-  const cfg = { ...dir.cfg, agentHub: { tokenFile } };
-  fs.writeFileSync(tokenFile, 'first fixture');
+test('configured notes parse and grep do not read protected names or existing aliases', async t => {
+  const dir = makeDir(), tokenFile = path.join(dir.dirs.notes, 'private.md');
+  const ordinary = { id: 'ordinary.md', file: path.join(dir.dirs.notes, 'ordinary.md') };
+  const symlink = { id: 'link.md', file: path.join(dir.dirs.notes, 'link.md') };
+  const hard = { id: 'hard.md', file: path.join(dir.dirs.notes, 'hard.md') };
+  fs.writeFileSync(tokenFile, '# Fixture text\n');
+  fs.writeFileSync(ordinary.file, '# Ordinary\n');
+  fs.symlinkSync(tokenFile, symlink.file); fs.linkSync(tokenFile, hard.file);
   const auth = new AgentAuthority(dir.cfg, tokenFile);
-  const notes = new Notes({ cfg, auth, L: {}, buffers: { byFile: () => null }, clients: [], log: console } as unknown as Server);
+  const notes = new Notes({ cfg: dir.cfg, auth, L: {}, buffers: { byFile: () => null }, clients: [], log: console } as unknown as Server);
   notes.grammar = JSON.parse(fs.readFileSync(new URL('./fixtures/notes/golden/grammar.json', import.meta.url), 'utf8'));
   t.after(async () => { await notes.shutdown(); fs.rmSync(dir.root, { recursive: true, force: true }); });
-
-  const id = 'middle.md', file = path.join(dir.dirs.notes, id);
-  const ordinary = { id: 'ordinary.md', file: path.join(dir.dirs.notes, 'ordinary.md') };
-  fs.writeFileSync(ordinary.file, '# Ordinary\n');
-  await notes.job({ t: 'parse', items: [ordinary] }); // worker is running before either rotation
-  assert.equal(notes.files.get(ordinary.id)?.rec.file.title, 'Ordinary');
-  const next = path.join(dir.root, 'replacement');
-  for (const label of ['middle fixture', 'last fixture']) {
-    fs.writeFileSync(next, label); fs.renameSync(next, tokenFile);
-    assert.equal(auth.readCredential(), label);
-    if (label === 'middle fixture') fs.linkSync(tokenFile, file);
-  }
-  const items = [{ id, file }];
-  const [result] = await notes.job({ t: 'parse', items });
-  assert.equal(result.skipped, 'error');
-  assert.ok(!notes.files.has(id));
-  const scan = await notes.job({ t: 'scan', root: dir.dirs.notes, ignore: [] });
-  assert.deepEqual(scan.map(entry => entry.id), [ordinary.id]);
-  const grep = { t: 'grep' as const, files: [ordinary, ...items], source: 'Ordinary|middle', flags: '', excludeLinks: false, max: 10 };
-  const pending = notes.job(grep); // sync grep must also work while an asynchronous disk job is outstanding
+  const files = [ordinary, { id: 'private.md', file: tokenFile }, symlink, hard];
+  const [, ...refusals] = await notes.job({ t: 'parse', items: files });
+  assert.deepEqual(refusals.map(r => r.skipped), ['error', 'error', 'error']);
+  assert.deepEqual([...notes.files.keys()], [ordinary.id]);
+  const grep = { t: 'grep' as const, files, source: 'Ordinary|Fixture', flags: '', excludeLinks: false, max: 10 };
   assert.deepEqual(notes.syncJob(grep).hits.map(hit => hit[0]), [ordinary.id]);
-  assert.deepEqual((await pending).hits.map(hit => hit[0]), [ordinary.id]);
+  assert.deepEqual((await notes.job(grep)).hits.map(hit => hit[0]), [ordinary.id]);
 });
 
-test('configured startup does not read or report protected storage contents', async t => {
-  for (const kind of ['same path', 'symlink', 'hard link', 'ordinary malformed JSON']) await t.test(kind, async t => {
+test('configured startup refuses storage aliases before any store write', async t => {
+  for (const excluded of ['credential', 'config']) for (const kind of ['same path', 'symlink', 'hard link']) await t.test(`${excluded}: ${kind}`, async t => {
     const dir = makeDir(), storage = path.join(dir.dirs.state, 'storage.json');
     t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
-    const tokenFile = kind === 'same path' ? storage : path.join(dir.root, 'credential');
-    // Invalid fixture bytes, never a bearer token, and never printed even on failure.
-    const canary = 'STORAGE_CANARY';
-    fs.writeFileSync(kind === 'ordinary malformed JSON' ? storage : tokenFile, canary);
-    if (kind === 'symlink') fs.symlinkSync(tokenFile, storage);
-    if (kind === 'hard link') fs.linkSync(tokenFile, storage);
+    const tokenFile = kind === 'same path' && excluded === 'credential' ? storage : path.join(dir.root, 'credential');
+    if (kind === 'same path' && excluded === 'config') dir.file = storage;
+    const canary = 'storage-collision-fixture';
+    fs.writeFileSync(tokenFile, canary);
     dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
-    fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-    const child = await startEdwind(dir, { env: { EDWIND_LOG: undefined } }), c = new EditClient(dir.cfg.socket);
+    fs.writeFileSync(dir.file, JSON.stringify({ ...dir.cfg, host: canary }));
+    const target = excluded === 'credential' ? tokenFile : dir.file, before = fs.readFileSync(target);
+    if (kind === 'symlink') fs.symlinkSync(target, storage);
+    if (kind === 'hard link') fs.linkSync(target, storage);
+    let failure = '';
     try {
-      await c.connect();
-      const welcome = await c.hello();
-      const reply = await c.call('status');
-      assert.ok(!JSON.stringify([welcome, reply, c.queue]).includes(canary), 'startup exposed storage bytes on the wire');
-    } finally { c.close(); await stopEdwind(child); }
-    assert.ok(!child.logs.includes(canary), 'startup logged storage bytes');
-    assert.ok(child.logs.includes(kind === 'ordinary malformed JSON' ? 'Invalid storage JSON' : 'Private file: access refused'),
-      'startup must distinguish an access refusal from a parse error');
+      const child = await startEdwind(dir, { env: { EDWIND_LOG: undefined } });
+      await stopEdwind(child);
+    } catch (e) { failure = String(e); }
+    assert.ok(fs.readFileSync(target).equals(before), 'startup modified the excluded file');
+    assert.match(failure, /edwind: storage\.json conflicts with a protected file/);
+    assert.ok(!failure.includes(canary), 'startup disclosed the excluded file contents');
   });
 });
 
-test('configured recovery uses trusted journal origins when the backing directory is not searchable',
-  { skip: process.getuid?.() === 0 && 'root bypasses directory search permissions' }, async t => {
-  const dir = makeDir(), parent = path.join(dir.dirs.config, 'not-searchable');
-  const ordinary = path.join(parent, 'ordinary.txt'), privateOrigin = path.join(dir.dirs.config, 'old.txt');
-  const moved = path.join(parent, 'moved.txt'), tokenFile = path.join(dir.root, 'credential');
-  fs.mkdirSync(parent);
-  t.after(() => { fs.chmodSync(parent, 0o700); fs.rmSync(dir.root, { recursive: true, force: true }); });
-  fs.writeFileSync(tokenFile, 'invalid fixture');
-  dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
+test('configured malformed ordinary storage logs a fixed parse error', async t => {
+  const dir = makeDir();
+  t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
+  const canary = 'STORAGE_CANARY';
+  fs.writeFileSync(path.join(dir.dirs.state, 'storage.json'), canary);
+  dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile: path.join(dir.root, 'absent') };
   fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
-  try {
-    await c.connect(); await c.hello();
-    for (const file of [ordinary, privateOrigin]) {
-      fs.writeFileSync(file, 'base');
-      assert.equal((await c.open(file)).text, 'base');
-      assert.equal((await c.edit(file, 0, [[0, '', 'journal ']])).t, 'ack');
-    }
-    assert.equal((await c.call('rename-file', [privateOrigin, moved])).value?.ok, true);
-  } finally { c.close(); await stopEdwind(child); }
-  const index = JSON.parse(fs.readFileSync(path.join(dir.dirs.state, 'index.json'), 'utf8'));
-  const { jid } = index.buffers.find((row: { id: string }) => row.id === ordinary);
-  fs.unlinkSync(path.join(dir.dirs.state, 'buffers', jid + '.saved'));
-  fs.writeFileSync(ordinary, 'new backing');
-  fs.linkSync(tokenFile, privateOrigin);
-  fs.chmodSync(parent, 0o600);
-  assert.throws(() => fs.statSync(ordinary), { code: 'EACCES' });
-  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket);
-  try {
-    await c.connect(); await c.hello();
-    const ids = (await c.call('buffer-list')).value.map((row: { id: string }) => row.id);
-    assert.ok(ids.includes(ordinary), 'the snapshot was not recovered at startup');
-    assert.ok(!ids.includes(moved), 'an excluded journal origin cannot authorize offline recovery');
-    const opened = await c.open(ordinary);
-    assert.equal(opened.text, 'journal base');
-    assert.equal(opened.ver, 1);
-    assert.equal(opened.meta?.modified, true);
-  } finally { c.close(); await stopEdwind(child); }
+  const child = await startEdwind(dir, { env: { EDWIND_LOG: undefined } });
+  await stopEdwind(child);
+  assert.ok(!child.logs.includes(canary), 'startup logged storage bytes');
+  assert.match(child.logs, /Invalid storage JSON/);
 });
 
-test('configured recovery takes a jid-only row identity from its journal and still excludes private aliases', async t => {
-  const dir = makeDir(), tokenFile = path.join(dir.root, 'credential');
-  const ordinary = 'name:ordinary', alias = path.join(dir.dirs.config, 'will-be-private');
-  t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
-  fs.writeFileSync(tokenFile, 'invalid fixture');
-  fs.writeFileSync(alias, 'old file');
+test('configured commands refuse named token and config files through leaf and parent aliases', async t => {
+  const dir = makeDir(), secretDir = path.join(dir.root, 'private'), parentLink = path.join(dir.root, 'parent-link');
+  const tokenFile = path.join(secretDir, 'credential'), source = path.join(dir.root, 'ordinary');
+  fs.mkdirSync(secretDir);
+  fs.renameSync(dir.file, path.join(secretDir, 'edit.json')); dir.file = path.join(secretDir, 'edit.json');
+  fs.symlinkSync(secretDir, parentLink);
+  const canary = 'private content canary';
+  fs.writeFileSync(tokenFile, canary);
+  fs.writeFileSync(source, 'ordinary text');
   dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
-  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-  let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  fs.writeFileSync(dir.file, JSON.stringify({ ...dir.cfg, host: canary }));
+  const targets = [tokenFile, dir.file].map(file => {
+    const leaf = path.join(secretDir, path.basename(file) + '-link'), hard = path.join(dir.root, path.basename(file) + '-hard');
+    fs.symlinkSync(path.basename(file), leaf); fs.linkSync(file, hard);
+    return { file, hard, paths: [file, leaf, path.join(parentLink, path.basename(file)), path.join(parentLink, path.basename(leaf))], before: fs.readFileSync(file) };
+  });
+  // The daemon opens this exact pathname: '..' is relative to the symlink's target.
+  const hop = path.join(dir.root, 'config-hop'), childDir = path.join(secretDir, 'child');
+  fs.mkdirSync(childDir); fs.symlinkSync(childDir, hop);
+  dir.file = `${hop}/../edit.json`;
+  const ordinary = path.join(dir.root, 'edit.json');
+  fs.writeFileSync(ordinary, 'ordinary file at the lexical spelling');
+  t.after(() => fs.rmSync(dir.root, { recursive: true, force: true }));
+  const child = await startEdwind(dir, { env: { EDWIND_LOG: undefined } }), c = new EditClient(dir.cfg.socket);
   try {
     await c.connect(); await c.hello();
-    assert.equal((await c.open(ordinary, { create: true })).text, '');
-    assert.equal((await c.open(alias)).text, 'old file');
-    for (const id of [ordinary, alias]) assert.equal((await c.edit(id, 0, [[0, '', 'journal']])).t, 'ack');
-  } finally { c.close(); await stopEdwind(child); }
-  const indexPath = path.join(dir.dirs.state, 'index.json');
-  const index = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
-  index.buffers = index.buffers.map(({ jid }: { jid: string }) => ({ jid }));
-  fs.writeFileSync(indexPath, JSON.stringify(index));
-  fs.unlinkSync(alias); fs.linkSync(tokenFile, alias);
-  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket);
-  try {
-    await c.connect(); await c.hello();
-    const ids = (await c.call('buffer-list')).value.map((row: { id: string }) => row.id);
-    assert.ok(ids.includes(ordinary), 'the jid-only row was not recovered');
-    assert.ok(!ids.includes(alias), 'a jid-only row cannot restore a private alias');
-    assert.equal((await c.open(ordinary)).text, 'journal');
-    assert.equal((await c.open(alias)).error?.code, 'refused_path');
+    assert.equal((await c.open(ordinary)).text, 'ordinary file at the lexical spelling');
+    const draft = (await c.call('agent-prompt-create', [{ text: '' }])).value;
+    assert.ok(draft, 'ordinary draft creation works');
+    for (const op of ['open', 'visit', 'insert', 'load', 'save', 'write-region', 'rename source', 'rename destination', 'delete', 'copy source', 'copy destination', 'embed']) await t.test(op, async () => {
+      for (const { paths, hard } of targets) for (const file of [...paths, ...(['rename source', 'rename destination', 'delete'].includes(op) ? [] : [hard])]) {
+        const r = op === 'open' ? (await c.open(file)).error
+          : op === 'visit' ? await c.call('visit-id', [file])
+          : op === 'insert' ? await c.form(`(insert-file-contents ${JSON.stringify(file)})`)
+          : op === 'load' ? await c.form(`(load ${JSON.stringify(file)})`)
+          : op === 'save' ? await c.request({ t: 'save', buf: file })
+          : op === 'write-region' ? await c.form(`(write-region #f #f ${JSON.stringify(file)})`)
+          : op === 'rename source' ? await c.call('rename-file', [file, source + '-moved'])
+          : op === 'rename destination' ? await c.call('rename-file', [source, file])
+          : op === 'delete' ? await c.call('fs-delete', [{ path: file }])
+          : op === 'copy source' ? await c.call('fs-copy', [{ src: file, dst: source + '-copy' }])
+          : op === 'copy destination' ? await c.call('fs-copy', [{ src: source, dst: file }])
+          : await c.call('agent-prompt-attach-file', [draft, file, { embed: true, mimeType: 'application/octet-stream' }]);
+        assert.ok(/private file|refused/i.test(JSON.stringify(r?.error ?? r?.msg) ?? ''), `${op} did not refuse a protected file`);
+        assert.ok(!JSON.stringify(r).includes(canary), `${op} disclosed file contents`);
+      }
+    });
+    const listing = await c.call('fs-list', [{ dir: parentLink }]);
+    assert.ok(listing.value?.entries.some((e: { name: string }) => e.name === 'credential'));
+    assert.ok(!JSON.stringify(listing).includes(canary), 'listing disclosed file contents');
+    for (const { file, before } of targets) assert.ok(fs.readFileSync(file).equals(before), 'a command modified an excluded file');
   } finally { c.close(); await stopEdwind(child); }
 });
 
@@ -480,7 +391,7 @@ test('configured rename and delete act on an ordinary self-link, not its target'
   } finally { c.close(); await stopEdwind(child); }
 });
 
-test('configured ordinary file I/O follows main without admitting private aliases', async t => {
+test('configured ordinary file I/O follows main', async t => {
   const dir = makeDir({ writablePaths: [] }), { config, state } = dir.dirs;
   const tokenFile = path.join(dir.root, 'bearer');
   fs.writeFileSync(tokenFile, 'not a valid bearer token'); // no remote I/O
@@ -490,22 +401,16 @@ test('configured ordinary file I/O follows main without admitting private aliase
   t.after(async () => { c.close(); await stopEdwind(child, 'SIGKILL'); fs.rmSync(dir.root, { recursive: true, force: true }); });
   await c.connect(); await c.hello();
 
-  // Ordinary snapshots survive a lost read permission, but a now-private backing can never
-  // be recovered or published by name (even when its old snapshot and journal are still valid).
-  const backing = path.join(config, 'backing'), tokenAlias = path.join(config, 'token-link'), configAlias = path.join(config, 'config-link');
-  for (const file of [backing, tokenAlias, configAlias]) {
-    fs.writeFileSync(file, 'snapshot');
-    assert.equal((await c.open(file)).text, 'snapshot');
-    assert.equal((await c.edit(file, 0, [[0, '', 'journal ']])).t, 'ack');
-  }
+  const backing = path.join(config, 'backing');
+  fs.writeFileSync(backing, 'snapshot');
+  assert.equal((await c.open(backing)).text, 'snapshot');
+  assert.equal((await c.edit(backing, 0, [[0, '', 'journal ']])).t, 'ack');
   c.close(); await stopEdwind(child);
   const index = JSON.parse(fs.readFileSync(path.join(state, 'index.json'), 'utf8'));
   const { jid } = index.buffers.find((row: { id: string }) => row.id === backing);
   fs.unlinkSync(path.join(state, 'buffers', jid + '.saved'));
   fs.writeFileSync(backing, 'different backing');
   fs.chmodSync(backing, 0);
-  fs.unlinkSync(tokenAlias); fs.linkSync(tokenFile, tokenAlias);
-  fs.unlinkSync(configAlias); fs.symlinkSync(dir.file, configAlias);
   child = await startEdwind(dir, { env: { CREDENTIALS_DIRECTORY: undefined } });
   c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
   const permissions = { skip: process.getuid?.() === 0 && 'root bypasses read permission' };
@@ -514,17 +419,6 @@ test('configured ordinary file I/O follows main without admitting private aliase
     const recovered = await c.open(backing);
     assert.equal(recovered.text, 'journal snapshot'); assert.equal(recovered.ver, 1);
     assert.equal(recovered.meta?.readOnly, false); assert.equal(recovered.meta?.modified, true);
-  });
-  await t.test('private aliases stay denied through recovery and rotation', async () => {
-    const ids = (await c.call('buffer-list')).value.map((row: { id: string }) => row.id);
-    for (const file of [tokenAlias, configAlias]) assert.ok(!ids.includes(file), file);
-    const next = path.join(dir.root, 'replacement'); fs.writeFileSync(next, 'another fake token'); fs.renameSync(next, tokenFile);
-    const rotated = path.join(config, 'replacement-alias'); fs.linkSync(tokenFile, rotated);
-    for (const file of [tokenAlias, configAlias, rotated]) {
-      assert.equal((await c.open(file)).error?.code, 'refused_path');
-      assert.equal((await c.call('visit-id', [file])).code, 'refused_path');
-      assert.equal((await c.call('fs-stat', [{ path: file }])).code, 'refused_path');
-    }
   });
   await t.test('/dev/null opens as empty read-only text', async () => {
     const opened = await c.open('/dev/null');
@@ -553,7 +447,7 @@ test('configured ordinary file I/O follows main without admitting private aliase
     assert.equal(entry?.kind, 'link'); assert.equal(entry.target, 'loop');
     assert.deepEqual((await c.call('fs-list', [{ dir: config }])).value.entries.find((e: { name: string }) => e.name === 'loop'), entry);
   });
-  await t.test('FIFO waits for a writer and a pathname swap cannot change the bytes read', async () => {
+  await t.test('FIFO waits for a writer', async () => {
     const fifo = path.join(config, 'pipe'); execFileSync('mkfifo', [fifo]);
     const reading = c.open(fifo);
     // No blocking writer in the test runner. ENXIO means the daemon has not opened its
@@ -567,14 +461,8 @@ test('configured ordinary file I/O follows main without admitting private aliase
       }
     }
     assert.notEqual(writer, undefined, 'no FIFO reader');
-    try {
-      fs.unlinkSync(fifo); fs.linkSync(tokenFile, fifo);
-      fs.writeFileSync(writer!, 'ordinary FIFO\n');
-    } finally { fs.closeSync(writer!); }
+    try { fs.writeFileSync(writer!, 'ordinary FIFO\n'); } finally { fs.closeSync(writer!); }
     const opened = await reading; assert.equal(opened.error, null); assert.equal(opened.text, 'ordinary FIFO\n');
-    assert.equal((await c.open(fifo)).error?.code, 'refused_path');
-    fs.unlinkSync(fifo);
-    assert.equal((await c.call('kill-buffer', [fifo])).value, true);
   });
 });
 
@@ -614,95 +502,6 @@ test('credential path redaction leaves ordinary replica data and request identif
   assert.ok(!JSON.stringify(condition.error).includes(tokenFile), 'Scheme diagnostic must mask the credential path');
 });
 
-test('protected reader: credential identities are refused by editor reads, metadata, completion and binary attach', async t => {
-  const hub = await new FakeAgentHub().start(), dir = makeDir();
-  const tokenFile = path.join(dir.dirs.notes, 'private-fixture'), link = path.join(dir.dirs.notes, 'linked-fixture'), hard = path.join(dir.dirs.notes, 'other-fixture');
-  fs.writeFileSync(tokenFile, hub.token); fs.symlinkSync(tokenFile, link); fs.linkSync(tokenFile, hard);
-  fs.mkdirSync(path.join(dir.dirs.notes, 'subdir'));
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-  const fd = fs.openSync(tokenFile, 'r');
-  const child = await startEdwind(dir, { fixtureFd: fd }); fs.closeSync(fd);
-  const c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
-  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
-  const draft = (await c.call('agent-prompt-create', [{ text: 'unchanged' }])).value;
-  const privateReply = (v: unknown) => {
-    const s = JSON.stringify(v);
-    assert.ok(!s.includes(tokenFile), 'a client reply must not disclose the configured path');
-    assert.ok(!s.includes(hub.token) && !s.includes(Buffer.from(hub.token).toString('base64')), 'a client reply must not contain credential bytes');
-  };
-  const procFds = ['/proc/self/fd/3', `/proc/${child.pid}/fd/3`, '/proc/thread-self/fd/3'];
-  for (const file of [tokenFile, link, hard, 'subdir/../private-fixture', ...procFds, '/proc/self/root' + hard, `/proc/${child.pid}/root` + tokenFile]) {
-    // find-file opens through the shared-buffer protocol; visit-id is the host-page opener.
-    const { error } = await c.open(file); assert.ok(error);
-    const { buf, ...diagnostic } = error;
-    assert.equal(buf, file); // the protocol echoes the caller's id, not the resolved private path
-    privateReply(diagnostic);
-    for (const [cmd, args] of [['visit-id', [file]], ['fs-stat', [{ path: file }]], ['fs-list', [{ dir: file }]],
-      ['agent-prompt-attach-file', [draft, file, { embed: true, mimeType: 'application/octet-stream' }]]] as const) {
-      const r = await c.call(cmd, [...args]); assert.ok(r.error || r.t === 'error', cmd); privateReply(r);
-    }
-    const insert = await c.form(`(insert-file-contents ${JSON.stringify(file)})`); assert.ok(insert.error || insert.t === 'error'); privateReply(insert);
-  }
-  // Dired and the minibuffer's filename completion use this same listing.
-  for (const dirname of [dir.dirs.notes, '/proc/self/root' + dir.dirs.notes, '/proc/self/fd']) {
-    const r = await c.call('fs-list', [{ dir: dirname }]); privateReply(r);
-    const names = (r.value?.entries || []).map((e: { name: string }) => e.name);
-    assert.ok(!names.some((n: string) => ['private-fixture', 'linked-fixture', 'other-fixture', ...(dirname === '/proc/self/fd' ? ['3'] : [])].includes(n)));
-  }
-  const watched = path.join(dir.dirs.notes, 'watched.txt'); fs.writeFileSync(watched, 'prior text');
-  assert.equal((await c.open(watched)).text, 'prior text');
-  const logMark = child.logs.length;
-  fs.unlinkSync(watched); fs.linkSync(tokenFile, watched);
-  const revert = await c.request({ t: 'revert', buf: watched }); assert.equal(revert.t, 'error'); privateReply(revert);
-  await until(() => /^warn disk .*refused_path/m.test(child.logs.slice(logMark)));
-  const refusals = child.logs.slice(logMark).split('\n').filter(line => line.startsWith('warn disk '));
-  assert.ok(refusals.every(line => !line.includes('watched.txt') && !line.includes(tokenFile)), 'a private watch refusal must log neither the alias id nor its target');
-  privateReply(await c.open(watched)); privateReply(c.queue);
-  assert.deepEqual((await c.call('agent-prompt-preview', [draft])).value.blocks, [{ type: 'text', text: 'unchanged' }]);
-});
-
-test('protected reader: private store rejects linked files, swapped directories and indexed draft restoration', async t => {
-  const hub = await new FakeAgentHub().start(), dir = makeDir(), tokenFile = path.join(dir.root, 'dummy-credential');
-  fs.writeFileSync(tokenFile, hub.token);
-  dir.cfg.agentHub = { url: hub.url, tokenFile }; fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
-  const fd = fs.openSync(tokenFile, 'r');
-  let child = await startEdwind(dir, { fixtureFd: fd }); fs.closeSync(fd);
-  let c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
-  t.after(async () => { c.close(); await stopEdwind(child); await hub.stop(); fs.rmSync(dir.root, { recursive: true, force: true }); });
-  const store = path.join(dir.dirs.state, 'agent-prompts'), id = (await c.call('agent-prompt-create', [{ text: 'ordinary' }])).value;
-  const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], md = path.join(store, key + '.md');
-  const moved = store + '-old', outside = path.join(dir.root, 'outside'); fs.mkdirSync(outside, 0o755);
-  fs.renameSync(store, moved); fs.symlinkSync(outside, store);
-  try {
-    const reply = await c.call('agent-prompt-create', [{ text: 'not outside' }]); assert.ok(reply.error);
-    assert.deepEqual(fs.readdirSync(outside), []); assert.equal(fs.statSync(outside).mode & 0o777, 0o755);
-  } finally { fs.unlinkSync(store); fs.renameSync(moved, store); }
-  const named = path.join(store, 'named.json'); fs.symlinkSync(tokenFile, named);
-  try { assert.ok((await c.call('agent-prompt-save', [id, 'label'])).error); assert.ok(fs.lstatSync(named).isSymbolicLink()); }
-  finally { fs.unlinkSync(named); }
-  // Reopen a killed retained buffer through each private-file alias. Even a harmless linked
-  // markdown file is not a retained store entry; no alias may supply the draft body.
-  const other = path.join(dir.root, 'ordinary.md'); fs.writeFileSync(other, 'outside draft');
-  const retained = (await c.call('agent-prompt-create', [{ text: 'private draft' }])).value;
-  const leaf = path.join(store, /: ([A-Za-z0-9_-]+)\*$/.exec(retained)![1] + '.md');
-  assert.ok(!(await c.call('kill-buffer', [retained])).error);
-  fs.unlinkSync(leaf);
-  for (const target of [tokenFile, path.relative(store, tokenFile), '/proc/self/fd/3', '/proc/self/root' + tokenFile, `/proc/${child.pid}/root` + tokenFile, other]) {
-    fs.symlinkSync(target, leaf);
-    try {
-      const r = await c.call('agent-prompt-open', [retained]);
-      assert.ok(r.error); assert.ok(!JSON.stringify(r).includes(tokenFile) && !JSON.stringify(r).includes(hub.token));
-    } finally { fs.unlinkSync(leaf); }
-  }
-  c.close(); await stopEdwind(child);
-  fs.unlinkSync(md); fs.linkSync(tokenFile, md);
-  const namedOutside = path.join(dir.root, 'outside.json'); fs.writeFileSync(namedOutside, '{"outside-label":{"blocks":[]}}'); fs.symlinkSync(namedOutside, named);
-  child = await startEdwind(dir); c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
-  const reopened = await c.open(id); assert.ok(reopened.error); assert.ok(!JSON.stringify(reopened).includes(hub.token));
-  assert.ok(!(await c.call('agent-prompt-list')).value?.includes('outside-label'));
-  assert.ok(!(await c.call('buffer-list')).value.some((b: { id: string }) => b.id === id));
-});
-
 test('AS-C8: token and symlink are refused; API-echoed token is redacted from buffers, results and logs', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
   const tokenFile = path.join(dir.root, 'private-token'); fs.writeFileSync(tokenFile, hub.token, { mode: 0o600 });
@@ -714,25 +513,17 @@ test('AS-C8: token and symlink are refused; API-echoed token is redacted from bu
   for (const p of [tokenFile, alias]) assert.equal((await c.open(p)).error?.code, 'refused_path');
   await c.call('agent-sessions');
   assert.ok(!(await c.open('name:*Agent Sessions*')).text!.includes(hub.token));
-  const rotated = path.join(dir.root, 'rotated-token'); fs.writeFileSync(rotated, hub.token, { mode: 0o600 });
-  fs.unlinkSync(tokenFile); fs.symlinkSync(rotated, tokenFile);
-  await c.call('agent-session-info');
-  assert.equal((await c.open(rotated)).error?.code, 'refused_path', 'a new symlink target is protected before its token is read');
   hub.refusal = { status: 403, body: { error: 'echo ' + hub.token } };
   const r = await c.call('agent-session-cancel', ['safe', { epoch: hub.sessions.get('safe')!.createdAt }]); assert.ok(!JSON.stringify(r).includes(hub.token)); assert.match(r.error.report, /redacted/);
   assert.ok(!child.logs.includes(hub.token));
 });
 
-for (const malformed of [false, true]) test(`index recovery: agent-looking ordinary buffer, malformed neighbour ${malformed}`, async t => {
+test('ordinary recovery preserves agent-looking buffer names without agentHub', async t => {
   const dir = makeDir(), id = 'name:*Agent Prompt: ordinary*';
   let child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
   t.after(async () => { c.close(); await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
   await c.connect(); await c.hello(); await c.open(id, { create: true }); await c.edit(id, 0, [[0, '', 'kept']]);
   c.close(); await stopEdwind(child);
-  if (malformed) {
-    const file = path.join(dir.dirs.state, 'index.json'), index = JSON.parse(fs.readFileSync(file, 'utf8'));
-    index.buffers.unshift({ jid: 'decaf' }); fs.writeFileSync(file, JSON.stringify(index));
-  }
   child = await startEdwind(dir); c = new EditClient(dir.cfg.socket);
   await c.connect(); await c.hello();
   assert.equal((await c.open(id)).text, 'kept');

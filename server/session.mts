@@ -185,7 +185,7 @@ export class Client {
   }
   async onSaveRevert(msg: WireMessage): Promise<void> {
     const rid = ridOf(msg), buf = str(msg, 'buf');
-    const sb = this.server.buffers.get(buf);
+    const sb = this.server.buffers.get(buf, true);
     const value = msg.t === 'save' ? await this.server.buffers.save(sb) : await this.server.buffers.revert(sb);
     if (msg.t === 'save' && sb.serverEdit) sb.serverEdit.saved = true;
     this.send({ t: 'result', rid, value });

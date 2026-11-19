@@ -363,13 +363,13 @@ test('direct prompt submission requires a caller-retained id and a writable inte
   const sid = 'direct-intent', epoch = hub.add(sid).createdAt, text = 'retain this logical send', mark = hub.calls.length;
   const missing = await client.call('agent-session-prompt', [sid, { epoch, text }]);
   assert.match(missing.error?.report || '', /submissionId/);
-  const root = path.join(dir.dirs.state, 'agent-prompts');
-  fs.renameSync(root, root + '.saved'); fs.mkdirSync(root);
+  const receipt = path.join(dir.dirs.state, 'agent-prompts', 'direct-cannot-record.json');
+  fs.mkdirSync(receipt);
   try {
     const failed = await client.call('agent-session-prompt', [sid, { epoch, text, submissionId: 'cannot-record' }]);
     assert.ok(failed.error);
     assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST').length, 0);
-  } finally { fs.rmdirSync(root); fs.renameSync(root + '.saved', root); }
+  } finally { fs.rmdirSync(receipt); }
 });
 
 test('a durable send intent is required before any prompt POST', async () => {

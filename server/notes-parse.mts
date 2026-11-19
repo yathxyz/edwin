@@ -9,7 +9,7 @@ import path from 'node:path';
 import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
 import { lockdown } from './lockdown.mts';
-import { AgentNoteReader } from './agent-notes.mts';
+import { checkProtected, type FileExclusions } from './agent-files.mts';
 
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 export const NOTE_EXT = /\.(md|org)$/i;
@@ -329,19 +329,22 @@ export type NoteRead =
   | { text: string; mtimeMs: number; size: number; skipped?: undefined }
   | { skipped: 'missing' | 'error' }
   | { skipped: 'big' | 'not_text'; mtimeMs: number; size: number };
-let agentReader: AgentNoteReader | undefined; // installed only inside the configured notes worker
-export function readNote(abs: string): NoteRead {
-  let st, bytes;
-  if (agentReader) {
-    const file = agentReader.bytes(abs, MAX_FILE_BYTES);
-    if ('skipped' in file) return file;
-    ({ st, bytes } = file);
-  } else {
-    try { st = fs.statSync(abs); } catch (e) { return { skipped: 'missing' }; }
-    if (!st.isFile()) return { skipped: 'missing' };
-    if (st.size > MAX_FILE_BYTES) return { skipped: 'big', mtimeMs: st.mtimeMs, size: st.size };
-    try { bytes = fs.readFileSync(abs); } catch (e) { return { skipped: e.code === 'ENOENT' ? 'missing' : 'error' }; }
-  }
+export function readNote(abs: string, exclusions?: FileExclusions): NoteRead {
+  let st;
+  try { st = fs.statSync(abs); } catch (e) { return { skipped: 'missing' }; }
+  if (!st.isFile()) return { skipped: 'missing' };
+  if (st.size > MAX_FILE_BYTES) return { skipped: 'big', mtimeMs: st.mtimeMs, size: st.size };
+  let bytes;
+  try {
+    if (exclusions) {
+      const fd = fs.openSync(abs, 'r');
+      try {
+        // Neither parsing nor grepping a note may expose the token or config through a file alias.
+        checkProtected(exclusions, abs, fs.fstatSync(fd, { bigint: true }));
+        bytes = fs.readFileSync(fd);
+      } finally { fs.closeSync(fd); }
+    } else bytes = fs.readFileSync(abs);
+  } catch (e) { return { skipped: e.code === 'ENOENT' ? 'missing' : 'error' }; }
   let text;
   try { text = decoder.decode(bytes); } catch (e) { return { skipped: 'not_text', mtimeMs: st.mtimeMs, size: st.size }; }
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -392,7 +395,7 @@ export function scanTree(root: string, ignorePatterns: readonly unknown[] | null
         if (name.startsWith('.') || ignored(r, true)) continue;
         stack.push({ dir: abs, rel: r });
       } else if (isFile && NOTE_EXT.test(name) && !ignored(r, false)) {
-        let st; try { st = agentReader ? agentReader.stat(abs) : fs.statSync(abs); } catch (e) { continue; }
+        let st; try { st = fs.statSync(abs); } catch (e) { continue; }
         if (st.size > MAX_FILE_BYTES) continue;
         out.push({ id: r, mtimeMs: st.mtimeMs, size: st.size });
       }
@@ -435,14 +438,14 @@ export type ParseOutcome =
   | ParsedFile
   | { id: string; skipped: SkipReason; error?: undefined }
   | { id: string; error: string; skipped?: undefined };
-function parseItem(item: ParseItem, G: Grammar): ParseOutcome {
+function parseItem(item: ParseItem, G: Grammar, exclusions?: FileExclusions): ParseOutcome {
   try {
     if (typeof item.text === 'string') {
       const rec = parseFile(item.id, item.text, G);
       rec.file.mtime = item.mtimeMs ?? null;
       return { id: item.id, mtimeMs: item.mtimeMs ?? -1, size: item.text.length, rec, fromBuffer: true };
     }
-    const r = readNote(item.file!);
+    const r = readNote(item.file!, exclusions);
     if (r.skipped) return { id: item.id, skipped: r.skipped };
     const rec = parseFile(item.id, r.text, G);
     rec.file.mtime = r.mtimeMs;
@@ -468,15 +471,14 @@ export type SyncReply = { jobId: number; hits: GrepHit[]; error?: undefined } | 
 if (!isMainThread && workerData && workerData.notesWorker) {
   lockdown();
   let G = compileGrammar(workerData.grammar);
-  const { syncPort, signal }: { syncPort?: MessagePort; signal: Int32Array } = workerData;
-  if (workerData.agentReader) agentReader = new AgentNoteReader(syncPort!, signal);
+  const { syncPort, signal, exclusions }: { syncPort?: MessagePort; signal: Int32Array; exclusions?: FileExclusions } = workerData;
   /* A grep job over MSG.files (live text or a file to read): the hits, at most MSG.max. */
   const grepJob = (msg: GrepJob) => {
     const re = new RegExp(msg.source, msg.flags.includes('g') ? msg.flags : msg.flags + 'g');
     const out: GrepHit[] = [];
     for (const f of msg.files) {
       if (out.length >= msg.max) break;
-      const text = typeof f.text === 'string' ? f.text : (() => { const r = readNote(f.file!); return r.skipped ? null : r.text; })();
+      const text = typeof f.text === 'string' ? f.text : (() => { const r = readNote(f.file!, exclusions); return r.skipped ? null : r.text; })();
       if (text === null) continue;
       grepText(f.id, text, re, { excludeLinks: msg.excludeLinks, wiki: G.wiki, ref: G.ref, max: msg.max }, out);
     }
@@ -486,7 +488,7 @@ if (!isMainThread && workerData && workerData.notesWorker) {
     try {
       switch (msg.t) {
         case 'grammar': G = compileGrammar(msg.grammar); parentPort!.postMessage({ t: 'grammar', ok: true }); break;
-        case 'parse': parentPort!.postMessage({ t: 'parsed', jobId: msg.jobId, results: msg.items.map(it => parseItem(it, G)) }); break;
+        case 'parse': parentPort!.postMessage({ t: 'parsed', jobId: msg.jobId, results: msg.items.map(it => parseItem(it, G, exclusions)) }); break;
         case 'scan': parentPort!.postMessage({ t: 'scanned', jobId: msg.jobId, files: scanTree(msg.root, msg.ignore) }); break;
         case 'grep': parentPort!.postMessage({ t: 'grepped', jobId: msg.jobId, hits: grepJob(msg) }); break; // a thread waits (R4.42)
         default: parentPort!.postMessage({ t: 'error', jobId: (msg as { jobId: number }).jobId, error: `unknown job ${(msg as { t: string }).t}` });
@@ -502,7 +504,6 @@ if (!isMainThread && workerData && workerData.notesWorker) {
       else reply = { jobId: msg.jobId, error: `unknown sync job ${msg.t}` };
     } catch (e) { reply = { jobId: msg.jobId, error: e.message }; }
     syncPort.postMessage(reply);
-    if (agentReader) agentReader.wakeDaemon();
-    else { Atomics.store(signal, 0, 1); Atomics.notify(signal, 0); }
+    Atomics.store(signal, 0, 1); Atomics.notify(signal, 0);
   });
 }

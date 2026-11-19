@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ProtoError } from './proto.mts';
 import { PathError, home, realPath, under } from './paths.mts';
-import { guardedCopy, guardedList, guardedStat } from './agent-fs.mts';
 import { REFUSED_DST, lexicalPath, osMessage, realEntry } from './buffers.mts';
 import { fsyncDir } from './files.mts';
 import type { Server } from './main.mts';
@@ -36,7 +35,8 @@ const arg = (args: unknown[]): Record<string, unknown> => (args[0] && typeof arg
 /* REAL may be written by a file operation: inside a write root and not refused (checkWrite), not one of
    edwind's directories or a write root or anything holding one, and not inside stateDir. */
 function checkOperand(auth: Authority, real: string): void {
-  try { if (auth.agent) auth.agent.checkWrite(real, 'entry-no-follow'); else auth.checkWrite(real); } catch (e) { throw bad(e); }
+  // An entry mutation must reject protected names and symlinks, but never act on the link target.
+  try { if (auth.agent) auth.agent.checkWrite(real, 'entry'); else auth.checkWrite(real); } catch (e) { throw bad(e); }
   for (const root of new Set([auth.notesDir, auth.stateDir, auth.configDir, ...auth.writeRootsForFlags()])) {
     let r = root; try { r = fs.realpathSync.native(root); } catch (e) { /* not made yet */ }
     if (under(root, real) || under(r, real)) throw new ProtoError('refused_path', `${real}: holds ${root}, a directory edwind is configured with`);
@@ -53,9 +53,6 @@ export class Fs {
      symlink to a directory lists what it leads to and dir names where that is. */
   list(dir: unknown): { dir: string; home: string; entries: FsEntry[]; truncated?: true } {
     const auth = this.auth;
-    if (auth.agent) {
-      try { return guardedList(auth.agent, dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir), MAX_ENTRIES); } catch (e) { throw bad(e); }
-    }
     let real: string;
     try { real = fs.realpathSync.native(dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir)); } catch (e) { throw bad(e); }
     if (auth.inRefused(real)) throw new ProtoError('refused_path', `${real}: refused`);
@@ -73,7 +70,6 @@ export class Fs {
   stat(p: unknown): { path: string; id: string | null; entry: FsEntry | null } {
     const abs = lexicalPath(this.auth, p), real = realEntry(abs);
     if (this.auth.inRefused(real)) throw new ProtoError('refused_path', `${real}: refused`);
-    if (this.auth.agent) { try { return guardedStat(this.auth.agent, real); } catch (e) { throw bad(e); } }
     const entry = entryOf(real, path.basename(real));
     let id: string | null = null;
     if (!entry || !(entry.kind === 'dir' || entry.dir)) { try { id = this.auth.idOf(realPath(abs).real); } catch (e) { /* nothing a buffer could visit */ } }
@@ -107,6 +103,15 @@ export class Fs {
     const srcAbs = lexicalPath(auth, src);
     let dstAbs = lexicalPath(auth, dst);
     try { if (fs.statSync(dstAbs).isDirectory()) dstAbs = path.join(dstAbs, path.basename(srcAbs)); } catch (e) { /* a new name */ }
+    const agent = auth.agent;
+    const filter = agent && ((from: string, to: string) => {
+      // Each source and destination in the tree may alias the token or config.
+      agent.checkNamed(from);
+      agent.checkNamed(to);
+      return true;
+    });
+    // A protected operand is a refusal even when the regular copy checks would report an existing destination.
+    try { filter?.(srcAbs, dstAbs); } catch (e) { throw bad(e); }
     const srcReal = realEntry(srcAbs), dstReal = realEntry(dstAbs);
     let st: fs.Stats;
     try { st = fs.lstatSync(srcReal); } catch (e) { throw bad(e); }
@@ -120,7 +125,7 @@ export class Fs {
     try { fs.lstatSync(dstReal); } catch (e) { if (e.code !== 'ENOENT') throw bad(e); there = false; }
     if (there || this.server.buffers.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
     try {
-      if (auth.agent) await guardedCopy(auth.agent, srcReal, dstReal);
+      if (filter) await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true, filter });
       else await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true });
     } catch (e) { throw bad(e); }
     fsyncDir(path.dirname(dstReal));
@@ -131,6 +136,8 @@ export class Fs {
   /* fs-mkdir [{path}]: make a directory and the parents it lacks. */
   mkdir(p: unknown): { ok: true; path: string } {
     const abs = lexicalPath(this.auth, p);
+    // An existing protected name or symlink must be refused, not reported as an ordinary directory.
+    try { this.auth.agent?.checkNamed(abs, 'entry'); } catch (e) { throw bad(e); }
     /* The deepest ancestor that exists is resolved; what is to be made under it is taken as written. */
     let base = abs;
     const rest: string[] = [];

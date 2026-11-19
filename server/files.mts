@@ -20,9 +20,9 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 /* Read a text file: {text, eol, big, stat}. text has \n inside (R8.10). Not UTF-8 → FileError not_text.
    Over 32 MiB → big: true, read anyway (the buffer opens read-only, R6.24). Missing → FileError no_buffer. */
 export interface TextFile { text: string; eol: Eol; big: boolean; stat: fs.Stats; bytes: number }
-export function readText(real: string): TextFile {
+export function readText(real: string, fd?: number): TextFile {
   let bytes: Buffer, stat: fs.Stats;
-  try { stat = fs.statSync(real); bytes = fs.readFileSync(real); }
+  try { stat = fd === undefined ? fs.statSync(real) : fs.fstatSync(fd); bytes = fs.readFileSync(fd ?? real); }
   catch (e) { throw new FileError(e.code === 'ENOENT' ? 'no_buffer' : 'refused_path', `${real}: ${e.code}`); }
   let text: string;
   try { text = decoder.decode(bytes); } catch (e) { throw new FileError('not_text', `${real}: not UTF-8 text`); }
@@ -84,7 +84,7 @@ export function fsyncDir(dir: string): void {
 }
 
 /* Write a whole file atomically with mode 0600 (state files: index, snapshots, saved copies). */
-export function writeAtomic(real: string, data: string | Buffer): void {
+export function writeAtomic(real: string, data: string | Buffer, durableDir = false): void {
   const dir = path.dirname(real);
   const tmp = path.join(dir, `.${path.basename(real)}.${process.pid}-${randomBytes(4).toString('hex')}~`);
   const fd = fs.openSync(tmp, 'wx', 0o600);
@@ -95,7 +95,11 @@ export function writeAtomic(real: string, data: string | Buffer): void {
   } catch (e) { try { fs.closeSync(fd); } catch (x) { /* closed */ } try { fs.unlinkSync(tmp); } catch (x) { /* gone */ } throw e; }
   fs.closeSync(fd);
   try { fs.renameSync(tmp, real); } catch (e) { try { fs.unlinkSync(tmp); } catch (x) { /* gone */ } throw e; }
-  fsyncDir(dir);
+  if (!durableDir) fsyncDir(dir);
+  else {
+    const dirFd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
+  }
 }
 
 /* The disk state edwind remembers per file (R8.15, the stat sweep). */

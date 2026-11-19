@@ -8,7 +8,6 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { writeAtomic, sha256 } from './files.mts';
 import type { By, Op, Undo } from './proto.mts';
-import type { AgentAuthority } from './agent-files.mts';
 
 export const FORMAT = 1;
 export const GROUP_COMMIT_MS = 2;
@@ -113,7 +112,7 @@ export class Journal {
    anchors.mts) or null. A torn last line (no newline, or not JSON) is dropped and reported; any other bad line is
    a JournalError (the buffer then opens read-only, R8.4). `whole` is the byte length of the whole lines and
    `unterminated` says the kept last line has no newline: healTail uses them before the journal is appended to. */
-export function readJournal(file: string | number): JournalContents {
+export function readJournal(file: string): JournalContents {
   const text = fs.readFileSync(file, 'utf8');
   const lines = text.split('\n');
   /* The last line ends with a newline when the file is whole; without one it is the tail of a write that
@@ -164,15 +163,12 @@ export class Index {
   declare buffers: Map<string, IndexEntry>;
   declare moved: Map<string, MovedRecord>;
   declare timer: NodeJS.Timeout | null;
-  constructor(file: string, agent?: AgentAuthority) { this.file = file; this.buffers = new Map(); this.moved = new Map(); this.timer = null; this.load(agent); }
-  load(agent?: AgentAuthority): void {
+  constructor(file: string) { this.file = file; this.buffers = new Map(); this.moved = new Map(); this.timer = null; this.load(); }
+  load(): void {
     try {
-      const o = JSON.parse(agent ? agent.withRead(this.file, fd => fs.readFileSync(fd, 'utf8'), 'state') : fs.readFileSync(this.file, 'utf8'));
+      const o = JSON.parse(fs.readFileSync(this.file, 'utf8'));
       if (o.format !== undefined && o.format > FORMAT) throw new Error(`index format ${o.format} is newer than this edwind (${FORMAT})`);
-      for (const b of o.buffers || []) {
-        if (agent && (typeof b?.jid !== 'string' || !/^[A-Za-z0-9_-]+$/.test(b.jid))) continue;
-        this.buffers.set(b.jid, b);
-      }
+      for (const b of o.buffers || []) this.buffers.set(b.jid, b);
       for (const m of o.moved || []) if (m && typeof m.from === 'string' && typeof m.to === 'string' && Number.isFinite(m.at)) this.moved.set(m.from, { to: m.to, at: m.at, dir: !!m.dir });
     } catch (e) { if (e.code !== 'ENOENT') throw e; }
   }

@@ -1,4 +1,5 @@
 // Agent sessions through the mesh HTTP API, never through ACP or the process hub socket (Step AS1).
+import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
@@ -754,7 +755,8 @@ export async function install(server: Server, registryOnly = false) {
     if (s.host !== server.cfg.host) throw new Error(`Tool file is on ${line(s.host)}, not this edwind host; open it there`);
     if (!location || typeof location.path !== 'string') throw new Error('Tool has no file location');
     const file = path.resolve(s.cwd, location.path);
-    server.auth.agent!.withRead(file, (_fd, st) => { if (!st.isFile()) throw new Error('Tool location is not a file'); });
+    if (!fs.statSync(file).isFile()) throw new Error('Tool location is not a file');
+    // resolve is the ordinary guarded visit; the stat above only checks the entry type.
     const found = server.buffers.resolve(file, false);
     if (!('id' in found)) throw new Error('Tool file moved');
     return found.id;

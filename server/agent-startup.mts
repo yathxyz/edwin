@@ -2,21 +2,8 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { AgentAuthority, configSource, PrivateStore } from './agent-files.mts';
+import { type AgentAuthority, PrivateStore } from './agent-files.mts';
 import type { Log } from './main.mts';
-
-// The ordinary read only detects the feature. All configuration used for an agent boot, including its
-// other fields, must come from the same descriptor whose identity we protect. Fail closed on disable mid-read.
-export function readAgentConfig(file: string) {
-  try {
-    const fd = fs.openSync(file, 'r');
-    try {
-      const cfg = JSON.parse(fs.readFileSync(fd, 'utf8'));
-      if (cfg?.agentHub === undefined) throw new Error('agentHub changed while reading configuration');
-      return { cfg, source: configSource(file, fd) };
-    } finally { fs.closeSync(fd); }
-  } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
-}
 
 export class PromptStoreBusy extends Error {
   readonly exitCode = 73; // EX_CANTCREAT; a unit with agentHub can opt out of restarting on this code.

@@ -13,7 +13,6 @@ import { ProtoError } from './proto.mts';
 import { writeAtomic } from './files.mts';
 import { PathError, under, realPath } from './paths.mts';
 import { parseFile, compileGrammar, NOTE_EXT, ignoreMatcher } from './notes-parse.mts';
-import { startAgentNotesWorker, syncAgentGrep } from './agent-notes.mts';
 import type { MessagePort } from 'node:worker_threads';
 import type { Authority, ParsedId } from './paths.mts';
 import type { By, CallResult } from './proto.mts';
@@ -204,15 +203,13 @@ export class Notes {
   /* ---------- the worker (R11.5) ---------- */
   startWorker() {
     if (this.worker) return;
-    let w;
-    if (this.server.auth.agent) w = startAgentNotesWorker(this, this.server.auth.agent, PARSER);
-    else {
-      const sab = new SharedArrayBuffer(4);
-      this.signal = new Int32Array(sab);
-      const { port1, port2 } = new MessageChannel();
-      this.syncPort = port1;
-      w = new Worker(PARSER, { workerData: { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal }, transferList: [port2] });
-    }
+    const sab = new SharedArrayBuffer(4);
+    this.signal = new Int32Array(sab);
+    const { port1, port2 } = new MessageChannel();
+    this.syncPort = port1;
+    const exclusions = this.server.auth.agent?.exclusions; // The worker parses files and greps their contents.
+    const workerData = { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal };
+    const w = new Worker(PARSER, { workerData: exclusions ? { ...workerData, exclusions } : workerData, transferList: [port2] });
     this.worker = w; this.workerStarts++;
     w.unref();
     w.on('message', msg => this.onWorkerMessage(msg));
@@ -243,7 +240,6 @@ export class Notes {
   syncJob(msg: GrepJob): Extract<SyncReply, { hits: GrepHit[] }> {
     if (!this.worker) this.startWorker();
     const jobId = ++this.jobSeq;
-    if (this.server.auth.agent) return syncAgentGrep(this, this.server.auth.agent, { ...msg, jobId }, SYNC_TIMEOUT_MS);
     Atomics.store(this.signal, 0, 0);
     this.syncPort.postMessage({ ...msg, jobId });
     const r = Atomics.wait(this.signal, 0, 0, SYNC_TIMEOUT_MS);
@@ -495,10 +491,7 @@ export class Notes {
   /* ---------- snapshot (R11.6) ---------- */
   loadSnapshot() {
     let snap: any; // any: the snapshot file, checked below
-    if (this.server.auth.agent) {
-      try { snap = JSON.parse(this.server.auth.agent.withRead(this.stateFile, fd => fs.readFileSync(fd, 'utf8'), 'state')); }
-      catch (e) { if (e.code !== 'ENOENT') this.log.warn('notes', { snapshot: 'unreadable', error: e.code }); return; }
-    } else try { snap = JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') this.log.warn('notes', { snapshot: 'unreadable', error: e.message }); return; }
+    try { snap = JSON.parse(fs.readFileSync(this.stateFile, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') this.log.warn('notes', { snapshot: 'unreadable', error: e.message }); return; }
     if (!snap || snap.v !== 1 || !Array.isArray(snap.files)) { this.log.warn('notes', { snapshot: 'ignored', reason: 'unknown format' }); return; }
     for (const e of snap.files) if (e && typeof e.id === 'string' && e.rec && e.rec.file) this.files.set(e.id, { id: e.id, mtimeMs: e.mtimeMs, size: e.size, rec: e.rec, fromBuffer: !!e.fromBuffer });
     this.gen = Number.isInteger(snap.gen) ? snap.gen : 0;
@@ -680,10 +673,11 @@ export class Notes {
     try { names = fs.readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort(); } catch (e) { return { dir, reviews: out }; }
     for (const n of names) {
       let text;
-      /* A symlinked log is read through the authority like any file (never a refused path). */
       try {
-        text = this.server.auth.agent ? this.server.auth.agent.withRead(path.join(dir, n), fd => fs.readFileSync(fd, 'utf8'))
-          : fs.readFileSync(this.server.auth.checkRead(realPath(path.join(dir, n)).real), 'utf8');
+        const file = path.join(dir, n);
+        // A review log may alias the token or config; check it before reading the JSON.
+        this.server.auth.agent?.checkNamed(file);
+        text = fs.readFileSync(this.server.auth.checkRead(realPath(file).real), 'utf8');
       } catch (e) { continue; }
       for (const line of text.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch (e) { /* a torn line */ } }
     }

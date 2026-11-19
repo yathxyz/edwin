@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { randomId } from './journal.mts';
+import { randomId, type IndexEntry } from './journal.mts';
 import { sha256, diskState } from './files.mts';
 import { lexicalPath } from './buffers.mts';
 import type { SBuf } from './buffers.mts';
@@ -54,6 +54,12 @@ const keyOf = (v: unknown): string => {
 };
 const nameOf = (d: Draft) => `*Agent Prompt: ${d.key}*`;
 const idOf = (d: Draft) => `name:${nameOf(d)}`;
+
+// A process without the prompt writer lock must not open or heal the writer's draft journals.
+export function isPromptDraft(dir: string, e: IndexEntry): boolean {
+  const key = /^name:\*Agent Prompt: ([A-Za-z0-9_-]+)\*$/.exec(e.id)?.[1];
+  return !!key && e.file === path.join(dir, `${key}.md`);
+}
 
 export async function installPrompts(server: Server, backend: AgentBackend): Promise<{ stop(): Promise<void> }> {
   const buffers = server.buffers, auth = server.auth.agent!;
@@ -110,7 +116,6 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     return idOf(d);
   }
   const entries = store.entries();
-  const retained = new Map([...buffers.index.buffers.values()].filter(e => typeof e.file === 'string' && path.dirname(e.file) === dir).map(e => [e.id, e]));
   for (const file of entries) {
     if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json' || file.startsWith('direct-')) continue;
     try {
@@ -119,8 +124,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
       d.acknowledged = targetsOf(d.acknowledged === undefined ? [] : d.acknowledged);
       d.possiblySent = targetsOf(d.possiblySent === undefined ? [] : d.possiblySent);
       d.targets = targetsOf(d.targets, true); d.blocks = blocksOf(d.blocks);
-      const indexed = retained.get(idOf(d));
-      const live = indexed?.file === markdown(d) ? buffers.reloadOne(indexed, markdown(d)) : undefined;
+      const live = buffers.live(idOf(d));
       if (live) { server.Ed.switchMajorMode(live.ed, 'markdown-mode'); meta(live, d); durable(live, d); }
       else open(d);
       drafts.set(d.key, d);
@@ -272,9 +276,13 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
       const uri = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(name) ? new URL(name).href : name.startsWith('/') ? pathToFileURL(name).href : fail('An agent file link needs an absolute path or URI');
       return attach(d, { type: 'resource_link', uri, name: path.basename(name), mimeType });
     }
-    const absolute = lexicalPath(auth, name); auth.checkRead(absolute);
-    const block = auth.withRead(absolute, (fd, st, real) => {
-      if (!st.isFile()) fail('Not a regular file');
+    const absolute = lexicalPath(auth, name);
+    // Reject non-files before opening so an embedded FIFO cannot block the daemon.
+    const entry = fs.statSync(absolute, { throwIfNoEntry: false });
+    if (entry && !entry.isFile()) fail('Not a regular file');
+    // Embedded resources send local bytes to the hub; read only from the checked descriptor.
+    const block = auth.withRead(absolute, fd => {
+      const st = fs.fstatSync(fd), real = fs.realpathSync.native(absolute);
       const isText = mimeType.startsWith('text/') || /(?:json|xml|javascript|yaml)/.test(mimeType);
       const limit = isText ? backend.requestBodyLimit : 3 * Math.floor(backend.requestBodyLimit / 4);
       if (st.size > limit) fail('Embedded file exceeds the agent request body limit');

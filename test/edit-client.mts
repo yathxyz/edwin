@@ -31,7 +31,7 @@ export interface TestDir {
 /* An edwind child: its output so far in logs, ready once the socket accepted. */
 export type EdwindChild = ChildProcessByStdio<null, Readable, Readable> & { logs: string; ready?: boolean };
 interface LaunchOptions { nodeArgs?: string[]; main?: string }
-export interface StartOptions extends LaunchOptions { env?: Record<string, string | undefined>; fixtureFd?: number }
+export interface StartOptions extends LaunchOptions { env?: Record<string, string | undefined> }
 export interface ClientOptions { kind?: string; cid?: string; device?: string }
 /* A pending next(): resolved by the first message PRED accepts. */
 export interface Waiter { pred: (m: Msg) => boolean; resolve: (m: Msg) => void; reject: (e: Error) => void }
@@ -83,8 +83,8 @@ export function readPrimitiveRegistry(dir: TestDir, { nodeArgs = nodeFlags(), ma
 const children = new Set<EdwindChild>();
 process.once('exit', () => { for (const c of children) { try { c.kill('SIGKILL'); } catch (e) { /* gone */ } } });
 
-export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN, env = {}, fixtureFd }: StartOptions = {}): Promise<EdwindChild> {
-  const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], { stdio: ['ignore', 'pipe', 'pipe', ...(fixtureFd === undefined ? [] : [fixtureFd])], env: { ...process.env, HOME: dir.dirs.home, ...env } }) as EdwindChild;
+export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN, env = {} }: StartOptions = {}): Promise<EdwindChild> {
+  const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: dir.dirs.home, ...env } }) as EdwindChild;
   child.logs = '';
   children.add(child); child.once('exit', () => children.delete(child));
   child.stderr.on('data', d => { child.logs += d; if (process.env.EDWIND_LOG) process.stderr.write(d); });
