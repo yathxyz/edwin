@@ -225,7 +225,7 @@ export class Buffers {
     let eol: Eol = 'lf', disk: DiskState | null = null, savedText: string | null = null;
     if (file) {
       try { const r = agent ? agent.readText(file) : readText(file); eol = r.eol; disk = diskState(r.stat); savedText = r.text; if (base === null && sha256(r.text) === header.base.sha256) base = r.text; }
-      catch (err) { if (agent && err.code === 'refused_path') throw err; if (err.code !== 'no_buffer') baseWhy = `${file}: ${err.message}`; }
+      catch (err) { if (err instanceof PathError) throw err; if (err.code !== 'no_buffer') baseWhy = `${file}: ${err.message}`; }
     }
     if (base === null && header.base.ver === 0 && !batches.length && header.base.sha256 === sha256('')) base = '';
     if (agent && fs.existsSync(saved)) savedText = readState(agent, saved); // refuse a private alias before publishing the buffer
@@ -335,7 +335,7 @@ export class Buffers {
       return nb;
     }
     let r: TextFile;
-    try { r = this.auth.agent ? this.auth.agent.readText(p.real) : readText(p.real); } catch (e) { if (e instanceof FileError) throw new ProtoError(e.code, e.message); throw e; }
+    try { r = this.auth.agent ? this.auth.agent.readText(p.real) : readText(p.real); } catch (e) { if (e instanceof FileError || e instanceof PathError) throw new ProtoError(e.code, e.message); throw e; }
     const nb = this.create({ id: canon, jid: randomId(), name: path.basename(p.real), file: p.real, text: r.text, eol: r.eol });
     nb.disk = diskState(r.stat);
     if (r.big) { nb.big = true; nb.readOnly = `file larger than ${BIG >> 20} MiB: read-only`; nb.ed.readOnly = true; }

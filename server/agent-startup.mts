@@ -19,7 +19,7 @@ export function readAgentConfig(file: string) {
 }
 
 export class PromptStoreBusy extends Error {
-  readonly exitCode = 73; // EX_CANTCREAT; RestartPreventExitStatus in the edwind unit
+  readonly exitCode = 73; // EX_CANTCREAT; a unit with agentHub can opt out of restarting on this code.
   constructor() { super('Agent prompt store is already in use'); }
 }
 

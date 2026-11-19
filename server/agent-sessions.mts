@@ -20,6 +20,7 @@ export interface AgentBackend {
   readonly requestBodyLimit: number;
   request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown, beforeDispatch?: () => void): Promise<Json>;
   clean<T>(value: T): T;
+  cleanDiagnostic(text: string): string;
   requireSession(sid: string, epoch?: number): Promise<Json>;
   open(sid: string): Promise<string>;
   promptBlocks(sid: string, seq: number, epoch: number): Promise<unknown[]>;
@@ -128,7 +129,6 @@ export class AgentSessions implements AgentBackend {
   #secrets = new Set<string>();
   constructor(server: Server) {
     this.server = server; this.config = server.cfg.agentHub; this.sessions = new Map(); this.observed = new Map();
-    if (this.config) this.#secrets.add(this.config.tokenFile);
     this.status = this.config ? 'connecting' : 'unconfigured'; this.info = {}; this.stopped = false;
     this.stream = null; this.requests = new Set(); this.generation = 0; this.listOpened = false;
     this.offKill = server.buffers.on('killed', sb => this.killed(sb.id));
@@ -137,6 +137,9 @@ export class AgentSessions implements AgentBackend {
     if (value === undefined) return value;
     const redact = (s: string) => { for (const token of this.#secrets) s = s.split(token).join('[redacted]'); return s; };
     return typeof value === 'string' ? redact(value) as T : JSON.parse(redact(JSON.stringify(value))) as T;
+  }
+  cleanDiagnostic(text: string): string {
+    return this.clean(this.config ? text.replaceAll(this.config.tokenFile, '[redacted]') : text);
   }
   // Presentation offsets remain valid even when a secret only appears after text chunks are assembled.
   redactText(value: string): string {
@@ -412,7 +415,7 @@ export class AgentSessions implements AgentBackend {
     })().catch(e => {
       const s = this.sessions.get(sid);
       if (valid() && s) {
-        this.facts.set(sid, { epoch: s.createdAt, head: -1, model: `unavailable (${line(this.clean(String(e.message || e).slice(0, 512)))})` });
+        this.facts.set(sid, { epoch: s.createdAt, head: -1, model: `unavailable (${line(this.cleanDiagnostic(String(e.message || e))).slice(0, 512)})` });
         if (e instanceof EpochDisagreement) this.deferRead(this.factRetries, sid, attempt, () => {
           if (valid()) void this.refreshFacts(sid, attempt + 1).catch(() => {});
         });
@@ -696,7 +699,7 @@ export class AgentSessions implements AgentBackend {
     })().catch(e => {
       const current = this.sessions.get(sid);
       if (!this.stopped && valid() && current) {
-        const report = this.clean(String(e.message || e)).slice(0, 1024);
+        const report = this.cleanDiagnostic(String(e.message || e)).slice(0, 1024);
         if (e instanceof TranscriptPinLimitError) this.publishState(sid);
         if (this.replayErrors.get(sid) !== report) {
           this.replayErrors.set(sid, report);

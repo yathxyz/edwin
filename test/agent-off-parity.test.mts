@@ -2,20 +2,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
-import { MAIN, EditClient, makeDir, nodeFlags, readPrimitiveRegistry, startEdwind, stopEdwind, transport } from './edit-client.mts';
+import { EDWIN, MAIN, EditClient, makeDir, nodeFlags, readPrimitiveRegistry, startEdwind, stopEdwind, transport } from './edit-client.mts';
 import type { EdwindChild, Msg, TestDir } from './edit-client.mts';
 import { createHost, loadEdwin, memoryStorage } from './headless.mts';
 import { assertOrdinaryFrameInput } from './frame-input.mts';
 
 const exec = promisify(execFile);
 const fixtureEnv = { CREDENTIALS_DIRECTORY: undefined };
+const rootBypassesMode = process.getuid?.() === 0 && 'root bypasses directory and file mode restrictions';
 async function connect(dir: TestDir) {
   const client = new EditClient(dir.cfg.socket);
-  await client.connect(); assert.equal((await client.hello()).t, 'welcome');
+  await client.connect();
+  const welcome = await client.hello();
+  assert.equal(welcome.t, 'welcome'); assert.deepEqual(welcome.caps, {}, 'main advertises no capabilities');
   return client;
 }
 async function expectStartupFailure(dir: TestDir, message: RegExp) {
@@ -23,6 +27,23 @@ async function expectStartupFailure(dir: TestDir, message: RegExp) {
     const unexpected = await startEdwind(dir, { env: fixtureEnv });
     await stopEdwind(unexpected, 'SIGKILL'); assert.fail('edwind unexpectedly listened');
   }, message);
+}
+
+// Compare every row and field, including its source. Offsets shift when unrelated lines are added:
+// identify the definer by its file and the actual line at that offset, not just its basename or number.
+function registryDigest(registry: ReturnType<typeof readPrimitiveRegistry>, tree: string) {
+  const lines = new Map<string, string[]>(), prefix = (tree + '/').slice((tree + '/').indexOf('/edwin/') + 1);
+  const rows = registry.map(row => {
+    assert.ok(row.source && row.source.startsWith(prefix), `${row.name}: ${row.source}`);
+    const match = /^((?:src|server)\/[^/]+):(\d+)$/.exec(row.source.slice(prefix.length));
+    assert.ok(match, `${row.name}: ${row.source}`);
+    const [, file, number] = match;
+    if (!lines.has(file)) lines.set(file, fs.readFileSync(path.join(tree, file), 'utf8').split('\n'));
+    const line = lines.get(file)![Number(number) - 1];
+    assert.ok(line, `${row.name}: missing definition at ${row.source}`);
+    return { ...row, source: [file, line.trim()] };
+  });
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
 }
 
 // An observer in the fixture daemon, not a replacement filesystem: all observed calls go to Node unchanged.
@@ -62,11 +83,15 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
     if (daemon) await stopEdwind(daemon, 'SIGKILL');
     fs.rmSync(dir.root, { recursive: true, force: true });
   });
-  const store = path.join(state, 'agent-prompts'); fs.mkdirSync(store);
+  const store = path.join(state, 'agent-prompts');
+  assert.equal(fs.lstatSync(store, { throwIfNoEntry: false }), undefined);
+  daemon = await startEdwind(dir, { env: fixtureEnv }); c = await connect(dir);
+  assert.equal(fs.lstatSync(store, { throwIfNoEntry: false }), undefined, 'fresh unconfigured boot must not create agent-prompts');
+  // An ordinary user can later create this path. Its files must then edit and recover normally.
+  fs.mkdirSync(store);
   const draft = path.join(store, 'ordinary'), headerOnly = 'name:jid-only', unreadable = path.join(config, 'unreadable');
   const base = 'disk base\n', insert = 'not saved: ';
   fs.writeFileSync(draft, base); fs.writeFileSync(unreadable, base);
-  daemon = await startEdwind(dir, { env: fixtureEnv }); c = await connect(dir);
   for (const id of [draft, headerOnly, unreadable]) {
     const opened = await c.open(id, { create: id === headerOnly });
     assert.equal(opened.text, id === headerOnly ? '' : base, id);
@@ -85,14 +110,19 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
   // Neither disk nor .saved can supply the old base (including when the test runner is root).
   assert.equal(fs.readFileSync(journal(row(unreadable), '.snap'), 'utf8'), base);
   fs.unlinkSync(journal(row(unreadable), '.saved'));
-  fs.writeFileSync(unreadable, 'different backing\n'); fs.chmodSync(unreadable, 0);
+  if (rootBypassesMode) { fs.unlinkSync(unreadable); fs.mkdirSync(unreadable); } // EISDIR even for root
+  else { fs.chmodSync(unreadable, 0); }
+  assert.throws(() => fs.readFileSync(unreadable), { code: rootBypassesMode ? 'EISDIR' : 'EACCES' });
   const notesIndex = path.join(state, 'notes-index', 'index.json');
   fs.mkdirSync(path.dirname(notesIndex), { recursive: true });
   fs.rmSync(notesIndex, { force: true }); fs.symlinkSync('index.json', notesIndex);
 
   const watched = path.join(config, 'watched'), metadata = path.join(dir.root, 'metadata'), fifo = path.join(config, 'fifo');
   const probe = observe(dir, [watched, metadata, fifo]);
-  daemon = await startEdwind(dir, { env: fixtureEnv, nodeArgs: [...nodeFlags(), '--require', probe.preload] });
+  // Debugger.defSource recognizes the packaged /edwin/ path. Use that spelling even in renamed worktrees.
+  const tree = path.join(dir.root, 'edwin'); fs.symlinkSync(EDWIN, tree);
+  const launch = { main: path.join(tree, 'server/main.mts'), nodeArgs: [...nodeFlags(), '--preserve-symlinks', '--preserve-symlinks-main'] };
+  daemon = await startEdwind(dir, { ...launch, env: fixtureEnv, nodeArgs: [...launch.nodeArgs, '--require', probe.preload] });
   const client = c = await connect(dir);
   await t.test('an unreadable notes snapshot reports its underlying error and file path', () => {
     assert.ok(daemon!.logs.split('\n').some(l => l.startsWith('warn notes ') && l.includes('"snapshot":"unreadable"') && l.includes('ELOOP') && l.includes(notesIndex)));
@@ -102,7 +132,7 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
     env: { ...process.env, ...fixtureEnv, HOME: dir.dirs.home }, timeout: 20000, killSignal: 'SIGKILL', maxBuffer: 8 * 1024 * 1024,
   });
 
-  await t.test('index rows and unreadable backing recover; live --export and --primitives use the same state', async () => {
+  await t.test('index rows and unreadable backing recover; live --export uses the same state', async () => {
     const listed = (await client.call('buffer-list')).value as Msg[];
     for (const id of [draft, headerOnly, unreadable]) {
       assert.ok(listed.some(b => b.id === id && b.ver === 1 && b.modified), `recovered ${id} before anyone opened it`);
@@ -117,12 +147,6 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
       const name = id.replace(/^\//, '').replace(/[/:]/g, '%2F');
       assert.equal(fs.readFileSync(path.join(out, name), 'utf8'), insert + (id === headerOnly ? '' : base));
     }
-    // main's --primitives calls Server.stop(), which unlinks its configured socket. Give the CLI its own
-    // unused socket spelling: it still competes for exactly the daemon's state and prompt directories.
-    const cliConfig = path.join(dir.root, 'primitives.json');
-    fs.writeFileSync(cliConfig, JSON.stringify({ ...dir.cfg, socket: path.join(dir.dirs.sock, 'cli.sock') }));
-    assert.ok(readPrimitiveRegistry(dir, cliConfig).some(r => r.name === 'primitive-registry'));
-    assert.equal((await client.call('status')).t, 'result');
   });
 
   await t.test('/dev/null opens empty; directory reads retain their path and errno; symlink loops are visible', async () => {
@@ -156,7 +180,7 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
     assert.ok(probe.ops(watched).every(op => op === 'statSync'), `unchanged watch/live visit: ${probe.ops(watched)}`);
   });
 
-  await t.test('save of an empty write-only file and rename in a writable, search-only directory commit', async () => {
+  await t.test('save of an empty write-only file and rename in a writable, search-only directory commit', { skip: rootBypassesMode }, async () => {
     const parent = path.join(config, 'search-only'), from = path.join(parent, 'before'), to = path.join(parent, 'after');
     fs.mkdirSync(parent); fs.writeFileSync(from, ''); assert.equal((await client.open(from)).text, '');
     fs.chmodSync(parent, 0o300); fs.chmodSync(from, 0o200);
@@ -193,6 +217,18 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
     assert.equal((await client.call('kill-buffer', [fifo])).value, true);
   });
 
+  await t.test('live primitives and --primitives with the identical config match the whole main registry', async () => {
+    const live = (await client.call('primitives')).value;
+    assert.ok(fs.lstatSync(dir.cfg.socket).isSocket());
+    // Run after the last new connection: main's metadata CLI unlinks the configured socket on exit.
+    const registry = readPrimitiveRegistry(dir, launch);
+    assert.deepEqual(live, registry);
+    // Measured from the packaged layout of origin/main (8fe116b), with an empty user image.
+    assert.equal(registryDigest(registry, tree), '4025a3be862f99d54908d56ae56332bb78cbd89c7ba466b7d7ed16cd1a2ebb22');
+    assert.equal(fs.lstatSync(dir.cfg.socket, { throwIfNoEntry: false }), undefined);
+    assert.equal((await client.call('status')).t, 'result', 'the already connected client still works');
+  });
+
   await t.test('a literal null index row fails at startup on main, unlike a jid-only row', async () => {
     const bad = makeDir();
     try {
@@ -201,7 +237,7 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
     } finally { fs.rmSync(bad.root, { recursive: true, force: true }); }
   });
 
-  await t.test('read-only stateDir cannot create main’s boot marker', { skip: process.getuid?.() === 0 && 'root bypasses directory permissions' }, async () => {
+  await t.test('read-only stateDir cannot create main’s boot marker', { skip: rootBypassesMode }, async () => {
     const ro = makeDir();
     try {
       // Pre-existing image epoch: the first mandatory write on restart is boot.json, not image.jsonl.

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import https from 'node:https';
 import { isIP } from 'node:net';
 import { createRequire } from 'node:module';
@@ -361,6 +362,140 @@ test('notes worker: middle rotation hard link stays private during parse, scan a
   assert.deepEqual((await pending).hits.map(hit => hit[0]), [ordinary.id]);
 });
 
+test('configured ordinary file I/O follows main without admitting private aliases', async t => {
+  const dir = makeDir({ writablePaths: [] }), { config, state } = dir.dirs;
+  const tokenFile = path.join(dir.root, 'bearer');
+  fs.writeFileSync(tokenFile, 'not a valid bearer token'); // no remote I/O
+  dir.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile };
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  let child = await startEdwind(dir, { env: { CREDENTIALS_DIRECTORY: undefined } }), c = new EditClient(dir.cfg.socket);
+  t.after(async () => { c.close(); await stopEdwind(child, 'SIGKILL'); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  await c.connect(); await c.hello();
+
+  // Ordinary snapshots survive a lost read permission, but a now-private backing can never
+  // be recovered or published by name (even when its old snapshot and journal are still valid).
+  const backing = path.join(config, 'backing'), tokenAlias = path.join(config, 'token-link'), configAlias = path.join(config, 'config-link');
+  for (const file of [backing, tokenAlias, configAlias]) {
+    fs.writeFileSync(file, 'snapshot');
+    assert.equal((await c.open(file)).text, 'snapshot');
+    assert.equal((await c.edit(file, 0, [[0, '', 'journal ']])).t, 'ack');
+  }
+  c.close(); await stopEdwind(child);
+  const index = JSON.parse(fs.readFileSync(path.join(state, 'index.json'), 'utf8'));
+  const { jid } = index.buffers.find((row: { id: string }) => row.id === backing);
+  fs.unlinkSync(path.join(state, 'buffers', jid + '.saved'));
+  fs.writeFileSync(backing, 'different backing');
+  fs.chmodSync(backing, 0);
+  fs.unlinkSync(tokenAlias); fs.linkSync(tokenFile, tokenAlias);
+  fs.unlinkSync(configAlias); fs.symlinkSync(dir.file, configAlias);
+  child = await startEdwind(dir, { env: { CREDENTIALS_DIRECTORY: undefined } });
+  c = new EditClient(dir.cfg.socket); await c.connect(); await c.hello();
+  const permissions = { skip: process.getuid?.() === 0 && 'root bypasses read permission' };
+  await t.test('recover the snapshot and journal across EACCES', permissions, async () => {
+    assert.throws(() => fs.readFileSync(backing), { code: 'EACCES' });
+    const recovered = await c.open(backing);
+    assert.equal(recovered.text, 'journal snapshot'); assert.equal(recovered.ver, 1);
+    assert.equal(recovered.meta?.readOnly, false); assert.equal(recovered.meta?.modified, true);
+  });
+  await t.test('private aliases stay denied through recovery and rotation', async () => {
+    const ids = (await c.call('buffer-list')).value.map((row: { id: string }) => row.id);
+    for (const file of [tokenAlias, configAlias]) assert.ok(!ids.includes(file), file);
+    const next = path.join(dir.root, 'replacement'); fs.writeFileSync(next, 'another fake token'); fs.renameSync(next, tokenFile);
+    const rotated = path.join(config, 'replacement-alias'); fs.linkSync(tokenFile, rotated);
+    for (const file of [tokenAlias, configAlias, rotated]) {
+      assert.equal((await c.open(file)).error?.code, 'refused_path');
+      assert.equal((await c.call('visit-id', [file])).code, 'refused_path');
+      assert.equal((await c.call('fs-stat', [{ path: file }])).code, 'refused_path');
+    }
+  });
+  await t.test('/dev/null opens as empty read-only text', async () => {
+    const opened = await c.open('/dev/null');
+    assert.equal(opened.text, ''); assert.equal(opened.meta?.readOnly, 'outside the writable paths');
+  });
+  await t.test('directory open reports the ordinary path and errno', async () => {
+    const { error } = await c.open(config);
+    assert.equal(error?.code, 'refused_path'); assert.equal(error?.msg, `${config}: EISDIR`);
+  });
+  await t.test('visit-id needs only metadata outside writable roots', permissions, async () => {
+    const file = path.join(dir.root, 'unreadable'); fs.writeFileSync(file, Buffer.from([255]), { mode: 0 });
+    assert.deepEqual((await c.call('visit-id', [file])).value, { buf: file, readOnly: 'outside the writable paths' });
+  });
+  await t.test('an empty write-only file saves without opening it for read', permissions, async () => {
+    const file = path.join(config, 'empty');
+    fs.writeFileSync(file, ''); assert.equal((await c.open(file)).text, '');
+    fs.chmodSync(file, 0o200); assert.throws(() => fs.readFileSync(file), { code: 'EACCES' });
+    assert.equal((await c.edit(file, 0, [[0, '', 'saved']])).t, 'ack');
+    assert.equal((await c.request({ t: 'save', buf: file })).value?.saved, true);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o200);
+    fs.chmodSync(file, 0o600); assert.equal(fs.readFileSync(file, 'utf8'), 'saved\n');
+  });
+  await t.test('ordinary symlink loops remain visible to list and stat', async () => {
+    const file = path.join(config, 'loop'); fs.symlinkSync('loop', file);
+    const entry = (await c.call('fs-stat', [{ path: file }])).value.entry;
+    assert.equal(entry?.kind, 'link'); assert.equal(entry.target, 'loop');
+    assert.deepEqual((await c.call('fs-list', [{ dir: config }])).value.entries.find((e: { name: string }) => e.name === 'loop'), entry);
+  });
+  await t.test('FIFO waits for a writer and a pathname swap cannot change the bytes read', async () => {
+    const fifo = path.join(config, 'pipe'); execFileSync('mkfifo', [fifo]);
+    const reading = c.open(fifo);
+    // No blocking writer in the test runner. ENXIO means the daemon has not opened its
+    // read end yet; returning before a writer arrives is not a successful empty read.
+    let writer: number | undefined;
+    for (let i = 0; i < 500 && writer === undefined; i++) {
+      try { writer = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); }
+      catch (e) {
+        if (e.code !== 'ENXIO') throw e;
+        assert.equal(await Promise.race([reading, sleep(10)]), undefined, 'FIFO open returned before a writer');
+      }
+    }
+    assert.notEqual(writer, undefined, 'no FIFO reader');
+    try {
+      fs.unlinkSync(fifo); fs.linkSync(tokenFile, fifo);
+      fs.writeFileSync(writer!, 'ordinary FIFO\n');
+    } finally { fs.closeSync(writer!); }
+    const opened = await reading; assert.equal(opened.error, null); assert.equal(opened.text, 'ordinary FIFO\n');
+    assert.equal((await c.open(fifo)).error?.code, 'refused_path');
+    fs.unlinkSync(fifo);
+    assert.equal((await c.call('kill-buffer', [fifo])).value, true);
+  });
+});
+
+test('credential path redaction leaves ordinary replica data and request identifiers intact', async t => {
+  const dir = makeDir(), tokenFile = path.join(dir.root, 'bearer'), file = tokenFile + '-ordinary.txt';
+  const text = `Reference to ${tokenFile}`, inserted = `\n${tokenFile}\n`;
+  fs.writeFileSync(file, text);
+  dir.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile }; // no credential, so no HTTP request
+  fs.writeFileSync(dir.file, JSON.stringify(dir.cfg));
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket), frame = new EditClient(dir.cfg.socket, { kind: 'frame' });
+  t.after(async () => { c.close(); frame.close(); await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
+  await c.connect(); await c.hello();
+  await frame.connect(); await frame.hello();
+  assert.equal((await c.open(file)).text, text);
+  frame.send({ t: 'open', buf: file, rid: 'frame-open' });
+  const snap = await frame.next(m => m.t === 'snap');
+  assert.equal(snap.text, text);
+  assert.equal(snap.buf, file);
+  assert.equal(snap.meta.file, file);
+  assert.equal((await frame.next(m => m.t === 'opened')).buf, file);
+  const ops: [number, string, string][] = [[text.length, '', inserted]];
+  const ack = await c.edit(file, 0, ops);
+  assert.equal(ack.buf, file);
+  const edits = await frame.next(m => m.t === 'edits');
+  assert.equal(edits.buf, file);
+  assert.deepEqual(edits.ops, ops);
+  const draft = (await c.call('agent-prompt-create', [{ text }])).value;
+  assert.equal((await c.call('agent-prompt-preview', [draft])).value.blocks[0].text, text);
+
+  c.send({ t: 'call', cmd: tokenFile, rid: tokenFile });
+  const invalid = await c.next(m => m.t === 'error');
+  assert.equal(invalid.rid, tokenFile);
+  assert.match(invalid.msg, /unknown server command/);
+  assert.ok(!invalid.msg.includes(tokenFile), 'protocol diagnostic must mask the credential path');
+  const condition = await c.form(`(error ${JSON.stringify(text)})`);
+  assert.ok(condition.error.report.includes('Reference to'), 'preserve diagnostic context');
+  assert.ok(!JSON.stringify(condition.error).includes(tokenFile), 'Scheme diagnostic must mask the credential path');
+});
+
 test('protected reader: credential identities are refused by editor reads, metadata, completion and binary attach', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();
   const tokenFile = path.join(dir.dirs.notes, 'private-fixture'), link = path.join(dir.dirs.notes, 'linked-fixture'), hard = path.join(dir.dirs.notes, 'other-fixture');
@@ -380,7 +515,10 @@ test('protected reader: credential identities are refused by editor reads, metad
   const procFds = ['/proc/self/fd/3', `/proc/${child.pid}/fd/3`, '/proc/thread-self/fd/3'];
   for (const file of [tokenFile, link, hard, 'subdir/../private-fixture', ...procFds, '/proc/self/root' + hard, `/proc/${child.pid}/root` + tokenFile]) {
     // find-file opens through the shared-buffer protocol; visit-id is the host-page opener.
-    const opened = await c.open(file); assert.ok(opened.error); privateReply(opened);
+    const { error } = await c.open(file); assert.ok(error);
+    const { buf, ...diagnostic } = error;
+    assert.equal(buf, file); // the protocol echoes the caller's id, not the resolved private path
+    privateReply(diagnostic);
     for (const [cmd, args] of [['visit-id', [file]], ['fs-stat', [{ path: file }]], ['fs-list', [{ dir: file }]],
       ['agent-prompt-attach-file', [draft, file, { embed: true, mimeType: 'application/octet-stream' }]]] as const) {
       const r = await c.call(cmd, [...args]); assert.ok(r.error || r.t === 'error', cmd); privateReply(r);

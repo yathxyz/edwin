@@ -23,9 +23,12 @@ function guardedEntry(auth: AgentAuthority, full: string, name: string): { entry
     }, 'entry');
   } catch (e) {
     if (e.code === 'refused_path') throw e;
-    if (!link || e.code !== 'ENOENT') return null;
-    // A link may outlast a removed credential; don't publish a protected target spelling either.
-    if (auth.inRefused(path.resolve(path.dirname(full), target!))) throw new PathError('refused_path', 'Private file: access refused');
+    if (!link || (e.code !== 'ENOENT' && e.code !== 'ELOOP')) return null;
+    // An unresolved link still has metadata. Don't publish either private spelling, even
+    // when listing relative to a pinned directory rather than its canonical pathname.
+    const parent = fs.realpathSync.native(path.dirname(full));
+    if (auth.inRefused(path.join(parent, name)) || auth.inRefused(path.resolve(parent, target!)))
+      throw new PathError('refused_path', 'Private file: access refused');
   }
   const entry: FsEntry = { name, kind: link ? 'link' : st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other', size: st.size, mtime: Math.floor(st.mtimeMs), mode: st.mode & 0o7777 };
   if (link) { entry.target = target; if (dir) entry.dir = true; }

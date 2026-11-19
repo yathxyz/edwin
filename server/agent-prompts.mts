@@ -130,7 +130,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     const d = owned.get(sb);
     if (!d) return;
     try { durable(sb, d); }
-    catch (e) { sb.setReadOnly('Agent prompt persistence failed; draft journal retained'); server.log.error('agent-prompt', { error: backend.clean(String(e.message || e)) }); }
+    catch (e) { sb.setReadOnly('Agent prompt persistence failed; draft journal retained'); server.log.error('agent-prompt', { error: backend.cleanDiagnostic(String(e.message || e)) }); }
   });
   const previousBeforeKill = buffers.hooks.beforeKill;
   const beforeKill = (sb: SBuf) => {

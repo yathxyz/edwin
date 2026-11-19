@@ -446,7 +446,6 @@ in
           Environment = [ "NODE_COMPILE_CACHE=%C/edwind" ];
           LoadCredential = credentials;
           Restart = "always";
-          RestartPreventExitStatus = [ 73 ]; # Another configured daemon owns the prompt store.
           RestartSec = 1;
           TimeoutStopSec = 10;
           OOMScoreAdjust = 100;

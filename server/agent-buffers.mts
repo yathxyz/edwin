@@ -1,7 +1,7 @@
 // Buffer file operations used only by a daemon with an agent authority.
 import fs from 'node:fs';
 import path from 'node:path';
-import { readTextFd } from './agent-files.mts';
+import { readTextEntry } from './agent-files.mts';
 import type { AgentAuthority } from './agent-files.mts';
 import type { Buffers, SBuf, VisitInfo } from './buffers.mts';
 import { BIG, diskState, sameDisk, sha256 } from './files.mts';
@@ -49,8 +49,8 @@ export function checkRecovery(agent: AgentAuthority, e: IndexEntry, read: Journa
   } else if (inside(e.file) || inside(read.header.file) || read.mv.some(m => inside(m.file))) {
     throw refused();
   } else if (file) {
-    // The snapshot is not an alternative route to a credential that now occupies the file.
-    try { agent.withRead(file, () => {}); } catch (err) { if (err.code !== 'ENOENT') throw err; }
+    // Check identity before touching snapshots; inspecting an inode needs no content access.
+    try { agent.withRead(file, () => {}, 'inspect'); } catch (err) { if (err.code !== 'ENOENT') throw err; }
   }
 }
 
@@ -72,9 +72,9 @@ export function visitGuarded(agent: AgentAuthority, file: string): VisitInfo {
       const buf = agent.idOf(real);
       try { agent.checkWrite(real); } catch { return { buf, readOnly: 'outside the writable paths' }; }
       if (st.size > BIG) return { buf, readOnly: `file larger than ${BIG >> 20} MiB: read-only` };
-      readTextFd(fd, st, real);
+      readTextEntry(fd, st, real);
       return { buf, readOnly: false };
-    });
+    }, 'inspect');
   } catch (e) { throw new ProtoError(e.code === 'ENOENT' ? 'no_buffer' : e.code === 'not_text' ? 'not_text' : 'refused_path', e.message); }
 }
 
@@ -84,7 +84,7 @@ export class AgentWatcher extends Watcher {
     let r: TextFile | null;
     try {
       r = this.buffers.auth.agent!.withRead(sb.file, (fd, st, real) =>
-        sameDisk(diskState(st), sb.disk) ? null : readTextFd(fd, st, real));
+        sameDisk(diskState(st), sb.disk) ? null : readTextEntry(fd, st, real), 'inspect');
     } catch (e) {
       // An alias may have become private since this buffer was opened. Never identify it in a refusal.
       if (e.code !== 'ENOENT') { this.log.warn('disk', { error: e.code }); return; }

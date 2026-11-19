@@ -18,9 +18,12 @@ export function configSource(file: string, fd: number) {
 }
 
 const decoder = new TextDecoder('utf-8', { fatal: true });
-export function readTextFd(fd: number, stat: fs.Stats, real: string): TextFile {
-  if (!stat.isFile()) throw new FileError('not_text', `${real}: not a regular file`);
-  const bytes = fs.readFileSync(fd);
+// Reopen the authorized inode, not its original pathname. Only content reads need read
+// permission or a blocking open (notably a FIFO waiting for its writer).
+export function readTextEntry(fd: number, stat: fs.Stats, real: string): TextFile {
+  let bytes: Buffer;
+  try { bytes = fs.readFileSync(fdPath(fd)); }
+  catch (e) { throw new FileError(e.code === 'ENOENT' ? 'no_buffer' : 'refused_path', `${real}: ${e.code}`); }
   let text: string;
   try { text = decoder.decode(bytes); } catch { throw new FileError('not_text', `${real}: not UTF-8 text`); }
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -120,21 +123,21 @@ export class AgentAuthority extends Authority {
     return this.promptStore;
   }
   /* No callback may reopen the pathname for its data. */
-  withRead<T>(file: string, use: Reader<T>, kind: 'read' | 'entry' | 'state' | 'private' | 'private-live' = 'read'): T {
+  withRead<T>(file: string, use: Reader<T>, kind: 'read' | 'inspect' | 'entry' | 'state' | 'private' | 'private-live' = 'read'): T {
     const privateEntry = kind === 'private' || kind === 'private-live';
     if (!privateEntry) {
       const store = this.storeFor(path.dirname(file));
       if (store) return store.withRead(path.basename(file), use);
     }
     if (this.protectedNames.has(file)) throw denied();
-    const flags = kind === 'entry' ? O_PATH : fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
+    const flags = kind === 'entry' || kind === 'inspect' ? O_PATH : fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
     const fd = fs.openSync(file, flags | (privateEntry ? fs.constants.O_NOFOLLOW : 0));
     try {
       const real = fs.readlinkSync(fdPath(fd));
       // An indirect alias must not turn a private leaf into a generic fd read.
       if (!privateEntry && this.isPromptDir(path.dirname(real))) throw denied();
       this.checkPrivate(fd, real);
-      if (kind === 'read') this.checkRead(real);
+      if (kind === 'read' || kind === 'inspect') this.checkRead(real);
       const stat = fs.fstatSync(fd);
       if (privateEntry && !(kind === 'private-live' && stat.isDirectory()) && (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid!())) throw denied();
       return use(fd, stat, real);
@@ -147,10 +150,13 @@ export class AgentAuthority extends Authority {
     });
   }
   readText(file: string): TextFile {
-    try { return this.withRead(file, readTextFd); }
+    try { return this.withRead(file, readTextEntry, 'inspect'); }
     catch (e) {
-      if (e instanceof FileError) throw e;
-      throw new FileError(e.code === 'ENOENT' ? 'no_buffer' : 'refused_path', e.code === 'refused_path' ? e.message : `Cannot read file: ${e.code}`);
+      // Recovery may use a snapshot after an I/O failure on a checked inode, never after
+      // an authorization failure or a failure to establish the identity of an existing file.
+      if (e instanceof FileError || e instanceof PathError) throw e;
+      if (e.code === 'ENOENT') throw new FileError('no_buffer', `${file}: ENOENT`);
+      throw new PathError('refused_path', `${file}: ${e.code}`);
     }
   }
   saveAtomic(file: string, text: string, { eol = 'lf' }: { eol?: Eol } = {}): Saved {
@@ -160,8 +166,12 @@ export class AgentAuthority extends Authority {
     try {
       this.withRead(file, (fd, stat) => {
         mode = stat.mode & 0o7777;
-        if (stat.size) { const b = Buffer.allocUnsafe(1); trailing = fs.readSync(fd, b, 0, 1, stat.size - 1) === 1 && b[0] === 10; }
-      });
+        if (stat.size) {
+          const reader = fs.openSync(fdPath(fd), 'r');
+          try { const b = Buffer.allocUnsafe(1); trailing = fs.readSync(reader, b, 0, 1, stat.size - 1) === 1 && b[0] === 10; }
+          finally { fs.closeSync(reader); }
+        }
+      }, 'inspect');
     } catch (e) { if (e.code !== 'ENOENT') throw e; }
     const data = encodeText(text, eol, trailing);
     let stat: fs.Stats;

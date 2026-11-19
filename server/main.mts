@@ -244,29 +244,31 @@ export class Server {
   }
   /* Load Edwin's core headless and boot it (host-node.cts), then replay the image log (R4.19) and the journals. */
   async start(mode: 'run' | 'metadata' = 'run') {
-    if (!this.auth.agent) return this.bootImage();
-    if (mode === 'run') this.releasePromptWriter = await openPromptWriter(this.auth.agent, this.log);
-    try { this.initState(this.cfg); await this.bootImage(mode === 'metadata'); }
-    catch (e) { await this.releasePromptWriter?.(); throw e; }
-  }
-  private async bootImage(registryOnly = false) {
-    const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
-    const storageFile = path.join(this.cfg.stateDir, 'storage.json');
-    /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
-    const safe = this.image.bootGuard();
-    const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log) });
-    if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
-    this.Ed = loadEdwin(host, { mode: 'gen' });
-    this.L = (globalThis as any).L; // any: the core sets globalThis.L
-    this.Ed.boot({ host });
-    await this.Ed.whenIdle();
-    this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
-    this.buffers.reload();
-    for (const m of MODULES) { await m.install(this); this.modules.push(m); }
-    if (this.auth.agent) { await agentSessionsModule.install(this, registryOnly); this.modules.push(agentSessionsModule); }
-    /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
-       module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
-    this.image.replay(this);
+    const agent = this.auth.agent;
+    if (agent && mode === 'run') this.releasePromptWriter = await openPromptWriter(agent, this.log);
+    try {
+      if (agent) this.initState(this.cfg);
+      const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
+      const storageFile = path.join(this.cfg.stateDir, 'storage.json');
+      /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
+      const safe = this.image.bootGuard();
+      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log) });
+      if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
+      this.Ed = loadEdwin(host, { mode: 'gen' });
+      this.L = (globalThis as any).L; // any: the core sets globalThis.L
+      this.Ed.boot({ host });
+      await this.Ed.whenIdle();
+      this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
+      this.buffers.reload();
+      for (const m of MODULES) { await m.install(this); this.modules.push(m); }
+      if (agent) { await agentSessionsModule.install(this, mode === 'metadata'); this.modules.push(agentSessionsModule); }
+      /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
+         module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
+      this.image.replay(this);
+    } catch (e) {
+      if (this.releasePromptWriter) await this.releasePromptWriter();
+      throw e;
+    }
   }
   /* A server command: FN(client, args, ctx, buf) returns the result object ({value, msg?, out?} or {error}),
      a promise of one, or undefined for a delayed result. */
@@ -323,17 +325,18 @@ export class Server {
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
-    try { await this.stopImage(); } finally { await this.releasePromptWriter?.(); }
-  }
-  private async stopImage() {
-    this.log.info('stop', {});
-    const closed = this.net ? new Promise<void>(r => this.net!.close(() => r())) : null;
-    for (const c of [...this.clients]) { c.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); c.destroy(); }
-    if (closed) await closed;
-    for (const m of [...this.modules].reverse()) if (m.shutdown) { try { await m.shutdown(this); } catch (e) { this.log.error('shutdown', { module: m.name || '?', error: e.message }); } }
-    await this.buffers.shutdown();
-    try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
-    if (!this.auth.agent || this.net) try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+    try {
+      this.log.info('stop', {});
+      const closed = this.net ? new Promise<void>(r => this.net!.close(() => r())) : null;
+      for (const c of [...this.clients]) { c.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); c.destroy(); }
+      if (closed) await closed;
+      for (const m of [...this.modules].reverse()) if (m.shutdown) { try { await m.shutdown(this); } catch (e) { this.log.error('shutdown', { module: m.name || '?', error: e.message }); } }
+      await this.buffers.shutdown();
+      try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
+      if (!this.auth.agent || this.net) try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+    } finally {
+      if (this.releasePromptWriter) await this.releasePromptWriter();
+    }
   }
 
   /* Stop cleanly and exit with RESTART_EXIT, after the caller's result has gone out: the service manager

@@ -329,6 +329,31 @@ test('R16.7 a journal write that fails after its bytes landed is truncated, so a
   fs.rmSync(dir.root, { recursive: true, force: true });
 });
 
+test('unconfigured start and stop settle in the same microtask order as main', async t => {
+  const d = makeDir(); t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  // Edwin can boot only once per process. Keep this lifecycle separate from the writer-lock test.
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', `
+    import { Server, loadConfig, makeLog } from ${JSON.stringify(MAIN)};
+    const order = [];
+    // Queue two microtasks at each final synchronous hook. On main, the await resumes between them.
+    const mark = hook => queueMicrotask(() => {
+      order.push(hook + ':1');
+      queueMicrotask(() => order.push(hook + ':2'));
+    });
+    const server = new Server(loadConfig(process.argv[1]), { ...makeLog('error'), info(event, fields) {
+      if (event === 'image' && fields?.event === 'replay') mark('replay');
+    } });
+    await server.start();
+    order.push('started');
+    server.Ed.host.onSuspend(() => mark('suspend'));
+    await server.stop();
+    order.push('stopped');
+    await Promise.resolve();
+    console.log(JSON.stringify(order));
+  `, d.file], { env: { ...process.env, HOME: d.dirs.home }, timeout: 10000 });
+  assert.deepEqual(JSON.parse(stdout), ['replay:1', 'started', 'replay:2', 'suspend:1', 'stopped', 'suspend:2']);
+});
+
 test('configured bootstrap validates every field from the identity-pinned second read', t => {
   const d = makeDir(); t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
   const agentHub = { url: 'http://127.0.0.1:1', tokenFile: path.join(d.root, 'absent') };
