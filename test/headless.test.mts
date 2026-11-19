@@ -18,6 +18,23 @@ test('boots into *scratch* in Normal state with the shipped config loaded', () =
   for (const b of ['emacs.scm', 'evil.scm', 'init.scm']) assert.ok(ed.Ed.getBuffer(b), b);
 });
 
+test('folded isearch includes overlapping literals at both edges of its near search', async () => {
+  await fresh();
+  const b = ed.E.current;
+  b.text = 'x'.repeat(4095) + '..ÀÀ..' + 'x'.repeat(4095);
+  // Put the editor on a non-flat revision; the lower-case literal starts at offset 4096.
+  ed.Ed.editText(b, 0, 1, 'y');
+  for (const [cmd, point, end] of [
+    ['forward', 2049, 4100], ['backward', 6143, 4096],
+    ['forward', 2048, 4100], ['backward', 6144, 4096],
+  ] as const) {
+    ed.Ed.editText(b, 0, 1, point % 2 ? 'z' : 'y'); b.pt = point;
+    for (const key of [`<cmd:isearch-${cmd}>`, '.', 'à', 'à', '.', 'RET']) ed.Ed.feedKey(key);
+    await ed.Ed.whenIdle();
+    assert.equal(b.pt, end);
+  }
+});
+
 test('Insert, Normal, operators, undo and redo', async () => {
   await fresh();
   await ed.type('ihello world foo'); await ed.keys('ESC');
