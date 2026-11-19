@@ -228,13 +228,16 @@ let matchOneBased = false;
 D('search-forward', 'STRING &optional BOUND NOERROR COUNT', 'Search forward for STRING; move point to the end of the match.', ([s, bound, noerr, count]) => searchStr(s, bound, noerr, count, 1));
 D('search-backward', 'STRING &optional BOUND NOERROR COUNT', 'Search backward for STRING; move point to the start of the match.', ([s, bound, noerr, count]) => searchStr(s, bound, noerr, count, -1));
 function searchStr(s: SchemeValue, bound: SchemeValue, noerr: SchemeValue, count: SchemeValue, dir: number) {
-  const b = cur(); str(s);
-  const fold = truthy(L.get('case-fold-search')) && s === (s as string).toLowerCase();
-  const hay = fold ? b.text.toLowerCase() : b.text, needle = fold ? (s as string).toLowerCase() : s as string;
+  const b = cur(), needle = str(s);
+  const fold = truthy(L.get('case-fold-search')) && needle === needle.toLowerCase();
+  /* Keep whole-string lowercasing: Unicode can expand, affecting the existing match offsets. */
+  const folded = fold ? b.text.toLowerCase() : null;
   const lim = L.absent(bound) ? null : clampPos(b, num(bound) - 1);
   let p = b.pt, n = optNum(count, 1); if (n < 0) { dir = -dir; n = -n; }
   for (let k = 0; k < n; k++) {
-    const i = dir > 0 ? hay.indexOf(needle, p) : (p - 1 >= 0 ? hay.lastIndexOf(needle, p - needle.length) : -1);
+    const start = dir > 0 ? p : p - needle.length;
+    const hay = folded ?? (Number.isInteger(start) && start >= 0 && start <= b.rope.length ? b.rope : b.text);
+    const i = dir > 0 ? hay.indexOf(needle, start) : (p - 1 >= 0 ? hay.lastIndexOf(needle, start) : -1);
     const ok = i >= 0 && (lim === null || (dir > 0 ? i + needle.length <= lim : i >= lim));
     if (!ok) return failSearch(b, noerr, lim, dir, s);
     matchOneBased = true; setMatchData([needle], i); matchData[0] = [i, i + needle.length];

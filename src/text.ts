@@ -151,6 +151,8 @@ class Rope {
       for (let k = i, rel = from - off[i]; k < C; k++, rel = 0) { const q = ch[k].indexOf(needle, rel); if (q >= 0) return off[k] + q; }
       return -1;
     }
+    /* Avoid copying a many-chunk overlap for every chunk when the needle itself is long. */
+    if (L > TARGET) return this.toString().indexOf(needle, from);
     /* A longer needle can straddle chunks: search each chunk with the tail of the one before. */
     for (let k = i; k < C; k++) {
       const base = Math.max(off[k] - (L - 1), from);
@@ -174,6 +176,7 @@ class Rope {
       for (let k = i, rel = start - off[i]; k >= 0; k--) { const q = ch[k].lastIndexOf(needle, rel); if (q >= 0) return off[k] + q; if (k > 0) rel = ch[k - 1].length - 1; }
       return -1;
     }
+    if (L > TARGET) return this.toString().lastIndexOf(needle, start);
     for (let k = i; k >= 0; k--) {
       const end = Math.min(n, (k === i ? start : off[k + 1] - 1) + L);
       const base = off[k];

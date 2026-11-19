@@ -315,7 +315,7 @@ function onChunk(msg: SyncChunkMsg) {
 }
 function finishSnap(b: SyncBuffer) {
   const s = b.sync, snap = s.snap!; s.snap = null;
-  if ((b.inflight || b.queue.length) && snap.text === s.sverText) {
+  if ((b.inflight || b.queue.length) && snap.text.length === s.sverText.length && snap.text === String(s.sverText)) {
     /* The server has no history for us (a restart) but the same text: our pending batches still apply and
        are resent after opened (R7.16). */
     b.sver = snap.ver; b.hist = []; if (b.inflight) b.inflight.base = snap.ver;
@@ -397,6 +397,25 @@ H.applied = (b, ops, origin) => {
 };
 
 /* ---------- remote batches and acks (R6.9) ---------- */
+/* The acknowledged text is independent of the displayed rope: local batches on that rope can still be
+   in flight. Keep the snap string until the first edit, then change a chunk instead of copying the whole
+   document on every key. As with OT.apply, an invalid later op must leave the entire batch unapplied. */
+function applyToShadow(text: EdText, ops: EdOTOp[]): EdText {
+  if (!Array.isArray(ops)) throw new OT.OTError('bad_edit', 'ops is not an array');
+  if (!ops.length) return text;
+  const r = typeof text === 'string' ? new globalThis.Rope(text) : text;
+  let i = 0;
+  try {
+    for (; i < ops.length; i++) {
+      const op = ops[i]; OT.checkOp(r, op);
+      r.splice(op[0], op[1].length, op[2]);
+    }
+  } catch (e) {
+    while (i > 0) { const [p, del, ins] = ops[--i]; r.splice(p, ins.length, del); }
+    throw e;
+  }
+  return r;
+}
 function onEdits(msg: SyncEditsMsg) {
   const b = bufOf(msg); if (!b || b.sver < 0) return;
   const s = b.sync;
@@ -404,15 +423,15 @@ function onEdits(msg: SyncEditsMsg) {
   if (msg.ver !== b.sver + 1) { reopen(b, 'edits out of order'); return; }
   const sverLen = s.sverText.length;
   let R = OT.fromOps(msg.ops, sverLen);
-  let base = OT.apply(s.sverText, msg.ops);
+  let base = applyToShadow(s.sverText, msg.ops);
   s.sverText = base; b.sver = msg.ver;
   if (b.inflight) {
     const [Rp, Ip] = OT.transform(R, OT.fromOps(b.inflight.ops, sverLen));
-    b.inflight.ops = OT.toOps(Ip, base); b.inflight.base = b.sver; R = Rp; base = OT.applyOperation(base, Ip);
+    b.inflight.ops = OT.toOps(Ip, base); b.inflight.base = b.sver; R = Rp; base = OT.applyOperation(String(base), Ip);
   }
   for (const q of b.queue) {
     const [Rp, Qp] = OT.transform(R, OT.fromOps(q.ops, R.baseLen));
-    q.ops = OT.toOps(Qp, base); R = Rp; base = OT.applyOperation(base, Qp);
+    q.ops = OT.toOps(Qp, base); R = Rp; base = OT.applyOperation(String(base), Qp);
   }
   const own = !!(msg.by && msg.by.cid === sync.cid);
   b.hist.push({ ver: msg.ver, ops: msg.ops, cid: own ? sync.cid : writerKey(msg.by), undo: own ? { g: 'server-' + msg.ver } : undefined, by: msg.by });
@@ -436,7 +455,7 @@ function onAck(msg: SyncAckMsg) {
   }
   s.acked.add(msg.seq);
   const f = b.inflight;
-  s.sverText = OT.apply(s.sverText, f.ops); b.sver = msg.ver;
+  s.sverText = applyToShadow(s.sverText, f.ops); b.sver = msg.ver;
   b.hist.push({ ver: msg.ver, ops: f.ops, cid: sync.cid, undo: f.undo });
   trimHist(b);
   for (const [pos, del, ins] of f.ops) for (const a of s.anchorsServer) a.pos = OT.shiftMarker(a.pos, 'after', pos, del.length, ins.length);
@@ -952,7 +971,7 @@ function resolveRef(addr: string) {
 /* Unsent edits across a runtime reload (R7.19, R6.10): exportPending() before, pending: in bootServed after. */
 function exportPending() {
   const out: SyncPending[] = [];
-  for (const b of sync.buffers.values()) if (b.inflight || b.queue.length) out.push({ buf: b.id, sver: b.sver, sverText: b.sync.sverText, seq: b.sync.seq, inflight: b.inflight, queue: b.queue });
+  for (const b of sync.buffers.values()) if (b.inflight || b.queue.length) out.push({ buf: b.id, sver: b.sver, sverText: String(b.sync.sverText), seq: b.sync.seq, inflight: b.inflight, queue: b.queue });
   return out;
 }
 function importPending(list: (SyncPending | null)[]) {
@@ -961,9 +980,10 @@ function importPending(list: (SyncPending | null)[]) {
     open(p.buf).catch(() => {});
     const b = sync.buffers.get(p.buf); if (!b) continue;
     const s = b.sync;
-    s.sverText = String(p.sverText || ''); b.sver = Number.isInteger(p.sver) ? p.sver : -1; s.seq = p.seq || 0;
+    const acknowledged = String(p.sverText || '');
+    s.sverText = acknowledged; b.sver = Number.isInteger(p.sver) ? p.sver : -1; s.seq = p.seq || 0;
     b.inflight = p.inflight || null; b.queue = Array.isArray(p.queue) ? p.queue : [];
-    let text = s.sverText; if (b.inflight) text = OT.apply(text, b.inflight.ops); for (const q of b.queue) text = OT.apply(text, q.ops);
+    let text = acknowledged; if (b.inflight) text = OT.apply(text, b.inflight.ops); for (const q of b.queue) text = OT.apply(text, q.ops);
     const was = E.inhibitModHooks; E.inhibitModHooks = true;
     try { replaceText(b, text, 'remote'); } finally { E.inhibitModHooks = was; }
     b.readOnly = false;
