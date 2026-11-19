@@ -23,6 +23,8 @@ nix flake check -L          # the suites below, the type check (edwin-typecheck)
 (cd tools && npm ci)        # without nix: typescript, @types/node and fast-check for tsc and the OT suite
 ```
 
+See [performance measurements](docs/performance.md) for the private text, redisplay, startup and replication benchmarks, baseline distributions and trade-offs.
+
 ## TypeScript
 
 edwind (`server/*.mts`) and the suites (`test/*.mts`) are TypeScript that Node 24 runs as it is: Node strips
