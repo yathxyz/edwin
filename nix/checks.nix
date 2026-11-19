@@ -85,6 +85,7 @@ in
   # The real standalone page, in a private headless Chromium with no external requests.
   edwin-standalone = pkgs.runCommand "edwin-standalone" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
     export HOME=$TMPDIR
+    export FONTCONFIG_FILE=${pkgs.makeFontsConf { fontDirectories = [ pkgs.dejavu_fonts ]; }}
     export NO_SANDBOX=1 CHROMIUM=${pkgs.chromium}/bin/chromium
     node --test ${edwin}/edwin/test/standalone.test.mts ${edwin}/edwin/test/row-offsets.test.mts
     touch $out

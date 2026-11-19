@@ -46,7 +46,8 @@ export async function inStandalonePage(t: TestContext, script: string, beforeBoo
     ...(process.env.NO_SANDBOX === '1' ? ['--no-sandbox'] : []),
     '--dump-dom', '--virtual-time-budget=5000', '--enable-logging=stderr',
     `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
-  ], { env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmpdir(), DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent', DBUS_SYSTEM_BUS_ADDRESS: 'unix:path=/nonexistent' }, timeout: 30000 });
+  ], { env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmpdir(), FONTCONFIG_FILE: process.env.FONTCONFIG_FILE,
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/nonexistent', DBUS_SYSTEM_BUS_ADDRESS: 'unix:path=/nonexistent' }, timeout: 30000 });
   const result = /<output>([^<]*)<\/output>/.exec(stdout)?.[1];
   if (!result?.startsWith('done:')) throw Error(`Standalone page: ${result ?? stdout.slice(-1800)}\n${stderr.split('\n').filter(s => s.includes('CONSOLE')).join('\n')}`);
   return decodeURIComponent(result.slice(5));
