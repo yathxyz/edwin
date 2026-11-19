@@ -15,6 +15,9 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { Authority, expandHome } from './paths.mts';
+import { AgentAuthority, ProtectedFileError } from './agent-files.mts';
+import { openPromptWriter, PromptStoreBusy } from './agent-startup.mts';
+import { agentEncoder } from './agent-wire.mts';
 import { Buffers } from './buffers.mts';
 import { Client } from './session.mts';
 import { ImageLog, randomId, readJournal, jidPath, SNAP_NEW } from './journal.mts';
@@ -33,6 +36,8 @@ import * as babelModule from './babel.mts';
 import * as fsModule from './fs.mts';
 import * as projectorModule from './projector.mts';
 import * as brainModule from './brain.mts';
+import * as agentSessionsModule from './agent-sessions.mts';
+import { isPromptDraft } from './agent-prompts.mts';
 import { TAG } from './projector.mts';
 import { lockdown, lockdownState } from './lockdown.mts';
 import type { By, CallCtx, CallResult, Condition, WireMessage } from './proto.mts';
@@ -77,6 +82,8 @@ export interface Config {
      brain-* commands read with and `taskCredential` what they write tasks with (server/brain.mts); without
      one, that part is off. */
   brain?: { url: string; credential?: string; readCredential?: string; taskCredential?: string; tags: string[] };
+  agentHub?: agentSessionsModule.AgentHubConfig;
+  configFile?: string;
 }
 
 /* A server command (§4.6): the result object, a promise of one, or undefined for a delayed result. */
@@ -110,7 +117,7 @@ export function makeLog(level: string = 'info'): Log {
 }
 
 /* ---------- config (R15.4): edit.json, unknown fields refused ---------- */
-const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'brain', 'host', 'logLevel']);
+const FIELDS = new Set(['socket', 'hubSocket', 'webSocket', 'stateDir', 'notesDir', 'configDir', 'writablePaths', 'refusePaths', 'models', 'brain', 'agentHub', 'host', 'logLevel']);
 export function loadConfig(file: string): Config {
   let cfg: any; // any: edit.json as parsed, checked field by field below
   try { cfg = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`cannot read ${file}: ${e.message}`); }
@@ -170,6 +177,10 @@ export function loadConfig(file: string): Config {
     if (!Array.isArray(tags) || !tags.every(t => typeof t === 'string' && TAG.test(t))) throw new Error(`${file}: brain.tags must be a list of brain tags such as ["roam"]`);
     out.brain = { url: b.url, tags, ...(b.credential === undefined ? {} : { credential: b.credential }), ...(b.readCredential === undefined ? {} : { readCredential: b.readCredential }), ...(b.taskCredential === undefined ? {} : { taskCredential: b.taskCredential }) };
   }
+  if (cfg.agentHub !== undefined) {
+    out.agentHub = agentSessionsModule.validateAgentHub(cfg.agentHub);
+    out.configFile = file; // Preserve the pathname that was opened, including '..' after a symlink.
+  }
   return out;
 }
 
@@ -189,6 +200,7 @@ export class Server {
   declare disconnects: ((client: Client) => void)[];
   declare started: number;
   declare image: ImageLog;
+  private releasePromptWriter?: () => Promise<void>;
   /* Set by start(). */
   declare Ed: Ed;
   declare L: Lisp;
@@ -210,7 +222,8 @@ export class Server {
     /* The credential files are edwind's to read and nobody's to visit: a buffer of one would hand a key to every
        frame, and to a model through pi's tools (R14.6). */
     const credentials = modelsModule.credentialsDirectory();
-    this.auth = new Authority(credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg);
+    const roots = credentials ? { ...cfg, refusePaths: [...cfg.refusePaths, credentials] } : cfg;
+    this.auth = cfg.agentHub ? new AgentAuthority(roots, cfg.agentHub.tokenFile, cfg.configFile) : new Authority(roots);
     /* Extension points for the E2 modules (notes, models, hub, image, threads): server commands by name
        (§4.6; `call{cmd}` reaches them after the E1 switch in command()), handlers for message types the
        session does not know (`sample`, `tool_result`, …), and the installed modules, shut down in reverse. */
@@ -220,29 +233,55 @@ export class Server {
     /* Told each client that disconnected (onDisconnect). */
     this.disconnects = [];
     this.started = Date.now();
+    if (!this.auth.agent) this.initState(cfg);
+  }
+  private initState(cfg: Config) {
     fs.mkdirSync(cfg.stateDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(cfg.configDir, { recursive: true, mode: 0o700 });
     this.image = new ImageLog(path.join(cfg.stateDir, 'image.jsonl'));
     this.image.ensureEpoch(() => randomId(8));
   }
   /* Load Edwin's core headless and boot it (host-node.cts), then replay the image log (R4.19) and the journals. */
-  async start() {
-    const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
-    const storageFile = path.join(this.cfg.stateDir, 'storage.json');
-    /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
-    const safe = this.image.bootGuard();
-    const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: fileStorage(storageFile, this.log) });
-    if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
-    this.Ed = loadEdwin(host, { mode: 'gen' });
-    this.L = (globalThis as any).L; // any: the core sets globalThis.L
-    this.Ed.boot({ host });
-    await this.Ed.whenIdle();
-    this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
-    this.buffers.reload();
-    for (const m of MODULES) { await m.install(this); this.modules.push(m); }
-    /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
-       module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
-    this.image.replay(this);
+  async start(mode: 'run' | 'metadata' = 'run') {
+    const agent = this.auth.agent;
+    const guardedStorage = agent && fileStorage(path.join(this.cfg.stateDir, 'storage.json'), this.log, agent);
+    if (agent && mode === 'run') this.releasePromptWriter = await openPromptWriter(agent, this.log);
+    try {
+      if (agent) this.initState(this.cfg);
+      const { createHost, loadEdwin } = require(path.join(EDWIN, 'src/host-node.cts'));
+      const storageFile = path.join(this.cfg.stateDir, 'storage.json');
+      /* Safe mode (image.mts): after starts that did not settle, the shipped Scheme only, without init.scm. */
+      const safe = this.image.bootGuard();
+      const host = createHost({ scmDir: path.join(EDWIN, 'scm'), configDir: this.cfg.configDir, storage: guardedStorage ?? fileStorage(storageFile, this.log) });
+      if (agent) {
+        // Scheme load/include/require can name a local file without going through a buffer.
+        host.readFile = (file: string) => {
+          try { return agent.withRead(file, fd => fs.readFileSync(fd, 'utf8')); }
+          catch (e) { if (e instanceof ProtectedFileError) throw e; return null; }
+        };
+        // Boot must not interpret a protected file reached through init.scm.
+        host.userConfig = (name: string) => {
+          try { return agent.withRead(path.join(this.cfg.configDir, name), fd => fs.readFileSync(fd, 'utf8')); }
+          catch { return null; }
+        };
+      }
+      if (safe) { host.userConfig = () => null; this.log.warn('start', { event: 'safe_mode', reason: safe.reason }); }
+      this.Ed = loadEdwin(host, { mode: 'gen' });
+      this.L = (globalThis as any).L; // any: the core sets globalThis.L
+      this.Ed.boot({ host });
+      await this.Ed.whenIdle();
+      this.buffers = new Buffers({ Ed: this.Ed, auth: this.auth, stateDir: this.cfg.stateDir, log: this.log });
+      if (agent && !agent.promptStore) this.buffers.reload(e => isPromptDraft(agent.promptDir, e));
+      else this.buffers.reload();
+      for (const m of MODULES) { await m.install(this); this.modules.push(m); }
+      if (agent) { await agentSessionsModule.install(this, mode === 'metadata'); this.modules.push(agentSessionsModule); }
+      /* The image is replayed last, in the runtime its definitions were made in: a logged define may call a
+         module's primitive (notes, models, processes, sessions) at definition time (R4.19). */
+      this.image.replay(this);
+    } catch (e) {
+      if (this.releasePromptWriter) await this.releasePromptWriter();
+      throw e;
+    }
   }
   /* A server command: FN(client, args, ctx, buf) returns the result object ({value, msg?, out?} or {error}),
      a promise of one, or undefined for a delayed result. */
@@ -273,8 +312,9 @@ export class Server {
     if ((dst.mode & 0o777) !== 0o700) throw new Error(`${dir} has mode ${(dst.mode & 0o777).toString(8)}, not 700`);
     try { const st = fs.lstatSync(sock); if (st.isSymbolicLink() || !st.isSocket()) throw new Error(`${sock} exists and is not a socket`); fs.unlinkSync(sock); }
     catch (e) { if (e.code !== 'ENOENT') { if (e instanceof Error && !(e as NodeJS.ErrnoException).code) throw e; throw new Error(`${sock}: ${e.code}`); } }
+    const encode = this.cfg.agentHub && agentEncoder(this.cfg.agentHub);
     const server = net.createServer({ allowHalfOpen: false }, socket => {
-      const c = new Client(this, socket);
+      const c = new Client(this, socket, encode);
       this.clients.add(c);
     });
     return new Promise<net.Server>((resolve, reject) => {
@@ -298,14 +338,18 @@ export class Server {
   async stop() {
     if (this.stopping) return;
     this.stopping = true;
-    this.log.info('stop', {});
-    const closed = this.net ? new Promise<void>(r => this.net!.close(() => r())) : null;
-    for (const c of [...this.clients]) { c.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); c.destroy(); }
-    if (closed) await closed;
-    for (const m of [...this.modules].reverse()) if (m.shutdown) { try { await m.shutdown(this); } catch (e) { this.log.error('shutdown', { module: m.name || '?', error: e.message }); } }
-    await this.buffers.shutdown();
-    try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
-    try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+    try {
+      this.log.info('stop', {});
+      const closed = this.net ? new Promise<void>(r => this.net!.close(() => r())) : null;
+      for (const c of [...this.clients]) { c.send({ t: 'error', code: 'shutting_down', msg: 'edwind is stopping' }); c.destroy(); }
+      if (closed) await closed;
+      for (const m of [...this.modules].reverse()) if (m.shutdown) { try { await m.shutdown(this); } catch (e) { this.log.error('shutdown', { module: m.name || '?', error: e.message }); } }
+      await this.buffers.shutdown();
+      try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
+      if (!this.auth.agent || this.net) try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+    } finally {
+      if (this.releasePromptWriter) await this.releasePromptWriter();
+    }
   }
 
   /* Stop cleanly and exit with RESTART_EXIT, after the caller's result has gone out: the service manager
@@ -432,13 +476,37 @@ export class Server {
 }
 
 /* Edwin's key-value store, kept as one JSON file in stateDir (settings and recentf; buffers are not in it). */
-function fileStorage(file: string, log: Log) {
+function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
   let map = new Map<string, string>();
-  try { map = new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))); } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
+  if (agent) {
+    // Refuse the startup collision before constructing a store whose flush would overwrite it.
+    try { agent.checkNamed(file); }
+    catch (e) {
+      if (e instanceof ProtectedFileError) throw new Error('storage.json conflicts with a protected file');
+      throw e;
+    }
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      try { map = new Map(Object.entries(JSON.parse(text))); }
+      catch { log.warn('storage', { error: 'Invalid storage JSON' }); }
+    } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
+  } else try { map = new Map(Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')))); } catch (e) { if (e.code !== 'ENOENT') log.warn('storage', { error: e.message }); }
   let timer: NodeJS.Timeout | null = null;
   const flush = () => { timer = null; try { fs.writeFileSync(file, JSON.stringify(Object.fromEntries(map)), { mode: 0o600 }); } catch (e) { log.warn('storage', { error: e.message }); } };
   const schedule = () => { if (!timer) timer = setTimeout(flush, 500); };
-  return { get: (k: string) => (map.has(k) ? map.get(k) : null), set: (k: string, v: unknown) => { map.set(k, String(v)); schedule(); return true; }, remove: (k: string) => { map.delete(k); schedule(); }, keys: () => [...map.keys()], flush };
+  const storage = { get: (k: string) => (map.has(k) ? map.get(k)! : null), set: (k: string, v: unknown) => { map.set(k, String(v)); schedule(); return true; }, remove: (k: string) => { map.delete(k); schedule(); }, keys: () => [...map.keys()], flush };
+  if (!agent) return storage;
+  // insert-file-contents and write-region use the host's virtual file namespace.
+  const checkKey = (k: string) => {
+    const prefix = 'lmacs:file:';
+    if (k.startsWith(prefix)) agent.checkNamed(path.resolve(agent.notesDir, expandHome(k.slice(prefix.length))));
+  };
+  return {
+    ...storage,
+    get: (k: string) => { checkKey(k); return storage.get(k); },
+    set: (k: string, v: unknown) => { checkKey(k); return storage.set(k, v); },
+    remove: (k: string) => { checkKey(k); storage.remove(k); },
+  };
 }
 
 /* ---------- --check and --export (R15.12) ---------- */
@@ -469,7 +537,7 @@ export function check(cfg: Config, out = (s: string): unknown => process.stdout.
 }
 export async function exportAll(cfg: Config, dir: string, log: Log): Promise<number> {
   const server = new Server(cfg, log);
-  await server.start();
+  await server.start('metadata');
   fs.mkdirSync(dir, { recursive: true });
   let n = 0;
   for (const sb of server.buffers.all()) {
@@ -519,7 +587,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   if (mode === 'primitives') {
     /* The registry (R4.48) needs the image with every module installed; nothing listens. */
     const server = new Server(cfg, makeLog('error'));
-    await server.start();
+    await server.start('metadata');
     process.stdout.write(JSON.stringify(server.debugger.registry(), null, 1) + '\n');
     await server.stop();
     return 0;
@@ -527,7 +595,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   if (isMainThread && !process.env.EDWIND_NO_THREAD) return runInThread(argv, log);
   const server = new Server(cfg, log);
   try { await server.start(); await server.listen(); }
-  catch (e) { process.stderr.write(`edwind: ${e.message}\n`); log.error('start', { error: e.message }); return 1; }
+  catch (e) { process.stderr.write(`edwind: ${e.message}\n`); log.error('start', { error: e.message }); return e instanceof PromptStoreBusy ? e.exitCode : 1; }
   let stopping: Promise<void> | null = null;
   const stop = (sig: string) => { if (stopping) return; log.info('signal', { sig }); stopping = server.stop().then(() => process.exit(0), e => { log.error('stop', { error: e.message }); process.exit(1); }); };
   if (isMainThread) { process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT')); }

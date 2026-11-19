@@ -18,6 +18,12 @@ pub const JS: &[(&str, &str)] = &[
     ("markdown", include_str!("../../src/markdown.js")),
     ("dired", include_str!("../../src/dired.js")),
     ("brain", include_str!("../../src/brain.js")),
+    ("agent-sessions", include_str!("../../src/agent-sessions.js")),
+    (
+        "agent-transcript",
+        include_str!("../../src/agent-transcript.js"),
+    ),
+    ("agent-prompts", include_str!("../../src/agent-prompts.js")),
     ("ot", include_str!("../../src/ot.js")),
     ("sync", include_str!("../../src/sync.js")),
     ("display", include_str!("../../src/display.js")),

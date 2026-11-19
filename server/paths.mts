@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import type { AgentAuthority } from './agent-files.mts';
 
 /* The codes a PathError carries; each is an error code of the protocol (§7.8). */
 export type PathErrorCode = 'no_buffer' | 'refused_path' | 'bad_id';
@@ -55,6 +56,7 @@ export class Authority {
   declare refuse: string[];
   declare realWriteRoots: string[];
   declare realRefuse: string[];
+  declare readonly agent?: AgentAuthority;
   constructor({ notesDir, stateDir, configDir, writablePaths = [], refusePaths = [] }: AuthorityConfig) {
     const norm = (p: string) => path.resolve(expandHome(p));
     this.notesDir = norm(notesDir); this.stateDir = norm(stateDir); this.configDir = norm(configDir);

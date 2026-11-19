@@ -2302,6 +2302,7 @@ function scrollStart(w: EdWindow, b: EdBuffer, ptLine: number, rows: number, sel
   w.start = bol(b.rope, w.start);
   let startLine = vLineNo(b, w.start);
   const rc = selected ? E.recenter : null;
+  if (hooks.keepWindowStart?.(w, selected)) return startLine;
   if (rc === 'top') startLine = ptLine;
   else if (rc === 'bottom') startLine = Math.max(1, ptLine - rows + 1);
   else if (rc) startLine = Math.max(1, ptLine - Math.floor(rows / 2));

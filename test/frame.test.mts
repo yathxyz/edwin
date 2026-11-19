@@ -3,6 +3,7 @@
 // per send, newline framed on the wire). A second writer is an EditClient with an ot-sim style replica.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -10,6 +11,7 @@ import { makeDir, startEdwind, stopEdwind, EditClient, EDWIN, transport } from '
 import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
 import { rng, randOp } from './ot-sim.mts';
 import type { EditOp, OTModule } from './ot-sim.mts';
+import { makeDocument, assertOrdinaryFrameInput, type FakeEvent } from './frame-input.mts';
 
 type EdwinCore = any; // any: Edwin's core (src) is outside this program's types
 type Batch = { seq: number; base: number; ops: EditOp[] };
@@ -70,145 +72,6 @@ class Writer {
   settled() { return until(() => !this.inflight && !this.queue.length, 'writer settled'); }
 }
 
-/* ---------- a small DOM for the frame tests ----------
-   Enough of Element and Document for Ed.makeFrame and a render with no browser (R9.2): a node tree, class,
-   id and data attributes, inline style, listeners, innerHTML parsed for the simple markup the core writes,
-   the selectors the core and the overlay hooks use (.c, #i, tag.c, .c[data-x="v"], lists), and a fixed
-   geometry: a monospace grid of 8 x 21 px in a 600 x 400 view, each .ln at its index. */
-interface FakeEvent { type: string; target: FakeElement; defaultPrevented: boolean; preventDefault(): void; [k: string]: unknown }
-type Handler = (e: FakeEvent) => void;
-type FakeChild = FakeElement | FakeText;
-interface Query { tag: string | null; classes: string[]; id: string | null; attrs: { name: string; value: string | null }[] }
-interface Rect { left: number; top: number; width: number; height: number; right: number; bottom: number }
-interface FakeDocument {
-  nodeType: 9; listeners: [string, Handler][]; hit: FakeElement | null;
-  createElement(tag: string): FakeElement; createTextNode(s: string): FakeText;
-  documentElement: FakeElement; body: FakeElement; activeElement: FakeElement;
-  getElementById(id: string): FakeElement | null;
-  addEventListener(t: string, fn: Handler): void; removeEventListener(): void;
-  elementFromPoint(): FakeElement | null;
-  caretPositionFromPoint(): { offsetNode: FakeElement; offset: number } | null;
-  defaultView: {
-    document: FakeDocument;
-    getComputedStyle(): { lineHeight: string; paddingTop: string; paddingLeft: string; paddingRight: string };
-    addEventListener(t: string, fn: Handler): void; removeEventListener(): void; getSelection(): null;
-  };
-}
-class FakeNode {
-  declare ownerDocument: FakeDocument; declare nodeType: number; declare nodeName: string; declare parentNode: FakeElement | null; declare childNodes: FakeChild[];
-  constructor(doc: FakeDocument, type: number, name: string) { this.ownerDocument = doc; this.nodeType = type; this.nodeName = name; this.parentNode = null; this.childNodes = []; } get parentElement() { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : null; } }
-class FakeText extends FakeNode { declare nodeType: 3; declare nodeValue: string; constructor(doc: FakeDocument, s: string) { super(doc, 3, '#text'); this.nodeValue = s; } get textContent() { return this.nodeValue; } }
-const kebab = (k: string) => k.replace(/[A-Z]/g, c => '-' + c.toLowerCase());
-const ENT: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
-const decode = (s: string) => s.replace(/&(#x[0-9a-fA-F]+|#\d+|[a-zA-Z]+);/g, (m, e) => (e[0] === '#' ? String.fromCodePoint(e[1] === 'x' ? parseInt(e.slice(2), 16) : Number(e.slice(1))) : ENT[e] !== undefined ? ENT[e] : m));
-function parseSelector(sel: unknown): Query[] {
-  return String(sel).split(',').map(part => {
-    const m = /^\s*([a-zA-Z0-9-]+)?((?:[.#][-\w]+|\[[-\w]+(?:="[^"]*")?\])*)\s*$/.exec(part);
-    if (!m) throw new Error('fake DOM: unsupported selector ' + sel);
-    const q: Query = { tag: m[1] ? m[1].toLowerCase() : null, classes: [], id: null, attrs: [] };
-    for (const t of m[2].match(/[.#][-\w]+|\[[^\]]*\]/g) || []) {
-      if (t[0] === '.') q.classes.push(t.slice(1));
-      else if (t[0] === '#') q.id = t.slice(1);
-      else { const a = /^\[([-\w]+)(?:="([^"]*)")?\]$/.exec(t)!; q.attrs.push({ name: a[1], value: a[2] === undefined ? null : a[2] }); }
-    }
-    return q;
-  });
-}
-function matches(el: FakeElement, q: Query) {
-  if (q.tag && el.localName !== q.tag) return false;
-  if (q.id !== null && el.id !== q.id) return false;
-  for (const c of q.classes) if (!el.classList.contains(c)) return false;
-  for (const a of q.attrs) { if (!el.attrs.has(a.name)) return false; if (a.value !== null && el.attrs.get(a.name) !== a.value) return false; }
-  return true;
-}
-function walk(n: FakeChild, fn: (n: FakeChild) => void) { fn(n); for (const c of n.childNodes) walk(c, fn); }
-class FakeElement extends FakeNode {
-  declare nodeType: 1; declare tagName: string; declare localName: string; declare attrs: Map<string, string>; declare listeners: [string, Handler, unknown][]; declare value: string; declare _html: string;
-  declare style: { cssText: string; setProperty(k: string, v: unknown): void; getPropertyValue(k: string): string };
-  declare classList: { contains(c: string): boolean; add(...cs: string[]): void; remove(...cs: string[]): void; toggle(c: string, force?: unknown): boolean };
-  declare dataset: Record<string, string | undefined>;
-  constructor(doc: FakeDocument, tag: string) {
-    super(doc, 1, tag.toUpperCase());
-    this.tagName = tag.toUpperCase(); this.localName = tag.toLowerCase(); this.attrs = new Map(); this.listeners = []; this.value = ''; this._html = '';
-    const props = new Map();
-    this.style = { cssText: '', setProperty: (k, v) => { props.set(k, String(v)); }, getPropertyValue: k => props.get(k) || '' };
-    const el = this, classes = () => (el.attrs.get('class') || '').split(/\s+/).filter(Boolean), setClasses = (cs: string[]) => { el.attrs.set('class', cs.join(' ')); };
-    this.classList = {
-      contains: c => classes().includes(c),
-      add: (...cs) => { const l = classes(); for (const c of cs) if (!l.includes(c)) l.push(c); setClasses(l); },
-      remove: (...cs) => setClasses(classes().filter(c => !cs.includes(c))),
-      toggle: (c, force) => { const on = force === undefined ? !classes().includes(c) : !!force; if (on) el.classList.add(c); else el.classList.remove(c); return on; },
-    };
-    this.dataset = new Proxy({} as Record<string, string | undefined>, {
-      get: (t, k) => (typeof k === 'string' ? el.attrs.get('data-' + kebab(k)) : undefined),
-      set: (t, k, v) => { el.attrs.set('data-' + kebab(k as string), String(v)); return true; },
-      deleteProperty: (t, k) => { el.attrs.delete('data-' + kebab(k as string)); return true; },
-      has: (t, k) => el.attrs.has('data-' + kebab(k as string)),
-    });
-  }
-  get id() { return this.attrs.get('id') || ''; } set id(v) { this.attrs.set('id', String(v)); }
-  get className() { return this.attrs.get('class') || ''; } set className(v) { this.attrs.set('class', String(v)); }
-  get hidden() { return this.attrs.has('hidden'); } set hidden(v) { if (v) this.attrs.set('hidden', ''); else this.attrs.delete('hidden'); }
-  get title() { return this.attrs.get('title') || ''; } set title(v) { this.attrs.set('title', String(v)); }
-  getAttribute(n: string) { return this.attrs.has(n) ? this.attrs.get(n) : null; } setAttribute(n: string, v: unknown) { this.attrs.set(n, String(v)); } removeAttribute(n: string) { this.attrs.delete(n); } hasAttribute(n: string) { return this.attrs.has(n); }
-  /* Live, as HTMLCollection is: the core reads length and indexes while it adds and removes. */
-  get children() { const el = this, now = () => el.childNodes.filter((c): c is FakeElement => c.nodeType === 1); return new Proxy([] as FakeElement[], { get(t, k) { const c = now(); const v = (c as unknown as Record<string | symbol, unknown>)[k]; return typeof v === 'function' ? v.bind(c) : v; }, has(t, k) { return k in now(); } }); }
-  get firstChild() { return this.childNodes[0] || null; } get lastChild() { return this.childNodes[this.childNodes.length - 1] || null; }
-  get isConnected() { let n: FakeElement = this; while (n.parentNode) n = n.parentNode; return n === this.ownerDocument.documentElement; }
-  appendChild(c: FakeChild) { if (c.parentNode) c.parentNode.removeChild(c); c.parentNode = this; this.childNodes.push(c); return c; }
-  insertBefore(c: FakeChild, ref: FakeChild | null) { if (!ref) return this.appendChild(c); if (c.parentNode) c.parentNode.removeChild(c); const i = this.childNodes.indexOf(ref); if (i < 0) throw new Error('fake DOM: insertBefore of a non-child'); c.parentNode = this; this.childNodes.splice(i, 0, c); return c; }
-  removeChild(c: FakeChild) { const i = this.childNodes.indexOf(c); if (i < 0) throw new Error('fake DOM: removeChild of a non-child'); this.childNodes.splice(i, 1); c.parentNode = null; return c; }
-  contains(n: FakeChild | null) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
-  get textContent(): string { return this.childNodes.map(c => c.textContent).join(''); }
-  set textContent(s: string | null | undefined) { for (const c of this.childNodes) c.parentNode = null; this.childNodes = []; this._html = ''; if (s !== '' && s !== null && s !== undefined) this.appendChild(new FakeText(this.ownerDocument, String(s))); }
-  get innerHTML() { return this._html; }
-  set innerHTML(s) {
-    this.textContent = ''; this._html = String(s);
-    const re = /<\/([a-zA-Z0-9-]+)\s*>|<([a-zA-Z0-9-]+)((?:\s+[a-zA-Z_:][-\w:.]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+))?)*)\s*(\/?)>|([^<]+)|(<)/g;
-    const voids = new Set(['br', 'hr', 'img', 'input', 'wbr']);
-    let cur: FakeElement = this, m: RegExpExecArray | null;
-    while ((m = re.exec(this._html))) {
-      if (m[1]) { if (cur !== this) cur = cur.parentNode!; }
-      else if (m[2]) {
-        const el = this.ownerDocument.createElement(m[2]);
-        for (const a of m[3].matchAll(/([a-zA-Z_:][-\w:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) el.attrs.set(a[1], decode(a[2] ?? a[3] ?? a[4] ?? ''));
-        cur.appendChild(el);
-        if (!m[4] && !voids.has(el.localName)) cur = el;
-      } else cur.appendChild(new FakeText(this.ownerDocument, m[5] !== undefined ? decode(m[5]) : '<'));
-    }
-  }
-  querySelectorAll(sel: string) { const qs = parseSelector(sel), out: FakeElement[] = []; walk(this, n => { if (n !== this && n.nodeType === 1 && qs.some(q => matches(n, q))) out.push(n); }); return out; }
-  querySelector(sel: string) { return this.querySelectorAll(sel)[0] || null; }
-  closest(sel: string) { const qs = parseSelector(sel); for (let n: FakeElement | null = this; n && n.nodeType === 1; n = n.parentNode) if (qs.some(q => matches(n, q))) return n; return null; }
-  addEventListener(t: string, fn: Handler, o?: unknown) { this.listeners.push([t, fn, o]); } removeEventListener(t: string, fn: Handler) { this.listeners = this.listeners.filter(l => !(l[0] === t && l[1] === fn)); }
-  /* Dispatch TYPE from this element up through its ancestors; returns the event. */
-  dispatch(type: string, init?: Record<string, unknown>): FakeEvent { const e: FakeEvent = { type, target: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...init }; for (let n: FakeElement | null = this; n; n = n.parentNode) for (const [t, fn] of n.listeners || []) if (t === type) fn(e); return e; }
-  focus() { this.ownerDocument.activeElement = this; } blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = this.ownerDocument.body; }
-  getBoundingClientRect() {
-    const rect = (left: number, top: number, width: number, height: number): Rect => ({ left, top, width, height, right: left + width, bottom: top + height });
-    const p = this.parentNode;
-    if (this.localName === 'span' && p && p.nodeType === 1 && p.classList.contains('text')) return rect(0, 0, this.textContent.length * 8, 21);   // the metrics probe
-    if (this.classList.contains('ln')) return rect(0, p!.children.indexOf(this) * 21, 600, 21);
-    return rect(0, 0, 600, 400);
-  }
-  get clientWidth() { return 600; } get clientHeight() { return 400; } get offsetWidth() { return 600; } get offsetHeight() { return this.classList.contains('ln') ? 21 : 400; } get clientTop() { return 0; }
-}
-function makeDocument() {
-  const doc = { nodeType: 9, listeners: [], hit: null } as unknown as FakeDocument;
-  doc.createElement = tag => new FakeElement(doc, tag);
-  doc.createTextNode = s => new FakeText(doc, s);
-  doc.documentElement = doc.createElement('html'); doc.body = doc.createElement('body'); doc.documentElement.appendChild(doc.body);
-  doc.activeElement = doc.body;
-  doc.getElementById = id => { let r: FakeElement | null = null; walk(doc.documentElement, n => { if (!r && n.nodeType === 1 && n.id === id) r = n; }); return r; };
-  doc.addEventListener = (t, fn) => { doc.listeners.push([t, fn]); }; doc.removeEventListener = () => {};
-  /* The element and caret under a point: whatever the test put in doc.hit (the view), so posFromPoint
-     falls back to the line rectangles. */
-  doc.elementFromPoint = () => doc.hit;
-  doc.caretPositionFromPoint = () => (doc.hit ? { offsetNode: doc.hit, offset: 0 } : null);
-  doc.defaultView = { document: doc, getComputedStyle: () => ({ lineHeight: '21px', paddingTop: '0px', paddingLeft: '0px', paddingRight: '0px' }), addEventListener: (t, fn) => { doc.listeners.push([t, fn]); }, removeEventListener: () => {}, getSelection: () => null };
-  return doc;
-}
-
 before(async () => {
   dir = makeDir();
   child = await startEdwind(dir);
@@ -218,6 +81,16 @@ before(async () => {
   await Ed.whenIdle();
 });
 after(async () => { if (sync) sync.shutdown(); if (child) await stopEdwind(child); });
+
+test('feature activation: no agentHub preserves the upstream served command table and key maps', () => {
+  const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const maps = [...L.variableNames().map((n: string) => [n, L.get(n)]), ...E.aux]
+    .filter(([, m]) => m instanceof Ed.Keymap)
+    .map(([n, m]) => [n, [...m.map].map(([key, value]) => [key, value?.name ?? String(value)]).sort()]).sort();
+  // Measured on origin/main, same served boot and empty user image.
+  assert.equal(digest(L.commandNames().sort()), 'd276aa53eb8d4436d8e3ed919a41135625decfe99ca9ce9bac98f80754e5c48d');
+  assert.equal(digest(maps), 'eab4d83ebb1b103cd984fd001b5aa5d74e5fe94dcfbd811d1e2fdd174deeb4dc');
+});
 
 test('R4.11 served boot: no frame, the shipped Scheme loaded, nothing read from browser stores, candidates set', async () => {
   assert.equal(E.frames.length, 0); assert.equal(E.frame, null);
@@ -706,6 +579,11 @@ test('E3 H3 gap 3: hooks.renderOverlay runs for every frame drawn, with that fra
     await settled(bb);
   } finally { Ed.hooks.renderOverlay = prev; f1.destroy(); f2.destroy(); sync.close(ba); sync.close(bb); }
   assert.equal(E.frames.length, 0); assert.equal(E.frame, null);
+});
+
+test('ordinary modeline tap selects its window and a physical mouse press after touch reaches the DOM handler', async () => {
+  const b = await sync.open(note('touch.md', 'first line\nsecond line\nthird line\n'));
+  try { assertOrdinaryFrameInput(Ed, b); } finally { sync.close(b); }
 });
 
 test('E3 H3 gap 5: hooks.mouseDown gets the event as third argument; readFile falls back to the shipped files by basename', async () => {

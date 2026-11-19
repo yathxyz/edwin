@@ -1038,3 +1038,502 @@ Not in DT0 (each is a later step or a known gap): the menubar of a console frame
 references drawn as their resolved text (a DOM pass in `markdown.ts`), screen-line motion (`gj`/`gk` in
 visual-line-mode falls back to buffer lines in a model frame), and per-character pixel metrics for proportional
 fonts (DT2 decides).
+
+## Step AS1: agent sessions in Edwin (done)
+
+Issue #7: Edwin is the complete text interface to the hub's agents and to the sessions harnesses report.
+Workbench keeps no second transcript or composer. The HTTP API of Workbench DESIGN §3.8 is the authority;
+Edwin never starts or speaks ACP to an agent itself.
+
+**State of the work.** All four original stages, the phone addition and review hardening (AS1.15–20)
+are complete. All twelve findings have fixes and regression coverage: incarnation-bound actions/drafts;
+bounded incremental replay; serialized/coalesced publication; GET retry/reset/pending reconciliation;
+and view/stream teardown. Acknowledged and possibly-sent draft destinations stay excluded across daemon restarts.
+Feature gate at `73cef87`: agent 67/67, all three TypeScript projects, native 31 passed with one existing ignored test.
+A standalone served frame exercised folds, an external prompt, global permission, off-tail/undo preservation,
+cross-publication token redaction and replacement rejection. Measurements and API limitations are below.
+No real credential, external network or existing service was used. Earlier baseline records remain;
+this review does not claim another full Node run or physical native GUI exercise.
+`tools/agent-live.mts` now provides standalone GET-only live-hub inspection, checked against the stub;
+it is statically typechecked but never run by a suite.
+The owner’s real-hub inspection opened 28,683 events in 493 ms and exposed presentation defects.
+The AS1.21–25 rendering follow-up is complete: messages stay open, bookkeeping lives in control state,
+current plans/tools keep their visible start order, and the list is bounded/aligned with an exited toggle.
+AS-C19/C20 fixtures and a served-frame/CLI smoke cover the real shapes; the directed list suite passes
+24/24 and all three TypeScript projects pass. Evidence and API limitations are recorded below.
+
+### Requirements
+
+| Requirement | Contract |
+|---|---|
+| AS1.1 | edwind owns the HTTP connection and all shared session text. `agentHub: {url, tokenFile}` in edit.json configures it. Require HTTPS except on loopback, or when the operator explicitly sets `allowCleartext: true` **only for an encrypted private network**. Never follow redirects. Reject URL credentials, invalid session IDs, non-integer/unsafe/negative cursors and any destination outside the configured origin and `/v1/` prefix before sending credentials. |
+| AS1.2 | Read the bearer token only from its configured file, protect that file through the path authority, and never expose it in buffers, diagnostics, errors, logs or argv. Redact remote responses as well as transport errors. Mutations are not retried: a lost reply may already have acted. |
+| AS1.3 | `*Agent Sessions*` lists hub and observed sessions, including state, harness, model, host, project/directory, activity and waiting status. Waiting rows sort first. SSE snapshots replace stale registries; reconnect takes a fresh snapshot, and an outage is visible. Open, start (agent/host/directory), cancel and remove are commands. Only explicit start or revive may run anything. |
+| AS1.4 | `*Agent: SID*` is a read-only Markdown-style transcript, shared as `name:*Agent: SID*`. Observed-only records use `*Agent Observed: ID*` and explicitly cannot be steered. All record fields and available tail are inspectable. Closing a frame/buffer never cancels or removes a session. |
+| AS1.5 | Journal replay uses epoch plus seq, skips duplicates, handles reset and pinned pending requests, and follows changed headSeq through `events?since=N`. Structure is editor metadata, not Markdown parsing. Prompts and user/assistant messages start open regardless of length; thoughts, tools, their output and diffs start folded to one line. Only current plans are presented, open. Prompt navigation is unaffected by headings or fences inside a prompt. |
+| AS1.6 | Streaming uses sequenced edits without undo groups; point and window positions away from the changed end stay put. Scrollback retains at most 32,768 events. On overflow it drops the oldest batch, marks the last dropped sequence visibly and in metadata, and rebuilds spans from the retained tail. Eviction checkpoints the latest steering values and keeps unanswered request details separate from scrollback; old pins can arrive again at the same epoch and head. Each transcript allows at most 32,768 pins outside scrollback and 32,768 entries in an authoritative pending snapshot. Exceeding either limit clears the local transcript and reports an error rather than offering a partial or stale pending list. Reopening reconstructs from the hub journal subject to the same bounds. |
+| AS1.7 | Transcript commands unfold, visit a tool's file and line, show its diffs, recall an immutable earlier prompt into a new draft, prompt quickly, cancel, revive, set mode and set a config option (`POST /config {id,value}`). Report 404/405/501 from config as unsupported by this hub. |
+| AS1.8 | Pending permissions and elicitations are announced to frames and reachable globally. The picker and details retain sid/createdAt/req; the answer also retains the displayed request's `requestKey`. Permission details show session, incarnation, request, tool and input before offered outcomes. Form elicitation supports string, number, boolean and string-array values; URLs are shown in full and never auto-opened. Edwin refuses stale/replaced/resolved replies at its pre-send check. |
+| AS1.9 | Compose in an ordinary shared Markdown buffer with a prompt minor mode: `C-c C-c` sends when steering is enabled, `C-c C-k` abandons the view, retaining the draft. Drafts survive buffer kills and daemon restart; their destinations persist as `{sid,epoch:createdAt}`. Persist a new draft's editor-journal index before exposing it, so acknowledged edits remain discoverable after a crash even if its Markdown write fails. Earlier prompts stay read-only. Only unsent and definitively refused destinations remain eligible in a multi-send. |
+| AS1.10 | Attach files as ACP resource links or embedded resources; attach regions and buffers as embedded resources, not pasted text. Preview is the exact JSON blocks and destinations that send uses. Persist attachments with the draft; named prompts can be saved, listed and reused, and one draft can target several sessions. |
+| AS1.11 | Any attached terminal/browser/card may open `name:*Agent: SID*` after `agent-session-open SID`; that command returns its canonical buffer id. Browser `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)` show it; terminal `edwinclient -e '(agent-session-open "SID")'` materialises it and a frame visits its returned name (or runs `M-x agent-session-open`). No second page-side API token. |
+| AS1.12 | A host page needs no Ctrl/Meta keys or Edwin minibuffer. Every transcript presentation action and every session mutation is a named command with explicit buffer/session arguments, through `Ed.agentSessions.rpc`. Presentation stays local; journal reads and mutations stay daemon-owned. Host text-field prompts use the direct text endpoint without creating a draft buffer. |
+| AS1.13 | A host can read a session buffer's pending requests, offered outcomes/forms/URLs, incarnation, state, mode and config options, and subscribe to changes. Reply with the req, epoch and requestKey captured when the control was drawn. If Edwin sees a stale incarnation, changed question or no-longer-pending request before sending, it refuses the answer; refresh and review. This check is not atomic with hub acceptance. |
+| AS1.14 | Browser taps use the existing frame input route: a tap places point, tapping the rendered fold marker or double-tapping a foldable transcript line toggles its structural fold. Touch scrolling never places/clamps point or becomes a tap, and retains tail-follow eligibility. No agent-only gesture listeners or second renderer. |
+| AS1.15 | Every action based on displayed hub-session data carries sid and the shown `createdAt` (called `epoch` on Edwin's wire). Detail/answer, tool location/seq, recall, quick text, mode/config/cancel/remove/revive and durable targets reject a mismatch with “session was replaced”. A legacy SID-only draft is unbound and requires explicit retargeting; it never silently binds after restart. |
+| AS1.16 | A response body is at most **32 MiB** and an SSE event, including an unfinished line, at most **1 MiB**, counted as UTF-8 bytes. Abort and visibly report overflow. One rendered journal event contributes at most **1,048,576 UTF-16 code units**, shared by heading, summary, text, JSON and diff; clipping is visibly marked and an incomplete diff is not offered as complete. Preserve surrogate pairs. No disk-backed history store. At most four journal GETs run concurrently, with at most 64 more waiting; excess readers get a queue-limit error. |
+| AS1.17 | Redact assembled text before offsets are materialized, preserving UTF-16 length. Cache immutable event/block presentation; active message updates publish only the new suffix (plus any changed redaction overlap), not their growing old body. Per-buffer text-plus-metadata publications are serialized and list redraws coalesce. |
+| AS1.18 | Before each draft POST, atomically move its `{sid,epoch}` from the sendable list to “possibly sent”; do not POST if this write fails. Replace that marker with an acknowledgement on success. Neither state can be retargeted for this draft, even after restart. A definite client-error refusal (e.g. busy) restores the destination for manual retry. |
+| AS1.19 | Retain a failed open transcript's desired journal head and retry GETs at 250 ms exponential backoff, capped at 5 s. A head decrease also reconciles journal and model facts. Only a same-incarnation, same-head authoritative pending snapshot can retire a request missing a resolution: show “no longer pending; resolution unavailable”, with no invented outcome or actionable stale request. A late matching summary must reconcile too. |
+| AS1.20 | Killing a list/transcript/reported buffer disables view-specific following, releases its replay/presentation state and prevents in-flight publications from recreating it. A view generation invalidates queued work; departed-session facts and announcement identities are pruned. Closing a view never steers its agent. Destroy rejected SSE responses/requests immediately; track and destroy every stream attempt at shutdown. |
+| AS1.21 | Bookkeeping is state, not conversation: initialization/session, usage, session-info, mode/config and available-command updates produce no transcript block. Latest main-session usage/session info are exposed beside mode/config through the buffer and host state. Invisible bookkeeping does not split matching message chunks. A turn ends with one quiet line naming its stop reason; turn errors name their code and message. Unknown event/update kinds get one folded line naming the kind, with their JSON inside. |
+| AS1.22 | Generated headings are human Markdown: tool title first, a short status marker and optional location, no journal sequence numbers. Sequence/request/tool identities remain structural metadata. A tool update whose start was not replayed uses its kind or “tool” and says its start was not replayed, never its opaque call ID as a title. |
+| AS1.23 | Tool commands occupy their own fenced line with output below; distinct tool content blocks cannot join a command to its output. Current tool status and all supplied outputs/diffs remain inspectable. Tools keep their original start position across updates; the current plan occupies its latest update’s position, not a superseded plan’s position. |
+| AS1.24 | A hub-truncated replay starts with one plain line saying earlier history is unavailable from the hub and that the transcript starts at event N. Detailed gap/from/head data stays in metadata. No backward-pagination workaround is invented. |
+| AS1.25 | The sessions list collapses whitespace to one line per cell, caps long cells with an ellipsis, and pads each column to its widest capped value/header. Empty WAIT/model cells retain their columns; absent or literal `unknown` models are blank. Waiting sessions sort first, then other live sessions, then exited sessions; show five exited sessions before a named, keyboard/host-callable expansion toggle. Full identities and values remain metadata, and non-session lines cannot target a session action. |
+
+### Data flow and buffer model
+
+`edit.json / init.scm -> edwind agent client -> authenticated HTTP /v1`.
+`/stream -> one current registry -> coalesced shared sessions list`; a changed headSeq (up or down),
+incarnation or pending identity schedules a single-flight journal read for that open transcript.
+Failed GET catch-up remains dirty and retries; mutations never do. Reconnection replaces registry snapshots
+and catches up open transcripts. The stream contains summaries, not journal events.
+`journal -> typed event fold -> text + spans -> sequencer -> edit.sock -> every frame`.
+
+The hub's journal remains the only session record. Derived transcripts are special buffers, not files and
+not another authoritative journal. Spans carry seq, kind, start/end, fold bounds, tool identity, locations,
+diff ranges and prompt identities; frames receive the structure beside the text with its buffer version.
+Original prompt blocks stay in the daemon's replay object and recall fetches them by seq, avoiding unbounded
+metadata copies. Fold choices are buffer-local within each frame runtime, as Edwin's existing folding is;
+separate attached clients choose independently. Markdown is fontification only, never the
+source of command targets. An event containing fences or headings cannot manufacture a prompt/tool span.
+Whole transcript buffers are read-only, so partial read-only spans are unnecessary. Existing sequenced edits,
+markers, metadata, folds and Markdown fontification are reused; missing seams are added, not a second renderer.
+The bounded in-memory journal retains the latest events. The text is their human presentation, not a JSON
+dump: bookkeeping is projected into controls; superseded plans remain journal events but do not render.
+Tool/message/request spans carry their identities even though headings omit sequence numbers.
+The current plan is anchored at its latest update, while a tool keeps its original start across updates.
+List metadata maps explicit physical line numbers to full session identities rather than parsing padded
+or clipped text; its exited-session group line is not an actionable session.
+Column caps in frame cells are SESSION 18, WAIT 4, STATE 10, HARNESS 12, MODEL 20,
+HOST 16, PROJECT 24 and ACTIVITY 48. Truncation and padding reuse Edwin's display character widths,
+including wide/combining Unicode; display clipping never changes the full structural identity.
+History-only reconnects now include current structural metadata. Large live changes publish bounded
+sequenced chunks, yielding between them rather than overflowing a frame's outbound queue. A pre-kill
+buffer hook can veto teardown when draft persistence fails, preserving the acknowledged journal.
+The client bounds ingress before concatenating/parsing a complete body or SSE event (AS1.16).
+Per-event text is capped visibly during rendering, not silently omitted; the hub journal remains untouched.
+The HTTP request deadline is 45 seconds; the stream has 40 seconds to send its initial `ready` before
+it is closed. Bytes and SSE heartbeats do not extend either deadline. Each registry (hub, observed,
+pending announcements) holds at most 1,024 records; an overflowing stream disconnects with a fixed reason.
+Reconnect starts at 250 ms and doubles with ±25% jitter, never exceeding 5 s; five seconds ready resets
+the delay. Disagreement between the registry epoch and journal epoch gets three immediate reads in
+list facts or transcript replay, followed by 250 ms exponential backoff capped at 5 s.
+Immutable rendered blocks/fragments are reused. Growing assistant/thought/user messages render only new
+fragments and recheck at most token-length-minus-one old characters for cross-chunk redaction, before
+computing the suffix patch. Whole-buffer publication is serialized, including explicit list opens; at most
+one superseding list redraw waits behind an active redraw. View generations reject post-kill work.
+
+Measured before this rendering follow-up (with the old long-message folding policy), in the final full run:
+8,192 events / 25,141,248 content bytes replayed and
+rendered in 18.36 ms in the pure journal fold (5 visible folded lines). A real daemon + frame opened
+1,201 events with 1,200 tool folds in 165.3 ms; after live updates including 3 MiB of raw tool output it held
+1,205 events / 9,998,712 rendered bytes without reconnect. Off-tail point stayed put and no undo group
+was added. These are observed runs, not latency guarantees.
+
+Drafts are ordinary editable daemon buffers backed by private state files, with an adjacent durable record of
+`{sid,epoch}` destinations and content blocks. Preview shows those exact pairs. Sending flushes pending
+edits, takes the preview snapshot and checks each incarnation again immediately before its POST.
+A lost reply or crash during delivery leaves that destination marked “possibly sent” in the recovered
+draft, separately from sendable destinations. Check the session journal before composing a new draft;
+neither another Send nor an explicit retarget can repeat that delivery from the original draft.
+Named prompts are private state records, not edits to old journal events. Resource paths pass the existing file
+authority; a remote-host file is not silently read from edwind's host. Resource links identify the agent-side
+file; embedding reads an explicitly chosen Edwin-side file/buffer/region.
+
+### Commands and keys
+
+`agentHub.steer` is a boolean, default `false`. In this mode lists and transcripts are read-only;
+clients can still compose, save, recall and preview drafts. No hub mutation command or binding is
+installed. With `agentHub.steer: true`, **every client admitted to the daemon can steer**, whether a
+frame, host page or terminal. An admitted client can already edit the user's files through the daemon.
+**Keep steering off until the hub atomically checks the request version and session incarnation at acceptance.**
+Edwin compares a permission or elicitation answer with the request the user saw before sending. The
+hub does not verify the displayed request on acceptance: a replaced question can receive the old answer.
+
+`M-x agent-sessions`, `agent-session-open`, `agent-session-start`, `agent-session-cancel`,
+`agent-session-remove`, `agent-session-revive`, `agent-session-mode`, `agent-session-config`,
+`agent-prompt-compose`, `agent-session-quick-prompt`, `agent-session-answer` (global),
+`agent-prompt-preview`, `agent-prompt-send`, `agent-prompt-abandon`, `agent-prompt-targets`,
+`agent-prompt-attach-file`, `agent-prompt-attach-buffer`, `agent-prompt-attach-region`,
+`agent-prompt-save`, `agent-prompt-load`, `agent-session-recall`.
+
+Sessions list, Motion state: `RET` open, `g r`/`r` refresh, `a` start, `c` cancel, `D` remove (confirm),
+`p` compose, `!` answer pending, `e` toggle extra exited sessions (`TAB` on its group line), `q` quit.
+Host pages call `await Ed.agentSessions.rpc('agent-sessions-toggle-exited')` and receive the canonical
+list buffer id; this changes presentation only, never a hub session. Transcript, Motion state: `TAB` fold, `] ]`/`[ [` next/previous
+prompt, `RET` visit tool location, `d` diff, `p` compose, `P` quick prompt, `R` recall, `c` cancel,
+`!` answer, `m` mode, `o` config option, `v` revive, `g r` refresh, `q` quit. Prompt minor mode takes
+precedence over Markdown: `C-c C-c` send, `C-c C-k` abandon, `C-c C-p` preview. Other prompt-engineering
+commands are available through M-x, with ordinary editing and completion throughout.
+Global `C-c a !` answers pending work and `C-c a p` composes from any buffer (with session completion).
+
+For an already attached page/card, materialise via the shared command, then address a particular frame:
+
+```js
+const id = await Ed.agentSessions.rpc('agent-session-open', ['SID']);
+const buffer = await Ed.sync.open(id); // name:*Agent: SID*
+frame.showBuffer(buffer);             // existing card/frame
+// Or create a new browser frame:
+const newFrame = Ed.makeFrame(rootElement, { buffer });
+```
+
+`Ed.agentSessions.open('SID')` is the selected-frame shortcut. In a terminal, start an ordinary
+`edwinclient -t --socket /path/to/edit.sock` frame and run `M-x agent-session-open RET SID RET`.
+`edwinclient --socket /path/to/edit.sock -e '(agent-session-open "SID")'` materialises and prints the
+canonical name without creating a frame; it does not pretend to be a file argument.
+
+### Host-page commands and touch
+
+Use `await Ed.agentSessions.rpc(command, args)`. Open the canonical transcript as above first for
+presentation commands. `id` is `buffer.id`; `sid` is the hub session id; **`epoch` is the session
+`createdAt` actually shown**, not a fresh lookup after a choice. Positions are zero-based UTF-16 buffer
+offsets. Explicit-buffer presentation commands do not select another frame/window or change an unrelated point.
+For a particular unselected card, pass `frame.point()` as the position and apply the returned point with
+`frame.setPoint(result.point)`; these existing frame methods do not take keyboard focus.
+
+| Command | Arguments | Result |
+|---|---|---|
+| `agent-session-toggle-fold` | `[id, position]` | `{bufferId, point, folds:[{s,e}]}` after toggling the containing structural block. |
+| `agent-session-open-folds` / `agent-session-close-folds` | `[id]` | The same presentation result after opening/closing every current structural fold. Closing a fold containing point puts point on its summary, not in hidden text. |
+| `agent-session-previous-prompt` / `agent-session-next-prompt` | `[id, position]` (position defaults to that buffer's point) | The same result with point at the previous/next structural prompt. No such prompt is a rejected `user-error`. |
+| `agent-session-recall` | `[sid, promptSeq, epoch]` | Canonical id of a new durable prompt draft. Get seq and epoch from the displayed `buffer.meta.locals.agentSession`; no Markdown parsing. |
+| `agent-session-state` | `[sid]` | The state snapshot described below, refreshed from the daemon/hub. |
+| `agent-session-request` | `[sid, req, epoch]` | Current pending request details, including an opaque `requestKey`, tool/input or elicitation form/URL, and offered choices. Reject a replaced incarnation before fetching/using another request. |
+| `agent-session-location` | `[{sid, epoch, seq, location}]` | Canonical file buffer id after validating the structural tool event/location and local host; rejects replacement before filesystem access. |
+| `agent-session-permission` | `[sid, {req, epoch, requestKey, outcome}]` | Hub JSON acknowledgement. `outcome` is `{outcome:'selected', optionId}` from the shown options, or `{outcome:'cancelled'}`. |
+| `agent-session-elicitation` | `[sid, {req, epoch, requestKey, response}]` | Hub JSON acknowledgement. `response` is `{action:'accept', content:{...}}`, `{action:'decline'}` or `{action:'cancel'}`; use the shown form schema. URL requests remain explicit and are never automatically opened. |
+| `agent-session-cancel` / `agent-session-remove` / `agent-session-revive` | `[sid, {epoch}]` | Hub JSON acknowledgement (remove ends the session; cancel only cancels its turn). |
+| `agent-session-mode` | `[sid, {epoch, modeId}]` | Hub JSON acknowledgement; choose from the shown `modes.availableModes`. |
+| `agent-session-config` | `[sid, {epoch, id:optionId, value}]` | Hub JSON acknowledgement; choose from the shown `configOptions`. An old hub's 404/405/501 rejects with an explicit unsupported-config explanation. |
+| `agent-session-prompt` | `[sid, {epoch, text, submissionId}]` | Hub JSON acknowledgement. Sends text without opening a draft buffer. `submissionId` identifies one logical submission; it is not sent to the hub. |
+
+For a direct prompt, generate `submissionId` once when the user chooses Send (for example,
+`crypto.randomUUID()`; 1–64 ASCII letters, digits, `_` or `-`). **Persist the id with the displayed
+sid, epoch and text before calling the RPC.** Keep that tuple across lost replies, page reloads and
+reconnections. A definite refusal such as “busy” permits resubmitting that same tuple. Edwin refuses
+replays of acknowledged or possibly-sent submissions, even after daemon restart. If delivery is
+uncertain, inspect the session before intentionally creating another submission. Never generate a new
+id for a retry. A deliberate new send, even of identical text, needs its own id.
+
+RPC failure rejects with Edwin's `user-error` condition and its redacted report. Permission/elicitation
+answers require the `requestKey` captured with the exact request the user saw. The daemon rereads the
+pending journal event and rejects a changed tool, input, option, URL or form even if a journal reset
+reused the same request id, kind and epoch. Refresh and review the new request; do not retry with a new
+key automatically. The hub receives the normal `req` and `epoch`, not Edwin's key: only the hub can
+arbitrate changes between the final check and the write. Observed records cannot be steered. Mutation acknowledgements are the hub's
+JSON, `{}` in the stub; they do not fabricate a new local mode/state before the journal/summary confirms it.
+The local replacement report is `Agent session was replaced (stale incarnation); refresh and explicitly select it again`;
+resolved requests report `Request is already resolved or no longer pending; refresh the session`.
+Other hub refusals retain their HTTP status/code in the redacted report.
+
+`Ed.agentSessions.state(buffer)` synchronously reads the latest daemon metadata snapshot:
+`{sid, bufferId, epoch, state, steerable, connection, modeId, modes, configOptions, usage, sessionInfo, pending}`.
+`usage` and `sessionInfo` are the latest main-session update payloads without `sessionUpdate`,
+or `null` when unavailable; they are also under `buffer.meta.locals.agentSession`.
+`pending` contains full permission options or elicitation request/schema/URL plus `req`, `kind`,
+`epoch` and `requestKey`, not just the registry's short title. Treat snapshots as read-only. Incarnation changes clear
+obsolete choices; disconnected/removed/observed sessions are not steerable. `connection` is the daemon's
+hub status string, not an invented agent state. A page can additionally listen to `Ed.sync.on('state', ...)`
+for its own connection to edwind.
+
+```js
+const dispose = Ed.agentSessions.onChange(buffer, snapshot => {
+  drawSessionButtons(snapshot); // called once immediately, then when state metadata changes
+});
+// A permission button retains the request it was drawn for:
+const shown = Ed.agentSessions.state(buffer).pending.find(p => p.kind === 'permission');
+await Ed.agentSessions.rpc('agent-session-permission', [
+  shown.sid, { req: shown.req, epoch: shown.epoch, requestKey: shown.requestKey,
+    outcome: { outcome: 'selected', optionId: shown.options[0].optionId } }
+]);
+dispose(); // when the card is unmounted
+```
+
+Notifications use the existing versioned buffer-metadata path, including state-only SSE changes with no
+text edit. Repeated equivalent metadata is not a change; unsubscribe stops callbacks. Fold choices stay
+local to the existing frame runtime. Only an agent-enabled frame installs the agent gesture handlers,
+and only agent buffers use them. There a movement/cancel/multi-touch is not a tap, and touch scroll
+keeps point while the next journal append resumes tail following if point was at the tail.
+
+### Checks
+
+| Check | Observable result |
+|---|---|
+| AS-C1 | Loopback fake API exercises info, hub and observed snapshots, fragmented SSE, duplicate summaries, removals, disconnect/reconnect, unconfigured/refused commands, remote start and all mutation routes. |
+| AS-C2 | Two edit clients/served frames see the same daemon-owned list and transcript; explicit open never spawns; a tool update changes its current state and fold metadata. |
+| AS-C3 | Long replay retains supplied ordinary events/content, opens with bounded visible rows, reports measured replay time, and labels hub-truncated history and oversized rendered events explicitly. |
+| AS-C4 | Events arriving while point/window start are elsewhere do not steal point; tail point follows; stream edits add no undo group. A prompt containing headings and fences does not change structural navigation or command targets. |
+| AS-C5 | A permission announced while another buffer is current can be answered there; req/epoch and offered outcome reach the stub. Elicitation values, cancellation, stale and already-resolved replies remain distinguishable. |
+| AS-C6 | C-c C-c sends exactly previewed blocks; C-c C-k and killing/reopening/restarting retain text/resources. Named reuse, recalled prompts and multiple destinations preserve the immutable journal and avoid resending successful destinations after a partial failure. |
+| AS-C7 | Config route works on a supporting stub and says unsupported on an older hub. Read-only observed records reject steering. File/line and diff actions use structural data. |
+| AS-C8 | A distinctive stub token, including one echoed maliciously in an error/record, appears in no buffer, wire result or daemon log; opening its file (including a symlink) is refused. |
+| AS-C9 | Run affected Node suites/type checks at stage boundaries; exercise an actual model frame's displayed folded surface and keys. At the end run the repository's full available suite once and quote its final lines. No external network or real credentials. |
+| AS-C10 | A host RPC targets an explicit transcript while another buffer is current: toggle/open/close folds, navigate structural prompts despite injected headings/fences, recall exact immutable blocks, send text without a draft, cancel and set mode/config. Invalid offsets and prompt boundaries fail plainly. |
+| AS-C11 | Read/subscription exposes complete offered permission/elicitation and mode/config data; state-only summaries notify without text edits. Replies use the captured req/epoch/requestKey. Changed content fails even after same-epoch request reuse; incarnation reset clears choices, and unsubscribe stops notifications. |
+| AS-C12 | Served-frame input tests dispatch tap, drag, cancel, double-tap and scroll through the registered handlers. Agent text supports point placement and fold toggles; modelines and ordinary buffers retain native input. A physical mouse press immediately after a tap is not suppressed. |
+| AS-C13 | Reuse the same SID/req under a new createdAt while frame pickers are open and across a retained-draft restart. Details, answers, quick sends, mode/config, recall, file jumps and draft sends reject replacement before action. Permission UI shows authoritative tool/input. Explicit retarget alone binds a new incarnation. |
+| AS-C14 | Both Content-Length and chunked responses exceed 32 MiB; an unfinished SSE event exceeds 1 MiB: connections close, refusal is visible and edwind remains usable. Render huge prompts/outputs/plans/diffs/Unicode with the shared per-event budget; incomplete diffs are not complete views. Saturated list facts and transcript opens never exceed four journal GETs. |
+| AS-C15 | Split a token across message chunks and recalled prompt text blocks: no buffer/log contains it, and later prompt, fold, location and diff offsets still target displayed text. Growing messages emit suffix-only patches. |
+| AS-C16 | Fail the write before POST: no mutation reaches the hub. Crash after a successful receipt: explicit retarget remains refused. Fail the receipt write after a positive reply, then kill the daemon without flushing: restart marks that destination “possibly sent”, never reposts it, and preserves later unsent destinations, text and resources. |
+| AS-C17 | Concurrent attached-list replacements keep displayed rows identical to structural command targets. Fail the final journal GET once without another summary: automatic GET retry catches up. A same-incarnation lower head resets transcript/facts. Truncated/later pending snapshots mark lost resolutions unavailable rather than actionable. |
+| AS-C18 | Kill list, observed and transcript views during in-flight reads: later completions/summaries do not recreate them, and reopening explicitly works. Repeated 503 SSE responses with ongoing bytes close immediately; shutdown closes all outstanding attempts. |
+| AS-C19 | A truncated real-shaped fixture begins mid-tool, includes bookkeeping between messages, interleaves tool/plan updates and ends with a long assistant answer. Assert open prompts/messages/current plans; folded thoughts/tools/unknown JSON; no superseded plan/bookkeeping/sequence headings; safe orphan title; separated command/output; start ordering; quiet end/reasons and one-line truncation. Verify usage/session-info controls and structural offsets/patches. |
+| AS-C20 | A real-shaped list fixture has a multi-paragraph activity, unknown/missing models, waiting/live/exited sessions and more than five exited rows. Assert whitespace/ellipsis/column boundaries/empty WAIT, wide/combining Unicode alignment, sort order, default collapse and named/key expansion, and row actions using the correct full identity after redraws. A finished turn, including a reported `done` record without an end marker, is not an exited session. |
+
+### Read-only live-hub inspection
+
+From the checkout, with Node 24 and the checkout's normal dependencies:
+
+```sh
+node tools/agent-live.mts URL TOKEN_FILE
+node tools/agent-live.mts URL TOKEN_FILE SID
+```
+
+The same HTTPS rule applies to this tool. For HTTP across an encrypted private network only, pass
+`--allow-cleartext` before the URL. Plain HTTP loopback stubs need no override.
+
+This is a manual tool, not a suite. It constructs `AgentSessions` and real daemon buffers in-process,
+under a private temporary state directory removed on success or failure. No user init/image, listening
+socket, agent RPC installer or prompt store is loaded. The core modules registering agent start/send/
+answer/cancel/remove/mode/config/revive commands are omitted too; a GET-only override additionally
+refuses every write before HTTP. Only the feature's token reader consumes credential bytes.
+
+With no SID, print the live list buffer after model-fact reads/publication finish. With SID, wait for
+the initial stream snapshot and replay to the latest announced epoch/head, freeze that snapshot,
+then print open milliseconds (excluding boot/connection), retained journal event count, spans and
+default folds. Print first/last 60 **logical display lines**, without viewport wrapping, cursor or faces,
+through the actual frame fold/line/glyph code. Repeat with every fold open, cutting each line to 200
+Unicode characters. Short excerpts intentionally overlap. Print the host-page pending/control snapshot,
+authoritative replay truncation/from/gaps, and displayed per-event bound-marker occurrences (literal
+agent quotations can contain that marker too). Reported/PTY records say journal event count is unavailable.
+
+HTTP/auth failures, including background fact/journal reads or a refused stream, exit nonzero without
+partial normal output or dumped headers/response bodies. Hub I/O has a 120-second deadline. Normal
+inspection performs only GETs; pending permissions and elicitations are printed, never answered.
+
+### Verification record
+
+**Real-shaped rendering follow-up (AS-C19/C20):** the directed list suite
+(`node --test --test-concurrency=1 test/agent-sessions.test.mts`) passes 24/24.
+`tsc -p .`, `tsc -p src` and `tsc -p native/js` each exit 0.
+A disposable driver opened the shared fixtures through a real daemon and served model frame,
+captured the first 40 default-folded transcript lines and the aligned/default-collapsed list,
+expanded exited rows through the host RPC and opened the correct hidden row with RET.
+Both actual `tools/agent-live.mts` paths succeeded against the stub without changes to the tool.
+The driver and its private state were removed. Final output:
+
+```text
+render smoke: 40 default transcript lines; exited toggle + RET opened finished-8; 38 HTTP requests, all GET; both live CLI paths succeeded; no token in output/logs
+```
+
+**Read-only live tool (manual stub check):** `tsc -p .` exits 0, including `tools/*.mts`.
+A disposable driver ran the actual CLI against `test/fake-agent-hub.mts`, outside the suite runner:
+list/model/observed records; replay advancing during its first read; exactly 60 first/last frame lines;
+all-open Unicode clipping/control glyphs; pending permission/elicitation and mode/config state;
+hub/render truncation; reported-only records; 401, 503, partial-list/journal 502, stream refusal and missing SID.
+The transcript retained 148 events / 147 spans / 144 default folds, opening in 31.82 ms in this run.
+The driver and its private credential/state directory were removed afterward. Final output:
+
+```text
+agent-live stub smoke: 9 checks passed; 25 HTTP calls, all GET; token/header output absent
+```
+
+**Reviewer-hardening gate (after the last runtime/test edit):**
+
+- All twelve static claims held. Eight directed regressions (findings 4, 5 and 7–12) were also run
+  against the unchanged pre-review `0cff9a6` tree: all eight failed. The attached-list race produced
+  `the text at 180225 is not the one the op deletes`. The final gate below passes those checks.
+- Node v24.21.0, Nix-store dependencies, no external network:
+  `NO_COLOR=1 NODE_PATH=tools/node_modules node --test --test-reporter=spec --test-concurrency=1 --test-timeout=30000 test/agent*.test.mts`.
+  Final lines, verbatim:
+
+  ```text
+  ℹ tests 67
+  ℹ suites 0
+  ℹ pass 67
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 37032.907439
+  ```
+
+- `tsc -p .`, `tsc -p src`, `tsc -p native/js`: all exit 0 without diagnostics after the last
+  runtime/test edit.
+- `cargo test --offline --locked --jobs 1 -- --test-threads=1`: 31 passed across three suites,
+  one existing ignored test. Private CARGO_HOME/target, exact Cargo.lock vendor catalogue and local
+  V8 archive/ICU from the Nix store; shell utilities on PATH. Initial environment attempts exposed
+  missing utilities and a read-only copied ICU file, corrected only in the private build environment.
+  The final suite's last lines, verbatim:
+
+  ```text
+  test wq_saves_and_exits_zero ... ok
+  test zz_and_c_x_c_c_save_then_leave ... ok
+
+  test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.33s
+  ```
+
+- Latest long replay: **8,192 events / 25,141,248 content bytes / 49.24 ms / 5 folded visible lines**.
+  A real daemon and served frame opened **1,201 events in 189.1 ms**; its final **1,205 events /
+  4,755,515 rendered bytes / 1,200 folds** included a visibly bounded 3 MiB live event without reconnect.
+  These shared-machine measurements are observations, not latency guarantees.
+- A disposable standalone program ran an actual edwind, loopback stub, served model frame and host RPCs
+  outside the test runner. It displayed tool folds, answered the shown permission while another buffer
+  was current, sent an external-field prompt, streamed off-point with no undo, split a token across
+  separate publications, and rejected a retained action after replacement. Output, verbatim:
+
+  ```text
+  Agent review live smoke: {"openMs":13.7,"surfaceDraws":11,"folds":6,"pointPreserved":true,"undoGroups":0,"stateNotifications":2,"pending":0,"tokenAbsent":true,"replacementRejected":true}
+  ```
+
+- That live scenario exposed a zero-width redaction overlap caused by using a method's arity instead
+  of the validated 64-character token width; a separate-publication regression now covers it.
+  The affected agent gate also exposed the deferred editor-index window on new durable drafts:
+  creation now writes the existing index synchronously before edits can be acknowledged.
+  No browser-touch implementation changed in this review; its earlier DOM/Chromium record remains below.
+
+**Original four-stage feature gate (before the phone addition):**
+
+- Node v24.21.0; all three `tsc -p` projects (`.`, `src`, `native/js`) passed without diagnostics.
+- `NODE_PATH=tools/node_modules node --test --test-concurrency=2 test/*.test.mts` ran all 36 files with
+  default OT_RUNS=10000 and CRASH_ROUNDS=1000. Final lines:
+
+  ```text
+  ℹ tests 460
+  ℹ suites 1
+  ℹ pass 458
+  ℹ fail 2
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 1128004.130386
+  ```
+
+  The failures are `debug.test.mts` R4.50/R4.48: `server/debug.mts:343` requires `/edwin/` in a captured
+  absolute source path, but this worktree's path had no such component.
+  `nix/checks.nix:30` documents its check tree's required `edwin` name. Copying the same sources and running
+  only `node --test test/debug.test.mts` in `/tmp/edwin-agent-gate.*/edwin` gave 7 passed, 0 failed.
+  No debugger code/test was changed. An earlier full-run attempt was cancelled before completion when
+  the console/native embedding omissions were found; the numbers above are the completed run after fixes.
+- Offline `cargo test --offline --locked --jobs 1 -- --test-threads=1` on the same sources in a private
+  `/tmp` tree used the exact Cargo.lock vendor catalogue and V8 archive already in the Nix store.
+  Results: 4 unit + 3 GUI-harness + 24 terminal tests passed; the existing GUI latency test is ignored.
+  The GUI harness retains its prerequisite-dependent early returns; no physical native GUI window was
+  exercised. A separate actual `edwinclient -t` smoke displayed/unfolded a journal and edited, previewed
+  and sent a draft into a new immutable prompt heading.
+- `node --stack-size=6900 test/scheme-bench.mts`: shadow overhead 6.3% (limit 10%),
+  generator/direct 1.19x (limit 3x), `ok`.
+- Real Chromium loaded the shipped console scripts, displayed the list and folded transcript, and used
+  RET, TAB, typing, C-c C-p and C-c C-c. The new heading appeared after the send. Model-frame checks also
+  cover file/line, diffs, recall, off-point/tail streaming, reconnect metadata and bounded live publication.
+- All HTTP traffic was loopback stubs; no real credentials or external network. Throwaway scripts and
+  private build/fixture directories were removed. Nix system/module evaluation and deployment were not run.
+
+**Phone addition (AS-C10–12):**
+
+- Final pre-commit daemon/prompt gate: `node --test --test-concurrency=2 test/agent-sessions.test.mts test/agent-prompts.test.mts`,
+  25 passed, 0 failed, duration_ms 8499.879536.
+- `node --test --test-concurrency=2 test/frame.test.mts test/display.test.mts test/console.test.mts`:
+  48 passed, 0 failed, duration_ms 4749.63043. The initial combined run exposed a new test's reliance on
+  the renderer's incidental fold-line-count cache; the corrected assertion checks the visible folded body
+  instead. The browser smoke also caught marker taps not placing point; both point and fold now use the
+  common input path, and the regression checks the summary's point placement.
+- Actual Chromium, 390×844 with touch enabled, loaded the shipped console runtime against a private
+  edwind/fake hub. Trusted touch marker tap opened retained output; double tap closed it. A trusted swipe
+  changed viewport start 2802 → 2721 while point stayed 3389 (tail); the next append moved point to 3439
+  (new tail) and made it visible. External text-field typing and Send/Allow buttons used no Ctrl/Meta
+  events. The captured req/epoch reached the stub unchanged; repeating it rejected with the documented
+  no-longer-pending report. Chromium reported no page runtime errors. No physical phone was exercised.
+- Throwaway browser fixture, daemon state, Chromium profile and listeners were removed/stopped.
+- After implementation commit `c3dacb0`, all three TypeScript projects (`tsc -p .`, `tsc -p src`,
+  `tsc -p native/js`) passed without diagnostics.
+- The first post-commit all-agent run at concurrency 2 finished 40/41: the unchanged legacy
+  `test/agent.test.mts:164` image-agent case hit a 10-second protocol timeout. That case passed in the
+  pre-commit combined run, then the unchanged legacy suite passed 3/3 in isolation (duration_ms
+  1063.37864). The timeout's cause is unproven; no unrelated code or timeout threshold was changed.
+- Final post-commit command: `node --test --test-concurrency=1 test/agent*.test.mts` (all five suites,
+  including the legacy pi agent). Final lines:
+
+  ```text
+  ℹ tests 41
+  ℹ suites 0
+  ℹ pass 41
+  ℹ fail 0
+  ℹ cancelled 0
+  ℹ skipped 0
+  ℹ todo 0
+  ℹ duration_ms 16701.429738
+  ```
+
+  This run also opened the 1,201-event daemon transcript in 152.2 ms and delivered its 3 MiB live output
+  without reconnect; the 8,192-event / 25,141,248-byte pure replay took 17.91 ms with 5 visible folded lines.
+
+### Open decisions and API constraints
+
+- **Connection:** HTTP in edwind, not `server/hub.mts`. The socket protocol is host-local and deliberately
+  process-only; the mesh API provides remote-host reach, observed records and the shared journal authority.
+- **Replay ceiling (DESIGN §3.4.4):** `/events` replays at most 4 MiB and has no backward cursor or
+  before/limit parameter. Edwin retains supplied events in memory and labels `truncated/from`; a first
+  open cannot recover withheld bytes. [Workbench #55](https://github.com/yathxyz/workbench/issues/55)
+  tracks backward paging. When the hub supports it, the plain history-unavailable line is the place to
+  load earlier history; no loader is built before that API exists. Edwin’s 32 MiB HTTP ceiling can also
+  refuse an oversized response; per-event rendered clipping is visible. No disk-backed store is added.
+  Reported sessions expose only their bounded tail, not transcriptPath contents over this API.
+  No filesystem or direct-agent workaround invents a second record.
+  Edwin's own event-count ceiling applies across incremental replies, not just the first read.
+  On overflow it keeps the latest 28,672 events (room for further appends) and marks the dropped
+  prefix; at most 1,024 recent hub gap descriptors are retained. This bounds event count per view,
+  not total daemon memory. Killing the buffer releases its replay/presentation state.
+- **Incarnation precondition:** every mutation of an existing session carries the selected `createdAt`
+  as `epoch` in its JSON body, including draft prompt POSTs and DELETE. Edwin rechecks the session
+  before sending. The hub checks the epoch on permission/elicitation answers, but not the displayed
+  request version. A same-incarnation replacement after Edwin's check can receive the answer. Other
+  routes may ignore even the epoch. These races require atomic preconditions at the hub, not another
+  client-side GET.
+- **Receipt durability:** delivery can be ambiguous, including a crash just after recording intent but
+  before transmitting. Edwin reports “possibly sent” rather than risking a duplicate. Without hub
+  idempotency or reconciliation, it cannot infer a definitive outcome. Receipts are per draft and
+  incarnation; they cannot reconstruct sends made before durable receipts were introduced.
+- **Config in flight:** the supplied `sessions.rs` has no config route. Send the specified new endpoint and
+  explain unsupported responses; never pretend that changing a local model label steered the agent.
+- **Transport:** require HTTPS for non-loopback addresses unless `allowCleartext: true` explicitly
+  authorizes HTTP over an encrypted private network. Refuse redirects and validate the final origin
+  and API path before attaching a bearer token. No automatic terminal attach beyond the named API.
+- **Configuration authority:** only edit.json enables the feature. Without `agentHub`, neither runtime
+  installs its commands or bindings. No prompt store is opened or locked; ordinary indexed journals
+  are recovered and exported as usual, including files under `stateDir/agent-prompts/`. Changing
+  the configuration requires restarting the daemon. A configured writer holds the private directory
+  lock until shutdown. A competing writer exits 73; a supervising unit must not restart it on 73.
+  `--export` and `--primitives` do not take the writer lock. Configured export omits private drafts;
+  it does not open the store or copy drafts into the export directory.
+- **Model availability:** summaries do not contain the model. A lightweight journal facts cursor follows
+  advertised model config options for list rows; observed model data wins when supplied. An absent or
+  literal `unknown` model renders as an empty cell, not a guessed agent default.
+- **Folds:** existing buffer-local folds are reused, including sharing between cards/windows inside one
+  runtime. Separate terminal/browser runtimes have independent choices. No second daemon transcript.
+
+- **Credential and storage boundary:** ordinary editor readers (including directory metadata, note
+  indexing, reloads and binary attachment) authorize the opened Linux descriptor, not a pathname
+  checked before opening. Hard links and proc aliases do not grant access. Retained draft entries
+  must be single-link regular files; writes use atomic rename relative to an opened private directory.
+  This is **not a Scheme or process sandbox**. The server evaluator has host file-loading authority;
+  process primitives delegate to the configured PTY hub, whose processes have that host account's
+  permissions. If either can read the credential, an attached programmer can use that authority.
+  Don't grant untrusted clients evaluator/process access; isolate services and credentials with OS
+  identities and filesystem permissions when a stronger boundary is required.
+- **Tool file authority:** file/line jumps work when the agent's host is this edwind host and its path
+  passes Edwin's read authority. The supplied HTTP API has no remote-file endpoint; a remote-host
+  location says to open it on that host rather than treating the same path on this machine as its file.
+  No implicit SSH connection, mount, credential or host-name mapping is invented.

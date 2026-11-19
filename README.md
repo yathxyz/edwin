@@ -89,7 +89,7 @@ build a block index.
 
 | Path | What |
 | --- | --- |
-| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `ot` `sync` `display` |
+| `src/*.js` | the editor, in the order `index.html` loads it: `scheme` `runtime` `text` `editor-core` `editor-prims` `evil-core` `pool` `complete` `extras` `stack` `ai` `evil-ex` `org` `markdown` `dired` `brain` `agent-sessions` `agent-transcript` `agent-prompts` `ot` `sync` `display` |
 | `scm/*.scm` | the shipped Scheme configuration (`emacs`, `evil`, `org`, `ai`, `init`, and `notes-syntax`, `address`, `markdown`, `babel` through `require`), fetched by `index.html` and the console from `scm/` |
 | `index.html` | the page: styles and the script tags. It loads `src/*.js` and fetches `scm/*.scm` relative to itself, so serving this directory runs it, and a published copy keeps the `src/` and `scm/` paths |
 | `src/host-browser.ts`, `src/host-node.cts` | the host layer (R4.1): storage, the shipped Scheme, page attributes, suspend, clipboard, scheduling. The core reaches the page only through it and through frame objects |
@@ -107,6 +107,7 @@ build a block index.
 | `test/term.test.mts`, `test/native.test.mts` | the terminal encoder and decoder, and the core's seams for the program: files on a disk, exit statuses, input events (`edwin-native`) |
 | `docs/hub-protocol.md` | the protocol edwind speaks to a hub, the process server that runs its PTYs (R4.45) |
 | `console/manifest.json` | what a page that hosts frames loads, in order: `files` (the scripts) and `scm` (the Scheme sources), with `api` 1; `edwin-web` ships it as `manifest.json` |
+| `server/agent-sessions.mts`, `src/agent-sessions.ts` | daemon-owned mesh agent sessions (`agentHub: {url, tokenFile}`); `M-x agent-sessions`, Step AS1 |
 
 These files came from the published Edwin artifact (version 1791768765, 2026-10-12). From now on this directory is
 the source.
@@ -116,8 +117,8 @@ the source.
 Since 2026-10-19 Edwin is its own repository, and Workbench depends on it, never the reverse. Edwin is the Emacs
 replacement: it grows the features an Emacs user expects and loads no extensions. Workbench uses it as an
 edit.sock client.
-- **No default hub.** edwind connects to a hub only when edit.json names `hubSocket`. With none, as under
-  `edwin --daemon`, it dials nothing, and process primitives raise `hub-error` (code `unconfigured`) at once.
+- **No default hub.** edwind connects to a process hub only when edit.json names `hubSocket`. With none, as under
+  `edwin --daemon`, it dials no process hub, and process primitives raise `hub-error` (code `unconfigured`) at once.
 - **The §5 session API is gone**: `wb.mts`, `scm/wb.scm` (sessions, cards, `acp-prompt`, `shell-run`, the `wb-*`
   hooks, feature `wb-hub`), board watching, and `:card` on processes. Nothing in Workbench or here called it.
   `boardsDir` was ignored with a warning for one release; since Workbench's module stopped writing it, edwind
@@ -125,6 +126,39 @@ edit.sock client.
 - **The hub protocol is Edwin's**: `docs/hub-protocol.md` specifies what edwind speaks to a hub (version 1, the
   messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
   server, without the ACP messages it served for the session API.
+- **Agent sessions** (Step AS1): `agentHub: {"url":"https://host-a:PORT","tokenFile":"/private/api-token"}`
+  in edit.json configures the session API. Never put token contents in init. `M-x agent-sessions` opens the
+  live shared list; RET opens a read-only, structurally folded journal. `p` composes an ordinary durable
+  Markdown draft (`C-c C-p` preview, `C-c C-k` leave retaining it). By default clients can read sessions
+  and write and keep drafts, but cannot send them. With `agentHub.steer: true`, **every client admitted to
+  the daemon can steer**. Admission already permits editing the user's files through the daemon.
+  **Keep steering off until the hub atomically checks both the request version and the session incarnation
+  when accepting an answer.** Edwin checks what the user saw before sending; the hub does not verify that
+  the question is still the same when it accepts the answer.
+  `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
+  named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
+  Only configured prompt-store writers take the exclusive lock. Without `agentHub`, startup, recovery
+  and live export use the ordinary editor paths; nothing reserves `stateDir/agent-prompts/`.
+  With `agentHub`, Edwin commands refuse to read, write, rename or delete the hub token and the daemon
+  config by name, including through symlinked parents or leaves. Content operations also check the file's
+  device and inode for aliases. Directory listings may show both entries, not their contents. Startup
+  refuses a `storage.json` that aliases either file.
+
+  This does not protect against someone who can run commands as the daemon user; they can read the files
+  directly. Hand-edited journals, snapshots and index rows, external links or renames after startup,
+  permission changes that hide identity, and file swaps between check and use are out of scope. Recovery
+  trusts its state and follows the same path with or without `agentHub`.
+
+  The stock NixOS units do not configure `agentHub`. If you supply an agent-enabled `edit.json` to a
+  systemd service, set `RestartPreventExitStatus=73` on that service to stop retrying when another writer owns the store.
+  `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
+  `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
+  For HTTP outside loopback, explicitly set `allowCleartext: true` **only on an encrypted private network**.
+  For a read-only live check, run `node tools/agent-live.mts [--allow-cleartext] URL TOKEN_FILE [SID]` from this checkout
+  (Node 24). Without SID it prints the session list; with SID it prints replay metrics, first/last
+  60 frame-visible lines with default/all-open folds, host control state and truncation notices.
+  It uses temporary state, loads no user init, installs no agent mutation commands and permits GET only.
+  All-open lines are cut to 200 Unicode characters; errors exit nonzero without dumping headers.
 - **Task rows carry `fields`**: every `key::` field (and Org property) of a task, by its lowercased key, in
   `notes-tasks`, `notes-task` and the reply of `notes-task-set`. The rows no longer single out `session`,
   `dispatched` and `target`, which only Workbench's dispatch gives a meaning.

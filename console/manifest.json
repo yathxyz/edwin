@@ -18,6 +18,9 @@
   "src/markdown.js",
   "src/dired.js",
   "src/brain.js",
+  "src/agent-sessions.js",
+  "src/agent-transcript.js",
+  "src/agent-prompts.js",
   "src/ot.js",
   "src/sync.js",
   "src/display.js"

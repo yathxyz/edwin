@@ -140,6 +140,59 @@ test('fs-copy: files, links as links, whole directories; into a directory; never
   assert.equal((await call('fs-copy', { src: '~/cp/a.md', dst: '~/cp/unsaved.md' })).code, 'bad_request');
 });
 
+test('fs-copy: serves a second command before an ordinary recursive copy finishes', async () => {
+  const src = at('many-files'), dst = at('many-copies'), count = 256;
+  fs.mkdirSync(src);
+  for (let i = 0; i < count; i++) fs.writeFileSync(path.join(src, String(i)), String(i));
+
+  // Dispatch in wire order. Sample the destination *inside the daemon*, not after its
+  // promises publish their replies: even a wholly synchronous copy returns a promise.
+  const copy = c.newRid(), probe = c.newRid();
+  c.sock.write([
+    { t: 'call', cmd: 'fs-copy', rid: copy, args: [{ src, dst }] },
+    { t: 'call', cmd: 'fs-list', rid: probe, args: [{ dir: dst }] },
+  ].map(m => JSON.stringify(m) + '\n').join(''));
+  const seen = await c.next(m => m.rid === probe);
+  const done = await c.next(m => m.rid === copy);
+  assert.equal(done.t, 'result', JSON.stringify(done));
+  assert.equal(fs.readdirSync(dst).length, count);
+  if (seen.t === 'error') assert.match(seen.msg, /ENOENT|no such file/i);
+  else assert.ok(seen.value.entries.length < count, 'the daemon could not inspect the destination until every file was copied');
+});
+
+test('configured fs-copy refuses protected operands and tree entries but copies ordinary entries unchanged', async t => {
+  const d = makeDir(), tokenFile = path.join(d.root, 'private-fixture');
+  t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
+  fs.writeFileSync(tokenFile, 'not a bearer token');
+  d.cfg.agentHub = { url: 'https://fixture.invalid', tokenFile };
+  fs.writeFileSync(d.file, JSON.stringify(d.cfg));
+  const daemon = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: undefined } }), client = new EditClient(d.cfg.socket);
+  try {
+    await client.connect(); await client.hello();
+    const copy = (src: string, dst: string) => client.call('fs-copy', [{ src, dst }]);
+    const occupied = path.join(d.root, 'occupied'); fs.writeFileSync(occupied, 'ordinary');
+    for (const kind of ['hard', 'symbolic']) {
+      const src = path.join(d.root, kind), dst = src + '-copy';
+      fs.mkdirSync(src);
+      const leaf = path.join(src, 'alias');
+      if (kind === 'hard') fs.linkSync(tokenFile, leaf);
+      else fs.symlinkSync(tokenFile, leaf);
+      assert.equal((await copy(leaf, occupied)).code, 'refused_path', 'check the source even when the destination exists');
+      assert.equal((await copy(occupied, leaf)).code, 'refused_path', 'a protected destination is not an ordinary existing file');
+      assert.equal((await copy(src, dst)).code, 'refused_path');
+      assert.equal(fs.lstatSync(path.join(dst, 'alias'), { throwIfNoEntry: false }), undefined);
+    }
+    const src = path.join(d.root, 'ordinary'), dst = src + '-copy';
+    fs.mkdirSync(src);
+    fs.writeFileSync(path.join(src, 'file'), 'ordinary text', { mode: 0o600 });
+    fs.symlinkSync('file', path.join(src, 'link'));
+    assert.equal((await copy(src, dst)).t, 'result');
+    assert.equal(fs.readFileSync(path.join(dst, 'file'), 'utf8'), 'ordinary text');
+    assert.equal(fs.statSync(path.join(dst, 'file')).mode & 0o777, 0o600);
+    assert.equal(fs.readlinkSync(path.join(dst, 'link')), 'file');
+  } finally { client.close(); await stopEdwind(daemon); }
+});
+
 test('fs-copy refuses a source in a refused path, a tree that holds one, and every destination a rename would refuse', async () => {
   for (const s of ['~/.ssh/authorized_keys', '~/sshlink/authorized_keys', '~/.ssh', '~/.config', '~/.local/share']) { await refused('fs-copy', { src: s, dst: '~/cp-taken' }, s); assert.equal(fs.existsSync(at('cp-taken')), false, s); }
   const src = put('cp2/k.md');

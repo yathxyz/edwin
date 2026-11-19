@@ -725,6 +725,22 @@ interface EdFold extends EdFoldRange {
   n?: number;
 }
 
+/* Small daemon-owned state for embedded agent controls; treat snapshots as read-only. */
+interface EdAgentSessionState {
+  sid: string;
+  bufferId: string;
+  epoch: number | null;
+  state: string;
+  steerable: boolean;
+  connection: string;
+  modeId: unknown;
+  modes: unknown;
+  configOptions: unknown;
+  usage: unknown;
+  sessionInfo: unknown;
+  pending: Array<Record<string, unknown> & { sid: string; req: number; kind: 'permission' | 'elicitation'; epoch: number; requestKey: string }>;
+}
+
 /* A shared buffer's sync state (sync.ts). */
 interface EdBufferSync {
   /* A snapshot string until the first batch; the acknowledged text is then edited in chunks. */
@@ -1331,6 +1347,11 @@ interface EdState {
 interface EdHooks {
   /* the major mode for a buffer name (org.ts, markdown.ts) */
   modeFor?: ((name: string) => string | null | undefined) | null;
+  /* Versioned non-text special-buffer structure, installed after shared metadata. */
+  bufferMeta?: ((b: EdBuffer, locals: Record<string, unknown>, ver: number) => void) | null;
+  /* Only installed by the served agent UI: pending draft acks and touch-scrolled viewports. */
+  syncBufferState?: (m: { t: string; buf?: string; msg?: string }) => void;
+  keepWindowStart?: (w: EdWindow, selected: boolean) => boolean;
   /* after edits were applied to B (sync.ts sends them) */
   applied?: ((b: EdBuffer, ops: EdAppliedOp[], origin: unknown) => void) | null;
   /* a buffer's text changed (org.ts, markdown.ts drop caches) */
@@ -1450,6 +1471,19 @@ interface EdApi {
   modeParents: Map<string, string>;
   modeChain(mode: string): string[];
   lighters(b: EdBuffer): string;
+  installAgentSessions(steer: boolean): void;
+  installAgentTranscript(steer: boolean): void;
+  installAgentPrompts(steer: boolean): void;
+  agentSessions: {
+    rpc(cmd: string, args?: unknown[]): Promise<unknown>;
+    show(id: string): Promise<EdBuffer>;
+    open(sid: string, epoch?: number): Promise<EdBuffer>;
+    selected(): string;
+    identity(sid?: string): { sid: string; epoch: number };
+    refresh(): Promise<unknown>;
+    state(buffer: EdBuffer): EdAgentSessionState;
+    onChange(buffer: EdBuffer, fn: (state: EdAgentSessionState) => void): () => void;
+  };
   /* the lexer's source, for the workers */
   LEX_SOURCE: string;
   /* the file store: the host's files, or its storage */

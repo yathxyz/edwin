@@ -207,7 +207,9 @@ export class Notes {
     this.signal = new Int32Array(sab);
     const { port1, port2 } = new MessageChannel();
     this.syncPort = port1;
-    const w = new Worker(PARSER, { workerData: { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal }, transferList: [port2] });
+    const exclusions = this.server.auth.agent?.exclusions; // The worker parses files and greps their contents.
+    const workerData = { notesWorker: true, grammar: this.grammar, syncPort: port2, signal: this.signal };
+    const w = new Worker(PARSER, { workerData: exclusions ? { ...workerData, exclusions } : workerData, transferList: [port2] });
     this.worker = w; this.workerStarts++;
     w.unref();
     w.on('message', msg => this.onWorkerMessage(msg));
@@ -671,8 +673,12 @@ export class Notes {
     try { names = fs.readdirSync(dir).filter(n => n.endsWith('.jsonl')).sort(); } catch (e) { return { dir, reviews: out }; }
     for (const n of names) {
       let text;
-      /* A symlinked log is read through the authority like any file (never a refused path). */
-      try { text = fs.readFileSync(this.server.auth.checkRead(realPath(path.join(dir, n)).real), 'utf8'); } catch (e) { continue; }
+      try {
+        const file = path.join(dir, n);
+        // A review log may alias the token or config; check it before reading the JSON.
+        this.server.auth.agent?.checkNamed(file);
+        text = fs.readFileSync(this.server.auth.checkRead(realPath(file).real), 'utf8');
+      } catch (e) { continue; }
       for (const line of text.split('\n')) { if (!line.trim()) continue; try { out.push(JSON.parse(line)); } catch (e) { /* a torn line */ } }
     }
     return { dir, reviews: out };

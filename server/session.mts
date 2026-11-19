@@ -23,6 +23,7 @@ export class Client {
   declare server: Server;
   declare socket: net.Socket;
   declare log: Log;
+  private readonly encode: (obj: OutMessage) => string;
   /* Set by hello (§7.2). */
   declare cid: string | null;
   declare kind: ClientKind | null;
@@ -41,8 +42,9 @@ export class Client {
   declare reader: LineReader;
   declare helloTimer: NodeJS.Timeout;
   declare pinger: NodeJS.Timeout;
-  constructor(server: Server, socket: net.Socket) {
+  constructor(server: Server, socket: net.Socket, encoder: (obj: OutMessage) => string = encode) {
     this.server = server; this.socket = socket; this.log = server.log;
+    this.encode = encoder;
     this.cid = null; this.kind = null; this.device = null; this.session = null; this.caps = {};
     this.buffers = new Set(); this.closed = false; this.hello = false;
     this.queue = []; this.queued = 0; this.writing = false; this.bulk = [];
@@ -67,11 +69,11 @@ export class Client {
 
   /* ---------- sending ---------- */
   /* Small frames: queued and written as the socket allows. */
-  send(obj: OutMessage): void { if (this.closed) return; this.queue.push(encode(obj)); this.pump(); }
+  send(obj: OutMessage): void { if (this.closed) return; this.queue.push(this.encode(obj)); this.pump(); }
   /* edits, sel and msg count toward the slow-client cap (R14.14). */
   sendBulkish(obj: OutMessage): void {
     if (this.closed) return;
-    const line = encode(obj);
+    const line = this.encode(obj);
     this.queued += line.length;
     /* Everything not yet on the wire counts: our queue and what Node holds for a socket that stopped draining. */
     const held = this.queued + this.socket.writableLength;
@@ -84,7 +86,7 @@ export class Client {
     this.queue.push(line); this.pump();
   }
   /* Bulk frames (snap, chunk, image): written one at a time, each after the previous one drained. */
-  sendBulk(obj: OutMessage): void { if (this.closed) return; this.queue.push(encode(obj)); this.pump(); }
+  sendBulk(obj: OutMessage): void { if (this.closed) return; this.queue.push(this.encode(obj)); this.pump(); }
   pump() {
     if (this.closed || this.writing) return;
     while (this.queue.length && !this.closed) {
@@ -183,7 +185,7 @@ export class Client {
   }
   async onSaveRevert(msg: WireMessage): Promise<void> {
     const rid = ridOf(msg), buf = str(msg, 'buf');
-    const sb = this.server.buffers.get(buf);
+    const sb = this.server.buffers.get(buf, true);
     const value = msg.t === 'save' ? await this.server.buffers.save(sb) : await this.server.buffers.revert(sb);
     if (msg.t === 'save' && sb.serverEdit) sb.serverEdit.saved = true;
     this.send({ t: 'result', rid, value });

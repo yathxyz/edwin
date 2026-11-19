@@ -19,7 +19,7 @@ type SyncBy = {
 type SyncCondition = { condition: string; report: string; restarts?: unknown[]; backtrace?: string[] };
 type SyncAnchor = { id: string; pos: number; label?: string };
 type SyncMeta = { file: string | null; mode: string; modified: boolean; readOnly: string | boolean; saved: number; diskChanged: string | null; eol: 'lf' | 'crlf'; anchors: SyncAnchor[]; locals: Record<string, unknown>; ver: number };
-type SyncWelcomeMsg = { t: 'welcome'; proto: number; build: string; boot: string; imageEpoch: string; gen: number; caps: Record<string, unknown> };
+type SyncWelcomeMsg = { t: 'welcome'; proto: number; build: string; boot: string; imageEpoch: string; gen: number; caps: Record<string, unknown> & { agentHub?: { steer: boolean } } };
 type SyncPingMsg = { t: 'ping' | 'pong'; rid?: string };
 type SyncErrorMsg = { t: 'error'; code: string; msg: string; rid?: string; buf?: string; seq?: number; [k: string]: unknown };
 type SyncResultMsg = { t: 'result'; rid?: string; value?: unknown; error?: SyncCondition; msg?: string; out?: string };
@@ -220,6 +220,7 @@ function onLine(text: string) {
   let msg: { t?: unknown } | null; try { msg = JSON.parse(text); } catch (e) { return; }
   if (!msg || typeof msg.t !== 'string') return;
   try { dispatch(msg as SyncServerMsg); } catch (e) { console.error('sync', msg.t, e); }
+  H.syncBufferState?.(msg as SyncServerMsg);
 }
 function dispatch(msg: SyncServerMsg) {
   switch (msg.t) {
@@ -247,9 +248,10 @@ function dispatch(msg: SyncServerMsg) {
   }
 }
 function onWelcome(msg: SyncWelcomeMsg) {
+  const previousAgent = sync.welcome?.caps.agentHub;
   sync.welcome = msg;
-  if (sync.epoch && msg.imageEpoch !== sync.epoch) {
-    /* R7.19: the image was reset or compacted; the page starts a fresh frame runtime. */
+  if (sync.epoch && (msg.imageEpoch !== sync.epoch || previousAgent?.steer !== msg.caps.agentHub?.steer)) {
+    /* Either the image or the installed command surface changed; start a fresh frame runtime. */
     sync.epochChanged = true; sync.emit('epoch', { epoch: msg.imageEpoch, was: sync.epoch });
     return;
   }
@@ -301,6 +303,7 @@ function closeBuffer(id: string | SyncBuffer) {
   sync.buffers.delete(b.id); b.shared = false;
   if (b.sync && b.sync.opening) { b.sync.opening = null; settleOpen(b, Object.assign(new Error(`${b.id}: closed`), { code: 'closed' })); }
   if (E.buffers.includes(b)) { try { L.call('kill-buffer', [b]); } catch (e) { Ed.reportError(e); } Ed.scheduleRender(); }
+  H.syncBufferState?.({ t: 'closed', buf: b.id });
 }
 function onSnap(msg: SyncSnapMsg) {
   const b = bufOf(msg); if (!b) return;
@@ -569,6 +572,7 @@ function applyMeta(b: SyncBuffer, m: Partial<SyncMeta>, ver?: number) {
   if (m.modified !== undefined) b.modified = !!m.modified;
   if (m.readOnly !== undefined && b.sver >= 0) b.readOnly = !!m.readOnly;
   anchorsChanged(b);
+  if (H.bufferMeta && m.locals) H.bufferMeta(b, m.locals, ver ?? b.sver);
   statusChanged();
 }
 /* b.meta.anchors in the replica's coordinates: the server positions mapped through inflight and the queue. */
@@ -933,6 +937,7 @@ async function bootServed({ sources, transport, device, cid, pending }: { source
   Ed.hooks.killShared = b => closeBuffer(b as SyncBuffer);
   if (pending) importPending(pending as (SyncPending | null)[]);
   await start({ transport, device, cid });
+  if (sync.welcome?.caps.agentHub) Ed.installAgentSessions(sync.welcome.caps.agentHub.steer === true);
   const ui = await call({ cmd: 'user-init' });
   if (ui && typeof ui.value === 'string' && ui.value.trim()) { try { for (const f of L.readAll(ui.value)) { L.resetOps(); L.ev(f); } } catch (e) { Ed.message(`Error in ~/.config/edwin/init.scm: ${Ed.errorText(e)}`); } }
   await imageQuery(0);

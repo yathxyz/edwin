@@ -4,12 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { EditOp, UndoTag } from './ot-sim.mts';
+import type { PrimitiveEntry } from '../server/debug.mts';
 
 /* A message of the edit protocol (spec §7.1); server/proto.mts has no message types to import. */
 export type Msg = Record<string, any>; // any: wire JSON
@@ -29,7 +30,8 @@ export interface TestDir {
 }
 /* An edwind child: its output so far in logs, ready once the socket accepted. */
 export type EdwindChild = ChildProcessByStdio<null, Readable, Readable> & { logs: string; ready?: boolean };
-export interface StartOptions { nodeArgs?: string[]; env?: Record<string, string | undefined> }
+interface LaunchOptions { nodeArgs?: string[]; main?: string }
+export interface StartOptions extends LaunchOptions { env?: Record<string, string | undefined> }
 export interface ClientOptions { kind?: string; cid?: string; device?: string }
 /* A pending next(): resolved by the first message PRED accepts. */
 export interface Waiter { pred: (m: Msg) => boolean; resolve: (m: Msg) => void; reject: (e: Error) => void }
@@ -65,13 +67,24 @@ export function nodeFlags(): string[] {
   return ['--disallow-code-generation-from-strings', '--no-warnings=ExperimentalWarning'];
 }
 
+/* A regular stdout file matches the packaged registry generator: the CLI exits explicitly and
+   a POSIX pipe's asynchronous final write need not have drained by then. */
+export function readPrimitiveRegistry(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN }: LaunchOptions = {}): PrimitiveEntry[] {
+  const out = path.join(dir.root, 'primitives.json.out'), fd = fs.openSync(out, 'wx', 0o600);
+  try {
+    execFileSync(process.execPath, [...nodeArgs, main, '--config', dir.file, '--primitives'], {
+      stdio: ['ignore', fd, 'pipe'], env: { ...process.env, HOME: dir.dirs.home, CREDENTIALS_DIRECTORY: undefined },
+    });
+    return JSON.parse(fs.readFileSync(out, 'utf8'));
+  } finally { fs.closeSync(fd); fs.unlinkSync(out); }
+}
+
 /* Every edwind this process started dies with it, whatever the test did. */
 const children = new Set<EdwindChild>();
 process.once('exit', () => { for (const c of children) { try { c.kill('SIGKILL'); } catch (e) { /* gone */ } } });
 
-export function startEdwind(dir: TestDir, { nodeArgs, env = {} }: StartOptions = {}): Promise<EdwindChild> {
-  if (!nodeArgs) nodeArgs = nodeFlags();
-  const child = spawn(process.execPath, [...nodeArgs, MAIN, '--config', dir.file], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: dir.dirs.home, ...env } }) as EdwindChild;
+export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN, env = {} }: StartOptions = {}): Promise<EdwindChild> {
+  const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: dir.dirs.home, ...env } }) as EdwindChild;
   child.logs = '';
   children.add(child); child.once('exit', () => children.delete(child));
   child.stderr.on('data', d => { child.logs += d; if (process.env.EDWIND_LOG) process.stderr.write(d); });
