@@ -125,7 +125,7 @@ edit.sock client.
 - **The hub protocol is Edwin's**: `docs/hub-protocol.md` specifies what edwind speaks to a hub (version 1, the
   messages edwind already used). Workbench's wb-hub serves it unchanged; `test/fake-hub.mts` is a reference
   server, without the ACP messages it served for the session API.
-- **Agent sessions** (Step AS1): `agentHub: {"url":"http://mesh-host:PORT","tokenFile":"/private/api-token"}`
+- **Agent sessions** (Step AS1): `agentHub: {"url":"https://host-a:PORT","tokenFile":"/private/api-token"}`
   in edit.json, or `(on-server (agent-hub-configure "http://mesh-host:PORT" "/private/api-token"))` in
   init.scm, configures the mesh HTTP API. Never put token contents in init. `M-x agent-sessions` opens the
   live shared list; RET opens a read-only, structurally folded journal. `p` composes an ordinary durable
@@ -134,7 +134,8 @@ edit.sock client.
   are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts, outside the notes tree.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
   `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
-  For a read-only live check, run `node tools/agent-live.mts URL TOKEN_FILE [SID]` from this checkout
+  For HTTP outside loopback, explicitly set `allowCleartext: true` **only on an encrypted private network**.
+  For a read-only live check, run `node tools/agent-live.mts [--allow-cleartext] URL TOKEN_FILE [SID]` from this checkout
   (Node 24). Without SID it prints the session list; with SID it prints replay metrics, first/last
   60 frame-visible lines with default/all-open folds, host control state and truncation notices.
   It uses temporary state, loads no user init, installs no agent mutation commands and permits GET only.

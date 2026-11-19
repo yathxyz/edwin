@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { FakeAgentHub } from './fake-agent-hub.mts';
 import { makeDir, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
 import type { TestDir } from './edit-client.mts';
-import { AgentSessions } from '../server/agent-sessions.mts';
+import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { sessionsFixture } from './agent-render-fixture.mts';
 import type { Server } from '../server/main.mts';
 const require = createRequire(import.meta.url);
@@ -22,6 +22,56 @@ async function untilText(c: EditClient, id: string, needle: string) {
   }
   throw new Error(`Buffer did not display ${needle}`);
 }
+
+test('transport boundary: plain HTTP requires a loopback host or a boolean private-network opt-in', () => {
+  const config = { tokenFile: '/fixture/token' };
+  for (const host of ['127.0.0.1', '127.8.9.1', '[::1]', 'localhost'])
+    assert.doesNotThrow(() => validateAgentHub({ ...config, url: `http://${host}:1234/proxy` }));
+  for (const host of ['host-a.test', 'localhost.example', '127.0.0.1.example', '[::2]']) {
+    const url = `http://${host}/proxy`;
+    assert.throws(() => validateAgentHub({ ...config, url }), /HTTPS/i);
+    assert.throws(() => validateAgentHub({ ...config, url, allowCleartext: false }), /HTTPS/i);
+    assert.equal(validateAgentHub({ ...config, url, allowCleartext: true }).url, url);
+  }
+  const url = 'https://host-a.test/path';
+  assert.equal(validateAgentHub({ ...config, url }).url, url);
+  for (const value of [1, 'true', null]) assert.throws(() => validateAgentHub({ ...config, url, allowCleartext: value }), /boolean/);
+});
+
+test('transport boundary: reject unsafe routes, IDs and cursors before looking up a bearer token', async () => {
+  const hub = new AgentSessions({ cfg: { agentHub: { url: 'https://host-a.test/proxy', tokenFile: '/fixture/token' } },
+    buffers: { on: () => () => {} } } as unknown as Server);
+  let tokenReads = 0;
+  hub.token = () => { tokenReads++; throw new Error('unexpected credential lookup'); };
+  for (const id of ['a/b', '..', '../outside', 'a?b', 'a#b', 'a%2fb', 'https://host-a.test/elsewhere']) {
+    await assert.rejects(hub.readEvents(id, 0, () => true), /invalid/i);
+    await assert.rejects(hub.open(id), /invalid/i);
+  }
+  for (const n of [-1, 2.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '0&other=1'])
+    await assert.rejects(hub.readEvents('safe', n as number, () => true), /cursor/i);
+  for (const route of ['../escape', '%2e%2e/escape', '//host-a.test/other', 'https://host-a.test/other', 'sessions/%2f/info', 'sessions/../info', 'sessions/x#fragment'])
+    await assert.rejects(hub.request('GET', route), /route|prefix/i);
+  assert.equal(tokenReads, 0); hub.stop();
+});
+
+test('transport boundary: list and stream ignore invalid journal identities before scheduling model discovery', async t => {
+  const bad = ['a/b', '..', '?x', '#x', '%2fb', 'https://host-a.test/s'];
+  const { c, hub } = await reviewFixture(t, stub => {
+    for (const id of bad) stub.add(id);
+    stub.add('good');
+    // Force the first registry to be the HTTP list fallback; a new stream snapshot follows.
+    const handle = stub.handle.bind(stub);
+    stub.handle = (req, res) => req.url === '/v1/stream' ? Promise.resolve(void res.destroy()) : handle(req, res);
+  });
+  const id = (await c.call('agent-sessions')).value;
+  assert.deepEqual((await c.open(id)).meta!.locals.agentList.rows.map((r: { sid: string }) => r.sid), ['good']);
+  hub.handle = FakeAgentHub.prototype.handle.bind(hub);
+  hub.add('new_good');
+  await untilText(c, id, 'new_good');
+  const paths = hub.calls.filter(call => call.path.includes('/events')).map(call => call.path);
+  assert.ok(paths.every(p => /^\/v1\/sessions\/(?:good|new_good)\/events\?since=0$/.test(p)));
+  assert.deepEqual((await c.open(id)).meta!.locals.agentList.rows.map((r: { sid: string }) => r.sid).sort(), ['good', 'new_good']);
+});
 
 test('AS-C1/C2: daemon-owned list is live in a served frame; waiting first, both registries, remote start and reconnect', async t => {
   const hub = await new FakeAgentHub().start(), dir = makeDir();

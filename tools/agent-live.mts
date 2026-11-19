@@ -1,4 +1,4 @@
-/* Read-only live-hub inspection, not a suite: node tools/agent-live.mts URL TOKEN_FILE [SID]
+/* Read-only live-hub inspection, not a suite: node tools/agent-live.mts [--allow-cleartext] URL TOKEN_FILE [SID]
    Constructs AgentSessions and real daemon buffers in-process, in disposable state. It never calls
    Server.start(), agent-sessions.install() or installPrompts(). The core's agent-sessions/agent-prompts
    UI modules are also omitted: prompt, cancel, permission, mode, config, start and remove commands
@@ -70,8 +70,10 @@ function excerpts(Ed: Ed, b: EdBuffer, width?: number): string[] {
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.length < 2 || args.length > 3) throw new Error('Usage: node tools/agent-live.mts URL TOKEN_FILE [SID]');
-  const config = validateAgentHub({ url: args[0], tokenFile: path.resolve(args[1]) }), sid = args[2];
+  const allowCleartext = args[0] === '--allow-cleartext';
+  if (allowCleartext) args.shift();
+  if (args.length < 2 || args.length > 3) throw new Error('Usage: node tools/agent-live.mts [--allow-cleartext] URL TOKEN_FILE [SID]');
+  const config = validateAgentHub({ url: args[0], tokenFile: path.resolve(args[1]), allowCleartext }), sid = args[2];
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'edwin-agent-live-'));
   let buffers: Buffers | undefined, hub: ReadOnlySessions | undefined, deadline: NodeJS.Timeout | undefined;
   try {

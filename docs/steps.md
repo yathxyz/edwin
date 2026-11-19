@@ -1056,7 +1056,7 @@ AS-C19/C20 fixtures and a served-frame/CLI smoke cover the real shapes; the dire
 
 | Requirement | Contract |
 |---|---|
-| AS1.1 | edwind owns the HTTP connection and all shared session text. `agentHub: {url, tokenFile}` in edit.json configures it; without it commands explain that no agent hub is configured. Scheme init may configure the same connection through `agent-hub-configure`; token contents are never Scheme values. HTTP on the private mesh is allowed (the API's transport contract); HTTPS works too. No redirects or URL credentials. |
+| AS1.1 | edwind owns the HTTP connection and all shared session text. `agentHub: {url, tokenFile}` in edit.json configures it. Require HTTPS except on loopback, or when the operator explicitly sets `allowCleartext: true` **only for an encrypted private network**. Never follow redirects. Reject URL credentials, invalid session IDs, non-integer/unsafe/negative cursors and any destination outside the configured origin and `/v1/` prefix before sending credentials. |
 | AS1.2 | Read the bearer token only from its configured file, protect that file through the path authority, and never expose it in buffers, diagnostics, errors, logs or argv. Redact remote responses as well as transport errors. Mutations are not retried: a lost reply may already have acted. |
 | AS1.3 | `*Agent Sessions*` lists hub and observed sessions, including state, harness, model, host, project/directory, activity and waiting status. Waiting rows sort first. SSE snapshots replace stale registries; reconnect takes a fresh snapshot, and an outage is visible. Open, start (agent/host/directory), cancel and remove are commands. Only explicit start or revive may run anything. |
 | AS1.4 | `*Agent: SID*` is a read-only Markdown-style transcript, shared as `name:*Agent: SID*`. Observed-only records use `*Agent Observed: ID*` and explicitly cannot be steered. All record fields and available tail are inspectable. Closing a frame/buffer never cancels or removes a session. |
@@ -1263,6 +1263,9 @@ From the checkout, with Node 24 and the checkout's normal dependencies:
 node tools/agent-live.mts URL TOKEN_FILE
 node tools/agent-live.mts URL TOKEN_FILE SID
 ```
+
+The same HTTPS rule applies to this tool. For HTTP across an encrypted private network only, pass
+`--allow-cleartext` before the URL. Plain HTTP loopback stubs need no override.
 
 This is a manual tool, not a suite. It constructs `AgentSessions` and real daemon buffers in-process,
 under a private temporary state directory removed on success or failure. No user init/image, listening

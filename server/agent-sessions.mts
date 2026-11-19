@@ -15,7 +15,7 @@ import type { SBuf } from './buffers.mts';
 import type { CallResult } from './proto.mts';
 
 type Json = Record<string, any>; // any: verbatim hub JSON; unknown ACP variants remain inspectable
-export interface AgentHubConfig { url: string; tokenFile: string }
+export interface AgentHubConfig { url: string; tokenFile: string; allowCleartext?: boolean }
 export interface AgentBackend {
   request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown): Promise<any>; // any: API JSON
   clean<T>(value: T): T;
@@ -25,7 +25,12 @@ export interface AgentBackend {
 }
 const modules = new WeakMap<Server, AgentSessions>();
 const fail = (report: string, condition = 'agent-hub-error'): CallResult => ({ error: { condition, report, restarts: [], backtrace: [] } });
-const sidOf = (sid: unknown): string => { if (typeof sid !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(sid)) throw new Error('Invalid agent session id'); return sid; };
+const validSid = (sid: unknown): sid is string => typeof sid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(sid);
+const sidOf = (sid: unknown): string => { if (!validSid(sid)) throw new Error('Invalid agent session id'); return sid; };
+const cursorOf = (n: unknown): number => {
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) throw new Error('Invalid agent journal cursor');
+  return n;
+};
 const line = (x: unknown) => String(x ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 const modelOf = (options: unknown): string => {
   if (!Array.isArray(options)) return '';
@@ -63,11 +68,14 @@ type PresentationPatch = { start: number; remove: number; text: string; previous
 
 export function validateAgentHub(value: unknown): AgentHubConfig {
   const c = value as Partial<AgentHubConfig>;
-  if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some(k => !['url', 'tokenFile'].includes(k))) throw new Error('agentHub must be {url, tokenFile}');
+  if (!c || typeof c !== 'object' || Array.isArray(c) || Object.keys(c).some(k => !['url', 'tokenFile', 'allowCleartext'].includes(k))) throw new Error('Invalid agentHub configuration fields');
+  if (c.allowCleartext !== undefined && typeof c.allowCleartext !== 'boolean') throw new Error('agentHub.allowCleartext must be a boolean');
   let u: URL; try { u = new URL(c.url!); } catch { throw new Error('agentHub.url must be an HTTP or HTTPS URL'); }
-  if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.search || u.hash) throw new Error('agentHub.url must be HTTP or HTTPS without credentials, query or fragment');
+  if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || /[?#]/.test(u.href)) throw new Error('agentHub.url must be HTTP or HTTPS without credentials, query or fragment');
+  const loopback = u.hostname === 'localhost' || u.hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(u.hostname);
+  if (u.protocol !== 'https:' && !loopback && !c.allowCleartext) throw new Error('agentHub.url requires HTTPS outside loopback; allowCleartext is only for an encrypted private network');
   if (typeof c.tokenFile !== 'string' || !path.isAbsolute(c.tokenFile)) throw new Error('agentHub.tokenFile must be an absolute path');
-  return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile };
+  return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile, allowCleartext: c.allowCleartext === true };
 }
 function protect(server: Server, c: AgentHubConfig) {
   let real = c.tokenFile; try { real = fs.realpathSync(c.tokenFile); } catch { /* refusal also covers a missing file */ }
@@ -139,8 +147,20 @@ export class AgentSessions implements AgentBackend {
     if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('Agent hub token file must contain 64 lowercase hexadecimal characters');
     this.#secrets.add(token); return token;
   }
+  private apiURL(route: string): URL {
+    if (!this.config) throw new Error('No agent hub configured');
+    // Inspect the spelling before URL normalization: encoded separators, dot segments, absolute
+    // addresses and fragments are never part of this API. Check the resolved destination too.
+    const match = /^(?:info|stream|(?:sessions|observed)(?:\/([A-Za-z0-9_-]+)(?:\/[a-z_]+)?)?)(?:\?(?:forget=true|since=(\d+)))?$/.exec(route);
+    if (!match) throw new Error('Invalid agent API route');
+    if (match[1]) sidOf(match[1]);
+    if (match[2]) cursorOf(Number(match[2]));
+    const base = new URL(this.config.url + '/v1/'), u = new URL(route, base);
+    if (u.origin !== base.origin || !u.pathname.startsWith(base.pathname)) throw new Error('Agent route outside the configured API prefix');
+    return u;
+  }
   async request(method: 'GET' | 'POST' | 'DELETE', route: string, body?: unknown): Promise<Json> {
-    const token = this.token(), u = new URL(this.config!.url + '/v1/' + route), generation = this.generation;
+    const u = this.apiURL(route), token = this.token(), generation = this.generation;
     const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     if (data && data.length > 1024 * 1024) throw new Error('Agent hub request exceeds its 1 MiB body limit');
     return new Promise((resolve, reject) => {
@@ -163,7 +183,11 @@ export class AgentSessions implements AgentBackend {
           const status = res.statusCode || 0;
           this.server.log.debug('agent-api', { method, status });
           let answer: Json; try { answer = this.clean(JSON.parse(Buffer.concat(chunks).toString())); } catch { reject(new Error(`Agent hub answered ${status} with invalid JSON`)); return; }
-          if (status >= 200 && status < 300) resolve(answer);
+          if (status >= 200 && status < 300) {
+            if (method === 'GET' && (route === 'sessions' || route === 'observed') && Array.isArray(answer?.sessions))
+              answer.sessions = answer.sessions.filter((s: Json) => validSid(route === 'sessions' ? s?.sid : s?.id));
+            resolve(answer);
+          }
           else if (route.endsWith('/config') && [404, 405, 501].includes(status)) reject(new Error('This hub does not support agent config options (POST /config is unavailable)'));
           else {
             const error = answer && typeof answer === 'object' ? answer : {};
@@ -178,11 +202,15 @@ export class AgentSessions implements AgentBackend {
     });
   }
   async readEvents(sid: string, since: number, valid: () => boolean): Promise<TranscriptReply> {
+    sidOf(sid); cursorOf(since);
     if (this.journalActive >= JOURNAL_READS) await new Promise<void>(resolve => this.journalWaiters.push(resolve));
     else this.journalActive++;
     try {
       if (this.stopped || !valid()) throw new Error('Agent view was closed; reopen it');
-      return await this.request('GET', `sessions/${sid}/events?since=${since}`) as TranscriptReply;
+      const reply = await this.request('GET', `sessions/${sid}/events?since=${since}`) as TranscriptReply;
+      cursorOf(reply.head); cursorOf(reply.from);
+      for (const e of reply.events) cursorOf(e.seq);
+      return reply;
     } finally {
       const next = this.journalWaiters.shift();
       if (next) next(); else this.journalActive--;
@@ -194,7 +222,7 @@ export class AgentSessions implements AgentBackend {
     try {
       this.info = await this.request('GET', 'info');
       if (this.stopped || gen !== this.generation) return;
-      const token = this.token(), u = new URL(this.config!.url + '/v1/stream');
+      const u = this.apiURL('stream'), token = this.token();
       await new Promise<void>((resolve, reject) => {
         const req = (u.protocol === 'https:' ? https : http).get(u, { headers: { authorization: `Bearer ${token}`, accept: 'text/event-stream' }, timeout: 40000 }, res => {
           if (res.statusCode !== 200) { res.destroy(); req.destroy(); reject(new Error('stream refused')); return; }
@@ -255,9 +283,11 @@ export class AgentSessions implements AgentBackend {
     for (const key of this.announced) if (key.startsWith(sid + '/')) this.announced.delete(key);
   }
   event(name: string, data: Json) {
+    if ((name === 'session' || name === 'gone') && !validSid(data?.sid) ||
+      (name === 'observed' || name === 'observed_gone') && !validSid(data?.id)) return;
     this.registryRevision++;
     if (name === 'hub') { this.sessions.clear(); this.hubStatus = line(data.status); this.status = `hub ${this.hubStatus}`; }
-    if (name === 'session' && typeof data.sid === 'string') this.sessions.set(data.sid, data);
+    if (name === 'session') this.sessions.set(data.sid, data);
     if (name === 'session') {
       const t = this.transcripts.get(data.sid), known = t?.controls().pending || [], offered = data.acp?.pending || [];
       const requestsChanged = known.length !== offered.length || known.some(p => !offered.some((q: Json) => q.req === p.req && q.kind === p.kind));
@@ -274,7 +304,7 @@ export class AgentSessions implements AgentBackend {
       }
     }
     if (name === 'gone' && this.sessions.get(data.sid)?.createdAt === data.epoch) this.sessions.delete(data.sid);
-    if (name === 'observed' && typeof data.id === 'string') this.observed.set(data.id, data);
+    if (name === 'observed') this.observed.set(data.id, data);
     if (name === 'observed' && this.openedObserved.has(data.id)) void this.open(data.id, undefined, this.views.get(`name:*Agent Observed: ${data.id}*`)).catch(() => {});
     if (name === 'observed_gone') this.observed.delete(data.id);
     if (name === 'ready') this.status = 'connected';
@@ -305,7 +335,7 @@ export class AgentSessions implements AgentBackend {
       do {
         const s = this.sessions.get(sid); if (!s || !valid()) return;
         let f = this.facts.get(sid);
-        if (!f || f.epoch !== s.createdAt) f = { epoch: s.createdAt, head: 0, model: '' };
+        if (!f || f.epoch !== s.createdAt || f.head < 0) f = { epoch: s.createdAt, head: 0, model: '' };
         const reply = await this.readEvents(sid, f.head, valid);
         const current = this.sessions.get(sid);
         if (!valid() || !current) return;
