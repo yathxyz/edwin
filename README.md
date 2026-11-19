@@ -55,14 +55,19 @@ so edwind and the suites need no step. `src/host-node.cts` is checked with the s
 read-only buffers. For example, on `"Tool\noutput\nNext\n"`, `[{s: 4, e: 11}]` leaves `Tool` and `Next`
 visible. Both offsets count UTF-16 code units from zero and must point to actual newline characters.
 Ranges must be ordered and disjoint (`s < e`, then `e < next.s`); invalid input throws without changing
-the previous folds. `[]` clears them. The setter neither selects the buffer nor edits it. Point, mark and
-selection stay at their text offsets, even if hidden; subsequent navigation uses the usual fold rules.
+the previous folds. `[]` clears them. If there are neither closed folds nor owner targets, `[]` does
+nothing: it preserves the outline cycle and does not queue a draw. The setter neither selects the
+buffer nor edits it. Point, mark and selection stay at their text offsets, even if hidden; subsequent
+navigation uses the usual fold rules.
 
 `Ed.getBufferFolds(buffer)` returns a detached list of the currently closed `{s, e}` ranges, including
 folds made by the mode (which can also end at EOF). Immediately after a successful setter, that list is
 exactly the supplied offsets in order. In Org and Markdown, fold-all closes the owner ranges and adds
 disjoint outline folds; an overlapping outline fold does not replace an owner range. Normal-state `za`
 toggles a supplied fold without requiring a heading; an explicit mode binding still takes precedence.
+`zo` and `zO` open a closed owner fold directly. With the owner target open, they use the outline
+command at point, even if a native fold has exactly the owner's offsets. Direct owner toggles and
+undo redraw on the next frame without waiting for a pending keyboard command to finish.
 An edit, including undo or a remote edit, forgets the supplied ranges, open or closed. After appending
 text, set the full list again in the same task: the two calls coalesce into one folded frame, with no
 intermediate unfolded frame. Mode-created folds follow the mode's usual edit rules.

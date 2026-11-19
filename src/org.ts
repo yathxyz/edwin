@@ -240,9 +240,19 @@ const headlineOrError = (b: EdBuffer) => { const hs = headlineBefore(b, b.pt); i
 /* ---------- folds: b.folds, sorted, no two overlapping; renderBuffer skips the hidden lines ---------- */
 function foldsOf(b: EdBuffer) { return b.folds && b.folds.length ? b.folds : null; }
 function setFolds(b: EdBuffer, list: EdFold[]) {
+  if (b._ownerFolds) return setSortedOwnerFolds(b, list.sort((x, y) => x.s - y.s));
+  list.sort((x, y) => x.s - y.s); b.folds = list; b._foldVer = (b._foldVer || 0) + 1;
+}
+function addFold(b: EdBuffer, s: number, e: number) {
+  if (e <= s) return;
+  const list = (b.folds || []).filter(f => f.e < s || f.s > e);
+  list.push({ s, e }); setFolds(b, list);
+}
+function removeFolds(b: EdBuffer, s: number, e: number) { if (!foldsOf(b)) return; setFolds(b, b.folds!.filter(f => f.e < s || f.s > e)); }
+/* Owner commands produce a sorted list. They can run from another host task even while a key is pending. */
+function setSortedOwnerFolds(b: EdBuffer, list: EdFold[]) {
   b.folds = list; b._foldVer = (b._foldVer || 0) + 1;
-  // A direct owner-fold command needs a draw of its own; keyboard commands have the key loop's draw.
-  if (b._ownerFolds && E.idle !== false) Ed.scheduleRender();
+  Ed.scheduleRender();
 }
 /* The first fold whose end is at or after P. Ends, like starts, are sorted since folds are disjoint. */
 function foldSlot(folds: EdFold[], p: number) {
@@ -258,20 +268,23 @@ function foldOnHeader(b: EdBuffer, eoh: number) {
    catalogue of folds, including ones that the user has opened and can close again. */
 function replaceFoldRange(b: EdBuffer, s: number, e: number, insert?: EdFold) {
   const F = foldsOf(b);
-  if (!F) { if (insert) setFolds(b, [insert]); return; }
+  if (!F) { if (insert) setSortedOwnerFolds(b, [insert]); return; }
   const i = foldSlot(F, s);
   let j = i; while (j < F.length && F[j].s <= e) j++;
-  if (insert) setFolds(b, F.toSpliced(i, j - i, insert));
-  else if (j > i) setFolds(b, F.toSpliced(i, j - i));
+  if (insert) setSortedOwnerFolds(b, F.toSpliced(i, j - i, insert));
+  else if (j > i) setSortedOwnerFolds(b, F.toSpliced(i, j - i));
 }
-function addFold(b: EdBuffer, s: number, e: number) { if (e > s) replaceFoldRange(b, s, e, { s, e }); }
-function removeFolds(b: EdBuffer, s: number, e: number) { replaceFoldRange(b, s, e); }
 function foldHiding(b: EdBuffer, p: number) { const F = foldsOf(b); return F ? Ed.foldAt(F, bol(b.rope, p)) : null; }
 const isHidden = (b: EdBuffer, p: number) => !!foldHiding(b, p);
 /* The end of the fold that starts at the line end E, or E itself: line-wise operators take the hidden part too. */
-H.foldEnd = (b, e) => foldOnHeader(b, e)?.e ?? e;
+H.foldEnd = (b, e) => {
+  const F = foldsOf(b); if (!F) return e;
+  let lo = 0, hi = F.length - 1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (F[mid].s === e) return F[mid].e; if (F[mid].s < e) lo = mid + 1; else hi = mid - 1; }
+  return e;
+};
 /* Show the line of P: remove the fold that hides it. */
-function reveal(b: EdBuffer, p: number) { const f = foldHiding(b, p); if (f) removeFolds(b, f.s, f.e); return !!f; }
+function reveal(b: EdBuffer, p: number) { const f = foldHiding(b, p); if (f) setFolds(b, b.folds!.filter(x => x !== f)); return !!f; }
 /* Run FN over the subtree from S to E and keep the folds of the headlines inside it (promote, demote,
    planning lines and drawers change the text inside a fold, which would otherwise unfold). Each fold
    remembers its headline, mapped through FN's edits, and whether it hid the entry's body or the whole
@@ -284,9 +297,14 @@ function mapPos(eds: EdLogEntry[], p: number) {
   }
   return p;
 }
+/* Owner offsets expire at the first edit. Only mode folds can be restored after the subtree changes. */
+function subtreeEditFolds(b: EdBuffer, owners: EdFold[]) {
+  return b.folds === owners ? null : b.folds?.filter(f => !f.owner);
+}
 function keepingFolds<T>(b: EdBuffer, s: number, e: number, fn: () => T): T {
-  const F = foldsOf(b), saved: { hs: number; f: EdFold; entry: boolean }[] = [];
-  if (F) for (const f of F) if (!f.owner && f.s >= s && f.e <= e) {
+  const owners = b._ownerFolds;
+  const F = owners ? subtreeEditFolds(b, owners) : foldsOf(b), saved: { hs: number; f: EdFold; entry: boolean }[] = [];
+  if (F) for (const f of F) if (f.s >= s && f.e <= e) {
     const hs = bol(b.rope, f.s), ee = foldEnd(b, f.s, entryEnd(b, hs));
     saved.push({ hs, f, entry: f.e === ee });
   }
@@ -356,9 +374,18 @@ H.postCommand = (def, b, failed) => {
   if (prevPost) prevPost(def, b, failed);
   if (E.depth > 0 || E.mini) return;
   const w = E.win, pre = ORG.pre; ORG.pre = null;
-  if (!w || !w.folds?.length) return;
+  if (w?._ownerFolds) return postOwnerFoldMotion(w, pre);
+  if (!w || !foldsOf(w)) return;
+  const f = foldHiding(w, w.pt); if (!f) return;
+  const name = E.lastCommand instanceof Sym ? E.lastCommand.name : '';
+  if (!pre || pre.b !== w || pre.pt === w.pt || REVEALS.test(name)) { reveal(w, w.pt); return; }
+  const r = w.rope, back = Math.max(bol(r, f.s), f.s - 1);
+  w.pt = w.pt > pre.pt && f.e < r.length ? f.e + 1 : back;
+};
+function postOwnerFoldMotion(w: EdBuffer, pre: OrgState['pre']) {
+  if (!w.folds?.length) return;
   let f = foldHiding(w, w.pt);
-  if (!f && w._ownerFolds && w.pt === w.rope.length && pre?.b === w && pre.pt < w.pt) {
+  if (!f && w.pt === w.rope.length && pre?.b === w && pre.pt < w.pt) {
     // EOF itself isn't hidden. Check whether the motion started inside the fold on the final newline.
     const last = w.folds[w.folds.length - 1];
     if (last.owner && last.e + 1 === w.pt && pre.pt > last.s) f = last;
@@ -369,35 +396,48 @@ H.postCommand = (def, b, failed) => {
   // Native outlines can step to EOF. For owner folds the following row must hold a real line.
   const r = w.rope, limit = f.owner ? r.length - 1 : r.length;
   w.pt = w.pt > pre.pt && f.e < limit ? f.e + 1 : Math.max(bol(r, f.s), f.s - 1);
-};
+}
 D('org-fold-hidden-p', '&optional POS', '#t when POS (default point) is inside a fold.', ([p]: SchemeValue[]) => isHidden(cur(), L.absent(p) ? cur().pt : num(p) - 1));
 D('org-folds', '&optional BUFFER', 'The folds of BUFFER as a list of (START . END) pairs.', ([bb]: SchemeValue[]) => listOf((Ed.toBuffer(bb === undefined ? false : bb).folds || []).map(f => new L.Pair(f.s + 1, f.e + 1))));
 
 /* ---------- visibility cycling: TAB and S-TAB ---------- */
 /* The owner's heading line and every line it hides operate on the exact supplied range, not the
    surrounding outline. Like a subtree close, closing it supersedes overlapping mode folds. */
-function ownerFoldCommand(b: EdBuffer, action: 'toggle' | 'open' | 'close') {
-  const defs = b._ownerFolds;
-  if (!defs?.length) return false;
+function ownerFoldCommand(b: EdBuffer, defs: EdFold[], action: 'toggle' | 'open' | 'open-rec' | 'close') {
   const f = defs[foldSlot(defs, b.pt)];
   if (!f || (b.pt < f.s && eol(b.rope, b.pt) !== f.s)) return false;
-  const atHeading = foldOnHeader(b, f.s), closed = atHeading?.e === f.e;
-  if (action === 'open' && atHeading && !closed) return false; // Let the outline open its own fold.
-  if (action === 'open' || (action === 'toggle' && closed)) {
-    if (closed) removeFolds(b, f.s, f.e);
+  // Native children can have exactly the same bounds. Only a closed catalogue entry is ours.
+  const closed = foldOnHeader(b, f.s) === f;
+  if (action === 'open' || action === 'open-rec') {
+    if (closed) replaceFoldRange(b, f.s, f.e);
+    else {
+      // An open target can span several headlines. Open the outline at point, not at the owner's
+      // header; in plain text or above the first headline there is nothing left to open.
+      const hs = isOutline(b) ? headlineBefore(b, b.pt) : null;
+      if (hs !== null) {
+        if (action === 'open') openFold(b, hs);
+        else removeFolds(b, eol(b.rope, hs), subtreeEnd(b, hs));
+      }
+    }
+  } else if (action === 'toggle' && closed) {
+    replaceFoldRange(b, f.s, f.e);
   } else {
     if (!closed) replaceFoldRange(b, f.s, f.e, f);
     if (b.pt > f.s) b.pt = bol(b.rope, f.s);
   }
   return true;
 }
-D('%toggle-owner-fold', '', 'Toggle the owner-supplied fold at point, returning #f when there is none.', () => ownerFoldCommand(cur(), 'toggle'));
+L.magic('%owner-folds-present', () => !!cur()._ownerFolds, null, '#t when the buffer has owner-supplied fold targets.');
+D('%toggle-owner-fold', '', 'Toggle the owner-supplied fold at point, returning #f when there is none.', () => {
+  const b = cur(), owners = b._ownerFolds;
+  return !!owners && ownerFoldCommand(b, owners, 'toggle');
+});
 function cycleLocal(b: EdBuffer, hs: number) {
   const r = b.rope, level = levelAt(b, hs), eoh = eol(r, hs), eos = subtreeEnd(b, hs, level), fe = foldEnd(b, eoh, eos);
   const last = E.lastCommand === intern('org-cycle') && b._cycle && (b._cycle as OrgCycle).hs === hs ? (b._cycle as OrgCycle).status : null;
   if (fe < 0) { b._cycle = null; Ed.message('EMPTY ENTRY'); return; }
   const kids = children(b, hs, level, eos);
-  const closed = foldOnHeader(b, eoh), whole = closed && closed.e >= fe;
+  const whole = foldsOf(b) && b.folds!.find(f => f.s === eoh && f.e >= fe);
   if (whole && kids.length) {
     removeFolds(b, eoh, eos);
     for (const c of kids) foldRegion(b, eol(r, c), subtreeEnd(b, c));
@@ -412,43 +452,62 @@ function cycleLocal(b: EdBuffer, hs: number) {
 }
 /* Close all owner targets. Add the mode's usual overview or contents folds wherever they do not
    overlap an owner target. Both sources are in buffer order, so one pass suffices. */
-function foldOutline(b: EdBuffer, view: 'overview' | 'contents') {
-  const r = b.rope, owners = b._ownerFolds, list: EdFold[] = [];
+function foldOwnerOutline(b: EdBuffer, owners: EdFold[], view: 'overview' | 'contents') {
+  const r = b.rope, list: EdFold[] = [];
   let i = 0;
   for (let h = nextHeadline(b, 0); h >= 0; ) {
     const s = eol(r, h), end = view === 'overview' ? subtreeEnd(b, h) : entryEnd(b, h);
     const e = foldEnd(b, s, end);
     if (e > s) {
-      while (owners && i < owners.length && owners[i].e < s) list.push(owners[i++]);
-      if (!owners || i === owners.length || e < owners[i].s) list.push({ s, e });
+      while (i < owners.length && owners[i].e < s) list.push(owners[i++]);
+      if (i === owners.length || e < owners[i].s) list.push({ s, e });
     }
     h = end >= r.length ? -1 : nextHeadline(b, end + 1);
   }
-  if (owners) while (i < owners.length) list.push(owners[i++]);
+  while (i < owners.length) list.push(owners[i++]);
+  setSortedOwnerFolds(b, list);
+}
+/* Fold every top-level subtree (overview), every entry's body (contents), or nothing (all). */
+function overview(b: EdBuffer) {
+  if (b._ownerFolds) return foldOwnerOutline(b, b._ownerFolds, 'overview');
+  const r = b.rope, list: EdFold[] = [];
+  let top = 0;
+  for (let h = nextHeadline(b, 0); h >= 0; ) {
+    const lv = levelAt(b, h);
+    if (!top || lv < top) top = lv;
+    const e = subtreeEnd(b, h, lv);
+    const fe = foldEnd(b, eol(r, h), e); if (fe > 0) list.push({ s: eol(r, h), e: fe });
+    h = e >= r.length ? -1 : nextHeadline(b, e + 1);
+  }
+  setFolds(b, list);
+}
+function contents(b: EdBuffer) {
+  if (b._ownerFolds) return foldOwnerOutline(b, b._ownerFolds, 'contents');
+  const r = b.rope, list: EdFold[] = [];
+  for (let h = nextHeadline(b, 0); h >= 0; h = nextHeadline(b, eol(r, h) + 1)) { const s = eol(r, h), e = foldEnd(b, s, entryEnd(b, h)); if (e > s) list.push({ s, e }); }
   setFolds(b, list);
 }
 function showAll(b: EdBuffer) { setFolds(b, []); }
 CMD('org-cycle', '', '', 'Toggle the owner fold at point, or cycle a headline: folded, children, subtree (TAB).', () => {
-  const b = cur();
-  if (ownerFoldCommand(b, 'toggle')) return false;
+  const b = cur(), hs = bol(b.rope, b.pt);
+  if (b._ownerFolds && ownerFoldCommand(b, b._ownerFolds, 'toggle')) return false;
   if (!isOutline(b)) return L.call('indent-for-tab-command', []);
-  const hs = bol(b.rope, b.pt);
   if (!levelAt(b, hs)) { if (foldHiding(b, b.pt)) reveal(b, b.pt); return false; }
   cycleLocal(b, hs); return false;
 });
 CMD('org-global-cycle', '', '', 'Cycle the visibility of the whole buffer: overview, contents, show all (S-TAB).', () => {
   const b = cur();
   const last = E.lastCommand === intern('org-global-cycle') ? b._gcycle : null;
-  if (last === 'overview') { foldOutline(b, 'contents'); b._gcycle = 'contents'; Ed.message('CONTENTS'); }
+  if (last === 'overview') { contents(b); b._gcycle = 'contents'; Ed.message('CONTENTS'); }
   else if (last === 'contents') { showAll(b); b._gcycle = 'all'; Ed.message('SHOW ALL'); }
-  else { foldOutline(b, 'overview'); b._gcycle = 'overview'; Ed.message('OVERVIEW'); }
+  else { overview(b); b._gcycle = 'overview'; Ed.message('OVERVIEW'); }
   if (isHidden(b, b.pt)) { const f = foldHiding(b, b.pt); b.pt = bol(b.rope, f!.s); }
   return false;
 });
 CMD('org-show-all', '', '', 'Show every line of the buffer.', () => { showAll(cur()); return false; });
 L.alias('outline-show-all', 'org-show-all');
-CMD('org-overview', '', '', 'Close all owner folds and disjoint top-level subtrees.', () => { const b = cur(); foldOutline(b, 'overview'); if (isHidden(b, b.pt)) b.pt = bol(b.rope, foldHiding(b, b.pt)!.s); return false; });
-CMD('org-content', '', '', 'Close all owner folds and disjoint entry bodies.', () => { const b = cur(); foldOutline(b, 'contents'); if (isHidden(b, b.pt)) b.pt = bol(b.rope, foldHiding(b, b.pt)!.s); return false; });
+CMD('org-overview', '', '', 'Close all owner folds and disjoint top-level subtrees.', () => { overview(cur()); const b = cur(); if (isHidden(b, b.pt)) b.pt = bol(b.rope, foldHiding(b, b.pt)!.s); return false; });
+CMD('org-content', '', '', 'Close all owner folds and disjoint entry bodies.', () => { contents(cur()); const b = cur(); if (isHidden(b, b.pt)) b.pt = bol(b.rope, foldHiding(b, b.pt)!.s); return false; });
 for (const n of ['org-cycle', 'org-global-cycle', 'org-show-all', 'org-overview', 'org-content']) L.put(intern(n), 'evil-repeat', intern('abort'));
 /* Vim's fold keys over outline folding, as evil-fold-list does for outline and Org buffers: zc hides
    the subtree of the headline at or before point (hide-subtree), zo shows its children (show-entry and
@@ -467,26 +526,31 @@ function closeFold(b: EdBuffer, hs: number) {
 }
 function openFold(b: EdBuffer, hs: number) {
   const r = b.rope, eoh = eol(r, hs), eos = subtreeEnd(b, hs);
-  if (!foldOnHeader(b, eoh)) return;
+  if (!(foldsOf(b) && b.folds!.some(f => f.s === eoh))) return;
   removeFolds(b, eoh, eos);
   for (const c of children(b, hs, 0, eos)) foldRegion(b, eol(r, c), subtreeEnd(b, c));
 }
+const foldClosed = (b: EdBuffer, hs: number) => !!(foldsOf(b) && b.folds!.some(f => f.s === eol(b.rope, hs)));
 CMD('evil-close-fold', '', '', 'Close the owner fold at point or hide the current subtree (zc).', () => {
-  const b = cur(); if (!ownerFoldCommand(b, 'close')) closeFold(b, foldHeadline(b)); return false;
+  const b = cur();
+  if (b._ownerFolds && ownerFoldCommand(b, b._ownerFolds, 'close')) return false;
+  closeFold(b, foldHeadline(b)); return false;
 });
 CMD('evil-open-fold', '', '', 'Open the owner fold at point or show the entry and its child headlines (zo).', () => {
-  const b = cur(); if (!ownerFoldCommand(b, 'open')) openFold(b, foldHeadline(b)); return false;
+  const b = cur();
+  if (b._ownerFolds && ownerFoldCommand(b, b._ownerFolds, 'open')) return false;
+  openFold(b, foldHeadline(b)); return false;
 });
 CMD('evil-open-fold-rec', '', '', 'Open the owner fold at point or show the whole subtree (zO).', () => {
   const b = cur();
-  if (!ownerFoldCommand(b, 'open')) { const hs = foldHeadline(b); removeFolds(b, eol(b.rope, hs), subtreeEnd(b, hs)); }
-  return false;
+  if (b._ownerFolds && ownerFoldCommand(b, b._ownerFolds, 'open-rec')) return false;
+  const hs = foldHeadline(b); removeFolds(b, eol(b.rope, hs), subtreeEnd(b, hs)); return false;
 });
 CMD('evil-toggle-fold', '', '', 'Toggle the owner fold at point or show the children or hide the subtree of its headline (za).', () => {
   const b = cur();
-  if (ownerFoldCommand(b, 'toggle')) return false;
+  if (b._ownerFolds && ownerFoldCommand(b, b._ownerFolds, 'toggle')) return false;
   const hs = foldHeadline(b);
-  if (foldOnHeader(b, eol(b.rope, hs))) openFold(b, hs); else closeFold(b, hs);
+  if (foldClosed(b, hs)) openFold(b, hs); else closeFold(b, hs);
   return false;
 });
 CMD('evil-close-folds', '', '', 'Close owner folds and disjoint top-level subtrees (zM, zm).', () => L.call('org-overview', []));
@@ -662,16 +726,24 @@ function lexOrgSeg(b: EdBuffer, from: number, to: number, seg: string) {
     }
     inline(line, ls, ls, le, 0);
   };
-  let ls = 0;
-  while (ls < n) {
-    if (F) {
+  if (b._ownerFolds && F) {
+    let ls = 0;
+    while (ls < n) {
       const f = Ed.foldAt(F, from + ls);
       if (f) {
         const next = f.e + 1 - from;
         if (f.owner && next < n) block = blockAcrossOwnerFold(seg.slice(ls, next), block, md);
         ls = next; continue;
       }
+      let le = seg.indexOf('\n', ls); if (le < 0) le = n;
+      lexLine(seg.slice(ls, le), ls, le);
+      ls = le + 1;
     }
+    return cls;
+  }
+  let ls = 0;
+  while (ls < n) {
+    if (F) { const f = Ed.foldAt(F, from + ls); if (f) { ls = f.e + 1 - from; continue; } }
     let le = seg.indexOf('\n', ls); if (le < 0) le = n;
     lexLine(seg.slice(ls, le), ls, le);
     ls = le + 1;
@@ -836,9 +908,9 @@ function moveSubtree(b: EdBuffer, dir: number) {
   }
   /* First piece S1..E1 (up to its newline at E1), second S2..E2; the result is second, newline, first. */
   const A = r.slice(s1, e1), tail = e2 === r.length && r.charAt(e2 - 1) === '\n' ? '\n' : '', B = r.slice(s2, e2 - tail.length);
-  const F = foldsOf(b), moved: EdFold[] = [];
+  const owners = b._ownerFolds;
+  const F = owners ? subtreeEditFolds(b, owners) : foldsOf(b), moved: EdFold[] = [];
   if (F) for (const f of F) {
-    if (f.owner) continue;
     if (f.s >= s2 && f.e <= e2) moved.push({ s: f.s - s2 + s1, e: Math.min(f.e - s2, B.length) + s1 });
     else if (f.s >= s1 && f.e <= e1) moved.push({ s: f.s - s1 + s1 + B.length + 1, e: f.e - s1 + s1 + B.length + 1 });
   }

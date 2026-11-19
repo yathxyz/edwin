@@ -58,6 +58,17 @@ for (const mixed of [false, true]) {
   });
 }
 
+test('backward word motion into a closed Org subtree lands on the last character of its headline', async () => {
+  await fresh('org');
+  const b = ed.E.current;
+  b.text = '* Heading\nhidden words\n* End\n'; b.pt = 0;
+  await ed.type('zc');
+  b.pt = b.text.indexOf('* End');
+  await ed.type('b');
+  assert.equal(b.pt, b.text.indexOf('\n') - 1);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'hidden words')]);
+});
+
 test('forward-char from the last hidden newline of an owner fold avoids only the phantom row', async () => {
   await fresh();
   const b = ed.E.current, fold = { s: 4, e: 12 };
@@ -107,6 +118,50 @@ test('ex commands: substitute, global and sort', async () => {
   await ed.type(':%s/^/x/\n:sort!\n'); assert.equal(ed.text(), 'xfig\nxaPPle\nxPear');
   await ed.type(':g/fig/d\n'); assert.ok(!ed.text().includes('fig'));
 });
+
+// A one-line body followed by another heading: both endpoints are newline offsets.
+function bodyFold(text: string, body: string) {
+  const s = text.indexOf(`\n${body}\n`);
+  assert.notEqual(s, -1, body);
+  return { s, e: s + body.length + 1 };
+}
+
+test(':%s shifts unchanged Org folds, opens changed ones, and does not retain owner ranges', async () => {
+  for (const mixed of [false, true]) {
+    await fresh('org');
+    const b = ed.E.current;
+    b.text = 'hit\n* Keep\nunchanged\n* Open\nhit again\n* Source\nowned\n* End\n';
+    const owner = mixed ? [bodyFold(b.text, 'owned')] : [];
+    if (mixed) ed.Ed.setBufferFolds(b, owner);
+    for (const h of ['* Keep', '* Open']) { b.pt = b.text.indexOf(h); await ed.type('zc'); }
+    assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'unchanged'), bodyFold(b.text, 'hit again'), ...owner]);
+    await ed.type(':%s/hit/longer/\n');
+    assert.equal(b.text, 'longer\n* Keep\nunchanged\n* Open\nlonger again\n* Source\nowned\n* End\n');
+    assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'unchanged')]);
+  }
+});
+
+for (const [command, expected] of [
+  ['org-promote-subtree', '* Parent\n* Target\n** Keep\nkept\n** Source\nowned\n** Peer\npeer\n* End\n'],
+  ['org-move-subtree-down', '* Parent\n** Peer\npeer\n** Target\n*** Keep\nkept\n*** Source\nowned\n* End\n'],
+]) {
+  test(`${command} keeps the native folds attached to their headings and discards owner ranges`, async () => {
+    for (const mixed of [false, true]) {
+      await fresh('org');
+      const b = ed.E.current;
+      b.text = '* Parent\n** Target\n*** Keep\nkept\n*** Source\nowned\n** Peer\npeer\n* End\n';
+      const owner = mixed ? [bodyFold(b.text, 'owned')] : [];
+      if (mixed) ed.Ed.setBufferFolds(b, owner);
+      for (const h of ['*** Keep', '** Peer']) { b.pt = b.text.indexOf(h); await ed.type('zc'); }
+      assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'kept'), ...owner, bodyFold(b.text, 'peer')]);
+      b.pt = b.text.indexOf('** Target');
+      ed.eval(`(${command})`);
+      assert.equal(b.text, expected);
+      const native = ['kept', 'peer'].map(body => bodyFold(b.text, body));
+      assert.deepEqual(ed.Ed.getBufferFolds(b), native.sort((a, z) => a.s - z.s));
+    }
+  });
+}
 
 test('a malformed name in evil-ex-commands leaves the other ex commands working', async () => {
   await fresh();

@@ -1552,8 +1552,8 @@ function recordUndo(b: EdBuffer, before: EdSnap) {
 }
 /* Bring the text back to its content at snapshot S, then put point at the first changed position. */
 function restoreSnap(b: EdBuffer, s: EdSnap) {
-  // Restoring the text discards owner ranges. The key loop already redraws before it waits.
-  const redraw = !!b._ownerFolds && E.idle !== false;
+  // Restoring the text discards owner ranges; a pending command may not redraw for some time.
+  const hadOwnerFolds = !!b._ownerFolds;
   const log = b.log, ops: EdLogEntry[] = [];
   let k = log.length - 1;
   while (k >= 0 && log[k].v > s.ver) ops.push(log[k--]);
@@ -1587,7 +1587,7 @@ function restoreSnap(b: EdBuffer, s: EdSnap) {
   b.modified = s.modified; b.pt = Math.min(i, newLen);
   b.mark = s.mark === null ? null : Math.min(s.mark, newLen);
   for (const m of b.markers) if (m.pos !== null && m.pos > newLen) m.pos = newLen;
-  if (redraw) scheduleRender();
+  if (hadOwnerFolds) scheduleRender();
 }
 /* The buffer now matches its file. Every snapshot in its history differs from the file, so undoing or redoing
    to one leaves the buffer modified, and undoing back to this state leaves it unmodified again. */
@@ -1897,6 +1897,7 @@ function setBufferFolds(b: EdBuffer, ranges: readonly EdFoldRange[]) {
   // Read caller properties before validating: a getter can resize the input or edit the buffer.
   const n = ranges.length;
   if (!Number.isInteger(n) || n < 0) throw new RangeError('Expected a non-negative integer fold array length');
+  if (n === 0 && !b._ownerFolds && !foldsOf(b)) return;
   const folds = new Array<EdFold>(n);
   for (let i = 0; i < n; i++) {
     const { s, e } = ranges[i];
@@ -2012,10 +2013,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     const le = eolS(ls);
     if (lines && ls === n && ls > 0 && !showPhantom && ls > last) break;
     /* VIS is what fitsRows measures: a folded line also shows the ellipsis after its text. */
-    const folded = folds && foldEndingAt(folds, le);
-    if (folds) vis += seg.slice(ls - from, le - from) + (folded ? ellT : '') + seg.slice(le - from, le - from + 1);
-    // A native fold leaves the heading newline to the cursor or Avy; an owner fold always shows its indicator.
-    const showEll = folded && (folded.owner || (pt !== le && !o.avy?.has(le)));
+    if (folds) vis += seg.slice(ls - from, le - from) + (foldEndingAt(folds, le) ? ellT : '') + seg.slice(le - from, le - from + 1);
     let html = '', start = ls;
     const rel = lines ? ls : 0;
     /* The keys (class, flags, depth) of the line's characters and of its end, read once. */
@@ -2025,7 +2023,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
     let ck: string | null = null;
     if (next && len <= 8192) {
-      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (showEll ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
+      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
       const hit = cache ? cache.get(ck) : undefined;
       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
     }
@@ -2058,11 +2056,11 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
       if (k === le) {
         flush(k);
         if (le < n && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
+        if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
         break;
       }
       if (k > start && kb[k - ls] !== kb[start - ls]) { flush(k); start = k; }
     }
-    if (showEll) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
     const val: EcLineVal = !R ? html : wantHtml ? { html, runs: R } : R;
     if (ck !== null) next!.set(ck, val);
     pushLine(val, le);
@@ -2076,8 +2074,23 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     ls = le >= n ? n + 1 : le + 1;
     if (folds && ls <= n) { const f = foldAt(folds, ls); if (f) { ls = f.e + 1; if (ls > n) ls = n + 1; else ln = lineNoB(b, ls) - 1; } }
   }
+  if (b._ownerFolds && folds) completeOwnerIndicators(out, folds, from, to, pt, o.avy, ell, ellT);
   if (lines || wantRuns) { out.seg = folds ? vis : seg; out.cache = next; return out; }
   return out.map(x => x.html).join('\n');
+}
+/* The native renderer gives the heading newline to point or an Avy label instead of the ellipsis.
+   Only those offsets need an extra indicator. Leave the native cached HTML and runs untouched. */
+function completeOwnerIndicators(out: EcRendered, folds: EdFold[], from: number, to: number, pt: number,
+                                 avy: EcRenderOpts['avy'], html: string, text: string) {
+  function add(p: number) {
+    if (p < from || p >= to || !foldEndingAt(folds, p)?.owner) return;
+    // Closed folds are disjoint: a heading newline in the rendered interval belongs to a visible row.
+    const line = out.findLast(row => row.o <= p)!;
+    if (line.html !== undefined) line.html += html;
+    if (line.runs) line.runs = line.runs.concat({ s: p - line.o, e: p - line.o, cls: 'oe', k: 'ell', t: text });
+  }
+  add(pt);
+  if (avy) for (const p of avy.keys()) if (p !== pt) add(p);
 }
 function syncLines(view: EcView, lines: EcLine[]) {
   const kids = view.children as HTMLCollectionOf<EcLineEl>;

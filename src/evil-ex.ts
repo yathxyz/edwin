@@ -543,13 +543,20 @@ function substituteSync(b: EdBuffer, lines: [number, number], re: RegExp, patter
   if (out !== seg) replaceSubstituted(b, s, e, out, seg);
   substituteFinish(b, s, lastEnd, count, nl, flags);
 }
+/* Only mode folds survive an edit. Usually a host buffer still has exactly the installed list. */
+function substitutionFolds(b: EdBuffer, owners: EdFold[]) {
+  if (!b.folds || b.folds === owners) return null;
+  const native = b.folds.filter(f => !f.owner);
+  return native.length ? native : null;
+}
 /* Put OUT, the :s result for SEG (the text from S to E), in the buffer: one replacement of the range,
    one log entry, one undo step. Org unfolds what an edit overlaps, so with folds the lines are
    compared first: a fold the replacement overlaps though no changed line does (a folded subtree with
    no match) is put back after it, moved by the changes before it. Its hidden text is the same. */
 function replaceSubstituted(b: EdBuffer, s: number, e: number, out: string, seg?: string) {
-  const F = b.folds && b.folds.length ? b.folds : null;
-  if (!F || F.every(f => f.owner)) { Ed.replaceText(b, s, e, out); return; }
+  const owners = b._ownerFolds;
+  const F = owners ? substitutionFolds(b, owners) : (b.folds && b.folds.length ? b.folds : null);
+  if (!F) { Ed.replaceText(b, s, e, out); return; }
   seg = seg ?? b.rope.slice(s, e);
   const a = seg.split('\n'), z = out.split('\n'), keep: EdFold[] = [];
   if (a.length === z.length) {
@@ -566,7 +573,7 @@ function replaceSubstituted(b: EdBuffer, s: number, e: number, out: string, seg?
     }
     let r = 0, shift = 0;
     for (const f of F) {
-      if (f.owner || e <= f.s || s > f.e) continue;
+      if (e <= f.s || s > f.e) continue;
       while (r < runs.length && runs[r].q <= f.s) shift += runs[r++].d;
       if (r < runs.length && runs[r].p <= f.e) continue;
       keep.push({ ...f, s: f.s + shift, e: f.e + shift });

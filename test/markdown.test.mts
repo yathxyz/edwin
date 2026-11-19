@@ -369,6 +369,43 @@ for (const key of ['zo', 'zO']) test(`Markdown ${key} opens a native subtree ove
   assert.deepEqual(ed.Ed.getBufferFolds(b), key === 'zo' ? [{ s: posOf('\ninside'), e: end }] : []);
 });
 
+for (const key of ['zo', 'zO']) test(`Org ${key} opens the current native heading inside an open owner target`, async () => {
+  const b = await page('* P\nhandle\n** C\nshort\nrest\n*** G\ninner\n* Q\n');
+  ev('(org-mode)');
+  const owner = { s: posOf('\n** C'), e: posOf('\nrest') }, end = posOf('\n* Q');
+  ed.Ed.setBufferFolds(b, [owner]);
+  b.pt = posOf('rest');
+  await ed.type('zc');
+  assert.equal(b.pt, posOf('** C'));
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [{ s: posOf('\nshort'), e: end }]);
+  await ed.type(key);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), key === 'zo' ? [{ s: posOf('\ninner'), e: end }] : []);
+});
+
+test('Org zo opens a native child with the same bounds as an owner target one level at a time', async () => {
+  const b = await page('* P\npreface\n** C\nshort\n*** G\ninner\n* Q\n');
+  ev('(org-mode)');
+  const child = { s: posOf('\nshort'), e: posOf('\n* Q') };
+  ed.Ed.setBufferFolds(b, [child]);
+  await ed.type('zczo'); // Opening P creates a native fold for C, superseding the owner fold.
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [child]);
+  b.pt = posOf('** C');
+  await ed.type('zo');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [{ s: posOf('\ninner'), e: child.e }]);
+});
+
+test('native zO on an open subtree replaces the fold list and advances its version', async () => {
+  const b = await page('# Open\none\n# Closed\ntwo\n# End\n');
+  b.pt = posOf('# Closed');
+  await ed.type('zc');
+  const before = b.folds, version = b._foldVer;
+  b.pt = 0;
+  await ed.type('zO');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [{ s: posOf('\ntwo'), e: posOf('\n# End') }]);
+  assert.equal(b._foldVer, version + 1);
+  assert.notEqual(b.folds, before);
+});
+
 test('plain major-mode za takes precedence; an owner-only fallback toggles supplied targets', async () => {
   const b = await page('tool\nresult\nrest');
   ev(`(define-derived-mode fold-key-test-mode text-mode "Fold keys" "Plain text with a local za.")

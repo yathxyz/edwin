@@ -242,6 +242,16 @@ test('setting and clearing folds redisplays every window, including a cached fra
   }
 });
 
+test('empty-to-empty replacement preserves the Org visibility cycle and schedules no draw', async () => {
+  const b = await show('*empty outline*', 'org-mode', '* A\n* B\n');
+  await keys('S-TAB');
+  assert.equal(E.echo, 'OVERVIEW');
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  const draws = await drawsDuring(() => Ed.setBufferFolds(b, []));
+  await keys('S-TAB');
+  assert.deepEqual({ echo: E.echo, draws }, { echo: 'CONTENTS', draws: 0 });
+});
+
 test('native show-all with nothing folded does not redraw an unchanged passive frame', async () => {
   const b = await show('*native passive*', 'org-mode', '* H\nbody');
   let draws = 0;
@@ -289,15 +299,16 @@ test('off-loop native folding and undo do not schedule draws without owner folds
   assert.deepEqual({ fold, undo }, { fold: 0, undo: 0 });
 });
 
-test('keyboard owner fold toggling and undo use the input loop draw', async () => {
+test('keyboard owner fold toggling and undo redisplay the buffer', async () => {
   const b = await show('*owner keyboard draws*', 'fundamental-mode', 'heading\nbody\nnext');
   await type('A!'); await keys('ESC');
   Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
-  const toggle = await drawsDuring(() => type('za'));
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'next');
+  await type('za');
   assert.equal(row(model!, 1).trimEnd(), 'body');
-  const undo = await drawsDuring(() => keys('u'));
+  await keys('u');
   assert.equal(row(model!, 0).trimEnd(), 'heading');
-  assert.deepEqual({ toggle, undo }, { toggle: 1, undo: 1 });
 });
 
 test('a cursor on a folded empty heading leaves its ellipsis in both HTML and model runs', async () => {
@@ -317,6 +328,21 @@ test('native fold display at the heading newline keeps the pre-owner cursor beha
   const lines = Ed.renderBuffer(b, { active: true, runs: true });
   assert.deepEqual(lines.map((l: Edwin) => l.text), ['* H', '* Next']);
   assert.deepEqual([lines[0].html.includes('class="oe"'), lines[0].runs.some((r: Edwin) => r.k === 'ell')], [false, false]);
+});
+
+test('Avy labels on heading newlines retain only owner fold indicators', async () => {
+  const b = await show('*Avy outlines*', 'org-mode', '* A\none\n* B\ntwo\n* C');
+  Ed.setBufferFolds(b, [{ s: 3, e: 7 }]);
+  b.pt = 8;
+  await type('zc');
+  const lines = Ed.renderBuffer(b, { active: true, runs: true, avy: new Map([[3, 'a'], [11, 'b']]) });
+  assert.deepEqual(lines.map((l: Edwin) => l.text), ['* A', '* B', '* C']);
+  for (const [i, label] of ['a', 'b'].entries()) {
+    assert.ok(lines[i].html.includes(`>${label}</span>`));
+    assert.equal(lines[i].html.includes('class="oe"'), i === 0);
+    assert.deepEqual(lines[i].runs.filter((r: Edwin) => r.k === 'ell').map((r: Edwin) => r.t),
+      i === 0 ? [ev('org-ellipsis')] : []);
+  }
 });
 
 test('a fold toggled from Scheme while idle redraws without another key', async () => {
@@ -342,6 +368,34 @@ test('direct undo discards owner folds and redraws the restored text while idle'
   await nextDraw();
   assert.deepEqual([row(model!, 0).trimEnd(), row(model!, 1).trimEnd()], ['heading', 'body']);
 });
+
+for (const action of ['toggle', 'undo']) {
+  test(`direct owner fold ${action} redraws while a keyboard command is pending`, async () => {
+    const b = await show(`*pending ${action}*`, 'scheme-mode', 'heading\nbody\nnext');
+    await type('A!'); await keys('ESC');
+    Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
+    await nextDraw();
+    assert.equal(row(model!, 1).trimEnd(), 'next');
+
+    // C-c C-b (eval-buffer) waits for its server result without reading another key.
+    const started = Promise.withResolvers<void>(), result = Promise.withResolvers<void>();
+    const original = Ed.hooks.evalServer;
+    Ed.hooks.evalServer = () => { started.resolve(); return result.promise; };
+    const command = keys('C-c C-b');
+    try {
+      await started.promise;
+      if (action === 'toggle') ev('(evil-toggle-fold)');
+      else Ed.undoStep(b);
+      assert.deepEqual(Ed.getBufferFolds(b), []);
+      await nextDraw();
+      assert.deepEqual([row(model!, 0).trimEnd(), row(model!, 1).trimEnd()],
+        [action === 'toggle' ? 'heading!' : 'heading', 'body']);
+    } finally {
+      result.resolve(); await command;
+      Ed.hooks.evalServer = original;
+    }
+  });
+}
 
 test('appending and reinstalling owner folds in one task draws only the folded result', async () => {
   const b = await show('*streaming transcript*', 'fundamental-mode', 'call\nout\n');
