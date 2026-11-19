@@ -1110,6 +1110,9 @@ function activeMaps(b?: EdBuffer | null) {
   if (minorModes.size) out.push(...minorMaps(b));
   const mm = KM(b.mode + '-map'); if (mm) out.push(mm);
   const g = KM('global-map'); if (g) out.push(g);
+  if (b._ownerFolds && E.evil && !b.minibuf && (b.evilState === 'normal' || b.evilState === 'motion')) {
+    const f = KM('owner-fold-map'); if (f) out.push(f);
+  }
   return out;
 }
 function lookupWith(maps: EdKeymap[], seq: string) {
@@ -1582,6 +1585,7 @@ function restoreSnap(b: EdBuffer, s: EdSnap) {
   b.modified = s.modified; b.pt = Math.min(i, newLen);
   b.mark = s.mark === null ? null : Math.min(s.mark, newLen);
   for (const m of b.markers) if (m.pos !== null && m.pos > newLen) m.pos = newLen;
+  scheduleRender();
 }
 /* The buffer now matches its file. Every snapshot in its history differs from the file, so undoing or redoing
    to one leaves the buffer modified, and undoing back to this state leaves it unmodified again. */
@@ -1882,14 +1886,19 @@ function foldEndingAt(folds: EdFold[], le: number) {
 const foldsOf = (b: EdBuffer) => b.folds && b.folds.length ? b.folds : null;
 function setBufferFolds(b: EdBuffer, ranges: readonly EdFoldRange[]) {
   if (!Array.isArray(ranges)) throw new TypeError('Expected an array of fold ranges');
-  const r = b.rope, folds = new Array<EdFold>(ranges.length);
-  let prev = -1;
-  for (let i = 0; i < ranges.length; i++) {
+  // Read caller properties before validating: a getter can resize the input or edit the buffer.
+  const n = ranges.length, folds = new Array<EdFold>(n);
+  for (let i = 0; i < n; i++) {
     const { s, e } = ranges[i];
+    folds[i] = { s, e, owner: true };
+  }
+  const r = b.rope;
+  let prev = -1;
+  for (let i = 0; i < n; i++) {
+    const { s, e } = folds[i];
     if (!Number.isInteger(s) || !Number.isInteger(e) || s <= prev || e <= s || e >= r.length ||
         r.charCodeAt(s) !== 10 || r.charCodeAt(e) !== 10)
       throw new RangeError(`Invalid fold at index ${i}: expected ordered, disjoint newline offsets`);
-    folds[i] = { s, e, owner: true };
     prev = e;
   }
   b.folds = folds;
@@ -1992,7 +2001,8 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     const le = eolS(ls);
     if (lines && ls === n && ls > 0 && !showPhantom && ls > last) break;
     /* VIS is what fitsRows measures: a folded line also shows the ellipsis after its text. */
-    if (folds) vis += seg.slice(ls - from, le - from) + (foldEndingAt(folds, le) ? ellT : '') + seg.slice(le - from, le - from + 1);
+    const folded = folds && foldEndingAt(folds, le);
+    if (folds) vis += seg.slice(ls - from, le - from) + (folded ? ellT : '') + seg.slice(le - from, le - from + 1);
     let html = '', start = ls;
     const rel = lines ? ls : 0;
     /* The keys (class, flags, depth) of the line's characters and of its end, read once. */
@@ -2002,7 +2012,7 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
     for (let k = ls; k <= le; k++) kb[k - ls] = key(k);
     let ck: string | null = null;
     if (next && len <= 8192) {
-      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folds && foldEndingAt(folds, le) ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
+      ck = ckPre + (pt >= ls && pt <= le ? pt - ls : -1) + '|' + (le < n ? 1 : 0) + (folded ? 'E' : '') + '|' + seg.slice(ls - from, le - from) + '\u0000' + String.fromCharCode.apply(null, kb.subarray(0, len) as unknown as number[]);
       const hit = cache ? cache.get(ck) : undefined;
       if (hit !== undefined) { next.set(ck, hit); pushLine(hit, le); continue; }
     }
@@ -2035,11 +2045,11 @@ function renderBuffer(b: EdBuffer, o: EcRenderOpts) {
       if (k === le) {
         flush(k);
         if (le < n && (flags[le - from] & FLAG.REGION)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'rg eolsel', k: 'eol', t: ' ' }); if (wantHtml) html += `<span class="rg eolsel" data-o="${le - rel}"> </span>`; }
-        if (folds && foldEndingAt(folds, le)) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
         break;
       }
       if (k > start && kb[k - ls] !== kb[start - ls]) { flush(k); start = k; }
     }
+    if (folded) { if (R) R.push({ s: le - ls, e: le - ls, cls: 'oe', k: 'ell', t: ellT }); if (wantHtml) html += ell; }
     const val: EcLineVal = !R ? html : wantHtml ? { html, runs: R } : R;
     if (ck !== null) next!.set(ck, val);
     pushLine(val, le);

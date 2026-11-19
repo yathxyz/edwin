@@ -327,6 +327,57 @@ test('Markdown toggles the owner’s exact range, not its enclosing headline, al
   assert.deepEqual(folds(), [native], 'substitution preserves untouched Markdown folds but not owner folds');
 });
 
+test('Markdown fold-all closes owner targets and only disjoint outline folds', async () => {
+  const b = await page('tool\nresult\n\n# Native\nbody\n# Shared\npartial\nrest\n# End\n');
+  const preamble = { s: posOf('\nresult'), e: posOf('\n\n# Native') };
+  const native = { s: posOf('\nbody'), e: posOf('\n# Shared') };
+  const shorter = { s: posOf('\npartial'), e: posOf('\nrest') };
+  ed.Ed.setBufferFolds(b, [preamble, shorter]);
+  await ed.type('zM');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [preamble, native, shorter]);
+  await ed.type('zR');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), []);
+  await ed.type('zm');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [preamble, native, shorter], 'also restores opened owner targets');
+  await ed.keys('S-TAB'); await ed.keys('S-TAB'); // overview, then contents
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [preamble, native, shorter]);
+});
+
+test('Markdown za distinguishes an owner target from a longer closed fold on the same heading', async () => {
+  const b = await page('# Shared\npartial\nrest\n# End\n');
+  const owner = { s: posOf('\npartial'), e: posOf('\nrest') };
+  ed.Ed.setBufferFolds(b, [owner]);
+  b.pt = posOf('rest'); // Outside the owner target: zc closes the outline subtree.
+  await ed.type('zc');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [{ s: owner.s, e: posOf('\n# End') }]);
+  await ed.type('za'); // zc moved point to the shared heading.
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [owner]);
+  await ed.type('za');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), []);
+});
+
+test('plain major-mode za takes precedence; an owner-only fallback toggles supplied targets', async () => {
+  const b = await page('tool\nresult\nrest');
+  ev(`(define-derived-mode fold-key-test-mode text-mode "Fold keys" "Plain text with a local za.")
+      (define fold-key-count 0)
+      (define-command (count-fold-key) (interactive) (set! fold-key-count (+ 1 fold-key-count)))
+      (define-key fold-key-test-mode-map "z a" 'count-fold-key)
+      (fold-key-test-mode)`);
+  await ed.type('za');
+  assert.equal(ev('fold-key-count'), 1, 'without supplied folds the major-mode command is not shadowed');
+  const owner = { s: posOf('\nresult'), e: posOf('\nrest') };
+  ed.Ed.setBufferFolds(b, [owner]);
+  await ed.type('za');
+  assert.equal(ev('fold-key-count'), 2, 'even with an owner target an explicit binding wins');
+  ev(`(define-key fold-key-test-mode-map "z a" #f)`);
+  await ed.type('za');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), []);
+  await ed.type('za');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [owner]);
+  ed.Ed.setBufferFolds(b, []);
+  assert.equal(ev('(key-binding "z a")'), false, 'no fallback without supplied targets');
+});
+
 test('R10.4 motions: ]] and [[ move by heading, gj and gk by visual line', async () => {
   await page('# One\nline a\nline b\n## Two\nline c\n# Three\n');
   await ed.type(']]'); assert.equal(line(), '## Two');
@@ -472,6 +523,41 @@ test('imenu lists the headings (not those inside fences); consult-imenu uses the
 test('markdown-unlinked-mentions runs on the server (:where server); in a frame runtime it says so', () => {
   assert.equal(ev('(command-where \'markdown-unlinked-mentions)').name, 'server');
   assert.throws(() => ev('(markdown-unlinked-mentions)'), /needs the notes index of the server/);
+});
+
+for (const [mode, heading, opener, closer, next] of [
+  ['Markdown', '# H', '```', '```', '# Next'],
+  ['Org', '* H', '#+begin_src', '#+end_src', '* Next'],
+]) test(`${mode}: the Org lexer carries block state across a folded opener`, async () => {
+  const text = [heading, opener, 'code', closer, next, ''].join('\n');
+  if (mode === 'Markdown') await page(text);
+  else { await ed.type(':e folded-opener.org\n'); ev(`(insert ${JSON.stringify(text)})`); }
+  const b = ed.E.current, body = posOf('code'), close = text.indexOf(closer, body);
+  ed.Ed.setBufferFolds(b, [{ s: heading.length, e: body - 1 }]); // Hide only the opening delimiter.
+  // Call Org's installed lexer directly: markdown.ts subsequently installs its own fence-indexed lexer.
+  const classes = (from: number) => {
+    const lx = (globalThis as Globals & { Org: Edwin }).Org.lexSeg(b, from, text.length, text.slice(from));
+    return Array.from(lx.cls as Uint8Array, c => lx.names[c]);
+  };
+  const inside = classes(body), whole = classes(0);
+  assert.equal(inside[0], 'osb', 'shown body is code');
+  assert.equal(inside[close - body], 'obd', 'shown delimiter closes the block');
+  assert.equal(inside[posOf('Next') - body], 'ol1', 'the following heading is outside the block');
+  assert.equal(whole[heading.length + 1], '', 'folded delimiter is not painted');
+  assert.deepEqual(whole.slice(body), inside, 'scrolling past the fold must not change visible classes');
+});
+
+test('the shipped Markdown renderer keeps visible faces across a folded opener', async () => {
+  const b = await page('# H\n```\ncode\n```\n# Next\n');
+  ed.Ed.setBufferFolds(b, [{ s: 3, e: 7 }]);
+  for (const from of [0, posOf('code')]) {
+    const rows = ed.Ed.renderBuffer(b, { from, active: false, runs: true });
+    const classes = (line: string) => rows.find((row: Edwin) => row.text === line).runs.map((run: Edwin) => run.cls);
+    assert.deepEqual(classes('code'), ['markdown-code-block']);
+    assert.deepEqual(classes('```'), ['markdown-fence']);
+    assert.ok(classes('# Next').includes('markdown-heading-1'));
+    assert.equal(rows.filter((row: Edwin) => row.text === '```').length, 1, 'only the closer is shown');
+  }
 });
 
 test('R10.5 font-lock is incremental: a keystroke in a 10,000-line page re-fontifies in 2 ms (median of 50) and lexes only the shown lines', async () => {

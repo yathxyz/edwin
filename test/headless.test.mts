@@ -31,6 +31,16 @@ test('Insert, Normal, operators, undo and redo', async () => {
   assert.equal(ed.text(), 'hello there foo');
 });
 
+test('forward word motion inside a fold at EOF stays on the last visible line', async () => {
+  await fresh();
+  const b = ed.E.current, fold = { s: 4, e: 12 };
+  b.text = 'head\none two\n'; b.pt = 5;
+  ed.Ed.setBufferFolds(b, [fold]);
+  await ed.type('w');
+  assert.equal(b.pt, 3, 'no real line follows the fold: land on the last character of its header');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
+});
+
 test('lines, counts, the dot command and a macro', async () => {
   await fresh();
   await ed.type('ione'); await ed.keys('ESC');
@@ -133,6 +143,26 @@ test('invalid fold lists are refused as a whole, not sorted, clipped or rounded 
     assert.throws(() => Ed.setBufferFolds(b, bad), JSON.stringify(bad));
     assert.deepEqual(Ed.getBufferFolds(b), [keep]);
   }
+});
+
+test('a fold input that shrinks during the call cannot publish a partial list', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\nd\n';
+  const keep = [{ s: 5, e: 7 }];
+  Ed.setBufferFolds(b, keep);
+  const input = [{ get s() { input.pop(); return 1; }, e: 3 }, { s: 5, e: 7 }];
+  assert.throws(() => Ed.setBufferFolds(b, input));
+  assert.deepEqual(Ed.getBufferFolds(b), keep);
+});
+
+test('fold offsets are validated after all caller-owned properties have been read', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\nd\n';
+  const input = [{ s: 1, e: 3 }, { get s() { b.text = 'abc\ne\nf\n'; return 5; }, e: 7 }];
+  assert.throws(() => Ed.setBufferFolds(b, input));
+  assert.deepEqual(Ed.getBufferFolds(b), []);
 });
 
 test('za toggles exact owner ranges without an outline; clear and edits forget even open ranges', async () => {

@@ -59,10 +59,13 @@ the previous folds. `[]` clears them. The setter neither selects the buffer nor 
 selection stay at their text offsets, even if hidden; subsequent navigation uses the usual fold rules.
 
 `Ed.getBufferFolds(buffer)` returns a detached list of the currently closed `{s, e}` ranges, including
-folds made by the mode (which can also end at EOF). Normal-state `za` toggles a supplied fold without
-requiring an Org or Markdown heading. An edit, including undo or a remote edit, forgets the supplied
-ranges, open or closed; supply new offsets for the changed text. Mode-created folds follow the mode's
-usual edit rules.
+folds made by the mode (which can also end at EOF). Immediately after a successful setter, that list is
+exactly the supplied offsets in order. In Org and Markdown, fold-all closes the owner ranges and adds
+disjoint outline folds; an overlapping outline fold does not replace an owner range. Normal-state `za`
+toggles a supplied fold without requiring a heading; an explicit mode binding still takes precedence.
+An edit, including undo or a remote edit, forgets the supplied ranges, open or closed. After appending
+text, set the full list again in the same task: the two calls coalesce into one folded frame, with no
+intermediate unfolded frame. Mode-created folds follow the mode's usual edit rules.
 
 ## Layout
 

@@ -116,6 +116,34 @@ test('long lines wrap after the last space that fits; truncate-lines keeps one r
   ev('(set! truncate-lines #f)');
 });
 
+test('gj and gk move a folded visual selection between visible buffer lines in a wrapped window', async () => {
+  const head = 'h'.repeat(70), hidden = 'private'.repeat(11), tail = 'z'.repeat(70);
+  const b = await show('*wrapped selection*', 'fundamental-mode', [head, hidden, tail].join('\n'), head.length + 1 + 62);
+  const mark = b.pt, pt = mark + 2, fold = { s: head.length, e: head.length + 1 + hidden.length };
+  const expectSelection = (p: number) => {
+    assert.equal(b.pt, p); assert.equal(b.mark, mark);
+    assert.equal(b.markActive, true); assert.equal(b.visual, 'char');
+    assert.deepEqual(Ed.getBufferFolds(b), [fold]);
+  };
+  try {
+    await type('vll');
+    Ed.setBufferFolds(b, [fold]);
+    const m = draw();
+    expectSelection(pt);
+    assert.deepEqual(rows(m).slice(0, 4).map(s => s.trimEnd()), [
+      head.slice(0, 60), head.slice(60) + ev('org-ellipsis'), tail.slice(0, 60), tail.slice(60),
+    ], 'the hidden selection has not exposed a body row');
+    // The plain-buffer gj/gk bindings move by logical line, retaining column 64 on the second screen row.
+    for (const [motion, dest, y] of [['gj', fold.e + 1 + 64, 3], ['gk', 64, 1]] as const) {
+      await type(motion);
+      const cursor = draw().cursor!;
+      expectSelection(dest);
+      assert.equal(cursor.y, y); assert.equal(cursor.x, 4);
+      assert.equal(D.posAt(frame, cursor.x, cursor.y).pos, dest);
+    }
+  } finally { await keys('ESC'); }
+});
+
 test('tabs reach the next stop of 8, wide characters take two cells, control characters show as ^X', async () => {
   await show('d3.txt', 'text-mode', 'a\tb\n日本x\n\u0001z\n', 0);
   const m = draw();
@@ -212,6 +240,60 @@ test('setting and clearing folds redisplays every window, including a cached fra
   } finally {
     Ed.deleteFrame(other); Ed.deleteOtherWindows();
   }
+});
+
+const nextDraw = () => new Promise<void>(resolve => host.nextFrame(resolve));
+
+test('a cursor on a folded empty heading leaves its ellipsis in both HTML and model runs', async () => {
+  const b = await show('*empty heading*', 'fundamental-mode', '\nbody\nnext');
+  Ed.setBufferFolds(b, [{ s: 0, e: 5 }]);
+  const lines = Ed.renderBuffer(b, { active: true, runs: true });
+  assert.deepEqual(lines.map((l: Edwin) => l.text), ['', 'next']);
+  assert.deepEqual([lines[0].html.includes(`<span class="oe">${ev('org-ellipsis')}</span>`),
+    lines[0].runs.find((r: Edwin) => r.k === 'ell')?.t], [true, ev('org-ellipsis')]);
+  assert.equal(draw().cursor!.x, 0);
+});
+
+test('a fold toggled from Scheme while idle redraws without another key', async () => {
+  const b = await show('*direct toggle*', 'fundamental-mode', 'heading\nbody\nnext');
+  Ed.setBufferFolds(b, [{ s: 7, e: 12 }]);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'next');
+  ev('(evil-toggle-fold)');
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'body');
+});
+
+test('direct undo discards owner folds and redraws the restored text while idle', async () => {
+  const b = await show('*direct undo*', 'fundamental-mode', 'heading\nbody\nnext');
+  await type('A!'); await keys('ESC');
+  Ed.setBufferFolds(b, [{ s: 8, e: 13 }]);
+  await nextDraw();
+  assert.equal(row(model!, 1).trimEnd(), 'next');
+  Ed.undoStep(b);
+  assert.equal(b.text, 'heading\nbody\nnext');
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  await nextDraw();
+  assert.deepEqual([row(model!, 0).trimEnd(), row(model!, 1).trimEnd()], ['heading', 'body']);
+});
+
+test('appending and reinstalling owner folds in one task draws only the folded result', async () => {
+  const b = await show('*streaming transcript*', 'fundamental-mode', 'call\nout\n');
+  const first = { s: 4, e: 8 }, both = [first, { s: 13, e: 17 }];
+  Ed.setBufferFolds(b, [first]);
+  await nextDraw();
+  const draws: string[][] = [], original = backend.draw;
+  backend.draw = m => { original(m); draws.push([row(m, 0).trimEnd(), row(m, 1).trimEnd()]); };
+  try {
+    Ed.applyOps(b, [[b.text.length, '', 'call\nout\n']]);
+    assert.deepEqual(Ed.getBufferFolds(b), []);
+    Ed.setBufferFolds(b, both);
+    assert.deepEqual(Ed.getBufferFolds(b), both);
+    await nextDraw();
+    const header = 'call' + ev('org-ellipsis');
+    assert.deepEqual(draws, [[header, header]]);
+  } finally { backend.draw = original; }
 });
 
 test('the minibuffer: prompt, input, candidates with every matching term marked, and the cursor in the echo area', async () => {
