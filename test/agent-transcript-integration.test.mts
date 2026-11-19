@@ -30,6 +30,60 @@ function scaleTimers(t: TestContext, delay: (ms: number) => number) {
   }));
 }
 
+function viewFixture(t: TestContext) {
+  const hub = new AgentSessions({ cfg: {}, buffers: { on: () => () => {} }, clients: [] } as unknown as Server);
+  hub.publish = async (_name, _mode, _text, _locals, valid) => {
+    assert.ok(valid()); return {} as Awaited<ReturnType<AgentSessions['publish']>>;
+  };
+  t.after(() => hub.stop());
+  return hub;
+}
+const absent = () => Object.assign(new Error('absent fixture'), { status: 404 });
+
+test('view reservation: missing sessions and rejected detail replies leave no retained views', async t => {
+  const hub = viewFixture(t), routes: string[] = [];
+  hub.request = async (_method, route) => { routes.push(route); throw absent(); };
+  for (let i = 0; i < 100; i++) await assert.rejects(hub.open(`missing_${i}`), /absent/);
+  assert.equal(routes.length, 200, 'both registries were queried for each missing session');
+  assert.equal(hub.views.size, 0);
+  hub.observed.set('reported', { id: 'reported' });
+  await assert.rejects(hub.open('reported'), /absent/);
+  hub.request = async () => { throw new Error('unavailable'); };
+  await assert.rejects(hub.open('unavailable'), /unavailable/);
+  hub.request = async () => ({ kind: 'pty', createdAt: 2 });
+  await assert.rejects(hub.open('stale', 1), /replaced/);
+  assert.equal(hub.views.size, 0);
+});
+
+test('view reservation: a failed fallback cannot release an existing or concurrent view', async t => {
+  const hub = viewFixture(t), record = { sid: 'same', kind: 'pty', createdAt: 1 };
+  const first = Promise.withResolvers<typeof record>(), second = Promise.withResolvers<typeof record>();
+  const detail = [first, second];
+  hub.request = async (_method, route) => {
+    if (route === 'sessions/same') return detail.shift()!.promise;
+    throw absent();
+  };
+  const missing = hub.open('same'), opening = hub.open('same');
+  first.reject(absent()); await assert.rejects(missing, /absent/);
+  second.resolve(record);
+  const id = await opening, original = hub.views.get(id);
+  assert.ok(original);
+  hub.request = async () => { throw absent(); };
+  await assert.rejects(hub.open('same'), /absent/);
+  assert.deepEqual([...hub.views.keys()], [id]);
+  assert.equal(hub.views.get(id), original, 'failed reopen must leave the published view alone');
+
+  // An old waiter must not tear down the replacement established after kill/reopen.
+  const late = Promise.withResolvers<typeof record>();
+  hub.request = () => late.promise;
+  const stale = hub.open('same'); hub.killed(id);
+  hub.request = async () => record;
+  assert.equal(await hub.open('same'), id);
+  const replacement = hub.views.get(id); assert.notEqual(replacement, original);
+  late.reject(absent()); await assert.rejects(stale, /closed/);
+  assert.equal(hub.views.get(id), replacement);
+});
+
 test('resource bounds: incremental journal flood keeps a marked recent tail, not every earlier event or span', async t => {
   const { backend, stub } = await boundsFixture(t), tr = new Transcript('tail');
   stub.add('tail'); let head = 0;
@@ -111,7 +165,7 @@ for (const facts of [false, true]) test(`resource bounds: ${facts ? 'facts' : 'r
   backend.queueList = async () => {};
   if (facts) { backend.listOpened = true; void backend.refreshFacts(s.sid).catch(() => {}); }
   else {
-    backend.transcripts.set(s.sid, new Transcript(s.sid)); backend.views.set(`name:*Agent: ${s.sid}*`, 1);
+    backend.transcripts.set(s.sid, new Transcript(s.sid)); backend.views.set(`name:*Agent: ${s.sid}*`, { opened: true, opening: 0 });
     backend.publish = async () => ({} as Awaited<ReturnType<AgentSessions['publish']>>);
     void backend.replay(s.sid).catch(() => {});
   }

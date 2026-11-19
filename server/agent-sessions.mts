@@ -91,6 +91,7 @@ export function validateAgentHub(value: unknown): AgentHubConfig {
   return { url: u.href.replace(/\/$/, ''), tokenFile: c.tokenFile, allowCleartext: c.allowCleartext === true, steer: c.steer === true };
 }
 type RetryQueue = Map<string, NodeJS.Timeout>;
+type SessionView = { opening: number; opened: boolean };
 export class AgentSessions implements AgentBackend {
   readonly requestBodyLimit = 1024 * 1024;
   declare server: Server; declare config: AgentHubConfig | undefined;
@@ -106,8 +107,7 @@ export class AgentSessions implements AgentBackend {
   listJob?: Promise<void>;
   exitedExpanded = false;
   publications = new Map<string, Promise<SBuf>>();
-  views = new Map<string, number>();
-  nextView = 0;
+  views = new Map<string, SessionView>();
   retries: RetryQueue = new Map();
   factRetries: RetryQueue = new Map();
   replayErrors = new Map<string, string>();
@@ -309,6 +309,10 @@ export class AgentSessions implements AgentBackend {
     }, retryDelay(attempt));
     timer.unref(); queue.set(sid, timer);
   }
+  private discardTranscript(sid: string) {
+    this.transcripts.delete(sid); this.replaying.delete(sid); this.clearRetry(this.retries, sid);
+    this.replayErrors.delete(sid);
+  }
   killed(id: string) {
     this.views.delete(id);
     if (id === 'name:*Agent Sessions*') {
@@ -323,8 +327,7 @@ export class AgentSessions implements AgentBackend {
     if (observed) this.openedObserved.delete(observed[1]);
     if (!transcript) return;
     const sid = transcript[1];
-    this.transcripts.delete(sid); this.replaying.delete(sid); this.clearRetry(this.retries, sid);
-    this.replayErrors.delete(sid);
+    this.discardTranscript(sid);
     if (!this.listOpened) this.facts.delete(sid);
     for (const key of this.announced) if (key.startsWith(sid + '/')) this.announced.delete(key);
   }
@@ -351,7 +354,7 @@ export class AgentSessions implements AgentBackend {
     }
     if (name === 'gone' && this.sessions.get(data.sid)?.createdAt === data.epoch) this.sessions.delete(data.sid);
     if (name === 'observed') storeRecord(this.observed, data.id, data);
-    if (name === 'observed' && this.openedObserved.has(data.id)) void this.open(data.id, undefined, this.views.get(`name:*Agent Observed: ${data.id}*`)).catch(() => {});
+    if (name === 'observed' && this.openedObserved.has(data.id)) void this.openView(data.id, undefined, true).catch(() => {});
     if (name === 'observed_gone') this.observed.delete(data.id);
     if (name === 'ready') this.status = 'connected';
     this.changed();
@@ -604,43 +607,54 @@ export class AgentSessions implements AgentBackend {
     const wire = { req: pending.req, epoch: pending.epoch, ...(kind === 'permission' ? { outcome: body.outcome } : { response: body.response }) };
     return this.request('POST', `sessions/${sid}/${kind}`, wire);
   }
-  async open(sid: string, epoch?: number, followingView?: number): Promise<string> {
+  async open(sid: string, epoch?: number): Promise<string> {
     sidOf(sid);
+    return this.openView(sid, epoch, this.observed.has(sid) && !this.sessions.has(sid));
+  }
+  private async openView(sid: string, epoch: number | undefined, observed: boolean): Promise<string> {
     const registered = this.sessions.has(sid), revision = this.registryRevision;
-    let observed = this.observed.has(sid) && !this.sessions.has(sid), s: Json;
-    let id = `name:*Agent${observed ? ' Observed' : ''}: ${sid}*`;
-    let generation = followingView ?? this.views.get(id);
-    if (generation === undefined) { generation = ++this.nextView; this.views.set(id, generation); }
-    const valid = () => this.views.get(id) === generation;
-    try { s = await this.request('GET', (observed ? 'observed/' : 'sessions/') + sid); }
-    catch (e) {
-      if (observed || e.status !== 404) throw e;
+    const name = observed ? `*Agent Observed: ${sid}*` : `*Agent: ${sid}*`, id = 'name:' + name;
+    // Object identity is the kill/reopen generation. Each racing open owns one reservation,
+    // and a successful publication keeps the view alive independently of pending callers.
+    let view = this.views.get(id);
+    if (!view) { view = { opening: 0, opened: false }; this.views.set(id, view); }
+    view.opening++;
+    const valid = () => this.views.get(id) === view;
+    try {
+      let s: Json;
+      try { s = await this.request('GET', (observed ? 'observed/' : 'sessions/') + sid); }
+      catch (e) {
+        if (observed || e.status !== 404) throw e;
+        if (!valid()) throw new Error('Agent view was closed; reopen it');
+        return this.openView(sid, epoch, true);
+      }
       if (!valid()) throw new Error('Agent view was closed; reopen it');
-      this.views.delete(id); id = `name:*Agent Observed: ${sid}*`;
-      generation = this.views.get(id) ?? ++this.nextView; this.views.set(id, generation);
-      s = await this.request('GET', 'observed/' + sid); observed = true;
-    }
-    if (!valid()) throw new Error('Agent view was closed; reopen it');
-    const current = observed ? this.observed.get(sid) : this.sessions.get(sid);
-    if (!observed && registered && !current && revision !== this.registryRevision) throw new Error('Agent session was removed; refresh the sessions list');
-    // A detail reply begun before a stream update cannot undo its state, removal, incarnation or head.
-    if (current && (this.streamActive && revision !== this.registryRevision ||
-      (observed ? current.lastAt > s.lastAt : current.createdAt > s.createdAt ||
-      current.createdAt === s.createdAt && (current.updatedAt > s.updatedAt || (current.acp?.headSeq || 0) > (s.acp?.headSeq || 0))))) s = current;
-    if (epoch !== undefined && s.createdAt !== expectedEpoch(epoch)) throw replaced();
-    storeRecord(observed ? this.observed : this.sessions, sid, s);
-    if (!observed && s.kind === 'acp') {
-      // token() validates exactly 64 hexadecimal characters, including rotated tokens retained for redaction.
-      if (!this.transcripts.has(sid)) this.transcripts.set(sid, new Transcript(sid, value => this.redactText(value), 63));
-      await this.replay(sid);
+      const current = observed ? this.observed.get(sid) : this.sessions.get(sid);
+      if (!observed && registered && !current && revision !== this.registryRevision) throw new Error('Agent session was removed; refresh the sessions list');
+      // A detail reply begun before a stream update cannot undo its state, removal, incarnation or head.
+      if (current && (this.streamActive && revision !== this.registryRevision ||
+        (observed ? current.lastAt > s.lastAt : current.createdAt > s.createdAt ||
+        current.createdAt === s.createdAt && (current.updatedAt > s.updatedAt || (current.acp?.headSeq || 0) > (s.acp?.headSeq || 0))))) s = current;
+      if (epoch !== undefined && s.createdAt !== expectedEpoch(epoch)) throw replaced();
+      storeRecord(observed ? this.observed : this.sessions, sid, s);
+      if (!observed && s.kind === 'acp') {
+        // token() validates exactly 64 hexadecimal characters, including rotated tokens retained for redaction.
+        if (!this.transcripts.has(sid)) this.transcripts.set(sid, new Transcript(sid, value => this.redactText(value), 63));
+        await this.replay(sid);
+        if (epoch !== undefined && this.sessions.get(sid)?.createdAt !== epoch) throw replaced();
+      } else {
+        if (observed) this.openedObserved.add(sid);
+        await this.publish(name, 'agent-session-mode', `# ${sid}\n\n${observed ? 'Reported session: read-only; this hub cannot steer it. Only the reported record and bounded tail are available.\n\n' : 'PTY record: this HTTP API offers no terminal input.\n\n'}${JSON.stringify(s, null, 2)}\n`, { agentSession: { sid, observed: true, epoch: s.createdAt, spans: [] } }, valid);
+      }
       if (!valid()) throw new Error('Agent view was closed; reopen it');
-      if (epoch !== undefined && this.sessions.get(sid)?.createdAt !== epoch) throw replaced();
-      return `name:*Agent: ${sid}*`;
+      view.opened = true;
+      return id;
+    } finally {
+      if (--view.opening === 0 && !view.opened && valid()) {
+        this.views.delete(id);
+        if (observed) this.openedObserved.delete(sid); else this.discardTranscript(sid);
+      }
     }
-    const name = observed ? `*Agent Observed: ${sid}*` : `*Agent: ${sid}*`;
-    if (observed) this.openedObserved.add(sid);
-    await this.publish(name, 'agent-session-mode', `# ${sid}\n\n${observed ? 'Reported session: read-only; this hub cannot steer it. Only the reported record and bounded tail are available.\n\n' : 'PTY record: this HTTP API offers no terminal input.\n\n'}${JSON.stringify(s, null, 2)}\n`, { agentSession: { sid, observed: true, epoch: s.createdAt, spans: [] } }, valid);
-    return 'name:' + name;
   }
   replay(sid: string, attempt = 0): Promise<void> {
     const existing = this.replaying.get(sid); if (existing) return existing;
