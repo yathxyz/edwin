@@ -179,12 +179,22 @@ function draw(b: EdBuffer, at?: string | null) {
   goLine(b, i >= 0 ? i + 2 : line);
 }
 /* Take in listing L, keeping the marks of the names still there. Returns the name point was on, read before
-   the entries change under it. */
+   the entries change under it. A listing global-auto-revert-mode follows, read again whole, tells the names that
+   came and went while a language server watches files (hooks.filesChanged, lsp.ts): its own deletes, renames,
+   copies and new directories, and another program's. A listing cut at MAX_ENTRIES tells nothing: which names
+   the cut keeps can change with no file changing. */
 function fill(b: EdBuffer, l: DiredListing) {
   const d = b.dired as Dired, e = entryAt(b), here = e ? e.name : null;
+  const told = Ed.hooks.filesChanged, was = told && b.autoRevert && !d.truncated && !l.truncated ? new Set(d.entries.map(e => e.name)) : null;
   d.dir = l.dir; d.home = l.home; d.entries = l.entries.slice().sort(byName); d.truncated = !!l.truncated; d.version = l.version;
   const names = new Set(d.entries.map(e => e.name));
   for (const n of [...d.marks.keys()]) if (!names.has(n)) d.marks.delete(n);
+  if (was) {
+    const changes: { path: string; type: 1 | 3 }[] = [];
+    for (const n of names) if (!was.has(n)) changes.push({ path: join(d.dir, n), type: 1 });
+    for (const n of was) if (!names.has(n)) changes.push({ path: join(d.dir, n), type: 3 });
+    if (changes.length) told!(changes);
+  }
   return here;
 }
 /* Show the directory PATH (null: the backend's own, the notes) in the selected window, point on AT. One buffer

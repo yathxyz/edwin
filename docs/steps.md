@@ -5473,6 +5473,144 @@ see it.
   `workspace/didChangeConfiguration {"nixd":{"nixpkgs":{"expr":"import <nixpkgs> { }"}}}`, `shutdown`, `exit` after
   `:q`, in edwin and in an edwinclient frame of a running edwind alike.
 
+## Watched files: servers hear of the changes Edwin makes or sees (done)
+
+Asked 2026-11-19 (the Emacs-to-Edwin plan, package `lsp-watched-files`, on lsp-servers and proc-auto-revert):
+tell servers about file changes the editor makes or sees through auto-revert polling
+(`workspace/didChangeWatchedFiles`); no inotify, so limited to the files Edwin knows about; proved by edwin-lsp.
+
+- **The capability.** `initialize` now offers `workspace.didChangeWatchedFiles` `{dynamicRegistration: true,
+  relativePatternSupport: true}`. `client/registerCapability` (answered null, as before, for every method) keeps
+  the watchers of each `workspace/didChangeWatchedFiles` registration by its id (an id given again replaces
+  them), and `client/unregisterCapability` drops them (its list is `unregisterations`, as LSP spells it). Other
+  registrations are still not taken up. The watchers are the child's: a crash (start again) and a shutdown drop
+  them, and the new child registers its own. With no registration nothing is sent.
+- **Who is told what** (src/lsp.ts, `filesChanged`): each change is a path and LSP's type (1 created, 2 changed,
+  3 deleted). Every running session whose watchers match it, under its root (below), is sent the batch's matching
+  changes in one notification, with the URI made as a document's is (`file://` and the resolved path). That goes by the
+  session's registrations, not by which buffers are attached: a `Cargo.toml`, `go.mod` or `pyproject.toml` in a
+  buffer with no server, or another server, still reaches rust-analyzer, gopls or pyright. A change is told only
+  where auto-revert looks (`Ed.looksAt`): never under the system's temporary directory (sops's decrypted copies)
+  or in a --private session.
+- **Where the changes come from**, through a new hook, `Ed.hooks.filesChanged`, which lsp.ts sets only while some
+  session has a watcher, so with none a write, a look and a listing do what they did before (no extra stat):
+  - `Ed.Store.set` and `Ed.Store.del` (src/editor-core.ts), the one way the editor's writes reach the disk: every
+    save and write-file, `:w FILE`, Org's and the notes' writes, grep-edit's write-back. A write asks first whether
+    the file was there (one `exists` more per write, only while something watches) and is told as changed or
+    created; a removal is told as deleted only when the file was there.
+  - global-auto-revert-mode's look (src/editor-prims.ts): an unmodified visited file whose stamp moved is told as
+    changed (or created, for a buffer visited before its file existed), whether or not its text could be read; a
+    file gone is told as deleted once (`b.disk.gone`, so later looks say nothing more), and its return as created,
+    with the same stamp too. The buffer itself behaves as before. Edwin's own save takes the new stamp, so the
+    look after it tells nothing more. A modified buffer's file is not looked at (as before: no stat more), so a
+    change to it by another program is told only by the buffer's save.
+  - a dired listing that global-auto-revert-mode follows (src/dired.ts, `fill`), each time it is read again whole:
+    the names that came are told as created and the names that went as deleted. That covers dired's own D, R, C
+    and + in a listed directory as well as another program's changes there. A listing cut at its 10000 names
+    tells nothing, as which names the cut keeps can change while no file changes.
+- **The patterns** (LSP's glob syntax) are the server's text, so they are compiled once at registration, bounded,
+  and matched without backtracking: `*` (within a segment), `**` (across them; `**/` any leading segments, none
+  too), `?` (one character of a segment), `[...]`, `[!...]` and `[^...]` (one character of a set, or not of it;
+  a `]` first is a member, a `[` never closed is itself), `{a,b}` nested to any depth. The matcher walks the parts
+  over the set of places in the path each can end at, so a match costs the parts times the path's length whatever
+  the pattern (`*a` thirty times then `*b` against 400 `a`s is answered no at once). A pattern of more than 1024
+  characters, an empty one, an unclosed brace, braces giving more than 64 alternatives, a `kind` outside 0..7, a
+  base that is no `file:` URI and any watcher of another shape are dropped, the registration's other watchers
+  kept; a session keeps at most 256 alternatives in all, the watchers past that dropped. A `kind` is the
+  WatchKind bits (create 1, change 2, delete 4; absent, all three).
+- **What a pattern is matched against:** a relative pattern (`{baseUri, pattern}`, the base a URI or a workspace
+  folder) against the path relative to its base; a string pattern starting with `/` against the absolute path;
+  any other string pattern against the path relative to the session's root. **Only a path under the session's
+  root is ever told**, whatever the pattern: a server that registers `/**`, or a base outside its project, does
+  not hear of the other files Edwin writes on the machine (dotfiles, other projects). A server watching a
+  directory outside its root (a dependency's checkout, say) therefore hears nothing from there; Edwin rarely
+  writes there, and the server reads those files itself.
+- **Choices made where the package left one open:**
+  - A change is sent at once, one notification a batch (a save, a look, a listing read again), not gathered over
+    a delay: the changes come from discrete actions, and the look already batches its buffers.
+  - The same change can be told twice: a file Edwin writes in a directory a followed listing shows is told by
+    the write and again, as created, when the listing is read again; a server reads the file again either way.
+  - A directory removed whole is told as the one deleted name; the files in it are not listed one by one.
+  - A string pattern not starting with `/` is matched relative to the root, where VS Code matches it against the
+    absolute path: `**/*.rs` matches the same files either way, and `*.toml` here means the root's own.
+- **Differences from Emacs:** eglot watches the directories a registration's globs reach through file
+  notifications (inotify), so it sees any program's change to any watched file; Edwin has no file notifications
+  (proc-auto-revert polls) and sees only the files it visits, the directories it lists and its own writes.
+- **Not in it:** files no buffer visits and no listing shows, changed by another program (the risk the package
+  names); a rename or copy by dired into a directory no listing shows (the source's listing tells the name gone,
+  nothing tells the new one); the writes vc-git makes straight to `host.files` (the rebase todo and message files
+  under `.git`); a modified buffer's file before it is saved; any registration other than watched files.
+  In edwinclient, edwind's notes (`H.servedPath`) are not left out by name: a frame's write there is told to a
+  frame-side server only when the notes lie under that server's root on the frame's machine, where the server
+  can read them anyway.
+- **Checked by**, on ex44 (the build host). On the first code (0a3b3e1 less one assertion), `nix flake check
+  --max-jobs 2` passed every check; then `nix build --max-jobs 2 .#edwin` passed (unit 41 and 3 ignored,
+  `tests/gui.rs` 5 and 1 ignored, `tests/terminal.rs` 39 and 1 ignored, the auto-revert terminal test among
+  them). After the first review (the suite's log read only to its last newline, a test of registration ids and
+  methods, `[^...]` tested), `nix build --max-jobs 2` of `.#checks.x86_64-linux.` `edwin-lsp` (145 passed: 12 of
+  them test/lsp-watched-files.test.mts), `edwin-typecheck`, `edwin-autorevert` (11 passed), `edit-dired` (26
+  passed) and, as editor-core.ts, editor-prims.ts and dired.ts load in edwind, `edit-lockdown` (6 passed) and
+  `edit-security` (21 passed). After the second review (a test for each of the four guards named below, no code
+  changed), on the final code, `nix build --max-jobs 2` of `edwin-lsp` (146 passed, 0 failed, none skipped: 13 of
+  them test/lsp-watched-files.test.mts, new), `edwin-typecheck`, `edwin-autorevert` (11 passed) and `edit-dired`
+  (26 passed), the counts from `nix log`; the full flake check and `.#edwin` were not run again after the first
+  code (the later code differs from it only in the suite, this entry and a comment in nix/checks.nix). The final
+  suite alone, with the flake's nodejs (24.21.0) and a throwaway HOME, XDG_RUNTIME_DIR and TMPDIR, passed 30
+  runs of 30.
+  test/lsp-watched-files.test.mts (13), against a stand-in (node) that logs each
+  message and sends what a `test/send` notification gives it, over a real directory with host.files shaped as
+  host-native.ts's (stamps, `temp`, a tree); absence shown by a watched sentinel written after the change. The
+  stand-in may be writing the log's last line while the suite reads it, so the suite parses only the lines
+  before the last newline (a part line written by hand is not read):
+  - the capability offered; with no watcher `Ed.hooks.filesChanged` unset and a write asking no `exists`; once
+    one registers, the hook set and a write told as created;
+  - saves: an existing file changed, a new one created, a file of a mode with no server reached, another name
+    and a `.fake` outside the root not told; `Ed.Store.del` of a file there deleted, of one not there nothing;
+  - kinds 1, 2, 4 and 0, each over a create, a change and a delete;
+  - a relative pattern by URI and by workspace folder (`*` within its segment, not under the base nothing), a
+    base outside the root nothing, an absolute pattern, a string pattern relative to the root (`top/*.fake`);
+    `/**` telling a file under the root and not one in HOME;
+  - auto-revert's look: changed (the buffer reverted), deleted once over two looks, back as created, a save
+    then a look told once, gone and back with the same stamp told as deleted then created, a file visited
+    before it existed not told deleted by the looks before it is there and created once it is, a modified
+    buffer's file not told;
+  - a followed dired listing: another program's new and removed names, then dired's own D and y; a listing cut
+    at 10000 names read again (`dired-revert`) with another set kept telling nothing;
+  - a listing opened (a directory with a name of a space in it) telling nothing, then a name made there told;
+    a listing read again and now cut (a name past the cut still there) telling nothing, read again and no
+    longer cut (the names kept out of the cut there all along) telling nothing, and the next read telling again;
+  - unregistering one id (the sentinel's kept), a killed child started again holding none (the hook unset, a
+    write not told until it registers again), a shutdown dropping them;
+  - registrations: watchers registered for another method, or under a number id, not kept; an id given again
+    replacing its watchers (the first ones no longer told), and within the 256 (254 under one id, then 254 others
+    under the same id, all kept); an unregistration of another method with a watched id keeping its watchers;
+  - nothing under the temporary directory or in a --private session, the same file told outside it;
+  - the bounds: `kind` 9, a non-string pattern, 1025 characters, an unclosed brace, 128 alternatives, an http
+    base and a string dropped beside a watcher kept; 300 watchers keeping 254 beside the 2 held;
+  - the globs through `Ed.lsp.globMatches` (each syntax, `[!...]` and `[^...]`, the refusals, 64 alternatives
+    kept), and two patterns a backtracking matcher takes exponential time on answered within a second.
+  Each guard was also taken out (or its value changed) and the suite run alone: every one made a test fail: the
+  `looksAt` filter, the root confinement, the deleted-once flag, the created-on-return, created for a stamp that
+  was null, changed versus created on a write, the `exists` asked only while watched, a removal told only of a
+  file that was there, the hook set only with watchers, the unwatch in `lost` and in `shutdown`, the unregister,
+  the kind bits, the kind's range, the base's `file:` URI, the pattern's length, the unclosed brace, the
+  alternatives bound, the session's 256, `?` and sets not matching `/`, the relative pattern being the root's,
+  the listing's diff being told; after the first review, each in a scratch copy of that code: the method filter
+  in `register`, the string-id check, the `s.watched.delete(id)` before a registration is counted, the method
+  filter in `unregister`, the `^` of `[^...]`, and the suite's reading of the log only to its last newline. The
+  second review found four guards no test covered one at a time (the suite passed with each taken out alone):
+  `fill`'s `b.autoRevert` (without it, opening a listing, whose first fill diffs against no names, tells every
+  name in the directory as created), its `!d.truncated` and its `!l.truncated` (the cut-listing test had both
+  true, so each alone was unproved; without one, a listing crossing the bound tells the names the cut keeps out as
+  deleted or as created) and the look's `b.disk.stamp !== null` (without it, a buffer visiting a file not yet
+  there is told deleted at the next look). The tests above cover them; each of the four was then taken out alone
+  in a scratch copy of the final tree (both the .ts and the stripped .js) and the suite run alone: each made
+  exactly its test fail (12 passed, 1 failed), the changes told being the fault named here. Two guards first written were
+  deleted as redundant, untestable: an unwatch at each start (a start
+  again always follows `lost` or a new session, both of which have none), and a check that a listing read again
+  is of the same directory (a dired buffer only ever lists its own); and a generation check on the registration
+  request (an old child's request after `lost` can only fill a session that is not running or is replaced, which
+  nothing reads).
 ## Backends declared in init.scm reach edwind's models (done)
 
 Asked 2026-11-16 (the Emacs-to-Edwin plan, package `ai-init-backends`): make sure a backend declared in the owner's

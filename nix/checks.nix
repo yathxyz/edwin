@@ -338,7 +338,15 @@ in
   # settings as JSON or from a procedure of the root, answered by section to workspace/configuration and sent in
   # workspace/didChangeConfiguration, refused when they are no JSON; nixd's per root; and the table's own nixd,
   # pyright and harper-ls, found on PATH as the table names them (EDWIN_LSP_SERVERS=1): definitions and an undefined
-  # name from the first two, a misspelling in a Markdown file from harper-ls.
+  # name from the first two, a misspelling in a Markdown file from harper-ls. test/lsp-watched-files.test.mts,
+  # watched files: the capability offered; a stand-in registering glob watchers (strings, relative to a base by URI
+  # or workspace folder, absolute) and told of the changes of Ed.Store's writes and removals, auto-revert's looks
+  # (changed, deleted once, back as created; a file not yet there never deleted; a modified buffer not looked at)
+  # and a dired listing read again (not one opened, nor one cut before or after the read), by kind; nothing
+  # outside the root for a relative pattern, under the temporary directory or in a
+  # --private session; unregistering, a start again and a shutdown dropping the watchers; only watched-files
+  # registrations under a string id kept, an id given again replacing its watchers; the hook unset with none;
+  # malformed and oversized watchers dropped, 256 alternatives a session; the glob syntax, in linear time.
   edwin-lsp =
     pkgs.runCommand "edwin-lsp"
       {
@@ -351,7 +359,7 @@ in
       }
       ''
         export HOME=$TMPDIR NODE_PATH=${devDeps}/node_modules EDWIN_LSP_REAL=${lib.getExe pkgs.nil} EDWIN_LSP_SERVERS=1
-        node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts ${edwin}/edwin/test/lsp-servers.test.mts
+        node --test ${edwin}/edwin/test/lsp-rpc.test.mts ${edwin}/edwin/test/lsp.test.mts ${edwin}/edwin/test/lsp-docs.test.mts ${edwin}/edwin/test/lsp-xref.test.mts ${edwin}/edwin/test/lsp-eldoc.test.mts ${edwin}/edwin/test/lsp-diagnostics.test.mts ${edwin}/edwin/test/lsp-rename.test.mts ${edwin}/edwin/test/lsp-completion.test.mts ${edwin}/edwin/test/lsp-code-actions.test.mts ${edwin}/edwin/test/lsp-symbols.test.mts ${edwin}/edwin/test/lsp-servers.test.mts ${edwin}/edwin/test/lsp-watched-files.test.mts
         touch $out
       '';
 

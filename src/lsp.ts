@@ -64,7 +64,11 @@
    Symbols (docs/steps.md, "Symbols"): consult-imenu in a buffer whose server gives document symbols lists the
    server's (textDocument/documentSymbol), else the buffer's own definitions as before; consult-eglot-symbols (SPC p
    s) asks the buffer's server for the workspace's symbols matching what is typed (workspace/symbol), asked again
-   timing.symbols after each change, and visits the one chosen as a definition is visited. */
+   timing.symbols after each change, and visits the one chosen as a definition is visited.
+
+   Watched files (docs/steps.md, "Watched files"): a server's workspace/didChangeWatchedFiles registrations are
+   kept, and each running server is told of the changes its globs match that Edwin makes (Ed.Store's writes and
+   removals) or sees (auto-revert's looks at the visited files, a followed dired listing read again). */
 (function () {
 'use strict';
 const L = globalThis.L, Ed = globalThis.Ed, E = Ed.E, H = Ed.hooks;
@@ -118,6 +122,8 @@ interface Session extends LspSession {
   done: Promise<void> | null;
   /* what the server last published, by absolute path */
   diags: Map<string, Diag[]>;
+  /* the files its server watches (workspace/didChangeWatchedFiles), by registration id */
+  watched: Map<string, Watcher[]>;
 }
 
 /* How a server wants documents synced (its textDocumentSync): whether opening and closing are told, changes as
@@ -217,8 +223,8 @@ function serverRequests(s: Session): Record<string, (params: unknown) => unknown
     },
     'workspace/workspaceFolders': () => [{ uri: uri(s.root), name: s.root.split('/').pop() || s.root }],
     'workspace/applyEdit': (p: unknown) => serverEdit(s, p),
-    'client/registerCapability': () => null,
-    'client/unregisterCapability': () => null,
+    'client/registerCapability': (p: unknown) => { register(s, p); return null; },
+    'client/unregisterCapability': (p: unknown) => { unregister(s, p); return null; },
     'window/workDoneProgress/create': () => null,
     'window/showMessageRequest': () => null,
   };
@@ -246,7 +252,10 @@ function initializeParams(s: Session) {
     workspaceFolders: [{ uri: uri(s.root), name }],
     capabilities: {
       general: { positionEncodings: ['utf-16'] },
-      workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true }, applyEdit: true, executeCommand: {}, symbol: { symbolKind } },
+      workspace: {
+        configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true }, applyEdit: true, executeCommand: {}, symbol: { symbolKind },
+        didChangeWatchedFiles: { dynamicRegistration: true, relativePatternSupport: true },
+      },
       textDocument: {
         synchronization: { didSave: true },
         definition: { linkSupport: true }, declaration: { linkSupport: true }, typeDefinition: { linkSupport: true },
@@ -305,7 +314,7 @@ function lost(s: Session, gen: number, why: string) {
   if (s.gen !== gen || s.state === 'stopping' || s.state === 'stopped') return;
   s.gen++;
   const { proc, conn } = s;
-  s.proc = null; s.conn = null; s.capabilities = null;
+  s.proc = null; s.conn = null; s.capabilities = null; unwatch(s);
   if (conn) conn.close(why);
   if (proc) proc.kill('KILL');
   dropDiags(s);
@@ -336,7 +345,7 @@ function shutdown(s: Session): Promise<void> {
   clearTimers(s);
   if (sessions.get(s.key) === s) sessions.delete(s.key);
   for (const b of s.buffers) if (ofBuffer.get(b) === s) { ofBuffer.delete(b); forgetDoc(b); forgetEldoc(b); forgetCompletion(b); unplace(b); setFlag(b, false); }
-  dropDiags(s);
+  dropDiags(s); unwatch(s);
   s.buffers.clear();
   const wasRunning = s.state === 'running';
   s.state = 'stopping';
@@ -499,6 +508,199 @@ H.wrote = (b, name) => {
   try { d.s.conn!.notify('textDocument/didSave', params); } catch (e) { /* lost */ }
 };
 
+/* ---- watched files ----
+   A server registers the files it wants to hear of (client/registerCapability for
+   workspace/didChangeWatchedFiles: glob patterns, each a string or relative to a base, with the kinds of change
+   it wants) and is told of each change Edwin makes or sees there: a file written or deleted through Ed.Store
+   (editor-core.ts), a visited file that global-auto-revert-mode's look finds changed, gone or back
+   (editor-prims.ts), and a name that comes or goes in a directory listing read again (dired.ts). There is no
+   inotify: a file no buffer visits and no listing shows changes unseen. Nothing is told of a path auto-revert does not look at
+   (Ed.looksAt: a --private session, the temporary directory). The registrations are the child's: a start again
+   or a shutdown drops them, and a new child registers its own. The patterns are the server's text, so they are
+   bounded (PATTERN_MAX characters, ALTERNATIVES_MAX alternatives of its braces, WATCHED_MAX alternatives in all
+   per session) and matched without backtracking. */
+const PATTERN_MAX = 1024, ALTERNATIVES_MAX = 64, WATCHED_MAX = 256;
+type GlobPart = { t: 'char'; c: string } | { t: '?' } | { t: '*' } | { t: '**' } | { t: '**/' } | { t: 'set'; not: boolean; ranges: [string, string][] };
+/* One alternative of a pattern: its parts, and whether it names absolute paths. */
+interface GlobAlt { abs: boolean; parts: GlobPart[] }
+/* A watcher: its alternatives, matched against a path relative to BASE (null: the absolute path for an absolute
+   alternative, else relative to the session's root), and the kinds it wants as LSP's WatchKind bits (create 1,
+   change 2, delete 4). */
+interface Watcher { base: string | null; alts: GlobAlt[]; kind: number }
+
+/* P with its braces expanded ({a,b} nested to any depth), at most ALTERNATIVES_MAX of them; null for a brace not
+   closed or more alternatives than that. */
+function braces(p: string): string[] | null {
+  const i = p.indexOf('{');
+  if (i < 0) return [p];
+  const cuts = [i];
+  let depth = 0, j = i;
+  for (; j < p.length; j++) {
+    if (p[j] === '{') depth++;
+    else if (p[j] === '}' && --depth === 0) break;
+    else if (p[j] === ',' && depth === 1) cuts.push(j);
+  }
+  if (j === p.length) return null;
+  cuts.push(j);
+  const rest = braces(p.slice(j + 1));
+  if (!rest) return null;
+  const out: string[] = [];
+  for (let k = 0; k + 1 < cuts.length; k++) {
+    const inner = braces(p.slice(cuts[k] + 1, cuts[k + 1]));
+    if (!inner) return null;
+    for (const a of inner) for (const r of rest) { if (out.length === ALTERNATIVES_MAX) return null; out.push(p.slice(0, i) + a + r); }
+  }
+  return out;
+}
+/* The parts of one alternative: * within a segment, ** across them (**\/ any leading segments, none too), ? one
+   character of a segment, [...] and [!...] one character of a set or not of it (a ] first is a member, a [ never
+   closed is itself), anything else itself. */
+function globParts(p: string): GlobPart[] {
+  const out: GlobPart[] = [];
+  for (let i = 0; i < p.length;) {
+    const c = p[i];
+    if (c === '*' && p[i + 1] === '*') {
+      if (p[i + 2] === '/') { out.push({ t: '**/' }); i += 3; } else { out.push({ t: '**' }); i += 2; }
+    } else if (c === '*') { out.push({ t: '*' }); i++; }
+    else if (c === '?') { out.push({ t: '?' }); i++; }
+    else if (c === '[') {
+      let j = i + 1;
+      const not = p[j] === '!' || p[j] === '^';
+      if (not) j++;
+      const end = p.indexOf(']', j + 1);
+      if (end < 0) { out.push({ t: 'char', c }); i++; continue; }
+      const ranges: [string, string][] = [];
+      for (let k = j; k < end; k++) {
+        if (p[k + 1] === '-' && k + 2 < end) { ranges.push([p[k], p[k + 2]]); k += 2; } else ranges.push([p[k], p[k]]);
+      }
+      out.push({ t: 'set', not, ranges });
+      i = end + 1;
+    } else { out.push({ t: 'char', c }); i++; }
+  }
+  return out;
+}
+/* Whether PARTS match all of S: the places in S each part can end at, worked out part by part, so the time is the
+   parts times S's length whatever the pattern. */
+function globMatch(parts: GlobPart[], s: string): boolean {
+  const n = s.length;
+  let at = new Uint8Array(n + 1);
+  at[0] = 1;
+  for (const g of parts) {
+    const nx = new Uint8Array(n + 1);
+    let any = false;
+    if (g.t === '*' || g.t === '**' || g.t === '**/') {
+      let on = false;
+      for (let q = 0; q <= n; q++) {
+        const slash = q > 0 && s.charCodeAt(q - 1) === 47;
+        if (g.t === '*') { if (slash) on = false; if (at[q]) on = true; if (on) nx[q] = 1; }
+        else if (g.t === '**') { if (at[q]) on = true; if (on) nx[q] = 1; }
+        else { if (slash && on) nx[q] = 1; if (at[q]) { nx[q] = 1; on = true; } }
+        if (nx[q]) any = true;
+      }
+    } else {
+      for (let q = 0; q < n; q++) {
+        if (!at[q]) continue;
+        const c = s[q];
+        const ok = g.t === 'char' ? c === g.c : c !== '/' && (g.t === '?' || g.ranges.some(([a, z]) => c >= a && c <= z) !== g.not);
+        if (ok) { nx[q + 1] = 1; any = true; }
+      }
+    }
+    if (!any) return false;
+    at = nx;
+  }
+  return at[n] === 1;
+}
+/* P (a path) relative to the directory D, or null when it is not under D. */
+function under(p: string, d: string): string | null {
+  const dd = d.replace(/\/+$/, '');
+  return p.startsWith(dd + '/') && p.length > dd.length + 1 ? p.slice(dd.length + 1) : null;
+}
+/* A FileSystemWatcher as the server gave it, or null when it is malformed or past the bounds. A relative pattern's
+   base is a file: URI or a workspace folder; its kind, absent, is every kind. */
+function watcherOf(w: unknown): Watcher | null {
+  if (!w || typeof w !== 'object') return null;
+  const { globPattern: g, kind } = w as { globPattern?: unknown; kind?: unknown };
+  let base: string | null = null, pattern: unknown = g;
+  if (g && typeof g === 'object') {
+    const { baseUri: bu, pattern: pt } = g as { baseUri?: unknown; pattern?: unknown };
+    const u = typeof bu === 'string' ? bu : bu && typeof bu === 'object' ? (bu as { uri?: unknown }).uri : undefined;
+    base = typeof u === 'string' ? pathOf(u) : null;
+    if (!base) return null;
+    pattern = pt;
+  }
+  if (typeof pattern !== 'string' || !pattern || pattern.length > PATTERN_MAX) return null;
+  if (kind !== undefined && !(Number.isSafeInteger(kind) && (kind as number) >= 0 && (kind as number) <= 7)) return null;
+  const alts = braces(pattern);
+  if (!alts) return null;
+  return { base, alts: alts.map(a => ({ abs: base === null && a.startsWith('/'), parts: globParts(a) })), kind: kind === undefined ? 7 : kind as number };
+}
+const WATCH_METHOD = 'workspace/didChangeWatchedFiles';
+/* client/registerCapability: S's server's watchers kept by registration id, past WATCHED_MAX alternatives in
+   all the rest dropped; a malformed watcher is dropped, the others kept. Other methods are not taken up. */
+function register(s: Session, params: unknown) {
+  const regs = params && typeof params === 'object' ? (params as { registrations?: unknown }).registrations : undefined;
+  if (!Array.isArray(regs)) return;
+  for (const r of regs) {
+    if (!r || typeof r !== 'object') continue;
+    const { id, method, registerOptions: o } = r as { id?: unknown; method?: unknown; registerOptions?: unknown };
+    if (method !== WATCH_METHOD || typeof id !== 'string') continue;
+    s.watched.delete(id);
+    const ws = o && typeof o === 'object' ? (o as { watchers?: unknown }).watchers : undefined;
+    if (!Array.isArray(ws)) continue;
+    let count = 0;
+    for (const v of s.watched.values()) for (const w of v) count += w.alts.length;
+    const kept: Watcher[] = [];
+    for (const x of ws) {
+      const w = watcherOf(x);
+      if (!w || count + w.alts.length > WATCHED_MAX) continue;
+      count += w.alts.length;
+      kept.push(w);
+    }
+    s.watched.set(id, kept);
+  }
+  rewatch();
+}
+/* client/unregisterCapability (its list is `unregisterations`, as LSP spells it). */
+function unregister(s: Session, params: unknown) {
+  const us = params && typeof params === 'object' ? (params as { unregisterations?: unknown }).unregisterations : undefined;
+  if (!Array.isArray(us)) return;
+  for (const u of us) if (u && typeof u === 'object' && (u as { method?: unknown }).method === WATCH_METHOD) s.watched.delete((u as { id?: unknown }).id as string);
+  rewatch();
+}
+function unwatch(s: Session) { if (s.watched.size) { s.watched.clear(); rewatch(); } }
+/* Whether S's watchers want a change of TYPE (1 created, 2 changed, 3 deleted) to the absolute path P. Only a path
+   under S's root is ever told, whatever the pattern: a server registering an absolute pattern or a base elsewhere
+   (`/**`) does not hear of the other files Edwin writes on this machine. */
+function watches(s: Session, p: string, type: number) {
+  if (under(p, s.root) === null) return false;
+  const bit = type === 1 ? 1 : type === 2 ? 2 : 4;
+  for (const ws of s.watched.values()) for (const w of ws) {
+    if (!(w.kind & bit)) continue;
+    const rel = w.base !== null ? under(p, w.base) : under(p, s.root);
+    for (const a of w.alts) {
+      const t = a.abs ? p : rel;
+      if (t !== null && globMatch(a.parts, t)) return true;
+    }
+  }
+  return false;
+}
+/* The changes CHANGES (absolute paths) told to each running server that watches them, one notification a server. */
+function filesChanged(changes: { path: string; type: 1 | 2 | 3 }[]) {
+  try {
+    const looked = changes.filter(c => Ed.looksAt(c.path));
+    for (const s of sessions.values()) {
+      if (s.state !== 'running' || !s.conn || !s.watched.size) continue;
+      const out = looked.filter(c => watches(s, c.path, c.type)).map(c => ({ uri: uri(c.path), type: c.type }));
+      if (out.length) try { s.conn.notify(WATCH_METHOD, { changes: out }); } catch (e) { /* lost */ }
+    }
+  } catch (e) { Ed.message(`eglot: ${Ed.errorText(e)}`); }
+}
+/* The hook is set only while some server watches files, so with none a write, a look and a listing do no more
+   than before. */
+function rewatch() {
+  H.filesChanged = [...sessions.values()].some(s => s.watched.size) ? filesChanged : null;
+}
+
 /* B on the session its server and root give now: it stays where it is when that is its session (its document
    opened again when its file or mode changed), else it is detached and attached afresh; with no server for its
    mode (or no root), detached. Nothing changes where no process may start (the image's replay, a web frame,
@@ -552,7 +754,7 @@ function open(server: LspServer, root: string): Session {
   const s: Session = {
     key: `${server.name}\0${root}`, name: server.name, root, argv: server.argv.slice(), settings, state: 'starting', proc: null,
     conn: null, capabilities: null, buffers: new Set(), restarts: 0, started: 0, why: null, gen: 0, timer: null,
-    idle: null, waiters: [], err: '', done: null, diags: new Map(),
+    idle: null, waiters: [], err: '', done: null, diags: new Map(), watched: new Map(),
   };
   launch(s);
   sessions.set(s.key, s);
@@ -2217,6 +2419,8 @@ Ed.lsp = {
   timing, uri, define, serverFor, rootOf, start, ready, shutdown, shutdownAll, reconnect, flush, languageId,
   servers: () => [...servers.values()],
   sessions: () => [...sessions.values()],
+  /* the suites: whether PATTERN (a server's glob, braces expanded) matches the path P; null for a pattern refused */
+  globMatches: (pattern, p) => { const w = watcherOf({ globPattern: pattern }); return w ? w.alts.some(a => globMatch(a.parts, p)) : null; },
   sessionOf: b => ofBuffer.get(b) || null,
   stderr: s => (s as Session).err.slice(-STDERR_MAX),
   diagnostics: b => {

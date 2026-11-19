@@ -40,12 +40,24 @@ const hooks: EdHooks = {};
 /* ---------- file store: the host's storage, under its own prefix ---------- */
 /* A host with a file system (host.files: the desktop shell, DT1) keeps files there instead: NAME is a path,
    read gives the text or null, write throws when the file cannot be written, list names the files that
-   completion offers. */
+   completion offers. While a language server watches files (hooks.filesChanged, lsp.ts), a write there is told
+   as the file made or changed, and a removal of a file that was there as it deleted. */
 const PFX = 'lmacs:file:';
 const Store = {
   get(n: string, max?: number) { return host.files ? host.files.read(n, max) : host.storage.get(PFX + n); },
-  set(n: string, v: string) { if (host.files) { host.files.write(n, v); return true; } return host.storage.set(PFX + n, v) !== false; },
-  del(n: string) { if (host.files) host.files.remove(n); else host.storage.remove(PFX + n); },
+  set(n: string, v: string) {
+    if (!host.files) return host.storage.set(PFX + n, v) !== false;
+    const told = hooks.filesChanged, had = told ? host.files.exists(n) : true;
+    host.files.write(n, v);
+    if (told) told([{ path: host.files.resolve(n), type: had ? 2 : 1 }]);
+    return true;
+  },
+  del(n: string) {
+    if (!host.files) { host.storage.remove(PFX + n); return; }
+    const told = hooks.filesChanged, had = !!told && host.files.exists(n);
+    host.files.remove(n);
+    if (told && had) told([{ path: host.files.resolve(n), type: 3 }]);
+  },
   list() { return host.files ? host.files.list() : host.storage.keys().filter(k => k.startsWith(PFX)).map(k => k.slice(PFX.length)).sort(); },
 };
 

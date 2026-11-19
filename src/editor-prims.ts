@@ -1371,11 +1371,15 @@ function disarmPoll() { if (poll !== null) { clearInterval(poll); poll = null; }
    own, so the look is skipped while one is still open: while a command runs (an operator waiting for its
    motion, a command waiting in the minibuffer) and, for its buffer, while an insert session is open. Taken
    into that step, the revert would be undone with it, the buffer left with the file's new stamp and older
-   text, and a save would write over the other program's version without asking. */
+   text, and a save would write over the other program's version without asking. While a language server watches
+   files (hooks.filesChanged) the look tells what it found: a file changed, made since it was visited, gone (once,
+   b.disk.gone), or back. A modified buffer's file is not looked at, so its change is told only by its save. */
 function autoRevert() {
   if (!truthy(L.get('global-auto-revert-enabled'))) { disarmPoll(); return 0; }
   if (E.running || E.mini) return 0;
   let looked = false, n = 0;
+  const told = Ed.hooks.filesChanged, changes: { path: string; type: 1 | 2 | 3 }[] = [];
+  const tell = (b: EdBuffer, type: 1 | 2 | 3) => { if (told) changes.push({ path: host.files!.resolve(b.file!), type }); };
   for (const b of E.buffers) {
     /* A buffer that is not a file's and follows by a look of its own (a dired listing): true when it is read
        again. */
@@ -1385,7 +1389,10 @@ function autoRevert() {
     if (b.modified || b.pendingUndo || (Ed.hooks.inSession && Ed.hooks.inSession(b))) continue;
     let now: string | null, text: string | null = null;
     try { now = host.files!.stamp!(b.file!); } catch (e) { continue; }
-    if (now === null || now === b.disk.stamp || now === b.disk.seen) continue;
+    if (now === null) { if (b.disk.stamp !== null && !b.disk.gone) { b.disk.gone = true; tell(b, 3); } continue; }
+    if (b.disk.gone) { delete b.disk.gone; tell(b, 1); }
+    else if (now !== b.disk.stamp && now !== b.disk.seen) tell(b, b.disk.stamp === null ? 1 : 2);
+    if (now === b.disk.stamp || now === b.disk.seen) continue;
     /* A version that cannot be read (not UTF-8, unreadable) is tried once, not on every look; the stamp stays,
        so a save over it still asks. */
     try { text = Ed.Store.get(b.file!); } catch (e) { /* below */ }
@@ -1399,6 +1406,7 @@ function autoRevert() {
     }
     b.disk = { stamp: now };
   }
+  if (changes.length) told!(changes);
   if (!looked) disarmPoll();
   if (n) Ed.scheduleRender();
   return n;

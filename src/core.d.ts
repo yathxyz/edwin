@@ -858,8 +858,9 @@ interface EdBuffer extends SchemeForeign {
   _foldVer?: number;
   _foldPre?: number[] | null;
   /* the visited file's stamp as the buffer last read or wrote it (host.files.stamp), and one a save over it
-     was allowed for, and one auto-revert could not read; absent when the file is not looked at (editor-prims.ts) */
-  disk?: { stamp: string | null; ok?: string; seen?: string };
+     was allowed for, and one auto-revert could not read, and whether a look found the file gone since; absent
+     when the file is not looked at (editor-prims.ts) */
+  disk?: { stamp: string | null; ok?: string; seen?: string; gone?: boolean };
   /* a directory listing (dired.ts) */
   dired?: unknown;
   /* the visited file's EditorConfig properties, as last read (editorconfig.ts) */
@@ -1410,6 +1411,9 @@ interface EdHooks {
   recentFiles?: (() => string[]) | null;
   visited?: ((b: EdBuffer, name: string, fresh: boolean) => void) | null;
   wrote?: ((b: EdBuffer, name: string) => void) | null;
+  /* files made (1), changed (2) or deleted (3), by absolute path, as Ed.Store's writes, global-auto-revert-mode's
+     looks and dired's listings see them; set only while a language server watches files (lsp.ts) */
+  filesChanged?: ((changes: { path: string; type: 1 | 2 | 3 }[]) => void) | null;
   /* redisplay: overlays, presence, a model frame's draw (complete.ts, stack.ts, sync.ts, display.ts) */
   renderOverlay?: ((f?: EdFrame) => void) | null;
   renderPresence?: ((f: EdFrame) => void) | null;
@@ -2554,6 +2558,8 @@ interface EdLspApi {
   languageId(mode: string): string;
   /* B's diagnostics where they are now in its text, by place: severity 1 (error) to 4, message, source and code */
   diagnostics(b: EdBuffer): { start: number; end: number; severity: number; message: string; source: string }[];
+  /* whether PATTERN, a watcher's glob, matches the path P as given; null for a pattern refused (the suites) */
+  globMatches(pattern: string, p: string): boolean | null;
 }
 
 /* vc-git.ts: the drawing git's buffers share, for the views of other version control (vc-jj.ts). A span is
