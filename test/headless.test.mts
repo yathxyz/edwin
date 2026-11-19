@@ -85,6 +85,75 @@ test('Insert, Normal, operators, undo and redo', async () => {
   assert.equal(ed.text(), 'hello there foo');
 });
 
+test('forward word motion inside a fold at EOF stays on the last visible line', async () => {
+  await fresh();
+  const b = ed.E.current, fold = { s: 4, e: 12 };
+  b.text = 'head\none two\n'; b.pt = 5;
+  ed.Ed.setBufferFolds(b, [fold]);
+  await ed.type('w');
+  assert.equal(b.pt, 3, 'no real line follows the fold: land on the last character of its header');
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
+});
+
+for (const mixed of [false, true]) {
+  test(`w in a native Org EOF fold still reaches EOF ${mixed ? 'alongside an owner fold' : 'without owner ranges'}`, async () => {
+    await fresh('org');
+    const b = ed.E.current, prefix = mixed ? 'call\nout\n' : '';
+    b.text = prefix + '* H\none two\n\n'; b.pt = prefix.length;
+    const owner = mixed ? [{ s: 4, e: 8 }] : [];
+    if (mixed) ed.Ed.setBufferFolds(b, owner);
+    await ed.type('zc');
+    const closed = [...owner, { s: prefix.length + 3, e: b.text.length - 1 }];
+    assert.deepEqual(ed.Ed.getBufferFolds(b), closed);
+    b.pt = b.text.indexOf('one') + 1;
+    await ed.type('w');
+    assert.equal(b.pt, b.text.length);
+    assert.deepEqual(ed.Ed.getBufferFolds(b), closed);
+  });
+}
+
+test('backward word motion into a closed Org subtree lands on the last character of its headline', async () => {
+  await fresh('org');
+  const b = ed.E.current;
+  b.text = '* Heading\nhidden words\n* End\n'; b.pt = 0;
+  await ed.type('zc');
+  b.pt = b.text.indexOf('* End');
+  await ed.type('b');
+  assert.equal(b.pt, b.text.indexOf('\n') - 1);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'hidden words')]);
+});
+
+test('forward-char from the last hidden newline of an owner fold avoids only the phantom row', async () => {
+  await fresh();
+  const b = ed.E.current, fold = { s: 4, e: 12 };
+  await ed.keys('C-z'); // In Emacs state, C-f is forward-char; Evil does not clamp point off EOF.
+  try {
+    b.text = 'head\none two\n'; b.pt = fold.e;
+    await ed.keys('C-f');
+    assert.equal(b.pt, 13, 'without a fold, forward-char reaches EOF');
+    for (const tail of ['next', '']) {
+      b.text = 'head\none two\n' + tail; b.pt = fold.e;
+      ed.Ed.setBufferFolds(b, [fold]);
+      assert.equal(b.pt, 12);
+      await ed.keys('C-f');
+      assert.equal(b.pt, tail ? fold.e + 1 : 3);
+      assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
+    }
+  } finally { await ed.keys('C-z'); }
+});
+
+test('shipped j from the last hidden logical line reaches the next visible line at the same column', async () => {
+  await fresh();
+  const b = ed.E.current;
+  b.text = 'head\nfirst hidden\nlast hidden\nvisible next\n';
+  const fold = { s: 4, e: b.text.indexOf('\nvisible') };
+  b.pt = b.text.indexOf('last hidden') + 2;
+  ed.Ed.setBufferFolds(b, [fold]);
+  await ed.type('j');
+  assert.equal(b.pt, b.text.indexOf('visible') + 2);
+  assert.deepEqual(ed.Ed.getBufferFolds(b), [fold]);
+});
+
 test('lines, counts, the dot command and a macro', async () => {
   await fresh();
   await ed.type('ione'); await ed.keys('ESC');
@@ -103,6 +172,50 @@ test('ex commands: substitute, global and sort', async () => {
   await ed.type(':%s/^/x/\n:sort!\n'); assert.equal(ed.text(), 'xfig\nxaPPle\nxPear');
   await ed.type(':g/fig/d\n'); assert.ok(!ed.text().includes('fig'));
 });
+
+// A one-line body followed by another heading: both endpoints are newline offsets.
+function bodyFold(text: string, body: string) {
+  const s = text.indexOf(`\n${body}\n`);
+  assert.notEqual(s, -1, body);
+  return { s, e: s + body.length + 1 };
+}
+
+test(':%s shifts unchanged Org folds, opens changed ones, and does not retain owner ranges', async () => {
+  for (const mixed of [false, true]) {
+    await fresh('org');
+    const b = ed.E.current;
+    b.text = 'hit\n* Keep\nunchanged\n* Open\nhit again\n* Source\nowned\n* End\n';
+    const owner = mixed ? [bodyFold(b.text, 'owned')] : [];
+    if (mixed) ed.Ed.setBufferFolds(b, owner);
+    for (const h of ['* Keep', '* Open']) { b.pt = b.text.indexOf(h); await ed.type('zc'); }
+    assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'unchanged'), bodyFold(b.text, 'hit again'), ...owner]);
+    await ed.type(':%s/hit/longer/\n');
+    assert.equal(b.text, 'longer\n* Keep\nunchanged\n* Open\nlonger again\n* Source\nowned\n* End\n');
+    assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'unchanged')]);
+  }
+});
+
+for (const [command, expected] of [
+  ['org-promote-subtree', '* Parent\n* Target\n** Keep\nkept\n** Source\nowned\n** Peer\npeer\n* End\n'],
+  ['org-move-subtree-down', '* Parent\n** Peer\npeer\n** Target\n*** Keep\nkept\n*** Source\nowned\n* End\n'],
+]) {
+  test(`${command} keeps the native folds attached to their headings and discards owner ranges`, async () => {
+    for (const mixed of [false, true]) {
+      await fresh('org');
+      const b = ed.E.current;
+      b.text = '* Parent\n** Target\n*** Keep\nkept\n*** Source\nowned\n** Peer\npeer\n* End\n';
+      const owner = mixed ? [bodyFold(b.text, 'owned')] : [];
+      if (mixed) ed.Ed.setBufferFolds(b, owner);
+      for (const h of ['*** Keep', '** Peer']) { b.pt = b.text.indexOf(h); await ed.type('zc'); }
+      assert.deepEqual(ed.Ed.getBufferFolds(b), [bodyFold(b.text, 'kept'), ...owner, bodyFold(b.text, 'peer')]);
+      b.pt = b.text.indexOf('** Target');
+      ed.eval(`(${command})`);
+      assert.equal(b.text, expected);
+      const native = ['kept', 'peer'].map(body => bodyFold(b.text, body));
+      assert.deepEqual(ed.Ed.getBufferFolds(b), native.sort((a, z) => a.s - z.s));
+    }
+  });
+}
 
 test('a malformed name in evil-ex-commands leaves the other ex commands working', async () => {
   await fresh();
@@ -139,6 +252,110 @@ test('every edit lands in the delta log that edwind will send', async () => {
   let t = '';
   for (const e of log) { assert.equal(t.slice(e.pos, e.pos + e.del.length), e.del); t = t.slice(0, e.pos) + e.ins + t.slice(e.pos + e.del.length); }
   assert.equal(t, ed.text());
+});
+
+test('the owner replaces a read-only buffer’s folds in UTF-16 offsets without editing or selecting it', async () => {
+  await fresh();
+  const { Ed, E } = ed, b = E.current;
+  b.text = 'tool 🧠\nfirst\nthought\ndetails 💡\nlast';
+  await ed.type('GA!'); await ed.keys('ESC');
+  await ed.type('A?'); await ed.keys('ESC'); await ed.type('u');
+  await ed.type(':w\n');
+  assert.equal(b.modified, false);
+  assert.ok(b.undo.length && b.redo.length);
+  await fresh(); // The host can fold a transcript while the user edits another buffer.
+  const current = E.current, win = E.sel;
+  b.readOnly = true; b.pt = 10; b.mark = 26; b.markActive = true;
+  const state = () => structuredClone({ text: b.text, ver: b.ver, log: b.log, undo: b.undo, redo: b.redo,
+    modified: b.modified, readOnly: b.readOnly, pt: b.pt, mark: b.mark, active: b.markActive });
+  const before = state(), first = { s: 7, e: 13 }, second = { s: 21, e: 32 };
+  const ranges = [{ ...first }, { ...second }];
+  Ed.setBufferFolds(b, ranges);
+  ranges[0].s = -1; ranges.pop();
+  const view = Ed.getBufferFolds(b);
+  assert.deepEqual(view, [first, second]);
+  view[1].e = -1; view.shift();
+  assert.deepEqual(Ed.getBufferFolds(b), [first, second]);
+  assert.deepEqual(state(), before, 'point and the active mark remain inside the hidden lines');
+  Ed.setBufferFolds(b, [second]);
+  assert.deepEqual(Ed.getBufferFolds(b), [second]);
+  Ed.setBufferFolds(b, []);
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+  assert.deepEqual(state(), before);
+  assert.equal(E.current, current); assert.equal(E.sel, win);
+});
+
+test('invalid fold lists are refused as a whole, not sorted, clipped or rounded to line boundaries', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\nd\ne\nf\ntail';
+  const keep = { s: 9, e: 11 }, a = { s: 1, e: 5 }, z = { s: 7, e: 9 };
+  Ed.setBufferFolds(b, [keep]);
+  for (const bad of [
+    null, [null], [{}], [z, a], [a, a], [a, { s: 3, e: 7 }], [a, { s: 5, e: 7 }],
+    [{ s: -1, e: 3 }], [{ s: 3, e: 3 }], [{ s: 5, e: 3 }], [{ s: 1.5, e: 3 }],
+    [{ s: 0, e: 3 }], [{ s: 1, e: 4 }], [{ s: 9, e: b.text.length }], [{ s: 9, e: b.text.length + 1 }],
+    [a, { s: 7, e: NaN }], [a, { s: '7', e: 9 }],
+  ]) {
+    assert.throws(() => Ed.setBufferFolds(b, bad), JSON.stringify(bad));
+    assert.deepEqual(Ed.getBufferFolds(b), [keep]);
+  }
+});
+
+test('a nonnumeric fold array length cannot replace the current folds', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\n';
+  const keep = [{ s: 1, e: 3 }];
+  Ed.setBufferFolds(b, keep);
+  const bad = new Proxy([], { get: (target, k) => k === 'length' ? '0' : Reflect.get(target, k) });
+  for (const input of [{ length: '0' }, bad]) {
+    assert.throws(() => Ed.setBufferFolds(b, input));
+    assert.deepEqual(Ed.getBufferFolds(b), keep);
+  }
+});
+
+test('a fold input that shrinks during the call cannot publish a partial list', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\nd\n';
+  const keep = [{ s: 5, e: 7 }];
+  Ed.setBufferFolds(b, keep);
+  const input = [{ get s() { input.pop(); return 1; }, e: 3 }, { s: 5, e: 7 }];
+  assert.throws(() => Ed.setBufferFolds(b, input));
+  assert.deepEqual(Ed.getBufferFolds(b), keep);
+});
+
+test('fold offsets are validated after all caller-owned properties have been read', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  b.text = 'a\nb\nc\nd\n';
+  const input = [{ s: 1, e: 3 }, { get s() { b.text = 'abc\ne\nf\n'; return 5; }, e: 7 }];
+  assert.throws(() => Ed.setBufferFolds(b, input));
+  assert.deepEqual(Ed.getBufferFolds(b), []);
+});
+
+test('za toggles exact owner ranges without an outline; clear and edits forget even open ranges', async () => {
+  await fresh();
+  const { Ed } = ed, b = ed.E.current;
+  ed.eval('(fundamental-mode)');
+  b.text = 'call\noutput\nthought\nresult\nafter';
+  const call = { s: 4, e: 11 }, thought = { s: 19, e: 26 };
+  b.pt = 2;
+  Ed.setBufferFolds(b, [call, thought]);
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [thought]);
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [call, thought]);
+  Ed.setBufferFolds(b, []);
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [], 'no old definition to close');
+
+  Ed.setBufferFolds(b, [call, thought]);
+  await ed.type('za'); // One open definition and one closed fold when the remote edit arrives.
+  Ed.applyOps(b, [[b.text.length, '', '!']], 'remote');
+  assert.deepEqual(Ed.getBufferFolds(b), [], 'an edit even outside the ranges drops the closed fold');
+  await ed.type('za'); assert.deepEqual(Ed.getBufferFolds(b), [], 'it drops the open definition too');
+  Ed.setBufferFolds(b, [call]);
+  b.text = 'new transcript';
+  assert.deepEqual(Ed.getBufferFolds(b), []);
 });
 
 test('Scheme: define a command, bind it, run it from a key', async () => {

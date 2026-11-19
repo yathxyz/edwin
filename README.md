@@ -51,6 +51,40 @@ stale `.js`) and the nix packages all strip first. In a checkout:
 `host-node.cts` loads a `.js` only when it is at least as new as its `.ts`, and strips the `.ts` itself otherwise,
 so edwind and the suites need no step. `src/host-node.cts` is checked with the server (`tsc -p .`).
 
+## Host-supplied folds
+
+`Ed.setBufferFolds(buffer, ranges)` replaces the closed folds in every window on that buffer, including
+read-only buffers. For example, on `"Tool\noutput\nNext\n"`, `[{s: 4, e: 11}]` leaves `Tool` and `Next`
+visible. Both offsets count UTF-16 code units from zero and must point to actual newline characters.
+Pass a plain array of plain `{s, e}` objects, ordered and disjoint (`s < e`, then `e < next.s`).
+Invalid ranges throw without replacing the previous folds. Getters or proxies that edit the buffer or
+call the setter during a read are unsupported: the setter never publishes a malformed list, but it
+cannot undo those side effects. `[]` clears the folds. If there are neither closed folds nor owner
+targets, `[]` does nothing: it preserves the outline cycle and does not queue a draw. The setter neither
+selects the buffer nor edits it. Point, mark and selection stay at their text offsets, even if hidden;
+subsequent navigation uses the usual fold rules.
+
+`Ed.getBufferFolds(buffer)` returns a detached list of the currently closed `{s, e}` ranges, including
+folds made by the mode (which can also end at EOF). Immediately after a successful setter, that list is
+exactly the supplied offsets in order. In Org and Markdown, fold-all closes the owner ranges and adds
+disjoint outline folds; an overlapping outline fold does not replace an owner range. Normal-state `za`
+toggles a supplied fold without requiring a heading; an explicit mode binding still takes precedence.
+`zo` and `zO` open a closed owner fold directly. With the owner target open, they use the outline
+command at point, even if a native fold has exactly the owner's offsets. Direct owner toggles and
+undo redraw on the next frame without waiting for a pending keyboard command to finish.
+With owner ranges, a keyboard fold command may draw the same state twice: once from the input loop
+and once from the queued draw. Buffers without owner ranges draw as before.
+
+An edit, including undo or a remote edit, forgets the supplied ranges, open or closed. After appending
+text, reinstall the full list inside the same `Ed.runCallback` as the append. It renders in `finally`:
+wrapping only the append can show one unfolded frame. Without `Ed.runCallback`, keep both calls in
+the same task with no synchronous render between them. Mode-created folds follow the mode's usual edit rules.
+
+Org highlighting looks back at most 65,536 UTF-16 code units from the start of a window. If an owner
+fold hides a block opener and more than that much text after it, a window starting beyond the fold
+can highlight the following lines differently from one starting at the heading. Folding does not
+build a block index.
+
 ## Layout
 
 | Path | What |

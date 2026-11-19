@@ -104,7 +104,10 @@
   "g l" 'org-next-visible-heading
   "M-RET" 'org-meta-return)
 
-;; Vim's fold keys fold outlines too, as evil-fold-list makes them do in Org and Markdown buffers.
+;; Checked after ordinary keymaps in Normal and Motion state, only in buffers with supplied targets.
+(define owner-fold-map (make-sparse-keymap "owner-fold-map"))
+(define-key owner-fold-map "z a" 'evil-toggle-fold)
+;; Vim's fold keys apply directly to Org and Markdown outlines, even without supplied targets.
 (for-each (lambda (mode)
             (evil-define-key 'normal mode
               "z a" 'evil-toggle-fold
