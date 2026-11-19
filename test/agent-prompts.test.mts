@@ -328,6 +328,50 @@ test('an oversized file cannot be embedded into a draft', async () => {
   assert.deepEqual((await value('agent-prompt-preview', [id])).blocks, [{ type: 'text', text: 'small' }]);
 });
 
+test('direct prompt retries cannot repeat an acknowledged or ambiguous submission after a crash', async () => {
+  const sid = 'direct-receipts', epoch = hub.add(sid).createdAt, text = 'deliberately repeatable text';
+  const send = (submissionId: string, body = text) => client.call('agent-session-prompt', [sid, { epoch, text: body, submissionId }]);
+  const route = `/v1/sessions/${sid}/prompt`, posts = () => hub.calls.filter(c => c.method === 'POST' && c.path === route);
+  const original = hub.handle.bind(hub); let outcome: 'normal' | 'lost' | 'busy' = 'normal';
+  hub.handle = async (req, res) => {
+    if (req.method !== 'POST' || req.url !== route || outcome === 'normal') return original(req, res);
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    hub.calls.push({ method: req.method, path: req.url, body: JSON.parse(raw) });
+    if (outcome === 'lost') { res.destroy(); return; }
+    res.writeHead(409, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: 'busy' }));
+  };
+  try {
+    assert.equal((await send('first-click')).error, undefined);
+    outcome = 'lost'; assert.ok((await send('second-click')).error);
+    assert.equal(posts().length, 2);
+    client.close(); await stopEdwind(child, 'SIGKILL'); child = await startEdwind(dir); client = await connect();
+    outcome = 'normal';
+    const ack = await send('first-click'), uncertain = await send('second-click');
+    assert.equal(posts().length, 2, 'neither a positive nor an ambiguous receipt can be replayed after restart');
+    assert.match(ack.error?.report || '', /already acknowledged/i);
+    assert.match(uncertain.error?.report || '', /possibly sent/i);
+    outcome = 'busy'; assert.match((await send('third-click')).error?.report || '', /busy/);
+    assert.ok((await send('third-click', 'changed text')).error);
+    assert.equal(posts().length, 3, 'a retry id cannot be rebound to other content');
+    outcome = 'normal'; assert.equal((await send('third-click')).error, undefined);
+    assert.equal(posts().length, 4, 'a definite refusal is retryable with its original identity');
+    for (const post of posts()) assert.deepEqual(post.body, { text, epoch }, 'only hub-defined fields leave edwind');
+  } finally { hub.handle = original; }
+});
+
+test('direct prompt submission requires a caller-retained id and a writable intent store before POST', async () => {
+  const sid = 'direct-intent', epoch = hub.add(sid).createdAt, text = 'retain this logical send', mark = hub.calls.length;
+  const missing = await client.call('agent-session-prompt', [sid, { epoch, text }]);
+  assert.match(missing.error?.report || '', /submissionId/);
+  const root = path.join(dir.dirs.state, 'agent-prompts');
+  fs.renameSync(root, root + '.saved'); fs.mkdirSync(root);
+  try {
+    const failed = await client.call('agent-session-prompt', [sid, { epoch, text, submissionId: 'cannot-record' }]);
+    assert.ok(failed.error);
+    assert.equal(hub.calls.slice(mark).filter(c => c.method === 'POST').length, 0);
+  } finally { fs.rmdirSync(root); fs.renameSync(root + '.saved', root); }
+});
+
 test('a durable send intent is required before any prompt POST', async () => {
   const alpha = target('alpha'), id = await value('agent-prompt-create', [{ ...alpha, text: 'no intent, no send' }]);
   const key = /: ([A-Za-z0-9_-]+)\*$/.exec(id)![1], file = path.join(dir.dirs.state, 'agent-prompts', key + '.json');
@@ -521,7 +565,7 @@ test('AS-C10: host RPC addresses a transcript without selecting it: folds, struc
   const recalled = await rpc('agent-session-recall', [sid, first.seq, epoch]);
   assert.deepEqual((await rpc('agent-prompt-preview', [recalled])).blocks, [{ type: 'text', text }]);
   const drafts = E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length;
-  await rpc('agent-session-prompt', [sid, { text: 'Sent from an ordinary host text field', epoch }]);
+  await rpc('agent-session-prompt', [sid, { text: 'Sent from an ordinary host text field', epoch, submissionId: 'phone-send-click' }]);
   await until(() => b.text.includes('Sent from an ordinary host text field'), 'host quick prompt replay');
   assert.equal(E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length, drafts, 'host text does not create a draft buffer');
   assert.deepEqual(hub.journals.get(sid)!.at(-1)!.prompt, [{ type: 'text', text: 'Sent from an ordinary host text field' }]);

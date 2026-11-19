@@ -13,10 +13,11 @@ import type { CallResult } from './proto.mts';
 
 interface Block { type: string; [key: string]: unknown }
 interface Target { sid: string; epoch: number | null }
-interface Draft {
-  key: string; targets: Target[]; blocks: Block[]; baseText: string;
-  acknowledged: Target[]; possiblySent: Target[];
-  name?: string;
+interface Delivery {
+  key: string; targets: Target[]; acknowledged: Target[]; possiblySent: Target[];
+}
+interface Draft extends Delivery {
+  blocks: Block[]; baseText: string; name?: string;
 }
 interface Preview { draft: string; targets: Target[]; possiblySent: Target[]; blocks: Block[] }
 const object = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v); // any: ACP JSON
@@ -26,12 +27,12 @@ const text = (v: unknown, what: string): string => typeof v === 'string' && v.le
 const sidOf = (v: unknown): string => { const s = text(v, 'Session'); if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) fail('Not an ACP session id'); return s; };
 const epochOf = (v: unknown): number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 ? v : fail('A captured session incarnation (epoch) is required');
 const targetKey = (v: Target): string => `${v.sid}/${v.epoch}`;
-function requireUnsent(d: Draft, target: Target) {
+function requireUnsent(d: Delivery, target: Target) {
   const same = (t: Target) => t.sid === target.sid && t.epoch === target.epoch;
-  if (d.acknowledged.some(same)) fail(`This draft was already acknowledged by ${target.sid} (${target.epoch}); choose another destination or create a new draft`);
-  if (d.possiblySent.some(same)) fail(`This draft was possibly sent to ${target.sid} (${target.epoch}); check the session before creating a new draft`);
+  if (d.acknowledged.some(same)) fail(`This prompt was already acknowledged by ${target.sid} (${target.epoch}); it will not be sent again`);
+  if (d.possiblySent.some(same)) fail(`This prompt was possibly sent to ${target.sid} (${target.epoch}); check the session before sending a new prompt`);
 }
-const uncertain = (d: Draft) => d.possiblySent.length ? ` Possibly sent to: ${d.possiblySent.map(targetKey).join(', ')}; these destinations will not be retried.` : '';
+const uncertain = (d: Delivery) => d.possiblySent.length ? ` Possibly sent to: ${d.possiblySent.map(targetKey).join(', ')}; these destinations will not be retried.` : '';
 function targetsOf(v: unknown, retained = false): Target[] {
   if (!Array.isArray(v)) fail('Targets must be an array of {sid, epoch} destinations');
   const targets = (v as unknown[]).map(t => {
@@ -60,9 +61,9 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   server.auth.promptStore = store;
   const drafts = new Map<string, Draft>(), sending = new Set<string>(), owned = new Map<SBuf, Draft>();
   const markdown = (d: Draft) => path.join(dir, `${d.key}.md`);
-  const persist = (d: Draft) => store.write(`${d.key}.json`, JSON.stringify(d) + '\n');
+  const persist = <T extends Delivery,>(d: T) => store.write(`${d.key}.json`, JSON.stringify(d) + '\n');
   function draft(v: unknown): Draft { const d = drafts.get(keyOf(v)); return d || fail('No such agent prompt draft'); }
-  function writable(d: Draft) { if (sending.has(d.key)) fail('This prompt is being sent'); }
+  function writable(d: Delivery) { if (sending.has(d.key)) fail('This prompt is being sent'); }
   function meta(sb: SBuf, d: Draft) {
     owned.set(sb, d);
     sb.replayMeta = true;
@@ -111,7 +112,7 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
   const entries = store.entries();
   const retained = new Map([...buffers.index.buffers.values()].filter(e => typeof e.file === 'string' && path.dirname(e.file) === dir).map(e => [e.id, e]));
   for (const file of entries) {
-    if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json') continue;
+    if (!/^[A-Za-z0-9_-]+\.json$/.test(file) || file === 'named.json' || file.startsWith('direct-')) continue;
     try {
       const d = JSON.parse(store.read(file)) as Draft;
       if (!object(d) || d.key !== file.slice(0, -5) || typeof d.baseText !== 'string') fail('Invalid persisted agent prompt');
@@ -176,51 +177,88 @@ export async function installPrompts(server: Server, backend: AgentBackend): Pro
     for (const target of next) requireUnsent(d, target);
     const changed = { ...d, targets: next }; persist(changed); d.targets = next; buffers.sendMeta(open(d)); return next;
   });
-  if (server.cfg.agentHub?.steer) command('agent-prompt-send', async (args, buf) => {
-    const d = selected(args, buf); writable(d); sending.add(d.key);
-    try {
-      const p = await snapshot(d), sent: string[] = [];
-      if (!p.targets.length) fail(`This draft has no remaining destinations.${uncertain(d)}`);
-      if (!p.blocks.length || p.blocks.every(b => b.type === 'text' && !b.text)) fail('This prompt is empty');
-      for (const target of p.targets) {
-        const { sid } = target;
-        const remaining = d.targets, earlier = d.possiblySent;
-        let awaitingReply = false;
-        try {
-          if (target.epoch === null) fail(`${sid} has an unbound legacy destination; explicitly retarget this draft before sending`);
-          requireUnsent(d, target);
-          const epoch = epochOf(target.epoch), session = await backend.requireSession(sid, epoch);
-          const caps = session.promptCapabilities ?? session.acp?.promptCapabilities ?? session.session?.promptCapabilities ?? session.info?.promptCapabilities;
-          if (object(caps)) for (const b of p.blocks) {
-            const capability = b.type === 'resource' ? 'embeddedContext' : b.type === 'image' ? 'image' : b.type === 'audio' ? 'audio' : null;
-            if (capability && caps[capability] !== true) fail(`${sid} does not support ${capability} prompt blocks`);
-          }
-          await backend.requireSession(sid, epoch);
-          await backend.request('POST', `sessions/${encodeURIComponent(sid)}/prompt`, { epoch, blocks: p.blocks }, () => {
-            const targets = remaining.filter(t => t !== target), possiblySent = [...earlier, target];
-            persist({ ...d, targets, possiblySent }); d.targets = targets; d.possiblySent = possiblySent;
-            awaitingReply = true;
-          });
-          awaitingReply = false;
-          const acknowledged = [...d.acknowledged, target];
-          try { persist({ ...d, acknowledged, possiblySent: earlier }); }
-          catch (e) { fail(`Prompt acknowledged by ${sid}, but durable send receipt failed: ${backend.clean(String(e.message || e))}. On restart this destination may be marked possibly sent; it will not be retried`); }
-          finally { d.acknowledged = acknowledged; d.possiblySent = earlier; sent.push(sid); }
-          buffers.sendMeta(open(d));
-        } catch (e) {
-          let message = String(e.message || e);
-          // A client-error refusal (e.g. busy) is safe to retry. Timeouts, bad/lost replies and server errors are not.
-          if (awaitingReply && e.status >= 400 && e.status < 500 && e.status !== 408) {
-            try { persist({ ...d, targets: remaining, possiblySent: earlier }); d.targets = remaining; d.possiblySent = earlier; }
-            catch (err) { message += `. Could not record refusal: ${err.message || err}`; }
-          }
-          buffers.sendMeta(open(d));
-          fail(`${backend.clean(message)}. Sent: ${sent.join(', ') || 'none'}; retained for retry: ${d.targets.map(t => t.sid).join(', ') || 'none'}.${uncertain(d)}`);
-        }
+  async function deliver(d: Delivery, target: Target, content: { blocks: Block[] } | { text: string }) {
+    const { sid } = target, remaining = d.targets, earlier = d.possiblySent;
+    if (target.epoch === null) fail(`${sid} has an unbound legacy destination; explicitly retarget this draft before sending`);
+    requireUnsent(d, target);
+    const epoch = epochOf(target.epoch);
+    if ('blocks' in content) {
+      const session = await backend.requireSession(sid, epoch);
+      const caps = session.promptCapabilities ?? session.acp?.promptCapabilities ?? session.session?.promptCapabilities ?? session.info?.promptCapabilities;
+      if (object(caps)) for (const b of content.blocks) {
+        const capability = b.type === 'resource' ? 'embeddedContext' : b.type === 'image' ? 'image' : b.type === 'audio' ? 'audio' : null;
+        if (capability && caps[capability] !== true) fail(`${sid} does not support ${capability} prompt blocks`);
       }
-      return { sent, remaining: d.targets, possiblySent: d.possiblySent, draft: idOf(d) };
-    } finally { sending.delete(d.key); }
-  });
+    }
+    await backend.requireSession(sid, epoch);
+    let awaitingReply = false;
+    try {
+      const reply = await backend.request('POST', `sessions/${sid}/prompt`, { epoch, ...content }, () => {
+        const targets = remaining.filter(t => t !== target), possiblySent = [...earlier, target];
+        persist({ ...d, targets, possiblySent }); d.targets = targets; d.possiblySent = possiblySent;
+        awaitingReply = true;
+      });
+      awaitingReply = false;
+      const acknowledged = [...d.acknowledged, target];
+      try { persist({ ...d, acknowledged, possiblySent: earlier }); }
+      catch (e) { fail(`Prompt acknowledged by ${sid}, but durable send receipt failed: ${backend.clean(String(e.message || e))}. On restart this destination may be marked possibly sent; it will not be retried`); }
+      finally { d.acknowledged = acknowledged; d.possiblySent = earlier; }
+      return reply;
+    } catch (e) {
+      // Only a definite client-error refusal (e.g. busy) releases the durable intent.
+      if (awaitingReply && e.status >= 400 && e.status < 500 && e.status !== 408) {
+        try { persist({ ...d, targets: remaining, possiblySent: earlier }); d.targets = remaining; d.possiblySent = earlier; }
+        catch (err) { fail(`${e.message || e}. Could not record refusal: ${err.message || err}`); }
+      }
+      throw e;
+    }
+  }
+  if (server.cfg.agentHub?.steer) {
+    command('agent-prompt-send', async (args, buf) => {
+      const d = selected(args, buf); writable(d); sending.add(d.key);
+      try {
+        const p = await snapshot(d), sent: string[] = [];
+        if (!p.targets.length) fail(`This draft has no remaining destinations.${uncertain(d)}`);
+        if (!p.blocks.length || p.blocks.every(b => b.type === 'text' && !b.text)) fail('This prompt is empty');
+        try {
+          for (const target of p.targets) {
+            try { await deliver(d, target, { blocks: p.blocks }); }
+            finally {
+              if (d.acknowledged.includes(target)) sent.push(target.sid);
+              buffers.sendMeta(open(d));
+            }
+          }
+        } catch (e) {
+          fail(`${e.message || e}. Sent: ${sent.join(', ') || 'none'}; retained for retry: ${d.targets.map(t => t.sid).join(', ') || 'none'}.${uncertain(d)}`);
+        }
+        return { sent, remaining: d.targets, possiblySent: d.possiblySent, draft: idOf(d) };
+      } finally { sending.delete(d.key); }
+    });
+    command('agent-session-prompt', async ([sid, input]) => {
+      if (!object(input) || typeof input.submissionId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(input.submissionId))
+        return fail('A retained submissionId (1–64 letters, digits, underscores or hyphens) is required');
+      const target = { sid: sidOf(sid), epoch: epochOf(input.epoch) }, body = text(input.text, 'Prompt text');
+      const key = `direct-${input.submissionId}`, digest = sha256(JSON.stringify([target.sid, target.epoch, body]));
+      const d: Delivery & { digest: string } = { key, digest, targets: [target], acknowledged: [], possiblySent: [] };
+      writable(d); sending.add(key);
+      try {
+        // Direct sends have no editor buffer. Read their compact receipt on demand, failing closed
+        // on corrupt or inaccessible state; only an absent record starts a fresh submission.
+        let raw: string | undefined;
+        try { raw = store.read(`${key}.json`); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        if (raw !== undefined) {
+          const prior = JSON.parse(raw);
+          if (!object(prior) || prior.key !== key || prior.digest !== digest) fail('The submissionId does not match the recorded prompt and destination');
+          const ledger = { key, targets: targetsOf(prior.targets), acknowledged: targetsOf(prior.acknowledged), possiblySent: targetsOf(prior.possiblySent) };
+          const all = [...ledger.targets, ...ledger.acknowledged, ...ledger.possiblySent];
+          if (all.length !== 1 || targetKey(all[0]) !== targetKey(target)) fail('Invalid direct prompt delivery record');
+          requireUnsent(ledger, target);
+        }
+        try { return await deliver(d, target, { text: body }); }
+        catch (e) { fail(`${e.message || e}${uncertain(d)}`); }
+      } finally { sending.delete(key); }
+    });
+  }
 
   // Prompt engineering: resources never become pasted prompt text; named prompts snapshot exact ACP blocks.
   function attach(d: Draft, block: Block) {

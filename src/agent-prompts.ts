@@ -40,7 +40,7 @@ async function chooseDraft(given?: unknown): Promise<string> {
   if (typeof given === 'string' && given) return given;
   const m = metadata(cur()); if (m) return m.id;
   const list = await rpc('agent-prompt-drafts') as Json[];
-  if (!list.length) signal('user-error', 'No prompt drafts; use agent-session-prompt first');
+  if (!list.length) signal('user-error', 'No prompt drafts; use agent-prompt-compose first');
   if (list.length === 1) return list[0].id;
   const labels = list.map(d => `${d.id}  ${d.name || d.targets.map((t: Json) => `${t.sid} (${t.epoch ?? 'unbound'})`).join(', ')}${sendWarning(d.possiblySent)}`);
   const picked = await Ed.readMini('Prompt draft: ', '', () => labels, { require: true });

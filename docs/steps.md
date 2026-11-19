@@ -1215,7 +1215,15 @@ For a particular unselected card, pass `frame.point()` as the position and apply
 | `agent-session-cancel` / `agent-session-remove` / `agent-session-revive` | `[sid, {epoch}]` | Hub JSON acknowledgement (remove ends the session; cancel only cancels its turn). |
 | `agent-session-mode` | `[sid, {epoch, modeId}]` | Hub JSON acknowledgement; choose from the shown `modes.availableModes`. |
 | `agent-session-config` | `[sid, {epoch, id:optionId, value}]` | Hub JSON acknowledgement; choose from the shown `configOptions`. An old hub's 404/405/501 rejects with an explicit unsupported-config explanation. |
-| `agent-session-prompt` | `[sid, {epoch, text}]` | Hub JSON acknowledgement; direct text without a draft. The host retains its text until success and must not automatically retry an ambiguous/lost reply. |
+| `agent-session-prompt` | `[sid, {epoch, text, submissionId}]` | Hub JSON acknowledgement. Sends text without opening a draft buffer. `submissionId` identifies one logical submission; it is not sent to the hub. |
+
+For a direct prompt, generate `submissionId` once when the user chooses Send (for example,
+`crypto.randomUUID()`; 1–64 ASCII letters, digits, `_` or `-`). **Persist the id with the displayed
+sid, epoch and text before calling the RPC.** Keep that tuple across lost replies, page reloads and
+reconnections. A definite refusal such as “busy” permits resubmitting that same tuple. Edwin refuses
+replays of acknowledged or possibly-sent submissions, even after daemon restart. If delivery is
+uncertain, inspect the session before intentionally creating another submission. Never generate a new
+id for a retry. A deliberate new send, even of identical text, needs its own id.
 
 RPC failure rejects with Edwin's `user-error` condition and its redacted report. Permission/elicitation
 answers require the `requestKey` captured with the exact request the user saw. The daemon rereads the

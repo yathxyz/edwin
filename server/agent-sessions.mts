@@ -736,7 +736,7 @@ export async function install(server: Server) {
   });
   if (server.cfg.agentHub?.steer) {
     cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
-    for (const action of ['cancel', 'revive', 'mode', 'config', 'prompt']) cmd('agent-session-' + action, async a => {
+    for (const action of ['cancel', 'revive', 'mode', 'config']) cmd('agent-session-' + action, async a => {
       const sid = sidOf(a[0]), body = a[1];
       await hub.requireSession(sid, body?.epoch); expectedEpoch(body?.epoch);
       return hub.request('POST', `sessions/${sid}/${action}`, body);
