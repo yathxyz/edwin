@@ -176,7 +176,13 @@ const sync: SyncClient = {
 const newRid = () => 'f' + (++sync.ridN);
 function setState(s: string) { if (sync.state === s) return; sync.state = s; sync.emit('state', s); statusChanged(); }
 function statusChanged() { for (const f of E.frames) Ed.frameEvent('status', f); Ed.scheduleRender(); }
-function send(obj: SyncOut) { if (sync.sock && sync.sockOpen) { try { sync.sock.send!(JSON.stringify(obj)); return true; } catch (e) { return false; } } return false; }
+function send(obj: SyncOut) {
+  const s = sync.sock;
+  if (!s || !sync.sockOpen) return false;
+  const state = s.readyState;
+  if (state !== undefined && state !== 1) return false;
+  try { s.send!(JSON.stringify(obj)); return true; } catch (e) { return false; }
+}
 
 function start({ transport, device, cid }: { transport?: () => EdTransport; device?: string; cid?: string } = {}) {
   if (sync.started) return sync.startP;
@@ -712,7 +718,10 @@ function call({ cmd, form, args, buf, ctx }: SyncCallOpts = {}): Promise<SyncRep
   if (args !== undefined) m.args = args;
   const bid = typeof buf === 'string' ? buf : buf && buf.shared ? buf.id : E.current && E.current.shared ? E.current.id : undefined;
   if (bid) m.buf = bid;
-  return new Promise(resolve => { sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid }); send(m); });
+  return new Promise(resolve => {
+    sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid });
+    if (!send(m)) onError({ t: 'error', rid, code: 'disconnected', msg: 'could not send to edwind' });
+  });
 }
 function onResult(msg: SyncResultMsg) {
   const c = sync.calls.get(msg.rid!); if (!c) return;
@@ -731,7 +740,13 @@ function spin<T>(p: Promise<T>, c?: unknown) {
 }
 function spinnerOff(c?: SyncCall): void;
 function spinnerOff() { /* the spinner is per call through spin(); nothing to do for the call record */ }
-function imageQuery(from: number) { const rid = newRid(); return new Promise<SyncReply>(resolve => { sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid }); send({ t: 'image?', rid, from }); }); }
+function imageQuery(from: number) {
+  const rid = newRid();
+  return new Promise<SyncReply>(resolve => {
+    sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid });
+    if (!send({ t: 'image?', rid, from })) onError({ t: 'error', rid, code: 'disconnected', msg: 'could not send to edwind' });
+  });
+}
 function onError(msg: SyncErrorMsg) {
   const code = msg.code || 'bad_request';
   if (msg.rid && sync.calls.has(msg.rid)) { const c = sync.calls.get(msg.rid)!; sync.calls.delete(msg.rid); c.resolve({ error: { condition: code, report: msg.msg || code } }); return; }
@@ -851,8 +866,24 @@ function visit(name: string): SyncBuffer | Promise<SyncBuffer | false> {
     return b;
   }, e => { Ed.message(e && e.message ? e.message : String(e)); Ed.scheduleRender(); return false; });
 }
-function save(b: EdBuffer | string | undefined) { b = typeof b === 'string' ? sync.buffers.get(b) : b; if (!b) return Promise.resolve({ error: { condition: 'error', report: 'no such buffer' } }); const rid = newRid(); return new Promise<SyncReply>(resolve => { sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid }); send({ t: 'save', rid, buf: b.id }); }); }
-function revert(b: EdBuffer | string | undefined) { b = typeof b === 'string' ? sync.buffers.get(b) : b; if (!b) return Promise.resolve({ error: { condition: 'error', report: 'no such buffer' } }); const rid = newRid(); return new Promise<SyncReply>(resolve => { sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid }); send({ t: 'revert', rid, buf: b.id }); }); }
+function save(b: EdBuffer | string | undefined) {
+  b = typeof b === 'string' ? sync.buffers.get(b) : b;
+  if (!b) return Promise.resolve({ error: { condition: 'error', report: 'no such buffer' } });
+  const rid = newRid(), buf = b.id;
+  return new Promise<SyncReply>(resolve => {
+    sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid });
+    if (!send({ t: 'save', rid, buf })) onError({ t: 'error', rid, code: 'disconnected', msg: 'could not send to edwind' });
+  });
+}
+function revert(b: EdBuffer | string | undefined) {
+  b = typeof b === 'string' ? sync.buffers.get(b) : b;
+  if (!b) return Promise.resolve({ error: { condition: 'error', report: 'no such buffer' } });
+  const rid = newRid(), buf = b.id;
+  return new Promise<SyncReply>(resolve => {
+    sync.calls.set(rid, { resolve, frame: E.frame, at: Date.now(), rid });
+    if (!send({ t: 'revert', rid, buf })) onError({ t: 'error', rid, code: 'disconnected', msg: 'could not send to edwind' });
+  });
+}
 /* The save goes out behind every edit already sent, so with none queued it covers the whole buffer: the buffer
    counts as saved at once, which lets :wq go on to quit. A quitting frame waits for the answer while b.saving,
    and stays when it is a refusal, which marks the buffer modified again and keeps the reason in b.saveError. */

@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { makeDir, startEdwind, stopEdwind, EditClient, EDWIN, transport } from './edit-client.mts';
-import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
+import type { Msg, TestDir, EdwindChild, ClientOptions, FakeSocket } from './edit-client.mts';
 import { rng, randOp } from './ot-sim.mts';
 import type { EditOp, OTModule } from './ot-sim.mts';
 import { makeDocument, assertOrdinaryFrameInput, type FakeEvent } from './frame-input.mts';
@@ -320,6 +320,26 @@ test('R7.16 reconnect after edwind restarts: the unacknowledged batch is resent 
   /* The replica keeps working after the reconnect. */
   await type('A3'); await keys('ESC'); await settled(b);
   assert.equal(await serverText(id), '1keep23\n');
+});
+
+test('requests fail before the close event when the transport is closing or closed', { timeout: 5000 }, async t => {
+  const b = await sync.open(note('closing.md', 'keep\n'));
+  t.after(() => sync.close(b));
+  const sock: FakeSocket & { readyState?: number } = sync.sock;
+  const send = t.mock.method(sock, 'send');
+  try {
+    for (const state of [2, 3]) {
+      sock.readyState = state;
+      const replies = [sync.call({ cmd: 'notes-info' }), sync.save(b), sync.revert(b)];
+      assert.equal(send.mock.callCount(), 0, `write attempted in readyState ${state}`);
+      for (const reply of await Promise.all(replies)) assert.equal(reply.error?.condition, 'disconnected');
+      assert.equal(sync.state, 'online', 'close event has not fired');
+    }
+  } finally {
+    delete sock.readyState;
+  }
+  const reply = await sync.call({ cmd: 'notes-info' });
+  assert.equal(reply.value?.root, dir.dirs.notes);
 });
 
 test('R4.15-R4.18 the image replicates: definitions arrive, on-server forms are skipped, shared variables follow', async () => {
