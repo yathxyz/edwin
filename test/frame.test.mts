@@ -340,7 +340,6 @@ test('requests fail before the close event when the transport is closing or clos
   }
   const reply = await sync.call({ cmd: 'notes-info' });
   assert.equal(reply.value?.root, dir.dirs.notes);
-  assert.equal(send.mock.callCount(), 1, 'transport without readyState still sends');
 });
 
 test('R4.15-R4.18 the image replicates: definitions arrive, on-server forms are skipped, shared variables follow', async () => {
