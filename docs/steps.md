@@ -289,6 +289,8 @@ undo on a shared buffer is by group, inverse-transformed through history (`undo:
 Hash checks every 50 versions, `bad_edit`, `stale_base`, `read_only`, `slow_client`, `shutting_down` and a
 reconnect follow §7; a divergence or a stale base puts the local text in `<name>~offline-<time>`; an image
 epoch change hands the unsent batches to the page, which reloads the runtime with them.
+Before the socket's close event, the frame skips writes to a closing or closed WebSocket. Unacknowledged
+edits stay queued for reconnect; requests that could not be sent fail immediately.
 
 Served boot (R4.11–R4.12): `Ed.bootServed({sources, transport, device, cid, pending})` boots from the eight
 Scheme files edwind ships (`/edwin/scm/`), never from browser storage (an in-memory store replaces it),

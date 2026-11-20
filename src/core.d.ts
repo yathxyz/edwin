@@ -1674,7 +1674,7 @@ interface EdTransport {
   onmessage: ((ev: { data: string }) => void) | null;
   onclose: ((ev: { code: number }) => void) | null;
   onerror: ((e: unknown) => void) | null;
-  readyState: number;
+  readyState?: number;
   send?(s: string): void;
   close?(): void;
 }
