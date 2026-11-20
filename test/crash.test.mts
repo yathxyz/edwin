@@ -362,7 +362,8 @@ test('prompt store lock excludes only configured writers; live metadata commands
   secondDir.cfg.stateDir = alias;
   fs.rmdirSync(secondDir.dirs.config);
   for (const d of [firstDir, secondDir]) {
-    d.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile: path.join(d.root, 'absent') };
+    const tokenFile = path.join(d.root, 'token'); fs.writeFileSync(tokenFile, '');
+    d.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile };
     fs.writeFileSync(d.file, JSON.stringify(d.cfg));
   }
 
@@ -396,12 +397,12 @@ test('prompt store lock excludes only configured writers; live metadata commands
 
 test('prompt store lock: Server.stop releases the lease and revokes late writes without process exit', async t => {
   const d = makeDir(); t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
-  const token = path.join(d.root, 'absent');
+  const token = path.join(d.root, 'token'); fs.writeFileSync(token, '');
   d.cfg.agentHub = { url: 'http://127.0.0.1:1', tokenFile: token }; fs.writeFileSync(d.file, JSON.stringify(d.cfg));
   const server = new Daemon(loadConfig(d.file), quiet);
   await server.start();
   const captured = server.auth.agent!.promptStore!;
-  const acquire = () => openPromptWriter(new AgentAuthority(d.cfg, token), quiet);
+  const acquire = () => openPromptWriter(new AgentAuthority(d.cfg, token, d.file), quiet);
   try { await assert.rejects(acquire, PromptStoreBusy); } finally { await server.stop(); }
   assert.throws(() => captured.writeReceipt('late.json', 'late'), { code: 'refused_path' });
   const contenders = await Promise.allSettled(Array.from({ length: 8 }, acquire));
@@ -417,7 +418,8 @@ for (const target of ['state', 'markdown', 'receipt'] as const) {
   test(`stateDir atomic write: only a prompt receipt requires directory fsync (${target})`, t => {
     const d = makeDir();
     t.after(() => fs.rmSync(d.root, { recursive: true, force: true }));
-    const store = target === 'state' ? null : new PrivateStore(new AgentAuthority(d.cfg, path.join(d.root, 'absent')));
+    const token = path.join(d.root, 'token'); fs.writeFileSync(token, '');
+    const store = target === 'state' ? null : new PrivateStore(new AgentAuthority(d.cfg, token, d.file));
     const leaf = target === 'receipt' ? 'entry.json' : 'entry.md', dir = store?.dir ?? d.dirs.state, file = path.join(dir, leaf);
     const write = (text: string) => store ? target === 'receipt' ? store.writeReceipt(leaf, text) : store.write(leaf, text) : writeAtomic(file, text);
     fs.writeFileSync(file, 'prior', { mode: 0o600 });

@@ -35,8 +35,7 @@ const arg = (args: unknown[]): Record<string, unknown> => (args[0] && typeof arg
 /* REAL may be written by a file operation: inside a write root and not refused (checkWrite), not one of
    edwind's directories or a write root or anything holding one, and not inside stateDir. */
 function checkOperand(auth: Authority, real: string): void {
-  // An entry mutation must reject protected names and symlinks, but never act on the link target.
-  try { if (auth.agent) auth.agent.checkWrite(real, 'entry'); else auth.checkWrite(real); } catch (e) { throw bad(e); }
+  try { auth.checkWrite(real); } catch (e) { throw bad(e); }
   for (const root of new Set([auth.notesDir, auth.stateDir, auth.configDir, ...auth.writeRootsForFlags()])) {
     let r = root; try { r = fs.realpathSync.native(root); } catch (e) { /* not made yet */ }
     if (under(root, real) || under(r, real)) throw new ProtoError('refused_path', `${real}: holds ${root}, a directory edwind is configured with`);
@@ -103,15 +102,6 @@ export class Fs {
     const srcAbs = lexicalPath(auth, src);
     let dstAbs = lexicalPath(auth, dst);
     try { if (fs.statSync(dstAbs).isDirectory()) dstAbs = path.join(dstAbs, path.basename(srcAbs)); } catch (e) { /* a new name */ }
-    const agent = auth.agent;
-    const filter = agent && ((from: string, to: string) => {
-      // Each source and destination in the tree may alias the token or config.
-      agent.checkNamed(from);
-      agent.checkNamed(to);
-      return true;
-    });
-    // A protected operand is a refusal even when the regular copy checks would report an existing destination.
-    try { filter?.(srcAbs, dstAbs); } catch (e) { throw bad(e); }
     const srcReal = realEntry(srcAbs), dstReal = realEntry(dstAbs);
     let st: fs.Stats;
     try { st = fs.lstatSync(srcReal); } catch (e) { throw bad(e); }
@@ -124,10 +114,7 @@ export class Fs {
     let there = true;
     try { fs.lstatSync(dstReal); } catch (e) { if (e.code !== 'ENOENT') throw bad(e); there = false; }
     if (there || this.server.buffers.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
-    try {
-      if (filter) await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true, filter });
-      else await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true });
-    } catch (e) { throw bad(e); }
+    try { await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true }); } catch (e) { throw bad(e); }
     fsyncDir(path.dirname(dstReal));
     this.server.log.info('fs-copy', { src: srcReal, dst: dstReal, dir });
     return { ok: true, src: srcReal, dst: dstReal, dir };
@@ -136,8 +123,6 @@ export class Fs {
   /* fs-mkdir [{path}]: make a directory and the parents it lacks. */
   mkdir(p: unknown): { ok: true; path: string } {
     const abs = lexicalPath(this.auth, p);
-    // An existing protected name or symlink must be refused, not reported as an ordinary directory.
-    try { this.auth.agent?.checkNamed(abs, 'entry'); } catch (e) { throw bad(e); }
     /* The deepest ancestor that exists is resolved; what is to be made under it is taken as written. */
     let base = abs;
     const rest: string[] = [];

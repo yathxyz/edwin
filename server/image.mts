@@ -34,6 +34,7 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { writeAtomic, sha256 } from './files.mts';
 import { ProtoError } from './proto.mts';
+import { ProtectedFileError, type AgentAuthority } from './agent-files.mts';
 import type { By, ImageMsg, VarMsg, EchoMsg } from './proto.mts';
 import type { Server, Lisp, SchemeValue } from './main.mts';
 import type { Client } from './session.mts';
@@ -168,7 +169,9 @@ export class ImageLog {
   declare safe: SafeMode | null;
   declare safeFloor: number;
   declare settleTimer: NodeJS.Timeout | null;
-  constructor(file: string) {
+  private readonly agent?: AgentAuthority;
+  constructor(file: string, agent?: AgentAuthority) {
+    this.agent = agent;
     this.file = file; this.gen = 0; this.entries = []; this.epoch = null; this.bytes = 0;
     this.heads = new Set(HEADS); this.shared = new Map();
     this.server = null; this.refreshTimer = null; this.epochTimer = null; this.settleTimer = null;
@@ -179,9 +182,10 @@ export class ImageLog {
   }
   get dir() { return path.dirname(this.file); }
   get genDir() { return path.join(this.dir, GENERATIONS_DIR); }
+  private readContent(file: string): string { return this.agent ? this.agent.withRead(file, fd => fs.readFileSync(fd, 'utf8')) : fs.readFileSync(file, 'utf8'); }
   load() {
     let text = '';
-    try { text = fs.readFileSync(this.file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+    try { text = this.readContent(this.file); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     const p = parseLog(text);
     this.epoch = p.epoch; this.entries = p.entries; this.bytes = p.bytes;
     this.gen = this.entries.reduce((g, e) => Math.max(g, e.gen), p.floor);
@@ -291,7 +295,7 @@ export class ImageLog {
   rollback(id: number, by: By = SERVER_BY): { id: number; before: number; entries: number; gen: number; epoch: string | null } | null {
     const g = this.generations().find(x => x.id === id);
     if (!g) return null;
-    const p = parseLog(fs.readFileSync(this.genFile(id), 'utf8'));
+    const p = parseLog(this.readContent(this.genFile(id)));
     const before = this.checkpoint({ reason: `before rollback to ${id}`, by }).generation.id;
     this.entries = p.entries; this.gen = Math.max(this.gen, p.floor, ...p.entries.map(e => e.gen));
     this.changeEpoch(`rolled back to generation ${id}`);
@@ -359,9 +363,9 @@ export class ImageLog {
       const re = new RegExp(`^\\s*\\((?:define|define-command|define-syntax|define-macro|defvar|defcustom|define-minor-mode|define-derived-mode|define-pi-tool)\\s+\\(?'?${esc}(?=[\\s)])`);
       let names: string[] = []; try { names = fs.readdirSync(path.join(EDWIN_TREE, 'scm')).filter(f => f.endsWith('.scm')).sort(); } catch (e) { return false; }
       for (const f of names) {
-        const file = path.join(EDWIN_TREE, 'scm', f);
-        // The source browser can encounter a protected file installed under a shipped name.
-        const lines = (server.auth.agent ? server.auth.agent.readSource(file, EDWIN_TREE) : fs.readFileSync(file, 'utf8')).split('\n');
+        let text: string;
+        try { text = this.readContent(path.join(EDWIN_TREE, 'scm', f)); } catch (e) { if (e instanceof ProtectedFileError) continue; throw e; }
+        const lines = text.split('\n');
         const i = lines.findIndex(l => re.test(l));
         if (i >= 0) return S.listOf([`edwin/scm/${f}`, BigInt(i + 1)]);
       }
@@ -372,9 +376,7 @@ export class ImageLog {
       const real = path.resolve(EDWIN_TREE, rel);
       if (!real.startsWith(EDWIN_TREE + path.sep) || rel.split('/').includes('node_modules')) throw new S.SchemeError('error', `%edwin-source: ${rel} is not in the shipped tree`, []);
       let text: string;
-      // This primitive returns source bytes to the caller.
-      try { text = server.auth.agent ? server.auth.agent.readSource(real, EDWIN_TREE) : fs.readFileSync(real, 'utf8'); }
-      catch (e) { throw new S.SchemeError('error', `%edwin-source: no file ${rel}`, []); }
+      try { text = this.readContent(real); } catch (e) { throw new S.SchemeError('error', e instanceof ProtectedFileError ? e.message : `%edwin-source: no file ${rel}`, []); }
       const lines = text.split('\n'), from = Math.max(1, Number(ln) || 1), count = Math.min(400, Math.max(1, n === undefined ? 40 : Number(n) || 40));
       return lines.slice(from - 1, from - 1 + count).map((l, i) => `${from + i}: ${l}`).join('\n');
     }));
@@ -524,7 +526,7 @@ export class ImageLog {
   /* Append the live entries to <configDir>/init.scm, then reset (R4.20). Failed entries go in as comments. */
   saveToInit(configDir: string) {
     const file = path.join(configDir, 'init.scm');
-    this.server?.auth.agent?.checkNamed(file); // Saving the image to init must not append to a protected alias.
+    this.agent?.checkNamed(file);
     const lines = [`\n;;; image log saved ${stamp(Date.now())} (${this.entries.length} entries)`];
     let saved = 0;
     for (const e of this.entries) {
