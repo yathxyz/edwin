@@ -849,6 +849,73 @@ async function reviewFixture(t: TestContext, setup?: (hub: FakeAgentHub, dir: Te
   return { hub, dir, child, c };
 }
 
+for (const refusal of ['stale', 'unsupported'] as const) {
+  test(`guarded session actions: ${refusal} is a definite refusal, never a retry or fallback`, async t => {
+    const { hub, c } = await reviewFixture(t), handle = hub.handle.bind(hub), stale = refusal === 'stale';
+    hub.sessionActionEpoch = stale; // A capable hub checks the incarnation; an older connection refuses the guard.
+    for (const [action, fields] of Object.entries({
+      prompt: { text: 'guard this send', submissionId: 'guard-click' }, draft: {},
+      mode: { modeId: 'auto' }, config: { id: 'model', value: 'large' }, cancel: {}, remove: {},
+    })) {
+      const sid = `guard-${action}`, session = hub.add(sid), epoch = session.createdAt;
+      const expected = { ...structuredClone(session), createdAt: stale ? epoch + 1 : epoch };
+      const draft = action === 'draft' ? (await c.call('agent-prompt-create', [{ sid, epoch, text: 'guard these blocks' }])).value : null;
+      const statuses: number[] = [], mark = hub.calls.length;
+      hub.handle = async (req, res) => {
+        if (req.method === 'GET') return handle(req, res);
+        // The client has finished all its preflights; swap the SID just as the hub receives the mutation.
+        if (stale && !statuses.length) hub.sessions.set(sid, { ...session, createdAt: epoch + 1 });
+        await handle(req, res); statuses.push(res.statusCode);
+      };
+      const result = action === 'draft' ? await c.call('agent-prompt-send', [draft])
+        : await c.call(`agent-session-${action}`, [sid, { ...fields, epoch }]);
+      assert.ok(hub.calls.slice(mark).some(call => call.method === 'GET' && call.path === `/v1/sessions/${sid}`), `${action} preflight`);
+      assert.deepEqual(statuses, [stale ? 409 : 400], `${action} must make exactly one mutation attempt`);
+      const report = result.error?.report || '';
+      assert.match(report, stale ? /session was replaced/i : /updat.*hub|hub.*updat/i);
+      assert.doesNotMatch(report, /possibly sent/i);
+      assert.deepEqual(hub.sessions.get(sid), expected); assert.deepEqual(hub.journals.get(sid), []);
+      if (action === 'draft') {
+        const preview = (await c.call('agent-prompt-preview', [draft])).value;
+        assert.deepEqual(preview.targets, [{ sid, epoch }]); assert.deepEqual(preview.possiblySent, []);
+      }
+    }
+  });
+}
+
+test('bodyless session actions reject invalid path epochs and locally stale revive without mutating', async t => {
+  const sid = 'invalid-path-epoch', { hub, c } = await reviewFixture(t, hub => { hub.add(sid).createdAt = -1; });
+  for (const action of ['cancel', 'remove']) {
+    // In particular, -1 matches both the detail and the registry; identity comparison alone is not validation.
+    for (const epoch of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, '-1', null, undefined])
+      assert.ok((await c.call(`agent-session-${action}`, [sid, { epoch }])).error, `${action} accepted epoch ${epoch}`);
+  }
+  const current = hub.add('stale-revive');
+  const revive = await c.call('agent-session-revive', [current.sid, { epoch: current.createdAt - 1 }]);
+  assert.match(revive.error?.report || '', /session was replaced/i);
+  assert.deepEqual(hub.calls.filter(call => call.method !== 'GET'), []);
+});
+
+test('a router without epoch paths returns a plain 404; cancel and remove never try the bare SID', async t => {
+  const { hub, c } = await reviewFixture(t), sid = 'old-router', epoch = hub.add(sid).createdAt;
+  const handle = hub.handle.bind(hub), attempts: string[] = [];
+  hub.handle = async (req, res) => {
+    if (req.method !== 'GET') {
+      attempts.push(req.url!);
+      if (req.url?.includes('/epochs/')) {
+        req.resume(); res.writeHead(404, { 'content-type': 'application/json' }); res.end('{"error":"route not found"}'); return;
+      }
+    }
+    await handle(req, res);
+  };
+  for (const action of ['cancel', 'remove']) {
+    const report = (await c.call(`agent-session-${action}`, [sid, { epoch }])).error?.report || '';
+    assert.match(report, /404/); assert.doesNotMatch(report, /updat.*hub|hub.*updat/i);
+  }
+  const path = `/v1/sessions/${sid}/epochs/${epoch}`;
+  assert.deepEqual(attempts, [path + '/cancel', path + '?forget=true']);
+});
+
 test('review 2: oversized HTTP bodies fail visibly, including chunked bodies without Content-Length', async t => {
   let oversized = '';
   const { c, hub } = await reviewFixture(t, hub => {
