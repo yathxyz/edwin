@@ -320,7 +320,14 @@ in
         steer = true;
         allowCleartext = true;
       };
-      acceptsHub = settings: (builtins.tryEval (withHub settings).config.system.build.toplevel.drvPath).success;
+      hasToplevel = system: (builtins.tryEval system.config.system.build.toplevel.drvPath).success;
+      wrongRefusal =
+        expected: settings:
+        let
+          system = withHub settings;
+          failures = map (a: a.message) (lib.filter (a: !a.assertion) system.config.assertions);
+        in
+        hasToplevel system || failures != [ expected ];
       editJson = sys.config.environment.etc."edwind/edit.json".source;
       hubJson = hubSys.config.environment.etc."edwind/edit.json".source;
       hubService = hubSys.config.systemd.services.edwind.serviceConfig;
@@ -341,8 +348,15 @@ in
         frontAllow = frontUnit.serviceConfig.IPAddressAllow;
         system = builtins.seq sys.config.system.build.toplevel.drvPath true;
         hubSystem = builtins.seq hubSys.config.system.build.toplevel.drvPath true;
-        acceptedInvalid = lib.filter acceptsHub [
+        tokenRefusalMismatches = lib.filter (wrongRefusal
+          "services.edwind.agentHub.tokenFile must be a runtime path outside the Nix store."
+        ) [
           { tokenFile = ../flake.nix; } # Harmless path inside the flake source in the store.
+          { tokenFile = lib.strings.addContextFrom edwind "/run/secrets/agent-hub"; }
+        ];
+        urlRefusalMismatches = lib.filter (wrongRefusal
+          "services.edwind.agentHub.url must be an HTTP or HTTPS URL; plain HTTP outside loopback requires allowCleartext."
+        ) [
           { url = ""; }
           { url = "ftp://localhost"; }
           { url = "http://hub.example"; }
@@ -351,7 +365,7 @@ in
           { url = "http://localhost@hub.example"; }
           { url = "http://127.256.0.1"; }
         ];
-        rejectedLoopback = lib.filter (host: !acceptsHub { url = "http://${host}:1234/prefix"; }) [
+        rejectedLoopback = lib.filter (host: !hasToplevel (withHub { url = "http://${host}:1234/prefix"; })) [
           "localhost"
           "127.23.45.67"
           "[::1]"
@@ -384,7 +398,8 @@ in
         frontAllow = [ "10.0.0.1" ];
         system = true;
         hubSystem = true;
-        acceptedInvalid = [ ];
+        tokenRefusalMismatches = [ ];
+        urlRefusalMismatches = [ ];
         rejectedLoopback = [ ];
       };
     in

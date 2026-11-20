@@ -555,9 +555,11 @@ in
           message = "services.edwind.credentials: ${agentHubCredential} is reserved when services.edwind.agentHub is set.";
         }
         {
-          assertion = !(lib.path.hasPrefix (/. + builtins.storeDir) (
-            /. + builtins.unsafeDiscardStringContext (toString cfg.agentHub.tokenFile)
-          ));
+          assertion =
+            let
+              tokenFile = toString cfg.agentHub.tokenFile;
+            in
+            !builtins.hasContext tokenFile && !(lib.path.hasPrefix (/. + builtins.storeDir) (/. + tokenFile));
           message = "services.edwind.agentHub.tokenFile must be a runtime path outside the Nix store.";
         }
         {
