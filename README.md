@@ -135,6 +135,9 @@ edit.sock client.
   **Keep steering off until the hub atomically checks both the request version and the session incarnation
   when accepting an answer.** Edwin checks what the user saw before sending; the hub does not verify that
   the question is still the same when it accepts the answer.
+  Edwin sends the selected incarnation with prompts, mode and config changes, cancel and remove.
+  If the hub refuses the guard, Edwin does not retry without it.
+  Revive has no hub-side guard: if the hub replaces the session after Edwin checks it, revive can act on the replacement.
   `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
   named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
   Only configured prompt-store writers take the exclusive lock. Without `agentHub`, startup, recovery

@@ -75,9 +75,10 @@ function storeRecord(map: Map<string, Json>, id: string, value: Json) {
 }
 const replaced = () => new Error('Agent session was replaced (stale incarnation); refresh and explicitly select it again');
 const expectedEpoch = (value: unknown): number => {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw replaced();
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) throw replaced();
   return value;
 };
+const epochRoute = /^sessions\/([A-Za-z0-9_-]+)\/epochs\/(\d+)(?:\/cancel|\?forget=true)$/;
 type PresentationPatch = { start: number; remove: number; text: string; previousHead: number; previousEpoch: number };
 const loopbackHost = (hostname: string) => hostname === 'localhost' || hostname === '[::1]' || /^127\.\d+\.\d+\.\d+$/.test(hostname);
 
@@ -157,10 +158,15 @@ export class AgentSessions implements AgentBackend {
     if (!this.config) throw new Error('No agent hub configured');
     // Inspect the spelling before URL normalization: encoded separators, dot segments, absolute
     // addresses and fragments are never part of this API. Check the resolved destination too.
-    const match = /^(?:info|stream|(?:sessions|observed)(?:\/([A-Za-z0-9_-]+)(?:\/[a-z_]+)?)?)(?:\?(?:forget=true|since=(\d+)))?$/.exec(route);
-    if (!match) throw new Error('Invalid agent API route');
-    if (match[1]) sidOf(match[1]);
-    if (match[2]) cursorOf(Number(match[2]));
+    const guarded = epochRoute.exec(route);
+    if (guarded) {
+      sidOf(guarded[1]); expectedEpoch(Number(guarded[2]));
+    } else {
+      const match = /^(?:info|stream|(?:sessions|observed)(?:\/([A-Za-z0-9_-]+)(?:\/[a-z_]+)?)?)(?:\?(?:forget=true|since=(\d+)))?$/.exec(route);
+      if (!match) throw new Error('Invalid agent API route');
+      if (match[1]) sidOf(match[1]);
+      if (match[2]) cursorOf(Number(match[2]));
+    }
     const base = new URL(this.config.url + '/v1/'), u = new URL(route, base);
     if (u.origin !== base.origin || !u.pathname.startsWith(base.pathname)) throw new Error('Agent route outside the configured API prefix');
     return u;
@@ -219,7 +225,13 @@ export class AgentSessions implements AgentBackend {
           else if (route.endsWith('/config') && [404, 405, 501].includes(status)) reject(new Error('This hub does not support agent config options (POST /config is unavailable)'));
           else {
             const error = answer && typeof answer === 'object' ? answer : {};
-            reject(Object.assign(new Error(`Agent hub ${status}${error.code ? ' (' + line(error.code).slice(0, 128) + ')' : ''}: ${typeof error.error === 'string' ? error.error.slice(0, 1024) : 'request refused'}`), { status }));
+            if (method !== 'GET' && status === 409 && error.code === 'stale') {
+              reject(Object.assign(replaced(), { status })); return;
+            }
+            const needsGuard = status === 400 && (epochRoute.test(route) ||
+              method === 'POST' && /^sessions\/[^/]+\/(?:prompt|mode|config)$/.test(route) && body && typeof body === 'object' && 'epoch' in body);
+            const hint = needsGuard ? '; the agent hub must be updated to support guarded session actions' : '';
+            reject(Object.assign(new Error(`Agent hub ${status}${error.code ? ' (' + line(error.code).slice(0, 128) + ')' : ''}: ${typeof error.error === 'string' ? error.error.slice(0, 1024) : 'request refused'}${hint}`), { status }));
           }
         });
       });
@@ -763,17 +775,25 @@ export async function install(server: Server, registryOnly = false) {
   });
   if (server.cfg.agentHub?.steer) {
     cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
-    for (const action of ['cancel', 'revive', 'mode', 'config']) cmd('agent-session-' + action, async a => {
-      const sid = sidOf(a[0]), body = a[1];
-      await hub.requireSession(sid, body?.epoch); expectedEpoch(body?.epoch);
-      return hub.request('POST', `sessions/${sid}/${action}`, body);
+    const action = (name: string, send: (session: string, epoch: number, body: Json) => Promise<Json>, validate?: (body: Json) => void) =>
+      cmd('agent-session-' + name, async ([id, body]) => {
+        const sid = sidOf(id), captured = body?.epoch;
+        validate?.(body);
+        await hub.requireSession(sid, captured);
+        return send(`sessions/${sid}`, expectedEpoch(captured), body);
+      });
+    action('cancel', (s, epoch) => hub.request('POST', `${s}/epochs/${epoch}/cancel`));
+    action('remove', (s, epoch) => hub.request('DELETE', `${s}/epochs/${epoch}?forget=true`));
+    // Revive has no hub-side guard: a replacement after requireSession can receive this POST.
+    action('revive', s => hub.request('POST', `${s}/revive`));
+    action('mode', (s, epoch, { modeId }) => hub.request('POST', `${s}/mode`, { modeId, epoch }), body => {
+      if (typeof body?.modeId !== 'string' || !body.modeId) throw new Error('modeId must be a non-empty string');
+    });
+    action('config', (s, epoch, { id, value }) => hub.request('POST', `${s}/config`, { id, value, epoch }), body => {
+      if (typeof body?.id !== 'string' || !body.id) throw new Error('Config id must be a non-empty string');
+      if (typeof body.value !== 'string' && typeof body.value !== 'boolean') throw new Error('Config value must be a string or boolean');
     });
     for (const action of ['permission', 'elicitation'] as const) cmd('agent-session-' + action, a => hub.answer(a[0], action, a[1]));
-    cmd('agent-session-remove', async a => {
-      const sid = sidOf(a[0]), epoch = a[1]?.epoch;
-      await hub.requireSession(sid, epoch); expectedEpoch(epoch);
-      return hub.request('DELETE', 'sessions/' + sid + '?forget=true', { epoch });
-    });
   }
   server.statusProviders.push(() => ({ agentHub: hub.status, agentSessions: hub.sessions.size, agentObserved: hub.observed.size }));
   const primitive = server.L.D('agent-session-open', 'sid', 'Materialise the shared transcript and return name:*Agent: SID* without starting an agent.', () => { throw new server.L.S.SchemeError('cannot-block', 'agent-session-open must run on a Scheme thread', []); });

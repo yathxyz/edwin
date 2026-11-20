@@ -570,15 +570,16 @@ test('AS-C10: host RPC addresses a transcript without selecting it: folds, struc
   assert.equal(E.buffers.filter((x: Core) => x.meta?.locals?.agentPrompt).length, drafts, 'host text does not create a draft buffer');
   assert.deepEqual(hub.journals.get(sid)!.at(-1)!.prompt, [{ type: 'text', text: 'Sent from an ordinary host text field' }]);
   await rpc('agent-session-cancel', [sid, { epoch }]);
-  await rpc('agent-session-mode', [sid, { modeId: 'auto', epoch }]);
-  await rpc('agent-session-config', [sid, { id: 'model', value: 'large', epoch }]);
+  await rpc('agent-session-mode', [sid, { modeId: 'auto', epoch, value: 'not a mode field' }]);
+  await rpc('agent-session-config', [sid, { id: 'model', value: 'large', epoch, modeId: 'not a config field' }]);
   await rpc('agent-session-revive', [sid, { epoch }]);
   await rpc('agent-session-remove', [sid, { epoch }]);
   assert.deepEqual(hub.calls.filter(c => c.method !== 'GET' && c.path.startsWith(`/v1/sessions/${sid}`)).map(c => [c.method, c.path.slice(`/v1/sessions/${sid}`.length), c.body]), [
-    ['POST', '/prompt', { text: 'Sent from an ordinary host text field', epoch }], ['POST', '/cancel', { epoch }],
+    ['POST', '/prompt', { text: 'Sent from an ordinary host text field', epoch }], ['POST', `/epochs/${epoch}/cancel`, undefined],
     ['POST', '/mode', { modeId: 'auto', epoch }], ['POST', '/config', { id: 'model', value: 'large', epoch }],
-    ['POST', '/revive', { epoch }], ['DELETE', '?forget=true', { epoch }],
+    ['POST', '/revive', undefined], ['DELETE', `/epochs/${epoch}?forget=true`, undefined],
   ]);
+  assert.deepEqual(hub.forwarded.filter(a => a.sid === sid), ['prompt', 'cancel', 'mode', 'config', 'revive', 'remove'].map(action => ({ sid, epoch, action })));
   assert.equal(E.current, other); assert.equal(other.pt, point);
 });
 
