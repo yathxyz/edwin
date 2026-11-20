@@ -117,6 +117,18 @@ let
       "http://127.0.0.1"
       "http://[::1]"
     ];
+  validAgentHubUrl =
+    hub:
+    let
+      parts = builtins.match "(https?)://([a-zA-Z0-9.-]+|\\[[a-fA-F0-9:]+])(:([0-9]{1,5}))?(/[^?#[:space:]]*)?" hub.url;
+      host = builtins.elemAt parts 1;
+      port = builtins.elemAt parts 3;
+      octet = "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+      loopback = host == "localhost" || host == "[::1]" || builtins.match "127([.]${octet}){3}" host != null;
+    in
+    parts != null
+    && (port == null || lib.toIntBase10 port <= 65535)
+    && (builtins.head parts == "https" || hub.allowCleartext || loopback);
   isName = n: builtins.match "[a-z0-9-]{1,32}" n != null;
 
   front = cfg.front;
@@ -223,11 +235,15 @@ in
         options = {
           url = mkOption {
             type = types.str;
-            description = "HTTP or HTTPS URL of the agent hub, without credentials, query or fragment.";
+            description = ''
+              HTTP or HTTPS URL of the agent hub, without credentials, query or fragment. Use a lowercase
+              scheme, an ASCII hostname or IP literal, and at most five decimal digits for a port. Unlike
+              the daemon's URL parser, the module does not normalize alternative loopback spellings.
+            '';
           };
           tokenFile = mkOption {
             type = types.path;
-            description = "Root-readable token file outside the Nix store, loaded as the credential ${agentHubCredential}.";
+            description = "Root-readable runtime path outside the Nix store, loaded as the credential ${agentHubCredential}.";
           };
           steer = mkOption {
             type = types.bool;
@@ -238,8 +254,8 @@ in
             type = types.bool;
             default = false;
             description = ''
-              Required for plain HTTP unless the URL host is localhost, an IPv4 address in 127.0.0.0/8,
-              or [::1]. Enable only on an encrypted private network.
+              Required for plain HTTP unless the URL host is exactly localhost, [::1], or a dotted-decimal
+              address in 127.0.0.0/8 with no leading zeros. Enable only on an encrypted private network.
             '';
           };
         };
@@ -434,10 +450,6 @@ in
           message = "services.edwind.brain.url needs brain.tokenFile (to project notes), brain.readTokenFile (to read) or brain.taskTokenFile (to write tasks).";
         }
         {
-          assertion = cfg.agentHub == null || !(cfg.credentials ? ${agentHubCredential});
-          message = "services.edwind.credentials: ${agentHubCredential} is reserved when services.edwind.agentHub is set.";
-        }
-        {
           assertion = lib.all isName (lib.attrNames cfg.credentials);
           message = "services.edwind.credentials: names must match ^[a-z0-9-]{1,32}$.";
         }
@@ -535,6 +547,25 @@ in
         };
       };
     }
+
+    (mkIf (cfg.agentHub != null) {
+      assertions = [
+        {
+          assertion = !(cfg.credentials ? ${agentHubCredential});
+          message = "services.edwind.credentials: ${agentHubCredential} is reserved when services.edwind.agentHub is set.";
+        }
+        {
+          assertion = !(lib.path.hasPrefix (/. + builtins.storeDir) (
+            /. + builtins.unsafeDiscardStringContext (toString cfg.agentHub.tokenFile)
+          ));
+          message = "services.edwind.agentHub.tokenFile must be a runtime path outside the Nix store.";
+        }
+        {
+          assertion = validAgentHubUrl cfg.agentHub;
+          message = "services.edwind.agentHub.url must be an HTTP or HTTPS URL; plain HTTP outside loopback requires allowCleartext.";
+        }
+      ];
+    })
 
     (mkIf front.enable {
       assertions = [

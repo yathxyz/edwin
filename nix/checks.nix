@@ -303,18 +303,24 @@ in
           };
         };
       };
-      hubSys = sys.extendModules {
-        modules = [
-          {
-            services.edwind.agentHub = {
-              url = "http://hub.example";
-              tokenFile = "/run/secrets/agent-hub";
-              steer = true;
-              allowCleartext = true;
-            };
-          }
-        ];
+      withHub =
+        settings:
+        sys.extendModules {
+          modules = [
+            {
+              services.edwind.agentHub = {
+                url = "https://hub.example";
+                tokenFile = "/run/secrets/agent-hub";
+              } // settings;
+            }
+          ];
+        };
+      hubSys = withHub {
+        url = "http://hub.example";
+        steer = true;
+        allowCleartext = true;
       };
+      acceptsHub = settings: (builtins.tryEval (withHub settings).config.system.build.toplevel.drvPath).success;
       editJson = sys.config.environment.etc."edwind/edit.json".source;
       hubJson = hubSys.config.environment.etc."edwind/edit.json".source;
       hubService = hubSys.config.systemd.services.edwind.serviceConfig;
@@ -328,12 +334,28 @@ in
         user = unit.serviceConfig.User;
         creds = unit.serviceConfig.LoadCredential;
         preventRestart = unit.serviceConfig.RestartPreventExitStatus or null;
-        hubCredential = lib.elem "agent-hub-token:/run/secrets/agent-hub" hubService.LoadCredential;
+        hubCreds = hubService.LoadCredential;
         hubPreventRestart = hubService.RestartPreventExitStatus;
         readOnly = unit.serviceConfig.ReadOnlyPaths;
         frontCreds = frontUnit.serviceConfig.LoadCredential;
         frontAllow = frontUnit.serviceConfig.IPAddressAllow;
         system = builtins.seq sys.config.system.build.toplevel.drvPath true;
+        hubSystem = builtins.seq hubSys.config.system.build.toplevel.drvPath true;
+        acceptedInvalid = lib.filter acceptsHub [
+          { tokenFile = ../flake.nix; } # Harmless path inside the flake source in the store.
+          { url = ""; }
+          { url = "ftp://localhost"; }
+          { url = "http://hub.example"; }
+          { url = "http://localhost.example"; }
+          { url = "http://127.0.0.1.example"; }
+          { url = "http://localhost@hub.example"; }
+          { url = "http://127.256.0.1"; }
+        ];
+        rejectedLoopback = lib.filter (host: !acceptsHub { url = "http://${host}:1234/prefix"; }) [
+          "localhost"
+          "127.23.45.67"
+          "[::1]"
+        ];
       };
       want = show {
         exec = "${edwind}/bin/edwind --config /etc/edwind/edit.json";
@@ -345,7 +367,13 @@ in
           "search:/run/secrets/search"
         ];
         preventRestart = null;
-        hubCredential = true;
+        hubCreds = [
+          "anthropic-api-key:/run/secrets/anthropic"
+          "brain-read-token:/run/secrets/brain-read"
+          "brain-task-token:/run/secrets/brain-task"
+          "agent-hub-token:/run/secrets/agent-hub"
+          "search:/run/secrets/search"
+        ];
         hubPreventRestart = 73;
         readOnly = [
           "/home/alice/.ssh"
@@ -355,6 +383,9 @@ in
         frontCreds = [ "proxy-secret:/run/secrets/front" ];
         frontAllow = [ "10.0.0.1" ];
         system = true;
+        hubSystem = true;
+        acceptedInvalid = [ ];
+        rejectedLoopback = [ ];
       };
     in
     assert lib.assertMsg (got == want) "services.edwind evaluated to ${got}, expected ${want}";

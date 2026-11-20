@@ -135,6 +135,8 @@ edit.sock client.
   user can answer them too. Admission already permits editing the user's files through the daemon.
   Workbench v0.1.14 and later refuse prompts, mode and config changes, cancel and remove for a replaced
   session. They also refuse an answer unless its `req` and `epoch` match the published question.
+  These guards are the hub's: an older Workbench hub or another server at the configured URL may lack them,
+  so keep `steer` off unless the hub is known to enforce them.
   If the hub refuses a guarded action, Edwin does not retry without the guard.
   Revive has no hub-side guard: if the hub replaces the session after Edwin checks it, revive can act on the replacement.
   `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
