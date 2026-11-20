@@ -487,19 +487,7 @@ function fileStorage(file: string, log: Log, agent?: AgentAuthority) {
   let timer: NodeJS.Timeout | null = null;
   const flush = () => { timer = null; try { fs.writeFileSync(file, JSON.stringify(Object.fromEntries(map)), { mode: 0o600 }); } catch (e) { log.warn('storage', { error: e.message }); } };
   const schedule = () => { if (!timer) timer = setTimeout(flush, 500); };
-  const storage = { get: (k: string) => (map.has(k) ? map.get(k)! : null), set: (k: string, v: unknown) => { map.set(k, String(v)); schedule(); return true; }, remove: (k: string) => { map.delete(k); schedule(); }, keys: () => [...map.keys()], flush };
-  if (!agent) return storage;
-  // insert-file-contents and write-region use the host's virtual file namespace.
-  const checkKey = (k: string) => {
-    if (!k.startsWith('lmacs:file:')) return;
-    const name = k.slice('lmacs:file:'.length);
-    agent.checkNamed(path.isAbsolute(name) ? name : name === '~' || name.startsWith('~/') ? expandHome('~') + name.slice(1) : `${agent.notesDir}/${name}`);
-  };
-  return {
-    ...storage,
-    get: (k: string) => { checkKey(k); return storage.get(k); },
-    set: (k: string, v: unknown) => { checkKey(k); return storage.set(k, v); },
-  };
+  return { get: (k: string) => (map.has(k) ? map.get(k) : null), set: (k: string, v: unknown) => { map.set(k, String(v)); schedule(); return true; }, remove: (k: string) => { map.delete(k); schedule(); }, keys: () => [...map.keys()], flush };
 }
 
 /* ---------- --check and --export (R15.12) ---------- */

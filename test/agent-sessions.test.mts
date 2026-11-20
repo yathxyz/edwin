@@ -325,7 +325,44 @@ function privateFiles(t: TestContext) {
   return { dir, files, canary, unchanged };
 }
 
-test('configured content commands refuse both files and their existing links', async t => {
+test('configured virtual file keys work even when a notes path aliases the token', async t => {
+  const { dir, files, canary, unchanged } = privateFiles(t);
+  fs.symlinkSync(files[0], path.join(dir.dirs.notes, 'region'));
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    const roundTrip = await c.form(`(begin (erase-buffer) (insert "virtual text") (write-region #f #f "region")
+      (erase-buffer) (insert-file-contents "region") (write-file "copy") (erase-buffer) (insert-file-contents "copy") (buffer-string))`);
+    assert.equal(roundTrip.value, '"virtual text"');
+  } finally { c.close(); await stopEdwind(child); }
+  assert.ok(!child.logs.includes(canary), 'daemon logged protected content');
+  unchanged();
+});
+
+test('configured file guard follows token rotation rather than the old inode', async t => {
+  const { dir, files: [tokenFile, , oldLink], canary } = privateFiles(t);
+  const replacement = path.join(dir.root, 'replacement'), newLink = path.join(dir.root, 'new-link');
+  const rotated = 'rotated private fixture';
+  fs.writeFileSync(replacement, rotated);
+  const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
+  try {
+    await c.connect(); await c.hello();
+    // Keep a link to the old inode so the test does not depend on inode reuse.
+    fs.renameSync(replacement, tokenFile);
+    fs.linkSync(tokenFile, newLink);
+    const old = await c.open(oldLink), direct = await c.open(tokenFile), linked = await c.open(newLink);
+    const refused = (reply: typeof direct) =>
+      reply.error?.code === 'refused_path' && reply.error?.msg === 'Private file: access refused' && reply.text === null;
+    assert.deepEqual({
+      oldInodeReadable: old.text === canary,
+      configuredPathRefused: refused(direct),
+      newInodeAliasRefused: refused(linked),
+    }, { oldInodeReadable: true, configuredPathRefused: true, newInodeAliasRefused: true });
+  } finally { c.close(); await stopEdwind(child); }
+  assert.ok(!child.logs.includes(rotated), 'daemon logged protected content');
+});
+
+test('configured opens and visits refuse both files and their existing links', async t => {
   const { dir, files, canary, unchanged } = privateFiles(t), ordinary = path.join(dir.root, 'ordinary');
   fs.writeFileSync(ordinary, 'disk text');
   const child = await startEdwind(dir), c = new EditClient(dir.cfg.socket);
@@ -333,17 +370,8 @@ test('configured content commands refuse both files and their existing links', a
     await c.connect(); await c.hello();
     assert.equal((await c.open(ordinary)).text, 'disk text');
     assert.equal((await c.call('visit-id', [ordinary])).value?.buf, ordinary);
-    // write-region, write-file (save-as) and insert use the daemon's virtual file store.
-    const roundTrip = await c.form(`(begin (erase-buffer) (insert "virtual text") (write-region #f #f "region")
-      (erase-buffer) (insert-file-contents "region") (write-file "copy") (erase-buffer) (insert-file-contents "copy") (buffer-string))`);
-    assert.equal(roundTrip.value, '"virtual text"');
     for (const file of files) {
-      const name = JSON.stringify(path.dirname(file) === dir.dirs.notes ? path.basename(file) : file);
-      const replies = {
-        open: await c.open(file), visit: await c.call('visit-id', [file]),
-        insert: await c.form(`(insert-file-contents ${name})`), region: await c.form(`(write-region #f #f ${name})`),
-        saveAs: await c.form(`(write-file ${name})`),
-      };
+      const replies = { open: await c.open(file), visit: await c.call('visit-id', [file]) };
       for (const [op, reply] of Object.entries(replies)) {
         const json = JSON.stringify(reply);
         assert.ok(!json.includes(canary), `${op} disclosed file content`);

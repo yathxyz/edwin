@@ -8,16 +8,24 @@ export class ProtectedFileError extends PathError {
   constructor() { super('refused_path', 'Private file: access refused'); }
 }
 
-export type FileExclusions = readonly { path: string; dev: bigint; ino: bigint }[];
+export type FileExclusions = readonly string[];
 
 export function checkProtected(files: FileExclusions, file: string, fd?: number): void {
   let real: string | undefined;
   try { real = fs.realpathSync.native(file); } catch { /* let the caller handle filesystem errors */ }
-  if (files.some(f => f.path === real)) throw new ProtectedFileError();
-  let st: fs.BigIntStats;
+  let st: fs.BigIntStats | undefined;
   try { st = fd === undefined ? fs.statSync(file, { bigint: true }) : fs.fstatSync(fd, { bigint: true }); }
-  catch { return; }
-  if (files.some(f => f.dev === st.dev && f.ino === st.ino)) throw new ProtectedFileError();
+  catch { /* the resolved path can still match */ }
+  if (!real && !st) return;
+  for (const name of files) {
+    let target: string;
+    try { target = fs.realpathSync.native(name); } catch { continue; }
+    if (target === real) throw new ProtectedFileError();
+    if (!st) continue;
+    let current: fs.BigIntStats;
+    try { current = fs.statSync(target, { bigint: true }); } catch { continue; }
+    if (st.dev === current.dev && st.ino === current.ino) throw new ProtectedFileError();
+  }
 }
 
 export function readProtected<T>(files: FileExclusions, file: string, use: (fd: number) => T): T {
@@ -25,12 +33,11 @@ export function readProtected<T>(files: FileExclusions, file: string, use: (fd: 
   try { checkProtected(files, file, fd); return use(fd); } finally { fs.closeSync(fd); }
 }
 
-function protectedFile(file: string | undefined, setting: string): FileExclusions[number] {
-  try {
-    const real = fs.realpathSync.native(file!);
-    const { dev, ino } = fs.statSync(real, { bigint: true });
-    return { path: real, dev, ino };
-  } catch { throw new Error(`Cannot resolve ${setting}`); }
+function protectedFile(file: string | undefined, setting: string): string {
+  if (file !== undefined) {
+    try { fs.realpathSync.native(file); return file; } catch { /* report the setting, not the filesystem error */ }
+  }
+  throw new Error(`Cannot resolve ${setting}`);
 }
 
 export class AgentAuthority extends Authority {
