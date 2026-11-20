@@ -63,12 +63,14 @@ let
     ++ lib.optional (cfg.brain.tokenFile != null) "${brainCredential}:${cfg.brain.tokenFile}"
     ++ lib.optional (cfg.brain.readTokenFile != null) "${brainReadCredential}:${cfg.brain.readTokenFile}"
     ++ lib.optional (cfg.brain.taskTokenFile != null) "${brainTaskCredential}:${cfg.brain.taskTokenFile}"
+    ++ lib.optional (cfg.agentHub != null) "${agentHubCredential}:${toString cfg.agentHub.tokenFile}"
     ++ lib.mapAttrsToList (name: c: "${name}:${c.file}") cfg.credentials;
   # brain's tokens, the projector's (server/projector.mts) and the two the brain-* commands read and write tasks
   # with (server/brain.mts): not among the credentials Scheme can name.
   brainCredential = "brain-token";
   brainReadCredential = "brain-read-token";
   brainTaskCredential = "brain-task-token";
+  agentHubCredential = "agent-hub-token";
 
   editJson = json.generate "edwind.json" (
     {
@@ -99,6 +101,12 @@ let
         // lib.optionalAttrs (cfg.brain.taskTokenFile != null) { taskCredential = brainTaskCredential; };
     }
     // lib.optionalAttrs (cfg.hubSocket != null) { inherit (cfg) hubSocket; }
+    // lib.optionalAttrs (cfg.agentHub != null) {
+      agentHub = {
+        inherit (cfg.agentHub) url steer allowCleartext;
+        tokenFile = "/run/credentials/edwind.service/${agentHubCredential}";
+      };
+    }
   );
 
   httpsOrLoopback =
@@ -206,6 +214,36 @@ in
       type = types.nullOr types.str;
       default = null;
       description = "A Workbench hub socket for processes (PTY sessions). Without it edwind runs, and processes report the hub unconfigured.";
+    };
+
+    agentHub = mkOption {
+      default = null;
+      description = "The Workbench hub for agent sessions. Without it agent sessions are not configured.";
+      type = types.nullOr (types.submodule {
+        options = {
+          url = mkOption {
+            type = types.str;
+            description = "HTTP or HTTPS URL of the agent hub, without credentials, query or fragment.";
+          };
+          tokenFile = mkOption {
+            type = types.path;
+            description = "Root-readable token file outside the Nix store, loaded as the credential ${agentHubCredential}.";
+          };
+          steer = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Allow every client admitted to edwind to steer sessions, including answering permission questions.";
+          };
+          allowCleartext = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Required for plain HTTP unless the URL host is localhost, an IPv4 address in 127.0.0.0/8,
+              or [::1]. Enable only on an encrypted private network.
+            '';
+          };
+        };
+      });
     };
 
     models = {
@@ -396,6 +434,10 @@ in
           message = "services.edwind.brain.url needs brain.tokenFile (to project notes), brain.readTokenFile (to read) or brain.taskTokenFile (to write tasks).";
         }
         {
+          assertion = cfg.agentHub == null || !(cfg.credentials ? ${agentHubCredential});
+          message = "services.edwind.credentials: ${agentHubCredential} is reserved when services.edwind.agentHub is set.";
+        }
+        {
           assertion = lib.all isName (lib.attrNames cfg.credentials);
           message = "services.edwind.credentials: names must match ^[a-z0-9-]{1,32}$.";
         }
@@ -446,6 +488,7 @@ in
           Environment = [ "NODE_COMPILE_CACHE=%C/edwind" ];
           LoadCredential = credentials;
           Restart = "always";
+          RestartPreventExitStatus = mkIf (cfg.agentHub != null) 73;
           RestartSec = 1;
           TimeoutStopSec = 10;
           OOMScoreAdjust = 100;
