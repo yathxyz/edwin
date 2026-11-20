@@ -63,12 +63,14 @@ let
     ++ lib.optional (cfg.brain.tokenFile != null) "${brainCredential}:${cfg.brain.tokenFile}"
     ++ lib.optional (cfg.brain.readTokenFile != null) "${brainReadCredential}:${cfg.brain.readTokenFile}"
     ++ lib.optional (cfg.brain.taskTokenFile != null) "${brainTaskCredential}:${cfg.brain.taskTokenFile}"
+    ++ lib.optional (cfg.agentHub != null) "${agentHubCredential}:${toString cfg.agentHub.tokenFile}"
     ++ lib.mapAttrsToList (name: c: "${name}:${c.file}") cfg.credentials;
   # brain's tokens, the projector's (server/projector.mts) and the two the brain-* commands read and write tasks
   # with (server/brain.mts): not among the credentials Scheme can name.
   brainCredential = "brain-token";
   brainReadCredential = "brain-read-token";
   brainTaskCredential = "brain-task-token";
+  agentHubCredential = "agent-hub-token";
 
   editJson = json.generate "edwind.json" (
     {
@@ -99,6 +101,12 @@ let
         // lib.optionalAttrs (cfg.brain.taskTokenFile != null) { taskCredential = brainTaskCredential; };
     }
     // lib.optionalAttrs (cfg.hubSocket != null) { inherit (cfg) hubSocket; }
+    // lib.optionalAttrs (cfg.agentHub != null) {
+      agentHub = {
+        inherit (cfg.agentHub) url steer allowCleartext;
+        tokenFile = "/run/credentials/edwind.service/${agentHubCredential}";
+      };
+    }
   );
 
   httpsOrLoopback =
@@ -109,6 +117,18 @@ let
       "http://127.0.0.1"
       "http://[::1]"
     ];
+  validAgentHubUrl =
+    hub:
+    let
+      parts = builtins.match "(https?)://([a-zA-Z0-9.-]+|\\[[a-fA-F0-9:]+])(:([0-9]{1,5}))?(/[^?#[:space:]]*)?" hub.url;
+      host = builtins.elemAt parts 1;
+      port = builtins.elemAt parts 3;
+      octet = "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+      loopback = host == "localhost" || host == "[::1]" || builtins.match "127([.]${octet}){3}" host != null;
+    in
+    parts != null
+    && (port == null || lib.toIntBase10 port <= 65535)
+    && (builtins.head parts == "https" || hub.allowCleartext || loopback);
   isName = n: builtins.match "[a-z0-9-]{1,32}" n != null;
 
   front = cfg.front;
@@ -206,6 +226,40 @@ in
       type = types.nullOr types.str;
       default = null;
       description = "A Workbench hub socket for processes (PTY sessions). Without it edwind runs, and processes report the hub unconfigured.";
+    };
+
+    agentHub = mkOption {
+      default = null;
+      description = "The Workbench hub for agent sessions. Without it agent sessions are not configured.";
+      type = types.nullOr (types.submodule {
+        options = {
+          url = mkOption {
+            type = types.str;
+            description = ''
+              HTTP or HTTPS URL of the agent hub, without credentials, query or fragment. Use a lowercase
+              scheme, an ASCII hostname or IP literal, and at most five decimal digits for a port. Unlike
+              the daemon's URL parser, the module does not normalize alternative loopback spellings.
+            '';
+          };
+          tokenFile = mkOption {
+            type = types.path;
+            description = "Root-readable runtime path outside the Nix store, loaded as the credential ${agentHubCredential}.";
+          };
+          steer = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Allow every client admitted to edwind to steer sessions, including answering permission questions.";
+          };
+          allowCleartext = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Required for plain HTTP unless the URL host is exactly localhost, [::1], or a dotted-decimal
+              address in 127.0.0.0/8 with no leading zeros. Enable only on an encrypted private network.
+            '';
+          };
+        };
+      });
     };
 
     models = {
@@ -446,6 +500,7 @@ in
           Environment = [ "NODE_COMPILE_CACHE=%C/edwind" ];
           LoadCredential = credentials;
           Restart = "always";
+          RestartPreventExitStatus = mkIf (cfg.agentHub != null) 73;
           RestartSec = 1;
           TimeoutStopSec = 10;
           OOMScoreAdjust = 100;
@@ -492,6 +547,27 @@ in
         };
       };
     }
+
+    (mkIf (cfg.agentHub != null) {
+      assertions = [
+        {
+          assertion = !(cfg.credentials ? ${agentHubCredential});
+          message = "services.edwind.credentials: ${agentHubCredential} is reserved when services.edwind.agentHub is set.";
+        }
+        {
+          assertion =
+            let
+              tokenFile = toString cfg.agentHub.tokenFile;
+            in
+            !builtins.hasContext tokenFile && !(lib.path.hasPrefix (/. + builtins.storeDir) (/. + tokenFile));
+          message = "services.edwind.agentHub.tokenFile must be a runtime path outside the Nix store.";
+        }
+        {
+          assertion = validAgentHubUrl cfg.agentHub;
+          message = "services.edwind.agentHub.url must be an HTTP or HTTPS URL; plain HTTP outside loopback requires allowCleartext.";
+        }
+      ];
+    })
 
     (mkIf front.enable {
       assertions = [

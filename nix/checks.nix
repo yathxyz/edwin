@@ -303,6 +303,34 @@ in
           };
         };
       };
+      withHub =
+        settings:
+        sys.extendModules {
+          modules = [
+            {
+              services.edwind.agentHub = {
+                url = "https://hub.example";
+                tokenFile = "/run/secrets/agent-hub";
+              } // settings;
+            }
+          ];
+        };
+      hubSys = withHub {
+        url = "http://hub.example";
+        steer = true;
+        allowCleartext = true;
+      };
+      hasToplevel = system: (builtins.tryEval system.config.system.build.toplevel.drvPath).success;
+      wrongRefusal =
+        expected: settings:
+        let
+          system = withHub settings;
+          failures = map (a: a.message) (lib.filter (a: !a.assertion) system.config.assertions);
+        in
+        hasToplevel system || failures != [ expected ];
+      editJson = sys.config.environment.etc."edwind/edit.json".source;
+      hubJson = hubSys.config.environment.etc."edwind/edit.json".source;
+      hubService = hubSys.config.systemd.services.edwind.serviceConfig;
       frontUnit = sys.config.systemd.services.edwin-front;
       frontJson = lib.head frontUnit.restartTriggers;
       unit = sys.config.systemd.services.edwind;
@@ -312,10 +340,36 @@ in
         exec = unit.serviceConfig.ExecStart;
         user = unit.serviceConfig.User;
         creds = unit.serviceConfig.LoadCredential;
+        preventRestart = unit.serviceConfig.RestartPreventExitStatus or null;
+        hubCreds = hubService.LoadCredential;
+        hubPreventRestart = hubService.RestartPreventExitStatus;
         readOnly = unit.serviceConfig.ReadOnlyPaths;
         frontCreds = frontUnit.serviceConfig.LoadCredential;
         frontAllow = frontUnit.serviceConfig.IPAddressAllow;
         system = builtins.seq sys.config.system.build.toplevel.drvPath true;
+        hubSystem = builtins.seq hubSys.config.system.build.toplevel.drvPath true;
+        tokenRefusalMismatches = lib.filter (wrongRefusal
+          "services.edwind.agentHub.tokenFile must be a runtime path outside the Nix store."
+        ) [
+          { tokenFile = ../flake.nix; } # Harmless path inside the flake source in the store.
+          { tokenFile = lib.strings.addContextFrom edwind "/run/secrets/agent-hub"; }
+        ];
+        urlRefusalMismatches = lib.filter (wrongRefusal
+          "services.edwind.agentHub.url must be an HTTP or HTTPS URL; plain HTTP outside loopback requires allowCleartext."
+        ) [
+          { url = ""; }
+          { url = "ftp://localhost"; }
+          { url = "http://hub.example"; }
+          { url = "http://localhost.example"; }
+          { url = "http://127.0.0.1.example"; }
+          { url = "http://localhost@hub.example"; }
+          { url = "http://127.256.0.1"; }
+        ];
+        rejectedLoopback = lib.filter (host: !hasToplevel (withHub { url = "http://${host}:1234/prefix"; })) [
+          "localhost"
+          "127.23.45.67"
+          "[::1]"
+        ];
       };
       want = show {
         exec = "${edwind}/bin/edwind --config /etc/edwind/edit.json";
@@ -326,6 +380,15 @@ in
           "brain-task-token:/run/secrets/brain-task"
           "search:/run/secrets/search"
         ];
+        preventRestart = null;
+        hubCreds = [
+          "anthropic-api-key:/run/secrets/anthropic"
+          "brain-read-token:/run/secrets/brain-read"
+          "brain-task-token:/run/secrets/brain-task"
+          "agent-hub-token:/run/secrets/agent-hub"
+          "search:/run/secrets/search"
+        ];
+        hubPreventRestart = 73;
         readOnly = [
           "/home/alice/.ssh"
           "/home/alice/.config/systemd"
@@ -334,16 +397,26 @@ in
         frontCreds = [ "proxy-secret:/run/secrets/front" ];
         frontAllow = [ "10.0.0.1" ];
         system = true;
+        hubSystem = true;
+        tokenRefusalMismatches = [ ];
+        urlRefusalMismatches = [ ];
+        rejectedLoopback = [ ];
       };
     in
     assert lib.assertMsg (got == want) "services.edwind evaluated to ${got}, expected ${want}";
     pkgs.runCommand "edwind-module" { } ''
       export HOME=$TMPDIR
-      ${edwind}/bin/edwind --config ${
-        sys.config.environment.etc."edwind/edit.json".source
-      } --write-roots > roots
+      # Digest of this fixture's edit.json before the agentHub option.
+      echo "3a7e67eb4fe98287ffe6ba186535471917fdb7364b8707b21d9ff40c102b54da  ${editJson}" | sha256sum -c -
+      ${edwind}/bin/edwind --config ${editJson} --write-roots > roots
       grep -qx /home/alice/notes roots
       grep -qx /run/edwind roots
+      # Only the credential path, never the source file or its contents, belongs in edit.json.
+      ${pkgs.jq}/bin/jq -e --slurpfile base ${editJson} '. == ($base[0] + {agentHub: {
+        url: "http://hub.example", tokenFile: "/run/credentials/edwind.service/agent-hub-token",
+        steer: true, allowCleartext: true
+      }})' ${hubJson} > /dev/null
+      ${edwind}/bin/edwind --config ${hubJson} --write-roots > /dev/null
       # edwin-front accepts the front.json the module writes, with the credential where systemd would put it.
       printf '%048d' 0 > secret
       sed "s|/run/credentials/edwin-front.service/proxy-secret|$PWD/secret|" ${frontJson} > front.json

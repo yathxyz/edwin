@@ -131,12 +131,13 @@ edit.sock client.
   live shared list; RET opens a read-only, structurally folded journal. `p` composes an ordinary durable
   Markdown draft (`C-c C-p` preview, `C-c C-k` leave retaining it). By default clients can read sessions
   and write and keep drafts, but cannot send them. With `agentHub.steer: true`, **every client admitted to
-  the daemon can steer**. Admission already permits editing the user's files through the daemon.
-  **Keep steering off until the hub atomically checks both the request version and the session incarnation
-  when accepting an answer.** Edwin checks what the user saw before sending; the hub does not verify that
-  the question is still the same when it accepts the answer.
-  Edwin sends the selected incarnation with prompts, mode and config changes, cancel and remove.
-  If the hub refuses the guard, Edwin does not retry without it.
+  the daemon can steer**. This includes answering permission questions, so agents running as the daemon's
+  user can answer them too. Admission already permits editing the user's files through the daemon.
+  Workbench v0.1.14 and later refuse prompts, mode and config changes, cancel and remove for a replaced
+  session. They also refuse an answer unless its `req` and `epoch` match the published question.
+  These guards are the hub's: an older Workbench hub or another server at the configured URL may lack them,
+  so keep `steer` off unless the hub is known to enforce them.
+  If the hub refuses a guarded action, Edwin does not retry without the guard.
   Revive has no hub-side guard: if the hub replaces the session after Edwin checks it, revive can act on the replacement.
   `C-c C-c` then sends a draft and `C-c a !` answers permissions/elicitations. Resource attachments,
   named reuse and several destinations are `agent-prompt-*` commands. Drafts live under stateDir/agent-prompts.
@@ -146,8 +147,9 @@ edit.sock client.
   config, to keep their contents out of buffers, journals and other frames. This is not a security boundary:
   clients admitted to the daemon have its user's file access. Protect the token with file permissions.
 
-  The stock NixOS units do not configure `agentHub`. If you supply an agent-enabled `edit.json` to a
-  systemd service, set `RestartPreventExitStatus=73` on that service to stop retrying when another writer owns the store.
+  On NixOS, set `services.edwind.agentHub = { url = "https://hub.example"; tokenFile = "/run/secrets/agent-hub"; };`.
+  The module loads the token as a systemd credential and sets `RestartPreventExitStatus=73` so the service
+  does not retry when another writer owns the store. Set that restart policy on custom agent-enabled units too.
   `agent-session-open SID` returns `name:*Agent: SID*`, which any attached frame/card can show through
   `Ed.sync.open(id)` and `Ed.setWindowBuffer(buffer)`. The HTTP API does not restore the removed §5 socket API.
   For HTTP outside loopback, explicitly set `allowCleartext: true` **only on an encrypted private network**.
