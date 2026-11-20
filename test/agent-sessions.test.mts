@@ -849,6 +849,25 @@ async function reviewFixture(t: TestContext, setup?: (hub: FakeAgentHub, dir: Te
   return { hub, dir, child, c };
 }
 
+test('mode and config reject invalid fields locally, not as a hub version error', async t => {
+  const { hub, c } = await reviewFixture(t), sid = 'validate-fields', epoch = hub.add(sid).createdAt;
+  for (const [action, fields, message] of [
+    ['mode', {}, /modeId/i], ['mode', { modeId: '' }, /modeId/i], ['mode', { modeId: true }, /modeId/i],
+    ['config', { value: false }, /id/i], ['config', { id: '', value: false }, /id/i], ['config', { id: 1, value: false }, /id/i],
+    ['config', { id: 'flag' }, /value/i], ['config', { id: 'flag', value: 1 }, /value/i],
+  ] as const) {
+    const result = await c.call(`agent-session-${action}`, [sid, { epoch, ...fields }]);
+    assert.match(result.error?.report || '', message);
+    assert.doesNotMatch(result.error.report, /hub/i);
+  }
+  assert.deepEqual(hub.calls.filter(call => call.method !== 'GET'), []);
+  for (const value of [false, '']) {
+    const result = await c.call('agent-session-config', [sid, { epoch, id: 'flag', value }]);
+    assert.equal(result.error, undefined);
+    assert.deepEqual(hub.calls.filter(call => call.method === 'POST').at(-1)?.body, { epoch, id: 'flag', value });
+  }
+});
+
 for (const refusal of ['stale', 'unsupported'] as const) {
   test(`guarded session actions: ${refusal} is a definite refusal, never a retry or fallback`, async t => {
     const { hub, c } = await reviewFixture(t), handle = hub.handle.bind(hub), stale = refusal === 'stale';
@@ -874,10 +893,23 @@ for (const refusal of ['stale', 'unsupported'] as const) {
       const report = result.error?.report || '';
       assert.match(report, stale ? /session was replaced/i : /updat.*hub|hub.*updat/i);
       assert.doesNotMatch(report, /possibly sent/i);
+      assert.deepEqual(hub.forwarded.filter(a => a.sid === sid), [], `${action} must not reach the session`);
       assert.deepEqual(hub.sessions.get(sid), expected); assert.deepEqual(hub.journals.get(sid), []);
       if (action === 'draft') {
         const preview = (await c.call('agent-prompt-preview', [draft])).value;
         assert.deepEqual(preview.targets, [{ sid, epoch }]); assert.deepEqual(preview.possiblySent, []);
+        if (stale) {
+          const resend = await c.call('agent-prompt-send', [draft]);
+          assert.match(resend.error?.report || '', /session was replaced/i);
+          assert.deepEqual(statuses, [409], 'an unchanged draft must not POST again');
+          const replacement = { sid, epoch: (await c.call('agent-session-state', [sid])).value.epoch };
+          assert.equal(replacement.epoch, epoch + 1);
+          assert.deepEqual((await c.call('agent-prompt-targets', [draft, [replacement]])).value, [replacement]);
+          assert.deepEqual((await c.call('agent-prompt-send', [draft])).value.sent, [sid]);
+          assert.deepEqual(statuses, [409, 200]);
+          assert.deepEqual(hub.forwarded.filter(a => a.sid === sid), [{ ...replacement, action: 'prompt' }]);
+          assert.deepEqual(hub.journals.get(sid)!.map(e => e.prompt), [preview.blocks]);
+        }
       }
     }
   });
@@ -893,6 +925,7 @@ test('bodyless session actions reject invalid path epochs and locally stale revi
   const current = hub.add('stale-revive');
   const revive = await c.call('agent-session-revive', [current.sid, { epoch: current.createdAt - 1 }]);
   assert.match(revive.error?.report || '', /session was replaced/i);
+  assert.deepEqual(hub.forwarded, []);
   assert.deepEqual(hub.calls.filter(call => call.method !== 'GET'), []);
 });
 

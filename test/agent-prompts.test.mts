@@ -579,6 +579,7 @@ test('AS-C10: host RPC addresses a transcript without selecting it: folds, struc
     ['POST', '/mode', { modeId: 'auto', epoch }], ['POST', '/config', { id: 'model', value: 'large', epoch }],
     ['POST', '/revive', undefined], ['DELETE', `/epochs/${epoch}?forget=true`, undefined],
   ]);
+  assert.deepEqual(hub.forwarded.filter(a => a.sid === sid), ['prompt', 'cancel', 'mode', 'config', 'revive', 'remove'].map(action => ({ sid, epoch, action })));
   assert.equal(E.current, other); assert.equal(other.pt, point);
 });
 

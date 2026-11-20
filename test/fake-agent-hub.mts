@@ -12,6 +12,7 @@ export class FakeAgentHub {
   observed = new Map<string, Json>();
   journals = new Map<string, Json[]>();
   calls: { method: string; path: string; body: Json | undefined }[] = [];
+  forwarded: { sid: string; epoch: number; action: string }[] = [];
   streams = new Set<http.ServerResponse>();
   server = http.createServer((req, res) => void this.handle(req, res));
   configSupported = true;
@@ -129,6 +130,7 @@ export class FakeAgentHub {
       if (!this.sessionActionEpoch) return reply(400, { code: 'bad_request', error: 'sessionActionEpoch is not supported' });
       if (epoch !== s.createdAt) return reply(409, { error: 'stale incarnation', code: 'stale' });
     }
+    this.forwarded.push({ sid, epoch: s.createdAt, action: remove ? 'remove' : endpoint.slice(1) });
     if (remove) { this.sessions.delete(sid); this.emit('gone', { sid, epoch: s.createdAt }); }
     if (action === '/prompt') this.append(sid, { e: 'prompt', prompt: body!.blocks || [{ type: 'text', text: body!.text }] });
     reply(200, {});

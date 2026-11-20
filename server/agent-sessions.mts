@@ -775,9 +775,10 @@ export async function install(server: Server, registryOnly = false) {
   });
   if (server.cfg.agentHub?.steer) {
     cmd('agent-session-start', async a => { const r = await hub.request('POST', 'sessions', a[0]); return hub.open(r.sid); });
-    const action = (name: string, send: (session: string, epoch: number, body: Json) => Promise<Json>) =>
+    const action = (name: string, send: (session: string, epoch: number, body: Json) => Promise<Json>, validate?: (body: Json) => void) =>
       cmd('agent-session-' + name, async ([id, body]) => {
         const sid = sidOf(id), captured = body?.epoch;
+        validate?.(body);
         await hub.requireSession(sid, captured);
         return send(`sessions/${sid}`, expectedEpoch(captured), body);
       });
@@ -785,8 +786,13 @@ export async function install(server: Server, registryOnly = false) {
     action('remove', (s, epoch) => hub.request('DELETE', `${s}/epochs/${epoch}?forget=true`));
     // Revive has no hub-side guard: a replacement after requireSession can receive this POST.
     action('revive', s => hub.request('POST', `${s}/revive`));
-    action('mode', (s, epoch, { modeId }) => hub.request('POST', `${s}/mode`, { modeId, epoch }));
-    action('config', (s, epoch, { id, value }) => hub.request('POST', `${s}/config`, { id, value, epoch }));
+    action('mode', (s, epoch, { modeId }) => hub.request('POST', `${s}/mode`, { modeId, epoch }), body => {
+      if (typeof body?.modeId !== 'string' || !body.modeId) throw new Error('modeId must be a non-empty string');
+    });
+    action('config', (s, epoch, { id, value }) => hub.request('POST', `${s}/config`, { id, value, epoch }), body => {
+      if (typeof body?.id !== 'string' || !body.id) throw new Error('Config id must be a non-empty string');
+      if (typeof body.value !== 'string' && typeof body.value !== 'boolean') throw new Error('Config value must be a string or boolean');
+    });
     for (const action of ['permission', 'elicitation'] as const) cmd('agent-session-' + action, a => hub.answer(a[0], action, a[1]));
   }
   server.statusProviders.push(() => ({ agentHub: hub.status, agentSessions: hub.sessions.size, agentObserved: hub.observed.size }));
