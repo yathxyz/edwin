@@ -63,13 +63,15 @@ let
     ++ lib.optional (cfg.brain.tokenFile != null) "${brainCredential}:${cfg.brain.tokenFile}"
     ++ lib.optional (cfg.brain.readTokenFile != null) "${brainReadCredential}:${cfg.brain.readTokenFile}"
     ++ lib.optional (cfg.brain.taskTokenFile != null) "${brainTaskCredential}:${cfg.brain.taskTokenFile}"
+    ++ lib.optional (cfg.brain.notesTokenFile != null) "${brainNotesCredential}:${cfg.brain.notesTokenFile}"
     ++ lib.optional (cfg.agentHub != null) "${agentHubCredential}:${toString cfg.agentHub.tokenFile}"
     ++ lib.mapAttrsToList (name: c: "${name}:${c.file}") cfg.credentials;
-  # brain's tokens, the projector's (server/projector.mts) and the two the brain-* commands read and write tasks
-  # with (server/brain.mts): not among the credentials Scheme can name.
+  # brain's tokens: the projector's and those the brain-* commands read and write with.
+  # These are not among the credentials Scheme can name.
   brainCredential = "brain-token";
   brainReadCredential = "brain-read-token";
   brainTaskCredential = "brain-task-token";
+  brainNotesCredential = "brain-notes-token";
   agentHubCredential = "agent-hub-token";
 
   editJson = json.generate "edwind.json" (
@@ -98,7 +100,11 @@ let
         }
         // lib.optionalAttrs (cfg.brain.tokenFile != null) { credential = brainCredential; }
         // lib.optionalAttrs (cfg.brain.readTokenFile != null) { readCredential = brainReadCredential; }
-        // lib.optionalAttrs (cfg.brain.taskTokenFile != null) { taskCredential = brainTaskCredential; };
+        // lib.optionalAttrs (cfg.brain.taskTokenFile != null) { taskCredential = brainTaskCredential; }
+        // lib.optionalAttrs (cfg.brain.notesTokenFile != null) {
+          notesCredential = brainNotesCredential;
+          inherit (cfg.brain) noteTags;
+        };
     }
     // lib.optionalAttrs (cfg.hubSocket != null) { inherit (cfg) hubSocket; }
     // lib.optionalAttrs (cfg.agentHub != null) {
@@ -305,7 +311,8 @@ in
         description = ''
           Where brain listens. Plain http is sent only to an address of this host. With `tokenFile`, edwind
           is the note projector; with `readTokenFile`, Edwin finds and opens brain's nodes and shows its
-          agenda through it; with `taskTokenFile`, Edwin adds and changes brain's tasks through it.
+          agenda through it; with `taskTokenFile`, Edwin adds and changes brain's tasks through it;
+          with `notesTokenFile`, Edwin adds and changes notes held in brain.
         '';
       };
       tokenFile = mkOption {
@@ -337,6 +344,20 @@ in
           change one. Every process that can open edwind's socket can then add, change, close and confirm tasks
           as the token's actor, with its trust, under the tags it is cleared for; it cannot delete one.
         '';
+      };
+      notesTokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Root-readable file holding a brain token for held notes. When set, the brain-note-add and
+          brain-note-set commands answer. Every process that can open edwind's socket can then add and
+          change held notes as the token's actor, with its trust, under the tags it is cleared for.
+        '';
+      };
+      noteTags = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = "Default brain tags for newly created held notes. With none, every client of brain can read the notes.";
       };
       tags = mkOption {
         type = types.listOf types.str;
@@ -438,16 +459,18 @@ in
               cfg.credentials ? ${brainCredential}
               || cfg.credentials ? ${brainReadCredential}
               || cfg.credentials ? ${brainTaskCredential}
+              || cfg.credentials ? ${brainNotesCredential}
             );
-          message = "services.edwind.credentials: ${brainCredential}, ${brainReadCredential} and ${brainTaskCredential} are brain's when services.edwind.brain.url is set.";
+          message = "services.edwind.credentials: ${brainCredential}, ${brainReadCredential}, ${brainTaskCredential} and ${brainNotesCredential} are brain's when services.edwind.brain.url is set.";
         }
         {
           assertion =
             cfg.brain.url == null
             || cfg.brain.tokenFile != null
             || cfg.brain.readTokenFile != null
-            || cfg.brain.taskTokenFile != null;
-          message = "services.edwind.brain.url needs brain.tokenFile (to project notes), brain.readTokenFile (to read) or brain.taskTokenFile (to write tasks).";
+            || cfg.brain.taskTokenFile != null
+            || cfg.brain.notesTokenFile != null;
+          message = "services.edwind.brain.url needs brain.tokenFile (to project notes), brain.readTokenFile (to read), brain.taskTokenFile (to write tasks) or brain.notesTokenFile (to write held notes).";
         }
         {
           assertion = lib.all isName (lib.attrNames cfg.credentials);
