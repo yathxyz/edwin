@@ -16,7 +16,7 @@
 type SyncBy = {
   kind: 'frame' | 'cli' | 'web' | 'disk' | 'server' | 'agent'; cid?: string | null; device?: string | null; session?: string; thread?: string; agent?: string; tab?: unknown;
 };
-type SyncCondition = { condition: string; report: string; restarts?: unknown[]; backtrace?: string[] };
+type SyncCondition = { condition: string; report: string; restarts?: unknown[]; backtrace?: string[]; currentBody?: string };
 type SyncAnchor = { id: string; pos: number; label?: string };
 type SyncMeta = { file: string | null; mode: string; modified: boolean; readOnly: string | boolean; saved: number; diskChanged: string | null; eol: 'lf' | 'crlf'; anchors: SyncAnchor[]; locals: Record<string, unknown>; ver: number };
 type SyncWelcomeMsg = { t: 'welcome'; proto: number; build: string; boot: string; imageEpoch: string; gen: number; caps: Record<string, unknown> & { agentHub?: { steer: boolean } } };
@@ -830,6 +830,7 @@ function onImage(msg: SyncImageMsg) {
 /* ---------- server commands and evaluation (R4.27, R4.15) ---------- */
 function serverCommand(name: string) {
   const b = E.current;
+  if (name === 'babel-tangle' && b.brainNote) L.signal('user-error', 'This brain note visits no file to tangle relative to');
   const p = spin(call({ cmd: name, args: [], buf: b, ctx: ctxNow(b) }));
   p.then(r => {
     if (r.error) Ed.message(r.error.condition === 'quit' ? 'Quit' : `${name}: ${r.error.report || r.error.condition}`);

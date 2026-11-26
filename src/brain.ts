@@ -1,14 +1,15 @@
 /* Nodes and tasks from brain (docs/steps.md, "Nodes from brain" and "Tasks from brain"). brain is the graph that
    holds what the notes are (their Org ids, titles, aliases and links, sent by edwind's projector) beside tasks,
    memories and references. Here Edwin finds a node by name, links to one, opens one, lists what links to the
-   note at point, shows the agenda and the open tasks, and adds and changes a task.
+   note at point, shows the agenda and the open tasks, and writes tasks and notes held in brain.
 
    A frame holds no token: it asks edwind (server/brain.mts), with the commands brain-titles, brain-node,
-   brain-agenda, brain-tasks, brain-task-add, brain-task-set and brain-tasks-follow. So there is a brain only
-   where Edwin is attached to an edwind that reads one; everywhere else the commands say why not, in a sentence.
+   brain-agenda, brain-tasks, brain-task-add, brain-task-set, brain-tasks-follow, brain-note-add and brain-note-set.
+   Without an attached edwind the commands say why not, in a sentence.
 
-   A note opens as its file, with point on its entry. Anything else opens as a record: a read-only buffer in
-   brain-mode, written as Org so its links are links. The backlinks of the note at point are such a buffer too,
+   A projected note opens as its file, with point on its entry; a held note opens as editable Markdown.
+   Anything else opens as a read-only record in brain-mode, written as Org so its links are links.
+   The backlinks of the note at point are such a buffer too,
    in a side window that follows point. The agenda is a read-only buffer in brain-agenda-mode, a line a task;
    while a window shows it, it follows brain: a task changed anywhere is in it without r. A new task is written
    in a Markdown buffer of its own, its fields in the front matter (brain-task-capture). */
@@ -25,10 +26,10 @@ interface BrainRow { id: string; kind: string; title: string; alias: string | nu
 /* A link of a node, as brain-node lists it: REL is the edge type, or its inverse name on a link that arrives. */
 interface BrainLink { rel: string; id: string; kind: string; title: string }
 interface BrainNode {
-  id: string; kind: string; title: string; body: string | null; props: Record<string, unknown> | null; tags: string[]; trust: string;
+  id: string; kind: string; title: string; body: string | null; props: Record<string, unknown> | null; tags: string[]; trust: string; revision: number;
   identifiers: { scheme: string; value: string }[]; links: BrainLink[];
 }
-interface BrainReply { value?: unknown; error?: { condition: string; report: string } }
+interface BrainReply { value?: unknown; error?: { condition: string; report: string; currentBody?: string } }
 
 /* ---------- asking ---------- */
 const attached = () => !!(Ed.sync && Ed.sync.started);
@@ -39,7 +40,8 @@ async function reply(cmd: string, ...args: unknown[]): Promise<BrainReply> {
   if (!attached()) return { error: { condition: 'brain-unavailable', report: NO_EDWIND } };
   const r = await Ed.sync.call({ cmd, args });
   if (!r.error) return { value: r.value };
-  return { error: { condition: r.error.condition, report: r.error.condition === 'offline' ? 'Not connected to edwind' : r.error.report || r.error.condition } };
+  const { condition, report, currentBody } = r.error;
+  return { error: { condition, report: condition === 'offline' ? 'Not connected to edwind' : report || condition, ...(typeof currentBody === 'string' ? { currentBody } : {}) } };
 }
 async function ask(cmd: string, ...args: unknown[]): Promise<unknown> {
   const r = await reply(cmd, ...args);
@@ -170,8 +172,49 @@ function recordText(n: BrainNode) {
   if (typeof n.body === 'string' && n.body.trim()) lines.push(n.body.replace(/\s+$/, '').replace(/^\*/gm, ' *'), '');
   return [...lines, ...linkLines(n.links)].join('\n').replace(/\n+$/, '') + '\n';
 }
-/* Open the node REF in the selected window. A note that a file holds is that file, with point on the note's
-   entry; the visit may have to open the file first, and is waited for. Anything else is its record. */
+/* Use a private, fileless Markdown buffer, identified by node id, not title. Reopening one must not
+   replace its text or advance its revision behind the user's edits. */
+function noteBuffer(title: string, text: string, id: string | null, revision: number) {
+  const b = Ed.getBufferCreate(L.call('generate-new-buffer-name', [`*brain note: ${oneLine(title) || id}*`]) as string);
+  Ed.switchMajorMode(b, 'markdown-mode');
+  b.text = text; b.pt = 0; b.modified = id === null;
+  b.brainNote = { id, title, revision };
+  Ed.setWindowBuffer(b);
+  return b;
+}
+
+async function saveNote(b: EdBuffer): Promise<false> {
+  const note = b.brainNote!;
+  if (note.id && !b.modified) { Ed.message('(No changes need to be saved)'); return false; }
+  if (b.saving) signal('user-error', 'The brain note is already being saved');
+  const body = b.text;
+  b.saving = true;
+  try {
+    const r = note.id
+      ? await reply('brain-note-set', note.id, { body, expect_revision: note.revision })
+      : await reply('brain-note-add', { title: note.title, body });
+    if (r.error) {
+      if (r.error.condition === 'brain-note-conflict' && typeof r.error.currentBody === 'string') {
+        const current = Ed.getBufferCreate(`*brain current: ${b.name}*`);
+        Ed.switchMajorMode(current, 'markdown-mode');
+        current.text = r.error.currentBody; current.pt = 0; current.readOnly = true;
+        current.modified = false; current.undo = []; current.redo = [];
+        Ed.popToBuffer(current, false);
+        signal('user-error', `${r.error.report} — current text shown in another window`);
+      }
+      signal('user-error', r.error.report);
+    }
+    const v = r.value;
+    if (!isObj(v) || typeof v.id !== 'string' || typeof v.revision !== 'number' || !Number.isSafeInteger(v.revision))
+      return signal('user-error', 'brain did not return the saved note and its revision');
+    note.id = v.id; note.revision = v.revision;
+    if (b.text === body) Ed.markSaved(b); else b.modified = true;
+    Ed.message(`Saved brain note: ${oneLine(note.title)}`);
+    return false;
+  } finally { b.saving = false; }
+}
+
+/* Open REF as its file, a held note, or a read-only record. */
 async function open(ref: string): Promise<EdBuffer | false> {
   const n = await node(ref), src = n.kind === 'note' && n.props && Array.isArray(n.props.sources) ? n.props.sources[0] : null;
   if (typeof src === 'string' && src) {
@@ -184,6 +227,12 @@ async function open(ref: string): Promise<EdBuffer | false> {
     Org.gotoId(b, orgId(n));
     return b;
   }
+  if (n.kind === 'note' && !(n.props && Object.hasOwn(n.props, 'sources'))) {
+    const b = E.buffers.find(b => b.brainNote?.id === n.id);
+    if (b) { Ed.setWindowBuffer(b); return b; }
+    if (!Number.isSafeInteger(n.revision)) signal('user-error', 'brain did not return the note revision');
+    return noteBuffer(n.title, n.body ?? '', n.id, n.revision);
+  }
   const b = Ed.getBufferCreate(`*brain: ${oneLine(n.title) || n.id}*`);
   show(b, recordText(n), { ref: n.id }); b.pt = 0;
   Ed.setWindowBuffer(b);
@@ -193,8 +242,22 @@ async function open(ref: string): Promise<EdBuffer | false> {
 /* ---------- the commands ---------- */
 const refOf = (x: SchemeValue) => (typeof x === 'string' && x.trim() ? x.trim() : null);
 const titleOf = (x: SchemeValue) => { const t = typeof x === 'string' ? x.trim() : ''; if (!t) signal('user-error', 'No title'); return t; };
+CMD('brain-new-note', async () => {
+  if (!attached()) signal('user-error', NO_EDWIND);
+  return [await Ed.readMini('Note title: ', '')];
+}, 'TITLE', 'Open an empty Markdown buffer titled TITLE, creating a note in brain on its first save.', ([title]: SchemeValue[]) => {
+  if (!attached()) signal('user-error', NO_EDWIND);
+  noteBuffer(titleOf(title), '', null, 0);
+  return false;
+});
+L.D('%brain-note-save-and-quit', '', 'Save the held note before closing it (internal).', async () => {
+  const b = cur();
+  await L.call('save-buffer', []);
+  if (b === cur()) return L.call('evil-quit', [false]);
+  return false;
+});
 CMD('brain-node-find', async () => { const { row, text } = await readNode('Node: ', ''); return [row ? row.id : false, row ? row.title : text]; },
-  'REF &optional TITLE', 'Open the node REF of brain (its id, or scheme:value such as org-id:ID): a note as its file, anything else as a record. With REF #f, make a note titled TITLE from a template and visit it (SPC n r f).',
+  'REF &optional TITLE', 'Open the node REF of brain (its id, or scheme:value such as org-id:ID): a projected note as its file, a held note as editable Markdown, anything else as a record. With REF #f, make a note titled TITLE from a template and visit it (SPC n r f).',
   async ([ref, title]: SchemeValue[]) => {
     const r = refOf(ref);
     if (r) { await open(r); return false; }
@@ -817,9 +880,9 @@ for (const [name, field, key, prompt] of [['brain-capture-schedule', 'scheduled'
 CMD('brain-capture-tags', async () => [await Ed.readMini('Tags: ', matter(capturing()).fields.get('tags')?.value ?? '')],
   'TAGS', 'Set the tags of the task being written: TAGS is words with spaces between, "" for none (C-c C-q).',
   ([tags]: SchemeValue[]) => setField('tags', fieldValue('tags', typeof tags === 'string' ? tags : '')));
-for (const n of ['brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
+for (const n of ['brain-new-note', 'brain-node-find', 'brain-node-insert', 'brain-backlinks', 'brain-follow', 'brain-agenda', 'brain-agenda-redo', 'brain-agenda-quit', 'brain-agenda-open',
   'brain-task-state', 'brain-task-done', 'brain-task-schedule', 'brain-task-due', 'brain-task-priority', 'brain-task-title', 'brain-task-tag', 'brain-task-add',
   'brain-task-capture', 'brain-task-edit', 'brain-capture-finalize', 'brain-capture-kill', 'brain-capture-state', 'brain-capture-priority', 'brain-capture-schedule', 'brain-capture-due', 'brain-capture-tags']) L.put(intern(n), 'evil-repeat', intern('abort'));
 
-globalThis.Brain = { open, noteTitled };
+globalThis.Brain = { open, noteTitled, saveNote };
 })();

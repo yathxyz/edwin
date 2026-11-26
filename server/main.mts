@@ -79,9 +79,9 @@ export interface Config {
   refusePaths: string[];
   models: ModelsConfig;
   /* brain: `credential` is what the note projector writes with (server/projector.mts), `readCredential` what the
-     brain-* commands read with and `taskCredential` what they write tasks with (server/brain.mts); without
-     one, that part is off. */
-  brain?: { url: string; credential?: string; readCredential?: string; taskCredential?: string; tags: string[] };
+     brain-* commands read with, and `taskCredential` and `notesCredential` what they write with
+     (server/brain.mts); without one, that part is off. */
+  brain?: { url: string; credential?: string; readCredential?: string; taskCredential?: string; notesCredential?: string; tags: string[]; noteTags: string[] };
   agentHub?: agentSessionsModule.AgentHubConfig;
   configFile?: string;
 }
@@ -155,27 +155,30 @@ export function loadConfig(file: string): Config {
     if (m.baseUrl !== undefined) { if (typeof m.baseUrl !== 'string') throw new Error(`${file}: models.${name}.baseUrl must be a string`); checkUrl(`models.${name}.baseUrl`, m.baseUrl); }
     if (m.credential !== undefined && (typeof m.credential !== 'string' || !/^[a-z0-9-]{1,32}$/.test(m.credential))) throw new Error(`${file}: models.${name}.credential must be a credential name`);
   }
-  /* brain: {url, credential, readCredential, taskCredential, tags} (server/projector.mts, server/brain.mts). The
+  /* brain: {url, credential, readCredential, taskCredential, notesCredential, tags, noteTags}.
      URL is http or https; where plain http may go is checked when a request is made. The credentials are
      edwind's alone: Scheme can name the ones under models.credentials, so none may be one of those. */
   if (cfg.brain !== undefined) {
     const b = cfg.brain;
     if (!b || typeof b !== 'object' || Array.isArray(b)) throw new Error(`${file}: brain must be an object`);
-    for (const k of Object.keys(b)) if (!['url', 'credential', 'readCredential', 'taskCredential', 'tags'].includes(k)) throw new Error(`${file}: brain: unknown field ${JSON.stringify(k)}`);
+    const credentials = ['credential', 'readCredential', 'taskCredential', 'notesCredential'] as const;
+    for (const k of Object.keys(b)) if (!['url', ...credentials, 'tags', 'noteTags'].includes(k)) throw new Error(`${file}: brain: unknown field ${JSON.stringify(k)}`);
     let u; try { u = new URL(b.url); } catch (e) { throw new Error(`${file}: brain.url is not a URL`); }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(`${file}: brain.url must be http or https`);
     const models = out.models as Record<string, any>; // any: checked above
-    for (const k of ['credential', 'readCredential', 'taskCredential']) {
+    for (const k of credentials) {
       const c = b[k];
       if (c === undefined) continue;
       if (typeof c !== 'string' || !/^[a-z0-9-]{1,32}$/.test(c)) throw new Error(`${file}: brain.${k} must be a credential name`);
       if (Object.keys(models.credentials || {}).includes(c) || Object.values(models).some(m => m && m.credential === c)) throw new Error(`${file}: brain.${k} ${JSON.stringify(c)} is also a models credential`);
     }
-    if (b.credential === undefined && b.readCredential === undefined && b.taskCredential === undefined) throw new Error(`${file}: brain needs a credential (to project notes), a readCredential (to read) or a taskCredential (to write tasks)`);
-    for (const k of ['readCredential', 'taskCredential']) if (b.credential !== undefined && b.credential === b[k]) throw new Error(`${file}: brain.${k} must not be the projector's: brain takes a projector's token on no other route`);
-    const tags = b.tags === undefined ? [] : b.tags;
-    if (!Array.isArray(tags) || !tags.every(t => typeof t === 'string' && TAG.test(t))) throw new Error(`${file}: brain.tags must be a list of brain tags such as ["roam"]`);
-    out.brain = { url: b.url, tags, ...(b.credential === undefined ? {} : { credential: b.credential }), ...(b.readCredential === undefined ? {} : { readCredential: b.readCredential }), ...(b.taskCredential === undefined ? {} : { taskCredential: b.taskCredential }) };
+    if (credentials.every(k => b[k] === undefined)) throw new Error(`${file}: brain needs a credential (to project notes), a readCredential (to read), a taskCredential (to write tasks) or a notesCredential (to write held notes)`);
+    for (const k of credentials.slice(1)) if (b.credential !== undefined && b.credential === b[k]) throw new Error(`${file}: brain.${k} must not be the projector's: brain takes a projector's token on no other route`);
+    const { url, credential, readCredential, taskCredential, notesCredential, tags = [], noteTags = [] } = b;
+    for (const [name, values] of Object.entries({ tags, noteTags })) {
+      if (!Array.isArray(values) || !values.every(t => typeof t === 'string' && TAG.test(t))) throw new Error(`${file}: brain.${name} must be a list of brain tags such as ["roam"]`);
+    }
+    out.brain = { url, credential, readCredential, taskCredential, notesCredential, tags, noteTags };
   }
   if (cfg.agentHub !== undefined) {
     out.agentHub = agentSessionsModule.validateAgentHub(cfg.agentHub);

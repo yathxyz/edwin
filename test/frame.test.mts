@@ -88,7 +88,7 @@ test('feature activation: no agentHub preserves the upstream served command tabl
     .filter(([, m]) => m instanceof Ed.Keymap)
     .map(([n, m]) => [n, [...m.map].map(([key, value]) => [key, value?.name ?? String(value)]).sort()]).sort();
   // Measured on origin/main, same served boot and empty user image.
-  assert.equal(digest(L.commandNames().sort()), 'd276aa53eb8d4436d8e3ed919a41135625decfe99ca9ce9bac98f80754e5c48d');
+  assert.equal(digest(L.commandNames().sort()), '1de6ddbe73e5e7da569fef446db1873ce807f457574bc81abddf3ef3379da796');
   assert.equal(digest(maps), 'eab4d83ebb1b103cd984fd001b5aa5d74e5fe94dcfbd811d1e2fdd174deeb4dc');
 });
 

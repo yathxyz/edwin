@@ -129,7 +129,7 @@ export type ClientKind = 'frame' | 'cli' | 'web';
 
 /* The result object of call (§7.4): a value, or the error of a condition; msg is the echo area, out the
    output port. */
-export interface Condition { condition: string; report: string; restarts: unknown[]; backtrace: string[] }
+export interface Condition { condition: string; report: string; restarts: unknown[]; backtrace: string[]; currentBody?: string }
 export type CallResult =
   | { value: unknown; error?: never; msg?: string; out?: string }
   | { error: Condition; value?: never; msg?: string; out?: string };

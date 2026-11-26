@@ -1068,7 +1068,7 @@ line-local finds.  With ARG, on when it is positive."
   #:no-repeat
   (interactive "<f><!>")
   (cond (file (if (buffer-file-name) (write-region #f #f file) (write-file file)))
-        ((buffer-file-name) (save-buffer))
+        ((or (buffer-file-name) (brain-note-buffer?)) (save-buffer))
         (else (user-error "E32: No file name"))))
 (set-procedure-property! evil-write 'evil-ex-complete 'file)
 
@@ -1089,7 +1089,7 @@ It refuses to drop unsaved changes unless FORCE (:q!)."
   (interactive "<!>")
   (cond ((pair? (cdr (window-list))) (delete-window))
         ((can-kill-emacs?) (evil--quit-program force 0))
-        ((and (buffer-file-name) (buffer-modified?) (not force))
+        ((and (or (buffer-file-name) (brain-note-buffer?)) (buffer-modified?) (not force))
          (user-error "E37: No write since last change (add ! to override)"))
         ((equal? (buffer-name) "*scratch*")
          (message "Edwin lives in this page; close the tab to leave"))
@@ -1121,14 +1121,18 @@ It refuses to drop unsaved changes unless FORCE (:q!)."
 (evil-define-command (evil-save-and-quit)
   "Save, then close this buffer (:wq)."
   #:no-repeat
-  (evil-write #f #f)
-  (evil-quit #f))
+  (if (brain-note-buffer?)
+      (%brain-note-save-and-quit)
+      (begin (evil-write #f #f) (evil-quit #f))))
 
 (evil-define-command (evil-save-modified-and-close)
   "Save if there are changes, then close this buffer (:x and ZZ)."
   #:no-repeat
-  (when (and (buffer-file-name) (buffer-modified?)) (save-buffer))
-  (evil-quit #f))
+  (if (brain-note-buffer?)
+      (%brain-note-save-and-quit)
+      (begin
+        (when (and (buffer-file-name) (buffer-modified?)) (save-buffer))
+        (evil-quit #f))))
 
 (evil-define-command (evil-quit-without-saving)
   "Close this buffer, dropping changes (ZQ)."

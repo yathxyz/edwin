@@ -2,8 +2,8 @@
 //
 // brainRequest is the one way a request to brain is made; the note projector (projector.mts) writes with it.
 //
-// The commands here are how a frame reads brain and changes its tasks: Edwin finds a node by name, opens it,
-// lists what links to it, shows the agenda and adds or changes a task by asking edwind, which holds the tokens,
+// The commands here are how a frame reads brain and writes its tasks and held notes: Edwin finds a node by name,
+// opens it, lists what links to it, shows the agenda and writes by asking edwind, which holds the tokens,
 // so no frame ever does.
 //   brain-titles {q, kind?, limit?}    -> brain's GET /v1/titles answer: {results: [{id, kind, title, alias, tags,
 //                                         org_id, path, updated_at}]}
@@ -12,17 +12,17 @@
 //   brain-tasks {state?, q?, tag?, limit?, offset?} -> brain's GET /v1/tasks answer: {tasks}
 //   brain-task-add FIELDS              -> brain's POST /v1/tasks answer: the new task
 //   brain-task-set REF FIELDS          -> brain's PATCH /v1/tasks/REF answer: the task, and `clashes`
+//   brain-note-add FIELDS              -> brain's POST /v1/nodes answer: the new held note
+//   brain-note-set ID FIELDS           -> brain's PATCH /v1/nodes/ID answer: the updated held note
 //   brain-tasks-follow ON              -> with ON true, the client is told {t: 'tasks'} whenever a task changed
 //                                         in brain, until it asks with another ON or disconnects (TaskFeed);
 //                                         the value is whether edwind has its place in brain's feed of changes
 // The four that read, and the feed, use brain.readCredential, a token brain takes on its GET routes only
 // (brain's `readOnly`).
-// The two that write use brain.taskCredential, a token brain takes on its task routes only, and send only the
-// fields of a task (TASK_FIELDS, SET_FIELDS); brain checks their values. Each answers with the condition
-// brain-unavailable when it has no token or brain cannot be reached, and brain-refused with brain's own words
-// when it says no. Every client of the socket may call them, as every client may read every note file: what the
-// read token is cleared for is what a process that can open the socket can read, and with a task token such a
-// process adds and changes tasks as that token's actor.
+// Task writes use brain.taskCredential and send only task fields. Note writes use brain.notesCredential
+// and send only note fields, with a required expect_revision on PATCH. Without a token or with brain out
+// of reach the answer is brain-unavailable; refusals carry brain's own words, with a note revision conflict
+// distinguished as brain-note-conflict. Every client of the socket may call these commands as the token's actor.
 //
 // A token is a LoadCredential file, read for each request and never logged; neither is what was asked for or
 // written (R15.10). Plain http goes only to this host: loopback, or an address the request can be bound to leave
@@ -81,7 +81,9 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
    tags to add and to remove instead of all of them. */
 const TASK_FIELDS = ['title', 'body', 'state', 'priority', 'due', 'scheduled', 'recur', 'tags', 'waiting_on'];
 const SET_FIELDS = [...TASK_FIELDS, 'add_tags', 'remove_tags', 'base_revision'];
-/* What brain records as the session of a task written through here. */
+const NOTE_FIELDS = ['title', 'body', 'tags'];
+const NO_NOTES = 'This edwind cannot write notes to brain (brain.notesCredential is not set)';
+/* What brain records as the session of a write through here. */
 const SESSION = 'edwind';
 const NO_READ = 'This edwind has no brain to read (brain.readCredential is not set)';
 /* A frame loaded before brain had tags still names a scope. Dropping it would add the task open to every client
@@ -89,6 +91,8 @@ const NO_READ = 'This edwind has no brain to read (brain.readCredential is not s
 const NO_SCOPE = 'brain has no scopes any more, and this frame still names one: reload it';
 const failed = (condition: string, report: string): CallResult => ({ error: { condition, report, restarts: [], backtrace: [] } });
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
+const heldNote = (n: unknown): n is Record<string, unknown> =>
+  isObj(n) && n.kind === 'note' && !(isObj(n.props) && Object.hasOwn(n.props, 'sources'));
 const within = (x: unknown, lo: number, hi: number): number | null => (Number.isInteger(x) ? Math.max(lo, Math.min(hi, x as number)) : null);
 const only = (a: Record<string, unknown>, names: string[]) => { const o: Record<string, unknown> = {}; for (const k of names) if (Object.hasOwn(a, k)) o[k] = a[k]; return o; };
 
@@ -181,6 +185,7 @@ export class TaskFeed {
 
 export class BrainClient {
   declare log: Log; declare base: URL; declare read: Credential | null; declare write: Credential | null;
+  declare notes: Credential | null; declare noteTags: string[];
   declare open: Set<http.ClientRequest>;
   declare feed: TaskFeed | null;
   constructor(server: Server) {
@@ -189,6 +194,8 @@ export class BrainClient {
     this.base = new URL(cfg ? (cfg.url.endsWith('/') ? cfg.url : cfg.url + '/') : 'http://localhost/');
     this.read = cfg && cfg.readCredential ? new Credential(cfg.readCredential, this.base.origin) : null;
     this.write = cfg && cfg.taskCredential ? new Credential(cfg.taskCredential, this.base.origin) : null;
+    this.notes = cfg && cfg.notesCredential ? new Credential(cfg.notesCredential, this.base.origin) : null;
+    this.noteTags = cfg?.noteTags ?? [];
     this.feed = this.read ? new TaskFeed(this.log, this.base, this.read) : null;
   }
   /* One request to brain and its answer as a command's result. WHAT names it in the log, which holds neither
@@ -212,7 +219,7 @@ export class BrainClient {
     if (!a.cut) try { answer = JSON.parse(a.text); } catch (e) { /* not brain's JSON */ }
     if (a.status >= 200 && a.status < 300 && answer && typeof answer === 'object') return { value: answer };
     const said = answer && typeof answer === 'object' && typeof (answer as { error?: unknown }).error === 'string' ? (answer as { error: string }).error : null;
-    if (said && a.status >= 400 && a.status < 500) return failed('brain-refused', `brain: ${said}`);
+    if (said && a.status >= 400 && a.status < 500) return failed(what === 'note-set' && a.status === 409 ? 'brain-note-conflict' : 'brain-refused', `brain: ${said}`);
     this.log.warn(event, { what, status: a.status, cut: a.cut });
     return failed('brain-unavailable', a.cut ? 'brain\'s answer is too long to show' : `brain answered ${a.status}`);
   }
@@ -260,6 +267,30 @@ export class BrainClient {
     if (Object.hasOwn(fields, 'scope')) return failed('wrong-type-argument', NO_SCOPE);
     return this.put('task-set', 'PATCH', 'v1/tasks/' + encodeURIComponent(ref.trim()), only(fields, SET_FIELDS));
   }
+  async noteAdd(fields: unknown): Promise<CallResult> {
+    if (!this.notes) return failed('brain-unavailable', NO_NOTES);
+    if (!isObj(fields) || typeof fields.title !== 'string' || !fields.title.trim() || typeof fields.body !== 'string')
+      return failed('wrong-type-argument', 'brain-note-add: a note title and Markdown body');
+    return this.ask('note-add', this.notes, 'POST', 'v1/nodes', {}, { kind: 'note', tags: this.noteTags, ...only(fields, NOTE_FIELDS) });
+  }
+  async noteSet(id: unknown, fields: unknown): Promise<CallResult> {
+    if (!this.notes) return failed('brain-unavailable', NO_NOTES);
+    if (typeof id !== 'string' || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id))
+      return failed('wrong-type-argument', 'brain-note-set: a full node id');
+    if (!isObj(fields) || !Number.isSafeInteger(fields.expect_revision))
+      return failed('wrong-type-argument', 'brain-note-set: note fields with an integer expect_revision');
+    const route = 'v1/nodes/' + id;
+    // Do not trust a frame to identify a held note. Only the guarded PATCH may change what we read.
+    const r = await this.ask('note-target', this.notes, 'GET', route, {});
+    if (r.error) return r;
+    if (!heldNote(r.value)) return failed('brain-refused', 'Only notes held in brain can be saved here');
+    const saved = await this.ask('note-set', this.notes, 'PATCH', route, {}, { ...only(fields, NOTE_FIELDS), expect_revision: fields.expect_revision });
+    if (saved.error?.condition === 'brain-note-conflict') {
+      const current = await this.ask('note-target', this.notes, 'GET', route, {});
+      if (heldNote(current.value)) saved.error.currentBody = typeof current.value.body === 'string' ? current.value.body : '';
+    }
+    return saved;
+  }
   async follow(client: Client, on: unknown): Promise<CallResult> {
     if (on !== true) { if (this.feed) this.feed.leave(client); return { value: false }; }
     if (!this.feed) return failed('brain-unavailable', NO_READ);
@@ -278,6 +309,8 @@ export async function install(server: Server): Promise<void> {
   server.defineCommand('brain-tasks', (_client, args) => c.tasks(fields(args[0])));
   server.defineCommand('brain-task-add', (_client, args) => c.taskAdd(args[0]));
   server.defineCommand('brain-task-set', (_client, args) => c.taskSet(args[0], args[1]));
+  server.defineCommand('brain-note-add', (_client, args) => c.noteAdd(args[0]));
+  server.defineCommand('brain-note-set', (_client, args) => c.noteSet(args[0], args[1]));
   server.defineCommand('brain-tasks-follow', (cl, args) => c.follow(cl, args[0]));
   server.onDisconnect(cl => { if (c.feed) c.feed.leave(cl); });
 }

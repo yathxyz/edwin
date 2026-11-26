@@ -216,12 +216,11 @@ in
   # retries, refusals, the ledger across a restart, and where the token may go.
   edit-projector = suite "projector" [ "projector.test.mts" ];
 
-  # Nodes and tasks from brain (server/brain.mts, src/brain.ts): a served Edwin against a real edwind and a
-  # stand-in for brain. The read token is sent and never logged, nor is what was asked; finding, linking and
-  # opening a node; the backlinks window; id: and title links; a new note and a daily made on disk through
-  # edwind. Tasks are read with the read token and written with the task token, a task's fields only; the
-  # agenda's two views, its keys, what brain replaced and what it refused; a new task written in a buffer of its
-  # own, from a selection, with its fields in the front matter, and a task brain has changed in such a buffer.
+  # Nodes, held notes and tasks from brain (server/brain.mts, src/brain.ts): a served Edwin against a real edwind
+  # and a stand-in for brain. The read token is sent and never logged, nor is what was asked; finding, linking
+  # and opening a node; the backlinks window; id: and title links; a new note and a daily made on disk through
+  # edwind. Held notes are edited with a notes token and a revision check; tests cover creation and stale saves.
+  # Tasks use the read and task tokens; the agenda's views and keys; task capture, edit, clashes and refusals.
   edit-brain = suite "brain" [ "brain.test.mts" ];
 
   # pi agents in chat notes (server/agent.mts, scm/pi.scm): the agent loop, a tool after a yes, a no, the saved
@@ -320,6 +319,17 @@ in
         steer = true;
         allowCleartext = true;
       };
+      notesSys = sys.extendModules {
+        modules = [
+          {
+            services.edwind.brain = {
+              notesTokenFile = "/run/secrets/brain-notes";
+              noteTags = [ "prv" ];
+            };
+          }
+        ];
+      };
+      notesJson = notesSys.config.environment.etc."edwind/edit.json".source;
       hasToplevel = system: (builtins.tryEval system.config.system.build.toplevel.drvPath).success;
       wrongRefusal =
         expected: settings:
@@ -343,6 +353,7 @@ in
         preventRestart = unit.serviceConfig.RestartPreventExitStatus or null;
         hubCreds = hubService.LoadCredential;
         hubPreventRestart = hubService.RestartPreventExitStatus;
+        notesCreds = notesSys.config.systemd.services.edwind.serviceConfig.LoadCredential;
         readOnly = unit.serviceConfig.ReadOnlyPaths;
         frontCreds = frontUnit.serviceConfig.LoadCredential;
         frontAllow = frontUnit.serviceConfig.IPAddressAllow;
@@ -388,6 +399,13 @@ in
           "agent-hub-token:/run/secrets/agent-hub"
           "search:/run/secrets/search"
         ];
+        notesCreds = [
+          "anthropic-api-key:/run/secrets/anthropic"
+          "brain-read-token:/run/secrets/brain-read"
+          "brain-task-token:/run/secrets/brain-task"
+          "brain-notes-token:/run/secrets/brain-notes"
+          "search:/run/secrets/search"
+        ];
         hubPreventRestart = 73;
         readOnly = [
           "/home/alice/.ssh"
@@ -417,6 +435,10 @@ in
         steer: true, allowCleartext: true
       }})' ${hubJson} > /dev/null
       ${edwind}/bin/edwind --config ${hubJson} --write-roots > /dev/null
+      ${pkgs.jq}/bin/jq -e --slurpfile base ${editJson} '. == ($base[0] * {brain: {
+        notesCredential: "brain-notes-token", noteTags: ["prv"]
+      }})' ${notesJson} > /dev/null
+      ${edwind}/bin/edwind --config ${notesJson} --write-roots > /dev/null
       # edwin-front accepts the front.json the module writes, with the credential where systemd would put it.
       printf '%048d' 0 > secret
       sed "s|/run/credentials/edwin-front.service/proxy-secret|$PWD/secret|" ${frontJson} > front.json

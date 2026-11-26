@@ -224,7 +224,7 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
     const registry = readPrimitiveRegistry(dir, launch);
     assert.deepEqual(live, registry);
     // Measured from the packaged layout of origin/main (8fe116b), with an empty user image.
-    assert.equal(registryDigest(registry, tree), '4025a3be862f99d54908d56ae56332bb78cbd89c7ba466b7d7ed16cd1a2ebb22');
+    assert.equal(registryDigest(registry, tree), '21e9a06cb33961d9dcdb6bda2edbfea2d00d26cabe310bf19f4c6dbca1bf5c2b');
     assert.equal(fs.lstatSync(dir.cfg.socket, { throwIfNoEntry: false }), undefined);
     assert.equal((await client.call('status')).t, 'result', 'the already connected client still works');
   });
