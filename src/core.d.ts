@@ -883,6 +883,7 @@ interface EdBuffer extends SchemeForeign {
   _jobs?: Map<number | symbol, number>;
   /* brain.ts: what a brain buffer shows, and the agenda's lines and their classes */
   brain?: unknown;
+  brainNote?: { id: string | null; title: string; revision: number };
   agenda?: unknown;
   _balx?: unknown;
   /* brain.ts: the task being written in the buffer (brain-task-capture) */
@@ -2144,6 +2145,7 @@ interface OrgApi extends EdModuleExports {
 interface BrainApi {
   open(ref: string): Promise<EdBuffer | false>;
   noteTitled(title: string): Promise<string | null>;
+  saveNote(b: EdBuffer): Promise<false>;
 }
 
 /* ---------- native: desktop Edwin (native/js) ---------- */

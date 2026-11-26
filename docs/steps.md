@@ -550,10 +550,11 @@ Emacs's names for this are not kept.
   else brain's first. A candidate is the alias that matched, else the title, annotated with the kind and then the file of
   a note (and `→ Title` after an alias) or the tags of anything else, as Org writes them (`:a:b:`). Two nodes with one name take their kind,
   and the end of their id when the kind is shared too.
-- **Opening a node.** A note is its file (`props.sources[0]`), visited through edwind and waited for, with
-  point on the entry that holds the note's `:ID:`, unfolded. Anything else is a record: `*brain: Title*` in
-  `brain-mode`, read only and in Motion state, written as Org (title, kind · `:tags:` · trust, the plain props,
-  the body, the links under a heading per relation), so `RET` (`brain-follow`) opens a link and `q` leaves.
+- **Opening a node.** A projected note is its file (`props.sources[0]`), visited through edwind and waited for,
+  with point on the entry that holds its `:ID:`, unfolded. A note with no `props.sources` is held in brain;
+  its body opens as editable Markdown (see "Notes held in brain"). Anything else is a record: `*brain: Title*`
+  in `brain-mode`, read only and in Motion state, written as Org (title, kind · `:tags:` · trust, the plain
+  props, the body, the links under a heading per relation), so `RET` (`brain-follow`) opens a link and `q` leaves.
 - **`brain-node-insert` (`SPC n r i`, `C-c n i`).** `[[id:ORG-ID][Title]]` to a note, `[[brain:UUID][Title]]` to
   anything else; `[Title](id:ORG-ID)` and `[Title](brain:UUID)` in Markdown. A Visual selection is what is
   looked for and stays as the description. The description is on one line with `(` `)` for `[` `]`, which
@@ -591,9 +592,8 @@ Emacs's names for this are not kept.
   old ones has to be changed.
 
 Not in it: a Markdown `[[wiki link]]` still goes to `wiki-follow-function` (the page's opener), not to brain;
-a random node; completing a link's title while typing it; and a record is read only (a task is changed from
-the agenda, see "Tasks from brain"; a memory where it is made). A new note is in brain once the projector has sent its file, a
-moment after the save, so it is not a candidate before that.
+a random node; or completing a link's title while typing it. A note made from a template is in brain once
+the projector has sent its file, a moment after the save, so it is not a candidate before that.
 
 ## Tasks from brain (done)
 
@@ -731,6 +731,27 @@ for. No task under a tag the task token is not cleared for.
 Editing a task's body, repeat or `waiting_on`, deleting one, and showing closed tasks. A write
 is not retried and carries no `client_id`, so a task added while the answer was lost may be added twice by
 adding it again.
+
+## Notes held in brain (done)
+
+- **edwind writes for the frame (`server/brain.mts`).** `brain-note-add FIELDS` sends `POST /v1/nodes` with
+  `kind: "note"`, `title`, `body` and `tags`. When not supplied, tags come from `services.edwind.brain.noteTags`
+  (`[]` by default; this leaves the note open to all brain clients). `brain-note-set ID FIELDS` first reads
+  `GET /v1/nodes/ID` to check that the record is a note without `props.sources`, then sends `PATCH /v1/nodes/ID`
+  with any supplied `title`, `body` and `tags`, and a required integer `expect_revision`. No other fields are
+  passed through. A refusal carries brain's words; on a revision conflict edwind reads back the current
+  body if it is still a held note.
+- **Who can write.** These commands use `brain.notesCredential` (`services.edwind.brain.notesTokenFile`,
+  the `brain-notes-token` credential), a token for held notes, not the reader, projector or task token.
+  Any process that can open edwind's socket can call them as that token's actor, under its clearance.
+  Without it they answer `brain-unavailable` and send nothing. Each write says `X-Brain-Session: edwind`
+  and is sent once, without logging the token, title or text. The node finder still uses the reader token.
+- **Editing (`src/brain.ts`).** `M-x brain-new-note` reads a title and opens an empty Markdown buffer;
+  its first `C-x C-s` or `:w` creates the note. Other saves send just the body and the revision last read
+  or saved. A refused save keeps the changes. On a stale revision the current body opens read-only in
+  another window; no automatic merge or overwrite. To reconcile manually, copy your edits aside, close
+  the stale draft and reopen the note before applying them. The buffer visits no file: save-as, tangle
+  and relative file links refuse, and grep treats it as it does other fileless buffers.
 
 ## Dired: directories as buffers (done)
 

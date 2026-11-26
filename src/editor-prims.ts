@@ -797,15 +797,21 @@ function writeTo(b: EdBuffer, given: string) {
   if (Ed.hooks.wrote) Ed.hooks.wrote(b, name);
   Ed.message(ok ? `Wrote ${fileLabel(name)}` : `Wrote ${name} (kept for this session only: browser storage is unavailable)`);
 }
-CMD('save-buffer', async () => (cur().file ? [] : [await Ed.readMini('File to save in: ', cur().name.replace(/[*\s]/g, '') || 'untitled', () => Ed.Store.list())]),
-  '&optional FILENAME', 'Save the current buffer to its file, asking for a name if it has none.', ([n]) => {
+CMD('save-buffer', async () => (cur().file || cur().brainNote ? [] : [await Ed.readMini('File to save in: ', cur().name.replace(/[*\s]/g, '') || 'untitled', () => Ed.Store.list())]),
+  '&optional FILENAME', 'Save the current buffer. A buffer without a save target asks for a file name.', ([n]) => {
     const b = cur();
+    if (b.brainNote) {
+      if (n !== undefined) signal('user-error', 'A brain note cannot be saved as a file');
+      return Brain.saveNote(b);
+    }
     if (b.shared && Ed.hooks.saveShared) return Ed.hooks.saveShared(b);
     if (b.file && !b.modified && n === undefined) { Ed.message('(No changes need to be saved)'); return false; }
     writeTo(b, n === undefined ? b.file! : str(n)); return false;
   });
 CMD('write-file', 'FWrite file: ', 'FILENAME', 'Save the current buffer to FILENAME and visit that file.', ([n]) => {
-  const b = cur(); writeTo(b, str(n));
+  const b = cur();
+  if (b.brainNote) signal('user-error', 'A brain note cannot be saved as a file');
+  writeTo(b, str(n));
   if (!Ed.getBuffer(n as string) && !b.name.startsWith('*')) b.name = n as string; b.mode = Ed.modeFor(n as string) === 'fundamental-mode' ? b.mode : Ed.modeFor(n as string); return false;
 });
 D('file-exists-p', 'FILENAME', 'Non-nil if FILENAME is saved in this browser.', ([n]) => bool(Ed.Store.get(str(n)) !== null));
@@ -921,6 +927,7 @@ for (const [a, b] of [['bob?', 'bobp'], ['eob?', 'eobp'], ['bol?', 'bolp'], ['eo
   ['buffer-modified?', 'buffer-modified-p'], ['buffer?', 'bufferp'], ['keymap?', 'keymapp'], ['file-exists?', 'file-exists-p'], ['looking-at?', 'looking-at'],
   ['looking-back?', 'looking-back'], ['string-match?', 'string-match-p'], ['buffer-file-name', 'buffer-file-name']]) if (a !== b && L.fnOrNull(intern(b))) alias(a, b);
 D('buffer-file-name', '[buffer]', 'Name of the file BUFFER visits, or #f.', ([b]) => Ed.toBuffer(b === undefined ? false : b).file ?? false);
+D('brain-note-buffer?', '', 'Non-nil if the current buffer saves to brain rather than to a file.', () => !!cur().brainNote);
 D('buffer-read-only?', '[buffer]', '#t if BUFFER is read-only.', ([b]) => Ed.toBuffer(b === undefined ? false : b).readOnly);
 D('set-buffer-read-only!', 'flag [buffer]', 'Make the buffer read-only or not.', ([f, b]) => { Ed.toBuffer(b === undefined ? false : b).readOnly = truthy(f); return false; });
 D('major-mode', '[buffer]', 'The major mode of BUFFER as a symbol.', ([b]) => intern(Ed.toBuffer(b === undefined ? false : b).mode));

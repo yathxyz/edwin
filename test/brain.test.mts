@@ -7,6 +7,7 @@
 // writes with the task token, a task's fields only; the agenda shows the week and every open task; its keys
 // change the task at point against the revision shown, say what brain replaced and what it refused;
 // a task is written in a buffer of its own, its fields in the front matter, from a selection and the note's id.
+// Held notes are fileless Markdown, saved against the exact revision read, using a notes-only token.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -24,7 +25,8 @@ const require = createRequire(import.meta.url);
 const { createHost, loadEdwin, memoryStorage } = require('../src/host-node.cts');
 
 const TOKEN = 'brain-read-token-for-the-tests-0123456789', TASK_TOKEN = 'brain-task-token-for-the-tests-9876543210';
-interface Node { id: string; kind: string; title: string; aliases?: string[]; tags: string[]; org_id?: string; path?: string; body?: string; props?: Record<string, unknown>; links?: string[][] }
+const NOTES_TOKEN = 'brain-notes-token-for-the-tests-1204987653';
+interface Node { id: string; kind: string; title: string; aliases?: string[]; tags: string[]; org_id?: string; path?: string; body?: string; props?: Record<string, unknown>; links?: string[][]; revision?: number }
 const id = (n: number, tail = '') => `${String(n).repeat(8)}-0000-4000-8000-${(tail || String(n).repeat(12)).padStart(12, '0')}`;
 const ALPHA: Node = { id: id(1), kind: 'note', title: 'Alpha note', aliases: ['First letter'], tags: ['roam'], org_id: 'a-file', path: 'alpha.org' };
 const SECTION: Node = { id: id(2), kind: 'note', title: 'Section', tags: ['roam'], org_id: 'a-section', path: 'alpha.org' };
@@ -42,7 +44,10 @@ const WIP: Node = { id: id(8, 'b2'), kind: 'reference', title: '[WIP] Roadmap', 
 const FAR: Node = { id: id(8, 'c1'), kind: 'note', title: 'Faraway', tags: ['roam'], org_id: 'far-id', path: 'far/away.org' };
 const VANISHED: Node = { id: id(8, 'c2'), kind: 'note', title: 'Vanished', tags: ['roam'], org_id: 'vanished-id', path: 'vanished.org' };
 const MISLAID: Node = { id: id(8, 'c3'), kind: 'note', title: 'Mislaid', tags: ['roam'], org_id: 'mislaid-id', path: 'nowhere/mislaid.org' };
-const NODES = [ALPHA, SECTION, BETA, DEEP, TASK, MEET_NOTE, MEET_TASK, STAND_1, STAND_2, EXACT, WIP, FAR, VANISHED, MISLAID];
+const HELD: Node = { id: id(9, 'a1'), kind: 'note', title: 'Held note', tags: ['own'], body: '# Markdown\n\nExact text  \n', revision: 4 };
+const STALE: Node = { id: id(9, 'a2'), kind: 'note', title: 'Stale note', tags: [], body: 'Old text', revision: 6 };
+const TOMBSTONE: Node = { id: id(9, 'a3'), kind: 'note', title: 'Tombstone', tags: [], props: { sources: [] } };
+const NODES = [ALPHA, SECTION, BETA, DEEP, TASK, MEET_NOTE, MEET_TASK, STAND_1, STAND_2, EXACT, WIP, FAR, VANISHED, MISLAID, HELD, STALE, TOMBSTONE];
 ALPHA.links = [['linked from', BETA.id], ['linked from', TASK.id], ['links_to', SECTION.id]];
 TASK.links = [['about', ALPHA.id]];
 const byId = (i: string) => NODES.find(n => n.id === i)!;
@@ -60,7 +65,7 @@ function nodeOf(ref: string) {
   const n = NODES.find(x => x.id === ref || (x.org_id && 'org-id:' + x.org_id === ref)), t = TASKS.find(x => x.id === ref);
   if (t) return { ...taskView(t), identifiers: [], links: [] };
   if (!n) return null;
-  return { id: n.id, kind: n.kind, title: n.title, body: n.body ?? null, props: n.kind === 'note' ? { sources: [n.path] } : n.props ?? {}, tags: n.tags, trust: 'owner', updated_at: '2026-11-10T10:00:00Z',
+  return { id: n.id, kind: n.kind, title: n.title, body: n.body ?? null, props: n.path ? { sources: [n.path] } : n.props ?? {}, tags: n.tags, trust: 'owner', revision: n.revision ?? 1, updated_at: '2026-11-10T10:00:00Z',
     identifiers: n.org_id ? [{ scheme: 'org-id', value: n.org_id }] : [],
     links: (n.links || []).map(([rel, to], i) => ({ rel, forward: rel !== 'linked from', edge_id: `e${i}`, id: to, kind: byId(to).kind, title: byId(to).title, tags: byId(to).tags })) };
 }
@@ -153,6 +158,27 @@ function tasksRoute(method: string, u: URL, auth: string | undefined, session: u
   const clashes = change(t, body);
   return send(200, { ...taskView(t), clashes });
 }
+
+function writeNode(method: string, u: URL, auth: string | undefined, session: unknown, body: Record<string, unknown>, send: Send) {
+  written.push({ method, path: u.pathname, auth, session, body });
+  if (auth !== `Bearer ${NOTES_TOKEN}`) return send(403, { error: 'this token does not write notes' });
+  if (Buffer.byteLength(JSON.stringify(body)) > 2 * 1024 * 1024) return send(413, { error: 'body too large' });
+  if (tagList(body.tags).includes('denied')) return send(403, { error: 'outside your clearance: denied' });
+  if (method === 'POST' && u.pathname === '/v1/nodes') {
+    const n: Node = { id: id(9, String(NODES.length)), kind: String(body.kind), title: String(body.title), body: String(body.body), tags: tagList(body.tags), revision: 1 };
+    NODES.push(n);
+    return send(201, nodeOf(n.id));
+  }
+  const n = method === 'PATCH' ? byId(u.pathname.slice('/v1/nodes/'.length)) : null;
+  if (!n) return send(404, { error: 'no such node' });
+  if (n.kind !== 'note' || n.path || Object.hasOwn(n.props ?? {}, 'sources')) return send(403, { error: 'not a held note' });
+  if (body.expect_revision !== n.revision) return send(409, { error: `stale revision: current revision is ${n.revision}` });
+  if (typeof body.title === 'string') n.title = body.title;
+  if (typeof body.body === 'string') n.body = body.body;
+  if (Array.isArray(body.tags)) n.tags = tagList(body.tags);
+  n.revision = n.revision! + 1;
+  return send(200, nodeOf(n.id));
+}
 const asked: { url: string; auth: string | undefined }[] = [];
 /* While set, brain answers no question about tasks: a write is taken and the view after it is not given. */
 let readsFail = false;
@@ -191,6 +217,7 @@ const brain = http.createServer((req, res) => {
     asked.push({ url: req.url!, auth: req.headers.authorization });
     if (readsFail && req.method === 'GET' && (u.pathname === '/v1/agenda' || u.pathname === '/v1/tasks')) return send(503, { error: 'brain is away' });
     if (u.pathname === '/v1/agenda' || u.pathname === '/v1/tasks' || u.pathname.startsWith('/v1/tasks/')) return tasksRoute(req.method!, u, req.headers.authorization, req.headers['x-brain-session'], sent ? JSON.parse(sent) : {}, send);
+    if (req.method !== 'GET' && (u.pathname === '/v1/nodes' || u.pathname.startsWith('/v1/nodes/'))) return writeNode(req.method!, u, req.headers.authorization, req.headers['x-brain-session'], JSON.parse(sent), send);
     if (req.method !== 'GET') return send(404, { error: 'no such route' });
     if (u.pathname === '/v1/titles') return send(200, { results: titles(u.searchParams.get('q') || '', u.searchParams.get('kind')).slice(0, Number(u.searchParams.get('limit'))) }, u.searchParams.get('q') === 'al' ? SLOW_MS : 0);
     const n = u.pathname.startsWith('/v1/nodes/') ? nodeOf(decodeURIComponent(u.pathname.slice('/v1/nodes/'.length))) : null;
@@ -262,11 +289,16 @@ async function visit(p: string) {
 /* Start a command that reads a node and wait for its minibuffer. */
 async function ask(k: string) { await keys(k); await until(() => E.mini, 'the minibuffer'); assert.equal(E.mini.prompt, 'Node: '); }
 const closedPort = () => new Promise<number>(r => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as AddressInfo).port; s.close(() => r(p)); }); });
-const makeCreds = (d: TestDir) => { const c = path.join(d.root, 'creds'); fs.mkdirSync(c, { mode: 0o700 }); for (const n of ['brain-token', 'brain-read-token']) fs.writeFileSync(path.join(c, n), TOKEN + '\n', { mode: 0o400 }); fs.writeFileSync(path.join(c, 'brain-task-token'), TASK_TOKEN + '\n', { mode: 0o400 }); return c; };
+const makeCreds = (d: TestDir) => {
+  const c = path.join(d.root, 'creds'); fs.mkdirSync(c, { mode: 0o700 });
+  for (const [n, token] of Object.entries({ 'brain-token': TOKEN, 'brain-read-token': TOKEN, 'brain-task-token': TASK_TOKEN, 'brain-notes-token': NOTES_TOKEN }))
+    fs.writeFileSync(path.join(c, n), token + '\n', { mode: 0o400 });
+  return c;
+};
 
 before(async () => {
   url = await new Promise<string>(r => brain.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(brain.address() as AddressInfo).port}`)));
-  dir = makeDir({ brain: { url, readCredential: 'brain-read-token', taskCredential: 'brain-task-token' }, logLevel: 'debug' });
+  dir = makeDir({ brain: { url, readCredential: 'brain-read-token', taskCredential: 'brain-task-token', notesCredential: 'brain-notes-token', noteTags: ['prv'] }, logLevel: 'debug' });
   creds = makeCreds(dir);
   note('alpha.org', ALPHA_ORG);
   note('sub/beta.md', '---\nid: b-file\ntitle: Beta\n---\n\nSee [Alpha](id:a-file).\n');
@@ -644,6 +676,89 @@ const answer = async (key: string, text: string) => { await keys(key); await unt
 const lastWrite = () => written[written.length - 1];
 const classAt = (b: EdwinCore, at: number): string => { const r = Ed.hooks.lexSeg(b, 0, b.text.length, b.text); return r.names[r.cls[at]]; };
 
+test('held notes open as fileless Markdown and successive saves use successive revisions', async () => {
+  await visit('host.org');
+  await L.call('brain-node-find', [HELD.id]);
+  const b = cur(), original = HELD.body!;
+  assert.equal(b.mode, 'markdown-mode'); assert.equal(b.file, null); assert.equal(b.readOnly, false);
+  assert.equal(b.text, original); assert.equal(b.modified, false);
+  await keys('i'); await type('Draft '); await keys('ESC C-x C-s');
+  assert.deepEqual(lastWrite(), { method: 'PATCH', path: `/v1/nodes/${HELD.id}`, auth: `Bearer ${NOTES_TOKEN}`, session: 'edwind',
+    body: { body: `Draft ${original}`, expect_revision: 4 } });
+  assert.equal(HELD.revision, 5); assert.equal(b.modified, false); assert.deepEqual(HELD.tags, ['own']);
+  await keys('i'); await type('X'); await keys('ESC');
+  await saying('Saved brain note: Held note', () => answer(':', 'w'));
+  assert.deepEqual(lastWrite().body, { body: b.text, expect_revision: 5 });
+  assert.equal(HELD.revision, 6); assert.equal(b.modified, false); assert.equal(b.file, null);
+  b.pt = 0; Ed.insertText(b, '[Attachment](file:relative.png)\n'); b.pt = 0;
+  await saying('no directory for relative file links', () => Ed.runCommand(L.intern('org-open-at-point')));
+});
+
+test('a stale save and quit leaves the draft unsaved and shows the current Markdown separately', async () => {
+  await visit('host.org');
+  await L.call('brain-node-find', [STALE.id]);
+  const b = cur();
+  await keys('i'); await type('My edit: '); await keys('ESC');
+  STALE.body = 'New text in brain\n'; STALE.revision = 7;
+  await L.call('brain-node-find', [STALE.id]);
+  assert.equal(cur(), b, 'opening again does not rebase or replace local edits');
+  await saying('brain: stale revision: current revision is 7', () => answer(':', 'wq'));
+  assert.equal(cur(), b); assert.equal(b.modified, true); assert.equal(b.text, 'My edit: Old text');
+  assert.equal(lastWrite().body.expect_revision, 6); assert.equal(STALE.body, 'New text in brain\n');
+  const current = Ed.windowList().find((w: EdwinCore) => w.buffer !== b)?.buffer;
+  assert.equal(current?.text, STALE.body); assert.equal(current?.readOnly, true);
+});
+
+test('brain-new-note accepts a title, creates on first save and patches on the next', async () => {
+  await visit('host.org');
+  const writes = written.length;
+  await keys('M-x'); await type('brain-new-note\n');
+  await until(() => E.mini?.prompt === 'Note title: ', 'title prompt');
+  await type('New held note\n');
+  const b = cur();
+  assert.equal(b.text, ''); assert.equal(b.file, null); assert.equal(b.mode, 'markdown-mode');
+  assert.equal(written.length, writes);
+  await saying('visits no file to tangle relative to', () => Ed.runCommand(L.intern('babel-tangle')));
+  await saying('cannot be saved as a file', () => answer(':', 'sav not-a-file.md'));
+  assert.equal(Ed.Store.get('not-a-file.md'), null);
+  await keys('i'); await type('New Markdown body'); await keys('ESC C-x C-s');
+  assert.deepEqual(lastWrite(), { method: 'POST', path: '/v1/nodes', auth: `Bearer ${NOTES_TOKEN}`, session: 'edwind',
+    body: { kind: 'note', title: 'New held note', body: 'New Markdown body', tags: ['prv'] } });
+  assert.equal(b.modified, false);
+  const made = NODES.find(n => n.title === 'New held note')!;
+  await keys('A'); await type('!'); await keys('ESC');
+  await answer(':', 'wq');
+  await until(() => !E.buffers.includes(b), 'saved note buffer closed');
+  assert.equal(lastWrite().method, 'PATCH'); assert.equal(lastWrite().path, `/v1/nodes/${made.id}`);
+  assert.deepEqual(lastWrite().body, { body: 'New Markdown body!', expect_revision: 1 });
+});
+
+test('note commands pass only note fields, require a revision and reject other records before writing', async () => {
+  const start = written.length;
+  for (const n of [TASK, ALPHA, TOMBSTONE]) {
+    const r = await sync.call({ cmd: 'brain-note-set', args: [n.id, { expect_revision: 1, body: 'no', kind: 'note', props: {} }] });
+    assert.equal(r.error.condition, 'brain-refused'); assert.match(r.error.report, /Only notes held in brain/);
+  }
+  assert.equal(written.length, start);
+  const before = asked.length;
+  for (const revision of [undefined, null, '1', 1.5]) {
+    const r = await sync.call({ cmd: 'brain-note-set', args: [HELD.id, { expect_revision: revision }] });
+    assert.equal(r.error.condition, 'wrong-type-argument');
+  }
+  assert.equal(asked.length, before);
+  const added = await sync.call({ cmd: 'brain-note-add', args: [{ title: 'Quiet note title', body: 'Quiet note body', tags: [], kind: 'task', props: { sources: ['bad'] }, identifiers: [] }] });
+  assert.deepEqual(lastWrite().body, { title: 'Quiet note title', body: 'Quiet note body', tags: [], kind: 'note' });
+  const set = await sync.call({ cmd: 'brain-note-set', args: [added.value.id, { title: 'Renamed', tags: ['new'], expect_revision: 1, base_revision: 2, links: [] }] });
+  assert.deepEqual(lastWrite().body, { title: 'Renamed', tags: ['new'], expect_revision: 1 });
+  assert.equal(set.value.title, 'Renamed');
+  assert.deepEqual(asked[asked.length - 2], { url: `/v1/nodes/${added.value.id}`, auth: `Bearer ${NOTES_TOKEN}` });
+  for (const [fields, reason] of [[{ tags: ['denied'] }, 'outside your clearance: denied'], [{ body: 'x'.repeat(2 * 1024 * 1024) }, 'body too large']] as const) {
+    const r = await sync.call({ cmd: 'brain-note-set', args: [added.value.id, { expect_revision: 2, ...fields }] });
+    assert.equal(r.error.condition, 'brain-refused'); assert.equal(r.error.report, `brain: ${reason}`);
+  }
+  for (const privateText of [NOTES_TOKEN, 'Quiet note title', 'Quiet note body', added.value.id]) assert.ok(!child.logs.includes(privateText));
+});
+
 test('edwind reads tasks with the read token and writes them with the task token: a task’s fields only, and none of it logged', async () => {
   resetTasks();
   const a = await sync.call({ cmd: 'brain-agenda', args: [{ from: '2026-11-10', days: 3, q: 'not-passed-on' }] });
@@ -683,7 +798,7 @@ test('edwind reads tasks with the read token and writes them with the task token
   for (const secret of [TOKEN, TASK_TOKEN, 'Quiet-title-words', 'Quiet-body-words', 'zebra-task-words', 'not-passed-on', taskN(8).id]) assert.ok(!child.logs.includes(secret), `${secret} is not in the log`);
 });
 
-test('an edwind with no task token reads tasks and says it cannot write them; the projector’s token is not a task token', async () => {
+test('an edwind with only a read token refuses both kinds of write; the projector’s token is not a task token', async () => {
   const d = makeDir({ brain: { url, readCredential: 'brain-read-token' } }), c = await startEdwind(d, { env: { CREDENTIALS_DIRECTORY: makeCreds(d) } });
   try {
     resetTasks();
@@ -692,6 +807,12 @@ test('an edwind with no task token reads tasks and says it cannot write them; th
     for (const m of [await cl.call('brain-task-add', [{ title: 'Nowhere' }]), await cl.call('brain-task-set', [taskN(1).id, { state: 'done' }])]) {
       assert.equal(m.error.condition, 'brain-unavailable'); assert.match(m.error.report, /^This edwind cannot write tasks to brain/);
     }
+    const before = asked.length;
+    for (const [cmd, args] of [['brain-note-add', [{ title: 'Nowhere', body: '' }]], ['brain-note-set', [HELD.id, { expect_revision: 1, body: '' }]]] as const) {
+      const m = await cl.call(cmd, [...args]);
+      assert.equal(m.error.condition, 'brain-unavailable'); assert.match(m.error.report, /^This edwind cannot write notes to brain/);
+    }
+    assert.equal(asked.length, before, 'no note token means no preflight read');
     cl.close();
     assert.equal(written.length, 0, 'brain is sent nothing');
   } finally { await stopEdwind(c); fs.rmSync(d.root, { recursive: true, force: true }); }

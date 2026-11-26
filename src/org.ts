@@ -1062,6 +1062,7 @@ async function openLink(target: string) {
     let name = m[1], search: string | null = null;
     const k = name.indexOf('::'); if (k >= 0) { search = name.slice(k + 2); name = name.slice(0, k); }
     if (m[2]) search = m[2].slice(2);
+    if (cur().brainNote && !/^(?:\/|~\/)/.test(name)) signal('user-error', 'A brain note has no directory for relative file links');
     const b = L.call('find-file', [name.replace(/^\.?\//, '')]);
     if (search && b instanceof Ed.Buffer) {
       const r = b.rope;
