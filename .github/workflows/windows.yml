@@ -50,6 +50,8 @@ jobs:
         env:
           NODE_PATH: ${{ github.workspace }}/tools/node_modules
         run: node --test test/ot.test.mts
+      - name: conformance
+        run: node --test test/conformance.test.mts
 
   native-build:
     runs-on: windows-latest

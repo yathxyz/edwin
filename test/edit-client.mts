@@ -7,6 +7,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { windowsPipe } from '../server/platform.mts';
 import type { ChildProcess, ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { EditOp, UndoTag } from './ot-sim.mts';
@@ -43,14 +44,16 @@ export interface OpenResult {
 
 export const EDWIN: string = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const MAIN: string = path.join(EDWIN, 'server/main.mts');
+const windows = process.platform === 'win32';
 
-/* A temp directory with a 0700 socket dir, notes, state, config, and an edit.json. */
+/* A temp directory with notes, state, config and edit.json, plus a 0700 socket dir on Unix. */
 export function makeDir(extra: Record<string, unknown> = {}): TestDir {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'edwind-'));
-  fs.chmodSync(root, 0o700);
+  if (!windows) fs.chmodSync(root, 0o700);
   const dirs = { sock: path.join(root, 'run'), notes: path.join(root, 'notes'), state: path.join(root, 'state'), config: path.join(root, 'config'), home: path.join(root, 'home') };
-  for (const d of Object.values(dirs)) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
-  const cfg: EdwindConfig = { socket: path.join(dirs.sock, 'edit.sock'), stateDir: dirs.state, notesDir: dirs.notes, configDir: dirs.config, writablePaths: [root], refusePaths: [path.join(dirs.home, '.ssh'), path.join(dirs.home, '.config/systemd'), path.join(dirs.home, '.local/share/systemd')], host: 'test', logLevel: 'info', ...extra };
+  for (const d of Object.values(dirs)) if (!windows || d !== dirs.sock) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+  const socket = windows ? windowsPipe(`edwind-test-${process.pid}-${randomBytes(8).toString('hex')}`) : path.join(dirs.sock, 'edit.sock');
+  const cfg: EdwindConfig = { socket, stateDir: dirs.state, notesDir: dirs.notes, configDir: dirs.config, writablePaths: [root], refusePaths: [path.join(dirs.home, '.ssh'), path.join(dirs.home, '.config/systemd'), path.join(dirs.home, '.local/share/systemd')], host: 'test', logLevel: 'info', ...extra };
   const file = path.join(root, 'edit.json');
   fs.writeFileSync(file, JSON.stringify(cfg));
   return { root, dirs, cfg, file };
@@ -82,8 +85,6 @@ export function readPrimitiveRegistry(dir: TestDir, { nodeArgs = nodeFlags(), ma
 /* Every edwind this process started dies with it, whatever the test did. */
 const children = new Set<EdwindChild>();
 process.once('exit', () => { for (const c of children) { try { c.kill('SIGKILL'); } catch (e) { /* gone */ } } });
-
-const windows = process.platform === 'win32';
 
 export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN, env = {} }: StartOptions = {}): Promise<EdwindChild> {
   const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], {

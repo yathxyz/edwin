@@ -4,7 +4,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -21,6 +21,7 @@ const require = createRequire(import.meta.url);
 const OT = require('../src/ot.ts') as OTModule;
 const { MAX_LINE, CODES } = await import('../server/proto.mts');
 const windows = process.platform === 'win32';
+const windowsFileId = windows && 'Windows file-backed buffer IDs are not ported: path containment assumes / separators';
 
 let dir: TestDir, child: EdwindChild;
 before(async () => { dir = makeDir(); child = await startEdwind(dir); });
@@ -62,7 +63,7 @@ test('§7.2 ping/pong and unknown messages are ignored (R7.4)', async () => {
   c.close();
 });
 
-test('§7.3 open, snap, edit, ack, edits to others, close; every op kind', async () => {
+test('§7.3 open, snap, edit, ack, edits to others, close; every op kind', { skip: windowsFileId }, async () => {
   const id = note('t1.md', 'hello\nworld\n');
   const a = await client(), b = await client();
   const oa = await a.open(id), ob = await b.open(id);
@@ -83,7 +84,7 @@ test('§7.3 open, snap, edit, ack, edits to others, close; every op kind', async
   a.close(); b.close();
 });
 
-test('R7.6, R7.11 concurrent edits are transformed; both replicas converge; sequenced insert left (R7.9)', async () => {
+test('R7.6, R7.11 concurrent edits are transformed; both replicas converge; sequenced insert left (R7.9)', { skip: windowsFileId }, async () => {
   const id = note('t2.md', 'ab');
   const a = await client(), b = await client();
   await a.open(id); await b.open(id);
@@ -100,7 +101,7 @@ test('R7.6, R7.11 concurrent edits are transformed; both replicas converge; sequ
   a.close(); b.close();
 });
 
-test('R7.7, R7.8 bad_edit: a del mismatch, a position out of range, a split surrogate pair', async () => {
+test('R7.7, R7.8 bad_edit: a del mismatch, a position out of range, a split surrogate pair', { skip: windowsFileId }, async () => {
   const id = note('t3.md', 'a😀b');
   const a = await client(); await a.open(id);
   let e = await a.edit(id, 0, [[0, 'x', '']]);
@@ -114,7 +115,7 @@ test('R7.7, R7.8 bad_edit: a del mismatch, a position out of range, a split surr
   a.close();
 });
 
-test('R7.15 an edit resent with the same (cid, seq) gets the original ack and is applied once', async () => {
+test('R7.15 an edit resent with the same (cid, seq) gets the original ack and is applied once', { skip: windowsFileId }, async () => {
   const id = note('t4.md', '');
   const a = await client(); await a.open(id);
   const ack = await a.edit(id, 0, [[0, '', 'once ']]);
@@ -125,7 +126,7 @@ test('R7.15 an edit resent with the same (cid, seq) gets the original ack and is
   a.close();
 });
 
-test('R7.16 reconnect with the same cid and open{since}: own batches come back as ack, others as edits', async () => {
+test('R7.16 reconnect with the same cid and open{since}: own batches come back as ack, others as edits', { skip: windowsFileId }, async () => {
   const id = note('t5.md', 'base\n');
   const a = await client(), b = await client();
   await a.open(id); await b.open(id);
@@ -145,7 +146,7 @@ test('R7.16 reconnect with the same cid and open{since}: own batches come back a
   a2.close(); b.close();
 });
 
-test('R7.3 rid rules and §7.8 bad_id, no_buffer, read_only, refused_path, not_text', async () => {
+test('R7.3 rid rules and §7.8 bad_id, no_buffer, read_only, refused_path, not_text', { skip: windows && 'Uses Unix absolute buffer IDs and /tmp' }, async () => {
   const a = await client();
   for (const id of ['../x', 'a//b', '', 'name:', '/etc/../x']) { const o = await a.open(id); assert.equal(o.error && o.error.code, 'bad_id', id); }
   assert.equal((await a.open('absent.md')).error!.code, 'no_buffer');
@@ -170,7 +171,7 @@ test('R7.3 rid rules and §7.8 bad_id, no_buffer, read_only, refused_path, not_t
   a.close();
 });
 
-test('R6.1 ids: notesDir-relative, ~/, absolute; a symlink and its target name one buffer', async () => {
+test('R6.1 ids: notesDir-relative, ~/, absolute; a symlink and its target name one buffer', { skip: windows && 'File IDs assume / separators and a Unix symlink fixture' }, async () => {
   const a = await client();
   note('ids.md', 'i\n');
   const abs = path.join(dir.dirs.notes, 'ids.md');
@@ -196,7 +197,7 @@ test('R6.1 ids: notesDir-relative, ~/, absolute; a symlink and its target name o
   a.close();
 });
 
-test('R14.14 a client that stops reading is disconnected with slow_client; the others go on', async () => {
+test('R14.14 a client that stops reading is disconnected with slow_client; the others go on', { skip: windowsFileId }, async () => {
   const id = note('slow.md', '');
   const slow = await client(), fast = await client(), other = await client();
   await slow.open(id); await fast.open(id); await other.open(id);
@@ -225,7 +226,7 @@ test('R7.2 a line over MAX_LINE is too_large and the connection stays', async ()
   a.close();
 });
 
-test('R14.14 a snap over 1 MiB comes in chunks and reassembles', async () => {
+test('R14.14 a snap over 1 MiB comes in chunks and reassembles', { skip: windowsFileId }, async () => {
   const big = ('0123456789abcdef\n'.repeat(70000)) + '😀';
   const id = note('big.md', big);
   const a = await client();
@@ -234,7 +235,7 @@ test('R14.14 a snap over 1 MiB comes in chunks and reassembles', async () => {
   a.close();
 });
 
-test('R7.14 ack and edits carry h every 50 versions; it is FNV-1a of the text', async () => {
+test('R7.14 ack and edits carry h every 50 versions; it is FNV-1a of the text', { skip: windowsFileId }, async () => {
   const id = note('h.md', '');
   const a = await client(), b = await client(); await a.open(id); await b.open(id);
   let text = '', ver = 0, seen = 0;
@@ -249,7 +250,7 @@ test('R7.14 ack and edits carry h every 50 versions; it is FNV-1a of the text', 
   a.close(); b.close();
 });
 
-test('§7.3 save and revert; meta on change; R8.7 atomic save keeps the mode bits', async () => {
+test('§7.3 save and revert; meta on change; R8.7 atomic save keeps the mode bits', { skip: windows && 'Asserts Unix file mode bits and uses file-backed IDs' }, async () => {
   const id = note('s.md', 'one\n');
   fs.chmodSync(path.join(dir.dirs.notes, 's.md'), 0o644);
   const a = await client(); await a.open(id);
@@ -271,7 +272,7 @@ test('§7.3 save and revert; meta on change; R8.7 atomic save keeps the mode bit
   a.close();
 });
 
-test('R7.3 sel is relayed to the other clients of the buffer and never to the sender', async () => {
+test('R7.3 sel is relayed to the other clients of the buffer and never to the sender', { skip: windowsFileId }, async () => {
   const id = note('sel.md', 'abc');
   const a = await client(), b = await client(); await a.open(id); await b.open(id);
   a.send({ t: 'sel', buf: id, ranges: [[1, 2]] });
@@ -329,7 +330,7 @@ test('R14.13 a runaway form hits the deadline and comes back as the timeout cond
   f.close();
 });
 
-test('§13.1 buffer-list and kill-buffer; killed reaches attached clients', async () => {
+test('§13.1 buffer-list and kill-buffer; killed reaches attached clients', { skip: windowsFileId }, async () => {
   const id = note('k.md', 'k\n');
   const a = await client(), b = await client(); await a.open(id); await b.open(id);
   const list = (await a.call('buffer-list')).value;
@@ -345,7 +346,7 @@ test('§13.1 buffer-list and kill-buffer; killed reaches attached clients', asyn
   a.close(); b.close();
 });
 
-test('§13.1 server-edit: --wait resolves on done (saved, 0) or abort (1); plain returns at once', async () => {
+test('§13.1 server-edit: --wait resolves on done (saved, 0) or abort (1); plain returns at once', { skip: windowsFileId }, async () => {
   const a = await client(), b = await client();
   const id = note('se.md', 'edit me\n');
   const quick = await a.call('server-edit', [id, 3], {});
@@ -367,7 +368,7 @@ test('§13.1 server-edit: --wait resolves on done (saved, 0) or abort (1); plain
   a.close(); b.close();
 });
 
-test('R6.19–R6.21 server undo: own newest group, undo-global, undo-writer, partial undo', async () => {
+test('R6.19–R6.21 server undo: own newest group, undo-global, undo-writer, partial undo', { skip: windowsFileId }, async () => {
   const id = note('u.md', 'base\n');
   const a = await client(), b = await client(); await a.open(id); await b.open(id);
   await a.edit(id, 0, [[0, '', 'A1 ']], { g: 1 });
@@ -396,7 +397,7 @@ test('R6.19–R6.21 server undo: own newest group, undo-global, undo-writer, par
   a.close(); b.close();
 });
 
-test('R14.3 edwind refuses to start on a socket directory that is not 0700, or not its own', async () => {
+test('R14.3 edwind refuses to start on a socket directory that is not 0700, or not its own', { skip: windows && 'Named pipes have no Unix socket directory or mode' }, async () => {
   const d2 = makeDir();
   fs.chmodSync(d2.dirs.sock, 0o755);
   await assert.rejects(startEdwind(d2), /mode 755, not 700/);
@@ -406,11 +407,27 @@ test('R14.3 edwind refuses to start on a socket directory that is not 0700, or n
   fs.rmSync(d2.root, { recursive: true, force: true });
 });
 
-test('R15.2, R15.4 the socket is 0600 and edit.json with an unknown field is refused', async () => {
+test('R15.2 the Unix socket is 0600', { skip: windows && 'Named pipes have no Unix mode bits' }, () => {
   assert.equal(fs.statSync(dir.cfg.socket).mode & 0o777, 0o600);
+});
+
+test('R15.4 edit.json with an unknown field is refused', async () => {
   const d2 = makeDir({ bogus: 1 });
   await assert.rejects(startEdwind(d2), /unknown field "bogus"/);
   fs.rmSync(d2.root, { recursive: true, force: true });
+});
+
+test('R15.4 Windows edit.json defaults to a per-user pipe and rejects invalid endpoints', { skip: !windows && 'Windows named-pipe configuration only' }, async () => {
+  const { loadConfig } = await import('../server/main.mts');
+  const file = path.join(dir.root, 'pipe-config.json');
+  fs.writeFileSync(file, '{}');
+  assert.equal(loadConfig(file).socket, `\\\\.\\pipe\\edwin-${os.userInfo().username}-edit`);
+  for (const key of ['socket', 'hubSocket', 'webSocket']) {
+    for (const invalid of [dir.dirs.notes, '\\\\.\\pipe\\']) {
+      fs.writeFileSync(file, JSON.stringify({ [key]: invalid }));
+      assert.throws(() => loadConfig(file), new RegExp(`${key} must be a Windows named pipe`));
+    }
+  }
 });
 
 test('R7.8 shutting_down: a stopping edwind tells its clients and exits cleanly', async () => {
@@ -429,7 +446,7 @@ test('R7.8 shutting_down: a stopping edwind tells its clients and exits cleanly'
   fs.rmSync(d2.root, { recursive: true, force: true });
 });
 
-test('R15.12 edwind --check verifies the journals; --export writes the buffers', async () => {
+test('R15.12 edwind --check verifies the journals; --export writes the buffers', { skip: windowsFileId }, async () => {
   const id = note('chk.md', 'c\n');
   const a = await client(); await a.open(id); await a.edit(id, 0, [[0, '', 'C ']]); a.close();
   await new Promise(r => setTimeout(r, 100));
@@ -463,7 +480,7 @@ test('R16.17 limits: 500 open buffers, a flood of edits and a deep recursion lea
   a.close(); b.close();
 });
 
-test('R16.16 the Node flags of bin/edwind are in effect: no eval, locked intrinsics, a sized stack, no child processes', async () => {
+test('R16.16 the Node flags of bin/edwind are in effect: no eval, locked intrinsics, a sized stack, no child processes', { skip: windows && 'Reads Linux /proc/PID/cmdline' }, async () => {
   const cmd = fs.readFileSync(`/proc/${child.pid}/cmdline`, 'utf8').split('\0');
   assert.ok(cmd.includes('--disallow-code-generation-from-strings'), '--disallow-code-generation-from-strings');
   /* The intrinsics are locked in-process (lockdown.mts, its own suite), not by --frozen-intrinsics, which made
@@ -489,7 +506,7 @@ test('R16.16 the Node flags of bin/edwind are in effect: no eval, locked intrins
   assert.equal(msgs.length, 4); for (const m of msgs) assert.match(m, /edwind never starts processes/);
 });
 
-test('open{create} of a notesDir-relative id makes the missing directories inside notesDir only (E3 H3 gap 1)', async () => {
+test('open{create} of a notesDir-relative id makes the missing directories inside notesDir only (E3 H3 gap 1)', { skip: windows && 'Uses file IDs with / separators, /tmp and Unix symlinks' }, async () => {
   const a = await client();
   /* deep/er/ does not exist: open creates it under the real notes directory; the file itself appears on save. */
   const o = await a.open('deep/er/new.md', { create: true });
