@@ -6,7 +6,7 @@
 //   edwind --config … --write-roots                   print the write roots, one per line (for bin/edwind's flags)
 //   edwind --config … --primitives                    print the primitive registry as JSON (R4.48)
 //
-// The process loads Edwin's core headless (host-node.cts), replays the journals, then listens on edit.sock.
+// The process loads Edwin's core headless (host-node.cts), replays the journals, then listens on a local endpoint.
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -15,6 +15,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { Authority, expandHome } from './paths.mts';
+import { daemonDefaults, resolveLocalEndpoint, checkLocalEndpointLength, localEndpointDirectory, prepareLocalEndpoint, verifyLocalEndpoint, removeLocalEndpoint, onProcessStop } from './platform.mts';
 import { AgentAuthority, ProtectedFileError } from './agent-files.mts';
 import { openPromptWriter, PromptStoreBusy } from './agent-startup.mts';
 import { agentEncoder } from './agent-wire.mts';
@@ -125,15 +126,14 @@ export function loadConfig(file: string): Config {
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
   const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
-  const home = process.env.HOME || os.homedir(), runtime = process.env.XDG_RUNTIME_DIR;
+  const defaults = daemonDefaults();
   const out: Config = {
-    /* By default the socket `edwin --daemon` listens on, where edwinclient looks after $EDWIN_SOCKET. */
-    socket: abs('socket', str('socket', !runtime, runtime && path.join(runtime, 'edwin/edit.sock'))),
-    hubSocket: abs('hubSocket', str('hubSocket', false, undefined)),
-    webSocket: abs('webSocket', str('webSocket', false, undefined)),
-    stateDir: abs('stateDir', str('stateDir', false, path.join(home, '.local/state/edwin/edwind'))),
-    notesDir: abs('notesDir', str('notesDir', true)),
-    configDir: abs('configDir', str('configDir', false, path.join(home, '.config/edwin'))),
+    socket: resolveLocalEndpoint(file, 'socket', str('socket', !defaults.socket, defaults.socket!)),
+    hubSocket: resolveLocalEndpoint(file, 'hubSocket', str('hubSocket', false, undefined)),
+    webSocket: resolveLocalEndpoint(file, 'webSocket', str('webSocket', false, undefined)),
+    stateDir: abs('stateDir', str('stateDir', false, defaults.stateDir)),
+    notesDir: abs('notesDir', str('notesDir', !defaults.notesDir, defaults.notesDir!)),
+    configDir: abs('configDir', str('configDir', false, defaults.configDir)),
     host: str('host', false, os.hostname()),
     logLevel: str('logLevel', false, 'info'),
     writablePaths: [], refusePaths: [], models: cfg.models || {},
@@ -143,7 +143,7 @@ export function loadConfig(file: string): Config {
     if (!Array.isArray(v) || v.some(x => typeof x !== 'string')) throw new Error(`${file}: ${k} must be a list of paths`);
     out[k] = v.map((x: string) => abs(k, x));
   }
-  for (const k of ['socket', 'hubSocket', 'webSocket'] as const) if (out[k] && Buffer.byteLength(out[k]!) >= 108) throw new Error(`${file}: ${k} is too long for a socket path (108 bytes)`);
+  for (const k of ['socket', 'hubSocket', 'webSocket'] as const) checkLocalEndpointLength(file, k, out[k]);
   /* models (§15.2, R15.4): backends `anthropic` and `openai` ({baseUrl, credential}), `tiers` (tier -> model) and
      `credentials` (name -> {origin}); a plain http URL only to loopback (R14.4). */
   const checkUrl = (k: string, v: string) => { let u; try { u = new URL(v); } catch (e) { throw new Error(`${file}: ${k} is not a URL`); } if (u.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) throw new Error(`${file}: ${k}: plain http only to loopback`); if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error(`${file}: ${k} must be http or https`); };
@@ -303,15 +303,7 @@ export class Server {
 
   /* ---------- the socket (R14.3) ---------- */
   listen() {
-    const sock = this.cfg.socket, dir = path.dirname(sock);
-    const euid = process.geteuid!();
-    let dst: fs.Stats;
-    try { dst = fs.lstatSync(dir); } catch (e) { throw new Error(`${dir}: ${e.code}`); }
-    if (!dst.isDirectory() || dst.isSymbolicLink()) throw new Error(`${dir} is not a directory`);
-    if (dst.uid !== euid) throw new Error(`${dir} is owned by uid ${dst.uid}, not ${euid}`);
-    if ((dst.mode & 0o777) !== 0o700) throw new Error(`${dir} has mode ${(dst.mode & 0o777).toString(8)}, not 700`);
-    try { const st = fs.lstatSync(sock); if (st.isSymbolicLink() || !st.isSocket()) throw new Error(`${sock} exists and is not a socket`); fs.unlinkSync(sock); }
-    catch (e) { if (e.code !== 'ENOENT') { if (e instanceof Error && !(e as NodeJS.ErrnoException).code) throw e; throw new Error(`${sock}: ${e.code}`); } }
+    const sock = this.cfg.socket, euid = prepareLocalEndpoint(sock);
     const encode = this.cfg.agentHub && agentEncoder(this.cfg.agentHub);
     const server = net.createServer({ allowHalfOpen: false }, socket => {
       const c = new Client(this, socket, encode);
@@ -321,11 +313,7 @@ export class Server {
       server.once('error', reject);
       server.listen(sock, () => {
         try {
-          fs.chmodSync(sock, 0o600);
-          const st = fs.lstatSync(sock);
-          if (st.isSymbolicLink() || !st.isSocket()) throw new Error(`${sock} is not the socket edwind created`);
-          if (st.uid !== euid) throw new Error(`${sock} is owned by uid ${st.uid}, not ${euid}`);
-          if ((st.mode & 0o777) !== 0o600) throw new Error(`${sock} has mode ${(st.mode & 0o777).toString(8)}, not 600`);
+          verifyLocalEndpoint(sock, euid);
         } catch (e) { server.close(); reject(e); return; }
         this.net = server;
         this.log.info('listen', { socket: sock, build: this.build, boot: this.boot, lockdown: lockdownState(), safe: this.image.safe ? this.image.safe.reason : undefined });
@@ -346,7 +334,7 @@ export class Server {
       for (const m of [...this.modules].reverse()) if (m.shutdown) { try { await m.shutdown(this); } catch (e) { this.log.error('shutdown', { module: m.name || '?', error: e.message }); } }
       await this.buffers.shutdown();
       try { this.Ed.host.suspend(); } catch (e) { /* storage flush is best effort */ }
-      if (!this.auth.agent || this.net) try { fs.unlinkSync(this.cfg.socket); } catch (e) { /* gone */ }
+      if (!this.auth.agent || this.net) removeLocalEndpoint(this.cfg.socket);
     } finally {
       if (this.releasePromptWriter) await this.releasePromptWriter();
     }
@@ -565,7 +553,12 @@ export async function main(argv: string[]): Promise<number | undefined> {
   let cfg: Config;
   try { cfg = loadConfig(config); } catch (e) { process.stderr.write(`edwind: ${e.message}\n`); return 1; }
   const log = makeLog(cfg.logLevel);
-  if (mode === 'roots') { const a = new Authority(cfg); for (const r of [...a.writeRootsForFlags(), path.dirname(cfg.socket)]) process.stdout.write(r + '\n'); return 0; }
+  if (mode === 'roots') {
+    const a = new Authority(cfg), socketDir = localEndpointDirectory(cfg.socket);
+    for (const r of a.writeRootsForFlags()) process.stdout.write(r + '\n');
+    if (socketDir !== undefined) process.stdout.write(socketDir + '\n');
+    return 0;
+  }
   if (mode === 'check') return check(cfg) ? 0 : 1;
   if (mode === 'export') { const n = await exportAll(cfg, exportDir!, log); process.stdout.write(`${n} buffers exported to ${exportDir}\n`); return 0; }
   if (mode === 'primitives') {
@@ -586,7 +579,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   }
   let stopping: Promise<void> | null = null;
   const stop = (sig: string) => { if (stopping) return; log.info('signal', { sig }); stopping = server!.stop().then(() => process.exit(0), e => { log.error('stop', { error: e.message }); process.exit(1); }); };
-  if (isMainThread) { process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT')); }
+  if (isMainThread) onProcessStop(stop);
   else parentPort!.on('message', m => { if (m && m.t === 'stop') stop(m.sig); });
   process.on('uncaughtException', e => { log.error('uncaught', { error: e.stack || String(e) }); });
   process.on('unhandledRejection', (e: any) => { log.error('unhandled', { error: (e && e.stack) || String(e) }); }); // any: whatever was rejected
@@ -595,7 +588,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
 
 /* The server runs on a worker thread with a stack sized for the Scheme cap (STACK_MB): Node's main thread
    gets about 1,500 Scheme frames from its default stack and `ulimit -s` belongs to the operator, while a
-   worker's stack is the process's own choice. The main thread only relays SIGTERM and SIGINT to the server
+   worker's stack is the process's own choice. The main thread only relays stop requests to the server
    and exits with its code. EDWIND_NO_THREAD=1 runs the server on the main thread (debugging, benchmarks). */
 function runInThread(argv: string[], log: Log): Promise<number> {
   return new Promise(resolve => {
@@ -603,7 +596,7 @@ function runInThread(argv: string[], log: Log): Promise<number> {
     if (Number(process.env.EDWIND_MEMORY_MIB) > 0) resourceLimits.maxOldGenerationSizeMb = Number(process.env.EDWIND_MEMORY_MIB);
     const w = new Worker(fileURLToPath(import.meta.url), { argv, resourceLimits });
     const stop = (sig: string) => w.postMessage({ t: 'stop', sig });
-    process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT'));
+    onProcessStop(stop);
     w.on('error', e => { log.error('thread', { error: e.stack || String(e) }); });
     w.on('exit', code => resolve(code));
   });
