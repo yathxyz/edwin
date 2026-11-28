@@ -1,0 +1,83 @@
+name: Windows
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-suites:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci --ignore-scripts
+      - name: Install tools dependencies
+        working-directory: tools
+        run: npm ci --ignore-scripts
+      - name: Prepare the stripped test tree
+        run: |
+          "HOME=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          node tools/strip.mts --in-place src native/js
+
+      - name: headless
+        run: node --test test/headless.test.mts
+      - name: scheme
+        run: node --test test/scheme.test.mts
+      - name: scheme-editor
+        run: node --test test/scheme-editor.test.mts
+      - name: markdown
+        run: node --test test/markdown.test.mts
+      - name: display
+        run: node --test test/display.test.mts
+      - name: term
+        run: node --test test/term.test.mts
+      - name: agent-transcript
+        run: node --test test/agent-transcript.test.mts
+      - name: ot
+        env:
+          NODE_PATH: ${{ github.workspace }}/tools/node_modules
+        run: node --test test/ot.test.mts
+
+  native-build:
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install stable Rust (MSVC)
+        run: |
+          # build.rs finds ICU data in Cargo's registry using CARGO_HOME or HOME.
+          if (-not $env:CARGO_HOME) {
+            "CARGO_HOME=$env:USERPROFILE\.cargo" >> $env:GITHUB_ENV
+          }
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+      - name: Strip JavaScript sources
+        run: node tools/strip.mts --in-place src native/js
+
+      - name: Build without default features
+        continue-on-error: true
+        run: cargo build --manifest-path native/Cargo.toml --locked --no-default-features
+      - name: Build with default features
+        continue-on-error: true
+        run: cargo build --manifest-path native/Cargo.toml --locked
