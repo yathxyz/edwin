@@ -133,6 +133,29 @@ read access. Other users can open a read-only connection; that grant does not in
 needed to send edit protocol requests. Administrators and LocalSystem can connect bidirectionally.
 The username in the pipe name is not access control.
 
+### Windows: file-backed buffer IDs (R6.1, §7)
+
+Canonical IDs use `/` on the wire: `sub/file.txt` relative to `notesDir`, `~/sub/file.txt`
+relative to the service home, or `C:/dir/file.txt` for other files. The daemon also accepts
+native `\` and mixed separators on input, and translates to native paths in `server/paths.mts`;
+it emits an uppercase drive letter and keeps the filesystem's spelling of existing components
+rather than lowercasing filenames. On a case-insensitive volume alternate case spellings of an
+existing file name the same buffer; a new file keeps its requested name. Unix IDs are unchanged.
+
+Only drive-rooted absolute paths are accepted on Windows, not drive-relative, root-relative,
+UNC, or device/extended namespace paths (such as `\\?\`). Empty components, `.` and `..`,
+trailing dots or spaces, invalid filename characters (including `:` for alternate streams),
+and DOS device names such as `NUL`, `CON.txt` and `COM1` are refused. Existing files and
+parent directories are resolved by Windows before containment is checked, expanding 8.3 aliases
+when possible; a path that cannot be resolved safely is refused. A different drive is outside the
+notes directory and any write root on the original drive. Explicit absolute IDs outside the
+write roots remain read-only unless a refusal rule blocks them altogether.
+
+Private files and directories use Unix modes `0600` and `0700` where applicable. On Windows
+the default config and state directories are in the user's profile and new files inherit access
+rules from their containing directory. edwind does not set Windows ACLs; if you override these
+locations, use directories with suitable access rules.
+
 ## Step E2: the Lisp machine (done)
 
 E2 makes the server image a Lisp machine (spec §4 after E0, §5 sessions, §11, §12, R15.6): the evaluator runs
