@@ -57,8 +57,8 @@ image log), `files.mts` (text files, CRLF, atomic save), `paths.mts` (ids and th
 `watch.mts` (inotify, the line-then-character diff, the three-way merge), `proto.mts` (constants and field
 checks). `src/ot.ts` is the OT library both ends share; `test/edit-client.mts` is the test client.
 
-Running edwind by hand: `edwind --config edit.json` where `edit.json` has at least `notesDir` (see
-`loadConfig` in `main.mts` for the fields of R15.4); the socket's directory must be yours and 0700.
+Running edwind by hand: `edwind --config edit.json` (see `loadConfig` in `main.mts` for the fields of
+R15.4). On Unix, `notesDir` is required and the socket's directory must be yours and 0700.
 
 Choices E1 made where the spec left one open, and where it had to deviate:
 - **No `--permission` (R14.12).** Node 22 and 24 disable `fsync` and `fdatasync` under the permission model, and the
@@ -118,6 +118,20 @@ Choices E1 made where the spec left one open, and where it had to deviate:
   `edit-conformance` (start refusal) and the VM (another uid).
 - **`CRASH_ROUNDS`** sets the kill count of the crash suite (default 1,000); `OT_RUNS` the fast-check runs
   (default 10,000); `EDWIND_LOG=1` streams edwind's log in the test harness.
+
+### Windows: who can connect
+
+On Windows, `socket`, `hubSocket` and `webSocket` are named pipes (`\\.\pipe\NAME`). The default edit
+pipe is `\\.\pipe\edwin-USERNAME-edit`; the config, state and notes directories default to
+`%APPDATA%\edwin`, `%LOCALAPPDATA%\edwin` and `%USERPROFILE%\notes`, respectively.
+
+**The pipe is not owner-only.** Node's [`net.Server.listen`](https://nodejs.org/docs/latest-v24.x/api/net.html#ipc-support)
+uses libuv, which [creates the duplex pipe with `NULL` security attributes](https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/pipe.c#L540-L550).
+[Windows' default pipe ACL](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
+gives the creator, Administrators and LocalSystem full access and grants Everyone and anonymous accounts
+read access. Other users can open a read-only connection; that grant does not include the write access
+needed to send edit protocol requests. Administrators and LocalSystem can connect bidirectionally.
+The username in the pipe name is not access control.
 
 ## Step E2: the Lisp machine (done)
 
