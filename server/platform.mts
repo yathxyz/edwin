@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { expandHome } from './paths.mts';
+import { expandHome, home as daemonHome } from './paths.mts';
 
 const windows = process.platform === 'win32';
 const PIPE_PREFIX = '\\\\.\\pipe\\';
@@ -10,7 +10,7 @@ export function windowsPipe(name: string): string { return PIPE_PREFIX + name; }
 
 export function daemonDefaults() {
   if (windows) {
-    const profile = process.env.USERPROFILE || os.homedir();
+    const profile = daemonHome();
     const roaming = process.env.APPDATA || path.join(profile, 'AppData', 'Roaming');
     const local = process.env.LOCALAPPDATA || path.join(profile, 'AppData', 'Local');
     return {

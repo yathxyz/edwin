@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { makeDir, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
+import { edwindEnv, makeDir, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
 import type { OTModule } from './ot-sim.mts';
 import { windowsPathId, windowsUnder } from '../server/paths.mts';
@@ -24,7 +24,11 @@ const { MAX_LINE, CODES } = await import('../server/proto.mts');
 const windows = process.platform === 'win32';
 
 let dir: TestDir, child: EdwindChild;
-before(async () => { dir = makeDir(); child = await startEdwind(dir); });
+before(async () => {
+  dir = makeDir();
+  // A shell-supplied POSIX HOME must not shadow the native fixture profile.
+  child = await startEdwind(dir, { env: windows ? { HOME: '/git-bash-home' } : undefined });
+});
 after(async () => { await stopEdwind(child); fs.rmSync(dir.root, { recursive: true, force: true }); });
 
 const client = async (opts?: ClientOptions): Promise<WelcomedClient> => { const c = new EditClient(dir.cfg.socket, opts) as WelcomedClient; await c.connect(); const w = await c.hello(); assert.equal(w.t, 'welcome'); c.welcome = w; return c; };
@@ -460,7 +464,7 @@ test('R15.12 edwind --check verifies the journals; --export writes the buffers',
   const id = note('chk.md', 'c\n');
   const a = await client(); await a.open(id); await a.edit(id, 0, [[0, '', 'C ']]); a.close();
   await new Promise(r => setTimeout(r, 100));
-  const run = (args: string[]) => new Promise<RunResult>(resolve => { const p = spawn(process.execPath, [MAIN, '--config', dir.file, ...args], { env: { ...process.env, HOME: dir.dirs.home } }); let out = ''; p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; }); p.on('exit', code => resolve({ code, out })); });
+  const run = (args: string[]) => new Promise<RunResult>(resolve => { const p = spawn(process.execPath, [MAIN, '--config', dir.file, ...args], { env: edwindEnv(dir) }); let out = ''; p.stdout.on('data', d => { out += d; }); p.stderr.on('data', d => { out += d; }); p.on('exit', code => resolve({ code, out })); });
   const r = await run(['--check']);
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /chk\.md: ok, 1 batches, version 1/);

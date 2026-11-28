@@ -124,6 +124,8 @@ Choices E1 made where the spec left one open, and where it had to deviate:
 On Windows, `socket`, `hubSocket` and `webSocket` are named pipes (`\\.\pipe\NAME`). The default edit
 pipe is `\\.\pipe\edwin-USERNAME-edit`; the config, state and notes directories default to
 `%APPDATA%\edwin`, `%LOCALAPPDATA%\edwin` and `%USERPROFILE%\notes`, respectively.
+The daemon uses `USERPROFILE` for `~` on Windows (falling back to `os.homedir()`), not a
+shell's potentially Unix-style `HOME`.
 
 **The pipe is not owner-only.** Node's [`net.Server.listen`](https://nodejs.org/docs/latest-v24.x/api/net.html#ipc-support)
 uses libuv, which [creates the duplex pipe with `NULL` security attributes](https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/pipe.c#L540-L550).

@@ -15,8 +15,8 @@ export class PathError extends Error {
   constructor(code: PathErrorCode, msg: string) { super(msg); this.code = code; }
 }
 
-const HOME = process.env.HOME || os.homedir();
 const windows = process.platform === 'win32';
+const HOME = (windows ? process.env.USERPROFILE : process.env.HOME) || os.homedir();
 const slashWindows = (p: string): string => p.replace(/\\/g, '/');
 const driveRoot = /^[a-z]:\//i;
 const upperDrive = (p: string): string => /^[a-z]:/i.test(p) ? p[0].toUpperCase() + p.slice(1) : p;

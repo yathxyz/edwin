@@ -48,7 +48,8 @@ const windows = process.platform === 'win32';
 
 /* A temp directory with notes, state, config and edit.json, plus a 0700 socket dir on Unix. */
 export function makeDir(extra: Record<string, unknown> = {}): TestDir {
-  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'edwind-'));
+  // Protocol metadata uses native realpaths; TEMP can contain an 8.3 alias on Windows.
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'edwind-')));
   if (!windows) fs.chmodSync(root, 0o700);
   const dirs = { sock: path.join(root, 'run'), notes: path.join(root, 'notes'), state: path.join(root, 'state'), config: path.join(root, 'config'), home: path.join(root, 'home') };
   for (const d of Object.values(dirs)) if (!windows || d !== dirs.sock) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -57,6 +58,10 @@ export function makeDir(extra: Record<string, unknown> = {}): TestDir {
   const file = path.join(root, 'edit.json');
   fs.writeFileSync(file, JSON.stringify(cfg));
   return { root, dirs, cfg, file };
+}
+
+export function edwindEnv(dir: TestDir, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...process.env, [windows ? 'USERPROFILE' : 'HOME']: dir.dirs.home, ...extra };
 }
 
 /* Start edwind on DIR; resolves to the child once the socket accepts. */
@@ -76,7 +81,7 @@ export function readPrimitiveRegistry(dir: TestDir, { nodeArgs = nodeFlags(), ma
   const out = path.join(dir.root, 'primitives.json.out'), fd = fs.openSync(out, 'wx', 0o600);
   try {
     execFileSync(process.execPath, [...nodeArgs, main, '--config', dir.file, '--primitives'], {
-      stdio: ['ignore', fd, 'pipe'], env: { ...process.env, HOME: dir.dirs.home, CREDENTIALS_DIRECTORY: undefined },
+      stdio: ['ignore', fd, 'pipe'], env: edwindEnv(dir, { CREDENTIALS_DIRECTORY: undefined }),
     });
     return JSON.parse(fs.readFileSync(out, 'utf8'));
   } finally { fs.closeSync(fd); fs.unlinkSync(out); }
@@ -89,7 +94,7 @@ process.once('exit', () => { for (const c of children) { try { c.kill('SIGKILL')
 export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN, env = {} }: StartOptions = {}): Promise<EdwindChild> {
   const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], {
     stdio: windows ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, HOME: dir.dirs.home, ...env },
+    env: edwindEnv(dir, env),
   }) as EdwindChild;
   child.logs = '';
   children.add(child); child.once('exit', () => children.delete(child));

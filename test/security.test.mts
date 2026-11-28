@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild, ClientOptions } from './edit-client.mts';
+import { pathToId } from '../server/paths.mts';
 
 let dir: TestDir, child: EdwindChild;
 before(async () => { dir = makeDir(); child = await startEdwind(dir); });
@@ -133,13 +134,13 @@ test('visit-id: the board\'s file opener learns the canonical id and whether edw
   fs.writeFileSync(path.join(dir.dirs.notes, 'vi.md'), '# vi\n');
   fs.symlinkSync(path.join(dir.dirs.notes, 'vi.md'), path.join(home, 'vi-link.md'));
   fs.writeFileSync(path.join(home, 'bin.dat'), Buffer.from([0xff, 0xfe, 0x00, 0x80]));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'edwind-visit-'));
+  const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'edwind-visit-')));
   fs.writeFileSync(path.join(outside, 'ro.md'), 'ro\n');
   const visit = (p: string) => c.call('visit-id', [p]);
   try {
     assert.deepEqual((await visit(path.join(dir.dirs.notes, 'vi.md'))).value, { buf: 'vi.md', readOnly: false }, 'an absolute path under notesDir is the relative id');
     assert.deepEqual((await visit('~/vi-link.md')).value, { buf: 'vi.md', readOnly: false }, 'a symlink and its target are one buffer');
-    assert.deepEqual((await visit(path.join(outside, 'ro.md'))).value, { buf: path.join(fs.realpathSync(outside), 'ro.md'), readOnly: 'outside the writable paths' });
+    assert.deepEqual((await visit(path.join(outside, 'ro.md'))).value, { buf: pathToId(path.join(outside, 'ro.md')), readOnly: 'outside the writable paths' });
     assert.equal((await visit('~/.ssh/config')).code, 'refused_path');
     assert.equal((await visit('~/bin.dat')).code, 'not_text');
     assert.equal((await visit('~/nothing-here.md')).code, 'no_buffer');

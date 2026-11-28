@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
-import { EDWIN, MAIN, EditClient, makeDir, nodeFlags, readPrimitiveRegistry, startEdwind, stopEdwind, transport } from './edit-client.mts';
+import { EDWIN, MAIN, EditClient, edwindEnv, makeDir, nodeFlags, readPrimitiveRegistry, startEdwind, stopEdwind, transport } from './edit-client.mts';
 import type { EdwindChild, Msg, TestDir } from './edit-client.mts';
 import { createHost, loadEdwin, memoryStorage } from './headless.mts';
 import { assertOrdinaryFrameInput } from './frame-input.mts';
@@ -129,7 +129,7 @@ test('without agentHub ordinary daemon and frame behavior matches main', async t
   });
   fs.unlinkSync(notesIndex);
   const runNode = (args: string[]) => exec(process.execPath, args, {
-    env: { ...process.env, ...fixtureEnv, HOME: dir.dirs.home }, timeout: 20000, killSignal: 'SIGKILL', maxBuffer: 8 * 1024 * 1024,
+    env: edwindEnv(dir, fixtureEnv), timeout: 20000, killSignal: 'SIGKILL', maxBuffer: 8 * 1024 * 1024,
   });
 
   await t.test('index rows and unreadable backing recover; live --export uses the same state', async () => {
