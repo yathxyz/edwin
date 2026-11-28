@@ -83,8 +83,13 @@ export function readPrimitiveRegistry(dir: TestDir, { nodeArgs = nodeFlags(), ma
 const children = new Set<EdwindChild>();
 process.once('exit', () => { for (const c of children) { try { c.kill('SIGKILL'); } catch (e) { /* gone */ } } });
 
+const windows = process.platform === 'win32';
+
 export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN, env = {} }: StartOptions = {}): Promise<EdwindChild> {
-  const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: dir.dirs.home, ...env } }) as EdwindChild;
+  const child = spawn(process.execPath, [...nodeArgs, main, '--config', dir.file], {
+    stdio: windows ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, HOME: dir.dirs.home, ...env },
+  }) as EdwindChild;
   child.logs = '';
   children.add(child); child.once('exit', () => children.delete(child));
   child.stderr.on('data', d => { child.logs += d; if (process.env.EDWIND_LOG) process.stderr.write(d); });
@@ -102,7 +107,13 @@ export function startEdwind(dir: TestDir, { nodeArgs = nodeFlags(), main = MAIN,
   });
 }
 export function stopEdwind(child: ChildProcess, sig: NodeJS.Signals = 'SIGTERM'): Promise<void> {
-  return new Promise(resolve => { if (child.exitCode !== null || child.signalCode) return resolve(); child.once('exit', () => resolve()); child.kill(sig); });
+  return new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode) return resolve();
+    child.once('exit', () => resolve());
+    if (windows && sig === 'SIGTERM') {
+      if (child.connected) child.disconnect();
+    } else child.kill(sig);
+  });
 }
 
 /* A protocol client: NDJSON over the socket, with awaitable requests and a message queue. */

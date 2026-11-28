@@ -15,7 +15,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { Authority, expandHome } from './paths.mts';
-import { daemonDefaults, resolveLocalEndpoint, checkLocalEndpointLength, localEndpointDirectory, prepareLocalEndpoint, verifyLocalEndpoint, removeLocalEndpoint } from './platform.mts';
+import { daemonDefaults, resolveLocalEndpoint, checkLocalEndpointLength, localEndpointDirectory, prepareLocalEndpoint, verifyLocalEndpoint, removeLocalEndpoint, onProcessStop } from './platform.mts';
 import { AgentAuthority, ProtectedFileError } from './agent-files.mts';
 import { openPromptWriter, PromptStoreBusy } from './agent-startup.mts';
 import { agentEncoder } from './agent-wire.mts';
@@ -579,7 +579,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
   }
   let stopping: Promise<void> | null = null;
   const stop = (sig: string) => { if (stopping) return; log.info('signal', { sig }); stopping = server!.stop().then(() => process.exit(0), e => { log.error('stop', { error: e.message }); process.exit(1); }); };
-  if (isMainThread) { process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT')); }
+  if (isMainThread) onProcessStop(stop);
   else parentPort!.on('message', m => { if (m && m.t === 'stop') stop(m.sig); });
   process.on('uncaughtException', e => { log.error('uncaught', { error: e.stack || String(e) }); });
   process.on('unhandledRejection', (e: any) => { log.error('unhandled', { error: (e && e.stack) || String(e) }); }); // any: whatever was rejected
@@ -588,7 +588,7 @@ export async function main(argv: string[]): Promise<number | undefined> {
 
 /* The server runs on a worker thread with a stack sized for the Scheme cap (STACK_MB): Node's main thread
    gets about 1,500 Scheme frames from its default stack and `ulimit -s` belongs to the operator, while a
-   worker's stack is the process's own choice. The main thread only relays SIGTERM and SIGINT to the server
+   worker's stack is the process's own choice. The main thread only relays stop requests to the server
    and exits with its code. EDWIND_NO_THREAD=1 runs the server on the main thread (debugging, benchmarks). */
 function runInThread(argv: string[], log: Log): Promise<number> {
   return new Promise(resolve => {
@@ -596,7 +596,7 @@ function runInThread(argv: string[], log: Log): Promise<number> {
     if (Number(process.env.EDWIND_MEMORY_MIB) > 0) resourceLimits.maxOldGenerationSizeMb = Number(process.env.EDWIND_MEMORY_MIB);
     const w = new Worker(fileURLToPath(import.meta.url), { argv, resourceLimits });
     const stop = (sig: string) => w.postMessage({ t: 'stop', sig });
-    process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT'));
+    onProcessStop(stop);
     w.on('error', e => { log.error('thread', { error: e.stack || String(e) }); });
     w.on('exit', code => resolve(code));
   });

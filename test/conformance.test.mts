@@ -20,6 +20,7 @@ interface RunResult { code: number | null; out: string }
 const require = createRequire(import.meta.url);
 const OT = require('../src/ot.ts') as OTModule;
 const { MAX_LINE, CODES } = await import('../server/proto.mts');
+const windows = process.platform === 'win32';
 
 let dir: TestDir, child: EdwindChild;
 before(async () => { dir = makeDir(); child = await startEdwind(dir); });
@@ -418,11 +419,13 @@ test('R7.8 shutting_down: a stopping edwind tells its clients and exits cleanly'
   const a = new EditClient(d2.cfg.socket); await a.connect(); await a.hello();
   const o = await a.open('name:x', { create: true });
   assert.equal(o.ver, 0);
-  ch.kill('SIGTERM');
+  const stopped = stopEdwind(ch);
   const e = await a.next(m => m.t === 'error');
   assert.equal(e.code, 'shutting_down');
-  await stopEdwind(ch);
-  assert.equal(fs.existsSync(d2.cfg.socket), false, 'the socket is removed');
+  await stopped;
+  assert.equal(ch.exitCode, 0, ch.logs);
+  if (windows) await assert.rejects(new EditClient(d2.cfg.socket).connect(), { code: 'ENOENT' });
+  else assert.equal(fs.existsSync(d2.cfg.socket), false, 'the socket is removed');
   fs.rmSync(d2.root, { recursive: true, force: true });
 });
 

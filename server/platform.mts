@@ -77,3 +77,10 @@ export function removeLocalEndpoint(sock: string): void {
   if (windows) return;
   try { fs.unlinkSync(sock); } catch (e) { /* gone */ }
 }
+
+export function onProcessStop(stop: (reason: string) => void): void {
+  if (!windows) process.on('SIGTERM', () => stop('SIGTERM'));
+  // A Windows supervisor can close its private Node IPC channel; SIGTERM would kill the child outright.
+  else if (process.channel) process.once('disconnect', () => stop('IPC disconnect'));
+  process.on('SIGINT', () => stop('SIGINT'));
+}
