@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { expandHome } from './paths.mts';
 
@@ -6,6 +7,28 @@ const windows = process.platform === 'win32';
 const PIPE_PREFIX = '\\\\.\\pipe\\';
 
 export function windowsPipe(name: string): string { return PIPE_PREFIX + name; }
+
+export function daemonDefaults() {
+  if (windows) {
+    const profile = process.env.USERPROFILE || os.homedir();
+    const roaming = process.env.APPDATA || path.join(profile, 'AppData', 'Roaming');
+    const local = process.env.LOCALAPPDATA || path.join(profile, 'AppData', 'Local');
+    return {
+      socket: windowsPipe(`edwin-${os.userInfo().username}-edit`),
+      stateDir: path.join(local, 'edwin'),
+      notesDir: path.join(profile, 'notes'),
+      configDir: path.join(roaming, 'edwin'),
+    };
+  }
+  const home = process.env.HOME || os.homedir(), runtime = process.env.XDG_RUNTIME_DIR;
+  return {
+    /* Where edwinclient looks after $EDWIN_SOCKET. */
+    socket: runtime ? path.join(runtime, 'edwin/edit.sock') : undefined,
+    stateDir: path.join(home, '.local/state/edwin/edwind'),
+    notesDir: undefined,
+    configDir: path.join(home, '.config/edwin'),
+  };
+}
 
 export function resolveLocalEndpoint<V extends string | undefined>(file: string, key: string, value: V): V {
   if (value === undefined) return value;

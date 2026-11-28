@@ -15,7 +15,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
 import { Authority, expandHome } from './paths.mts';
-import { resolveLocalEndpoint, checkLocalEndpointLength, localEndpointDirectory, prepareLocalEndpoint, verifyLocalEndpoint, removeLocalEndpoint } from './platform.mts';
+import { daemonDefaults, resolveLocalEndpoint, checkLocalEndpointLength, localEndpointDirectory, prepareLocalEndpoint, verifyLocalEndpoint, removeLocalEndpoint } from './platform.mts';
 import { AgentAuthority, ProtectedFileError } from './agent-files.mts';
 import { openPromptWriter, PromptStoreBusy } from './agent-startup.mts';
 import { agentEncoder } from './agent-wire.mts';
@@ -126,15 +126,14 @@ export function loadConfig(file: string): Config {
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
   const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
-  const home = process.env.HOME || os.homedir(), runtime = process.env.XDG_RUNTIME_DIR;
+  const defaults = daemonDefaults();
   const out: Config = {
-    /* By default the socket `edwin --daemon` listens on, where edwinclient looks after $EDWIN_SOCKET. */
-    socket: resolveLocalEndpoint(file, 'socket', str('socket', !runtime, runtime && path.join(runtime, 'edwin/edit.sock'))),
+    socket: resolveLocalEndpoint(file, 'socket', str('socket', !defaults.socket, defaults.socket!)),
     hubSocket: resolveLocalEndpoint(file, 'hubSocket', str('hubSocket', false, undefined)),
     webSocket: resolveLocalEndpoint(file, 'webSocket', str('webSocket', false, undefined)),
-    stateDir: abs('stateDir', str('stateDir', false, path.join(home, '.local/state/edwin/edwind'))),
-    notesDir: abs('notesDir', str('notesDir', true)),
-    configDir: abs('configDir', str('configDir', false, path.join(home, '.config/edwin'))),
+    stateDir: abs('stateDir', str('stateDir', false, defaults.stateDir)),
+    notesDir: abs('notesDir', str('notesDir', !defaults.notesDir, defaults.notesDir!)),
+    configDir: abs('configDir', str('configDir', false, defaults.configDir)),
     host: str('host', false, os.hostname()),
     logLevel: str('logLevel', false, 'info'),
     writablePaths: [], refusePaths: [], models: cfg.models || {},
