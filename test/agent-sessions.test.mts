@@ -9,7 +9,7 @@ import https from 'node:https';
 import { isIP } from 'node:net';
 import { createRequire } from 'node:module';
 import { FakeAgentHub } from './fake-agent-hub.mts';
-import { EDWIN, MAIN, makeDir, nodeFlags, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
+import { EDWIN, MAIN, edwindEnv, makeDir, nodeFlags, startEdwind, stopEdwind, EditClient, transport } from './edit-client.mts';
 import type { TestDir } from './edit-client.mts';
 import { AgentSessions, validateAgentHub } from '../server/agent-sessions.mts';
 import { sessionsFixture } from './agent-render-fixture.mts';
@@ -400,7 +400,7 @@ test('configured Buffers.save refuses both backing files and their existing link
         else await assert.rejects(server.buffers.save(sb), { code: 'refused_path', message: 'Private file: access refused' });
       }
     } finally { await server.stop(); }
-  `, dir.file, ordinary, ...files], { encoding: 'utf8', env: { ...process.env, HOME: dir.dirs.home } });
+  `, dir.file, ordinary, ...files], { encoding: 'utf8', env: edwindEnv(dir) });
   assert.ok(!(result.stdout + result.stderr).includes(canary), 'writer disclosed protected content');
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);

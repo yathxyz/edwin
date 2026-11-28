@@ -29,7 +29,7 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Prepare the stripped test tree
         run: |
-          "HOME=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "USERPROFILE=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
           node tools/strip.mts --in-place src native/js
 
       - name: headless
@@ -52,6 +52,8 @@ jobs:
         run: node --test test/ot.test.mts
       - name: conformance
         run: node --test test/conformance.test.mts
+      - name: disk
+        run: node --test test/disk.test.mts
 
   native-build:
     runs-on: windows-latest

@@ -10,6 +10,7 @@ import { isMainThread, parentPort, workerData } from 'node:worker_threads';
 import type { MessagePort } from 'node:worker_threads';
 import { lockdown } from './lockdown.mts';
 import { readProtected, type FileExclusions } from './agent-files.mts';
+import { canonicalFilePath, under } from './paths.mts';
 
 export const MAX_FILE_BYTES = 4 * 1024 * 1024;
 export const NOTE_EXT = /\.(md|org)$/i;
@@ -366,7 +367,7 @@ export interface ScanEntry { id: string; mtimeMs: number; size: number }
 export function scanTree(root: string, ignorePatterns: readonly unknown[] | null | undefined): ScanEntry[] {
   const ignored = ignoreMatcher(ignorePatterns);
   let realRoot;
-  try { realRoot = fs.realpathSync.native(root); } catch (e) { return []; }
+  try { realRoot = canonicalFilePath(root); } catch (e) { return []; }
   const out: ScanEntry[] = [], seen = new Set([realRoot]), stack = [{ dir: root, rel: '' }];
   while (stack.length) {
     const { dir, rel } = stack.pop()!;
@@ -377,8 +378,8 @@ export function scanTree(root: string, ignorePatterns: readonly unknown[] | null
       let isDir = ent.isDirectory(), isFile = ent.isFile();
       if (ent.isSymbolicLink()) {
         let real;
-        try { real = fs.realpathSync.native(abs); } catch (e) { continue; }
-        if (real !== realRoot && !real.startsWith(realRoot + '/')) continue;
+        try { real = canonicalFilePath(abs); } catch (e) { continue; }
+        if (process.platform === 'win32' ? !under(real, realRoot) : real !== realRoot && !real.startsWith(realRoot + '/')) continue;
         let st; try { st = fs.statSync(real); } catch (e) { continue; }
         isDir = st.isDirectory(); isFile = st.isFile();
         if (isDir) { if (seen.has(real)) continue; seen.add(real); }

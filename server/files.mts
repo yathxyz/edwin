@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
+const windows = process.platform === 'win32';
+
 export const BIG = 32 * 1024 * 1024;
 
 /* The codes a FileError carries; each is an error code of the protocol (§7.8). */
@@ -40,9 +42,10 @@ export function encodeText(text: string, eol: Eol, trailingNewline: boolean): st
   return t;
 }
 
-/* Write TEXT to REAL atomically (R8.7): temp file in the same directory, fsync, mode bits of the existing
-   file (new files 0600), rename, fsync of the directory. Returns the bytes written and their hash (of the
-   text as the buffer holds it). Throws the fs error (ENOSPC among them) with nothing half-written. */
+/* Write TEXT to REAL atomically (R8.7): fsync a temp file in the same directory, then rename.
+   Preserve Unix mode bits (new files 0600) and fsync the directory on Unix; on Windows the
+   temp file inherits the directory's ACL. Returns bytes written and a hash of the buffer text.
+   Throws the fs error (ENOSPC among them) with nothing half-written. */
 export interface Saved { bytes: number; stat: fs.Stats; hash: string; trailing: boolean }
 export function saveAtomic(real: string, text: string, { eol = 'lf' }: { eol?: Eol } = {}): Saved {
   const dir = path.dirname(real);
@@ -64,7 +67,7 @@ export function saveAtomic(real: string, text: string, { eol = 'lf' }: { eol?: E
     if (process.env.EDWIND_FAULT === 'enospc-save') { fs.writeSync(fd, buf, 0, buf.length >> 1); throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }); }
     while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
     fs.fsyncSync(fd);
-    if (existing) fs.fchmodSync(fd, existing.mode & 0o7777);
+    if (existing && !windows) fs.fchmodSync(fd, existing.mode & 0o7777);
   } catch (e) {
     try { fs.closeSync(fd); } catch (x) { /* already closed */ }
     try { fs.unlinkSync(tmp); } catch (x) { /* nothing to remove */ }
@@ -78,12 +81,13 @@ export function saveAtomic(real: string, text: string, { eol = 'lf' }: { eol?: E
 }
 
 export function fsyncDir(dir: string): void {
+  if (windows) return; // Node cannot open a Windows directory for fsync.
   let fd: number;
   try { fd = fs.openSync(dir, 'r'); } catch (e) { return; }
   try { fs.fsyncSync(fd); } catch (e) { /* some filesystems refuse; the rename is still durable enough */ } finally { fs.closeSync(fd); }
 }
 
-/* Write a whole file atomically with mode 0600 (state files: index, snapshots, saved copies). */
+/* Write a whole state file atomically (Unix mode 0600; inherited access rules on Windows). */
 export function writeAtomic(real: string, data: string | Buffer, durableDir = false): void {
   const dir = path.dirname(real);
   const tmp = path.join(dir, `.${path.basename(real)}.${process.pid}-${randomBytes(4).toString('hex')}~`);

@@ -1,7 +1,7 @@
 // Disk changes (spec §16.1 edit-disk, R8.12–R8.15): external writes revert an unmodified buffer as one batch by
 // disk, merge three ways into a modified one, mark a conflict or a deletion, keep CRLF across a round trip, and
 // edwind's own saves never count as external changes. Files live under the test home (not notesDir), so the
-// 2 s autosave does not interfere; the watcher reacts to inotify events (fs.watch), the sweep is 10 s.
+// 2 s autosave does not interfere; the watcher reacts to fs.watch events, the sweep is 10 s.
 // Renames through edwind (rename-file, R4.49, R6.1, R8.1, §7 moved) are here too: the buffers follow the file,
 // clients get moved, the journal and the moved records survive a restart, and the watcher sees no deletion.
 import { test, before, after } from 'node:test';
@@ -11,6 +11,9 @@ import path from 'node:path';
 import { makeDir, startEdwind, stopEdwind, EditClient } from './edit-client.mts';
 import type { Msg, TestDir, EdwindChild } from './edit-client.mts';
 import type { EditOp } from './ot-sim.mts';
+
+const windows = process.platform === 'win32';
+const windowsDirectoryRename = windows && 'Node rename cannot replace the reserved destination directory on Windows';
 
 let dir: TestDir, child: EdwindChild;
 before(async () => { dir = makeDir(); child = await startEdwind(dir); });
@@ -86,7 +89,7 @@ test('R8.14 a deleted file keeps its buffer, marks deleted, and a save recreates
   assert.equal((await a.open(id)).text, 'keep\n');
   assert.equal((await a.request({ t: 'save', buf: id })).value.saved, true);
   assert.equal(fs.readFileSync(p, 'utf8'), 'keep\n');
-  assert.equal(fs.statSync(p).mode & 0o777, 0o600, 'a new file is 0600');
+  if (!windows) assert.equal(fs.statSync(p).mode & 0o777, 0o600, 'a new file is 0600 on Unix');
   const after = await a.next(m => m.t === 'meta' && m.buf === id && m.diskChanged === null);
   assert.equal(after.modified, false);
   a.close();
@@ -123,21 +126,58 @@ test('R8.15 edwind\'s own saves never read back as disk changes; an identical ex
   a.close();
 });
 
-test('R8.7 a save is atomic: a reader never sees a partial file, and the mode bits survive', async () => {
+test('R8.7 a save replaces an existing file atomically and preserves Unix mode bits', async () => {
   const { p, id } = file('atomic.md', 'short\n');
-  fs.chmodSync(p, 0o640);
+  if (!windows) fs.chmodSync(p, 0o640);
   const a = await client();
   await a.open(id);
   const big = 'x'.repeat(3 * 1024 * 1024) + '\n';
   await a.edit(id, 0, [[0, '', big]]);
   let partial = false, stop = false;
-  const reader = (async () => { while (!stop) { const s = fs.readFileSync(p, 'utf8'); if (s !== 'short\n' && s !== big + 'short\n') partial = true; await sleep(0); } })();
-  await a.request({ t: 'save', buf: id });
-  stop = true; await reader;
+  // On Windows even short-lived open handles may deny a replacement. That case is tested separately below.
+  const reader = windows ? null : (async () => {
+    while (!stop) {
+      const s = fs.readFileSync(p, 'utf8');
+      if (s !== 'short\n' && s !== big + 'short\n') partial = true;
+      await sleep(0);
+    }
+  })();
+  try {
+    assert.equal((await a.request({ t: 'save', buf: id })).value?.saved, true);
+    assert.equal(fs.readFileSync(p, 'utf8'), big + 'short\n');
+    if (!windows) assert.equal(fs.statSync(p).mode & 0o777, 0o640);
+  } finally { stop = true; await reader; a.close(); }
   assert.equal(partial, false);
-  assert.equal(fs.statSync(p).mode & 0o777, 0o640);
-  assert.equal(fs.statSync(p).size, big.length + 6);
-  a.close();
+});
+
+test('R8.7 a reader holding the old target either sees the old file or blocks replacement without data loss', async () => {
+  const { p, id } = file('held-open.md', 'before\n');
+  const a = await client();
+  try {
+    await a.open(id);
+    await a.edit(id, 0, [[0, 'before', 'after']]);
+    const fd = fs.openSync(p, 'r');
+    let blocked = false;
+    try {
+      const save = await a.request({ t: 'save', buf: id });
+      blocked = windows && save.t === 'error';
+      if (blocked) {
+        assert.equal(save.code, 'refused_path');
+        assert.match(save.msg, /^save failed: (EACCES|EBUSY|EPERM)$/);
+        assert.equal(fs.readFileSync(p, 'utf8'), 'before\n');
+        assert.equal((await a.open(id)).meta!.modified, true);
+        assert.deepEqual(fs.readdirSync(path.dirname(p)).filter(n => n.startsWith('.held-open.md.edwind-')), []);
+      } else {
+        assert.equal(save.value?.saved, true);
+        assert.equal(fs.readFileSync(p, 'utf8'), 'after\n');
+      }
+      assert.equal(fs.readFileSync(fd, 'utf8'), 'before\n');
+    } finally { fs.closeSync(fd); }
+    if (blocked) {
+      assert.equal((await a.request({ t: 'save', buf: id })).value?.saved, true);
+      assert.equal(fs.readFileSync(p, 'utf8'), 'after\n');
+    }
+  } finally { a.close(); }
 });
 
 /* rename-file as POST /api/mv sends it: {src, dst}. */
@@ -197,7 +237,7 @@ test('R6.1 rename-file never replaces: an existing destination, or one a buffer 
   a.close();
 });
 
-test('R6.1 rename-file of a directory: buffers under it follow, ids of files not loaded are sent on, the notes index moves', async () => {
+test('R6.1 rename-file of a directory: buffers under it follow, ids of files not loaded are sent on, the notes index moves', { skip: windowsDirectoryRename }, async () => {
   const sub = path.join(dir.dirs.notes, 'proj');
   fs.mkdirSync(sub);
   fs.writeFileSync(path.join(sub, 'one.md'), '# One\n\n[[two]]\n');
@@ -218,7 +258,7 @@ test('R6.1 rename-file of a directory: buffers under it follow, ids of files not
   a.close();
 });
 
-test('R6.1 a directory\'s moved record sends on only files that went with it: a new note under the old name is made there', async () => {
+test('R6.1 a directory\'s moved record sends on only files that went with it: a new note under the old name is made there', { skip: windowsDirectoryRename }, async () => {
   const a = await client();
   fs.mkdirSync(path.join(dir.dirs.notes, 'daily'));
   fs.writeFileSync(path.join(dir.dirs.notes, 'daily', 'old.md'), 'old\n');

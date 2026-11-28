@@ -14,7 +14,7 @@ import os from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort } from 'node:worker_threads';
-import { Authority, expandHome } from './paths.mts';
+import { Authority, absoluteFilePath, expandHome, pathToId } from './paths.mts';
 import { daemonDefaults, resolveLocalEndpoint, checkLocalEndpointLength, localEndpointDirectory, prepareLocalEndpoint, verifyLocalEndpoint, removeLocalEndpoint, onProcessStop } from './platform.mts';
 import { AgentAuthority, ProtectedFileError } from './agent-files.mts';
 import { openPromptWriter, PromptStoreBusy } from './agent-startup.mts';
@@ -125,7 +125,15 @@ export function loadConfig(file: string): Config {
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`${file}: not an object`);
   for (const k of Object.keys(cfg)) if (!FIELDS.has(k)) throw new Error(`${file}: unknown field ${JSON.stringify(k)}`);
   const str = <D extends string | undefined>(k: string, req: boolean, dflt?: D): string | D => { const v = cfg[k]; if (v === undefined || v === null) { if (req) throw new Error(`${file}: ${k} is required`); return dflt as D; } if (typeof v !== 'string' || !v) throw new Error(`${file}: ${k} must be a string`); return v; };
-  const abs = <V extends string | undefined>(k: string, v: V): V => { if (v !== undefined && !path.isAbsolute(expandHome(v))) throw new Error(`${file}: ${k} must be an absolute path`); return (v === undefined ? v : expandHome(v)) as V; };
+  const abs = <V extends string | undefined>(k: string, v: V): V => {
+    if (v === undefined) return v;
+    if (process.platform === 'win32') {
+      try { return absoluteFilePath(v) as V; } catch (e) { throw new Error(`${file}: ${k}: ${e.message}`); }
+    }
+    const p = expandHome(v);
+    if (!path.isAbsolute(p)) throw new Error(`${file}: ${k} must be an absolute path`);
+    return p as V;
+  };
   const defaults = daemonDefaults();
   const out: Config = {
     socket: resolveLocalEndpoint(file, 'socket', str('socket', !defaults.socket, defaults.socket!)),
@@ -513,7 +521,9 @@ export async function exportAll(cfg: Config, dir: string, log: Log): Promise<num
   fs.mkdirSync(dir, { recursive: true });
   let n = 0;
   for (const sb of server.buffers.all()) {
-    const name = sb.file ? sb.file.replace(/^\//, '').replace(/\//g, '%2F') : sb.id.replace(/[/:]/g, '%2F');
+    const name = process.platform === 'win32'
+      ? (sb.file ? pathToId(sb.file) : sb.id).replace(/[%<>:"/\\|?*\x00-\x1f]|[. ](?=[. ]*$)/g, c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase())
+      : sb.file ? sb.file.replace(/^\//, '').replace(/\//g, '%2F') : sb.id.replace(/[/:]/g, '%2F');
     fs.writeFileSync(path.join(dir, name), sb.text, { mode: 0o600 }); n++;
   }
   await server.buffers.shutdown();

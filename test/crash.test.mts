@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { makeDir, readPrimitiveRegistry, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
+import { edwindEnv, makeDir, readPrimitiveRegistry, startEdwind, stopEdwind, EditClient, MAIN } from './edit-client.mts';
 import { writeAtomic } from '../server/files.mts';
 import { AgentAuthority, PrivateStore } from '../server/agent-files.mts';
 import { openPromptWriter, PromptStoreBusy } from '../server/agent-startup.mts';
@@ -350,7 +350,7 @@ test('unconfigured start and stop settle in the same microtask order as main', a
     order.push('stopped');
     await Promise.resolve();
     console.log(JSON.stringify(order));
-  `, d.file], { env: { ...process.env, HOME: d.dirs.home }, timeout: 10000 });
+  `, d.file], { env: edwindEnv(d), timeout: 10000 });
   assert.deepEqual(JSON.parse(stdout), ['replay:1', 'started', 'replay:2', 'suspend:1', 'stopped', 'suspend:2']);
 });
 
@@ -380,7 +380,7 @@ test('prompt store lock excludes only configured writers; live metadata commands
       await client.open('name:ordinary', { create: true }); await client.edit('name:ordinary', 0, [[0, '', 'export me']]);
       const draft = await client.call('agent-prompt-create', [{ text: 'private draft' }]); assert.ok(draft.value, JSON.stringify(draft));
       const dirOut = path.join(firstDir.root, 'export');
-      const cli = (args: string[]) => promisify(execFile)(process.execPath, [MAIN, '--config', firstDir.file, ...args], { env: { ...process.env, HOME: firstDir.dirs.home }, maxBuffer: 16 << 20 });
+      const cli = (args: string[]) => promisify(execFile)(process.execPath, [MAIN, '--config', firstDir.file, ...args], { env: edwindEnv(firstDir), maxBuffer: 16 << 20 });
       await cli(['--export', dirOut]);
       const exported = fs.readdirSync(dirOut).map(f => fs.readFileSync(path.join(dirOut, f), 'utf8'));
       assert.ok(exported.includes('export me')); assert.ok(!exported.includes('private draft'));

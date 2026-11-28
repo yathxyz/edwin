@@ -124,6 +124,8 @@ Choices E1 made where the spec left one open, and where it had to deviate:
 On Windows, `socket`, `hubSocket` and `webSocket` are named pipes (`\\.\pipe\NAME`). The default edit
 pipe is `\\.\pipe\edwin-USERNAME-edit`; the config, state and notes directories default to
 `%APPDATA%\edwin`, `%LOCALAPPDATA%\edwin` and `%USERPROFILE%\notes`, respectively.
+The daemon uses `USERPROFILE` for `~` on Windows (falling back to `os.homedir()`), not a
+shell's potentially Unix-style `HOME`.
 
 **The pipe is not owner-only.** Node's [`net.Server.listen`](https://nodejs.org/docs/latest-v24.x/api/net.html#ipc-support)
 uses libuv, which [creates the duplex pipe with `NULL` security attributes](https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/pipe.c#L540-L550).
@@ -132,6 +134,48 @@ gives the creator, Administrators and LocalSystem full access and grants Everyon
 read access. Other users can open a read-only connection; that grant does not include the write access
 needed to send edit protocol requests. Administrators and LocalSystem can connect bidirectionally.
 The username in the pipe name is not access control.
+
+### Windows: file-backed buffer IDs (R6.1, §7)
+
+Canonical IDs use `/` on the wire: `sub/file.txt` relative to `notesDir`, `~/sub/file.txt`
+relative to the service home, or `C:/dir/file.txt` for other files. The daemon also accepts
+native `\` and mixed separators on input, and translates to native paths in `server/paths.mts`;
+it emits an uppercase drive letter and keeps the filesystem's spelling of existing components
+rather than lowercasing filenames. On a case-insensitive volume alternate case spellings of an
+existing file name the same buffer; a new file keeps its requested name. Unix IDs are unchanged.
+
+Only drive-rooted absolute paths are accepted on Windows, not drive-relative, root-relative,
+UNC, or device/extended namespace paths (such as `\\?\`). Empty components, `.` and `..`,
+trailing dots or spaces, invalid filename characters (including `:` for alternate streams),
+and DOS device names such as `NUL`, `CON.txt` and `COM1` are refused. Existing files and
+parent directories are resolved by Windows before containment is checked, expanding 8.3 aliases
+when possible; a path that cannot be resolved safely is refused. Write containment uses the
+exact case of resolved components, so distinct case-sensitive paths cannot grant access to
+one another. Refusals also compare configured spellings without case. A different drive is
+outside the notes directory and any write root on the original drive. Explicit absolute IDs
+outside the write roots remain read-only unless a refusal rule blocks them altogether.
+File operations that act on the link itself (such as delete or rename) refuse a final Windows
+symlink when its own spelling cannot be resolved safely. `rename-file` does not move directories
+on Windows: its no-overwrite contract reserves the destination first, and Node cannot rename
+over that reserved directory.
+
+Private files and directories use Unix modes `0600` and `0700` where applicable. On Windows
+the default config and state directories are in the user's profile and new files inherit access
+rules from their containing directory. edwind does not set Windows ACLs; if you override these
+locations, use directories with suitable access rules.
+
+### Windows: atomic save
+
+edwind flushes a temporary file in the target directory, closes it, and renames it over
+the target. [Node's rename contract](https://nodejs.org/docs/latest-v24.x/api/fs.html#fsrenameoldpath-newpath-callback)
+covers replacement of an existing file, not replacement of an open target. On Windows,
+[libuv uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`](https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/fs.c#L2313-L2319);
+an [open target can block replacement](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information#remarks).
+On failure edwind reports the error, removes the temporary file, and leaves the original
+and the unsaved buffer intact; it does not unlink or rewrite the target as a fallback.
+The disk suite exercises both an existing target and a held Node read handle. Windows
+sharing behavior with other applications and crash durability of the directory entry
+are not verified; Node does not provide a Windows directory fsync here.
 
 ## Step E2: the Lisp machine (done)
 

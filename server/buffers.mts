@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { ProtoError, CHUNK } from './proto.mts';
-import { PathError, expandHome, under } from './paths.mts';
+import { PathError, expandHome, under, underConfigured, windowsEntry, windowsOperand, windowsPathId } from './paths.mts';
 import { readText, saveAtomic, writeAtomic, fsyncDir, sha256, diskState, FileError, BIG } from './files.mts';
 import { Journal, readJournal, healTail, header as journalHeader, Index, randomId, jidPath, SNAP_NEW } from './journal.mts';
 import { Sequencer } from './sequencer.mts';
@@ -25,6 +25,7 @@ import type { Anchor } from './anchors.mts';
 const require = createRequire(import.meta.url);
 const OT = require('../src/ot.ts');
 
+const windows = process.platform === 'win32';
 export const AUTOSAVE_MS = 2000;
 export const MOVED_TTL_MS = 24 * 3600 * 1000;
 export const UNLOAD_AFTER_MS = 7 * 24 * 3600 * 1000;
@@ -47,6 +48,9 @@ export const osMessage = (e: NodeJS.ErrnoException): string => (e && e.code ? St
    with no empty, . or .. segment. Lexical only; nothing is resolved. Throws ProtoError bad_request. */
 export function lexicalPath(auth: Authority, p: unknown): string {
   if (typeof p !== 'string' || !p || p.includes('\0')) throw new ProtoError('bad_request', 'a path must be a non-empty string');
+  if (windows) {
+    try { return windowsOperand(p, auth.notesDir).path; } catch (e) { throw new ProtoError('bad_request', e.message); }
+  }
   if (p === '~' || p.startsWith('~/') || p.startsWith('/')) return path.resolve(expandHome(p));
   if (p.startsWith('name:') || p.split('/').some(x => x === '' || x === '.' || x === '..')) throw new ProtoError('bad_request', `bad path ${JSON.stringify(p)}`);
   return path.join(auth.notesDir, p);
@@ -54,6 +58,9 @@ export function lexicalPath(auth: Authority, p: unknown): string {
 /* The parent resolved by the kernel and the last component left alone: what a rename or a delete acts on (a
    symlink itself, never its target). */
 export function realEntry(p: string): string {
+  if (windows) {
+    try { return windowsEntry(p); } catch (e) { throw new ProtoError(e.code === 'refused_path' ? 'refused_path' : 'bad_request', e.message); }
+  }
   try { return path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)); } catch (e) { throw new ProtoError('bad_request', osMessage(e)); }
 }
 
@@ -183,7 +190,11 @@ export class Buffers {
   }
   byFile(real: string): SBuf | null { for (const sb of this.byJid.values()) if (sb.file === real) return sb; return null; }
   ofEd(ed: EdBuffer): SBuf | null { for (const sb of this.byJid.values()) if (sb.ed === ed) return sb; return null; }
-  autosaves(sb: SBuf): boolean { return !!sb.file && !sb.special && !sb.big && sb.file.startsWith(this.auth.realNotesDir() + '/'); }
+  autosaves(sb: SBuf): boolean {
+    if (!sb.file || sb.special || sb.big) return false;
+    const root = this.auth.realNotesDir();
+    return windows ? sb.file !== root && under(sb.file, root) : sb.file.startsWith(root + '/');
+  }
 
   /* ---------- start: reload what the index names (R8.4, R8.6) ---------- */
   reload(skip?: (e: IndexEntry) => boolean): void {
@@ -294,7 +305,11 @@ export class Buffers {
     if (to && !this.fileExists(id)) return { moved: to };
     /* A new note under a directory that does not exist yet (R6.1 relative ids only): the directories are made
        inside notesDir with the walk notes-append uses; elsewhere a missing directory stays no_buffer. */
-    if (create && typeof id === 'string' && id.includes('/') && !/^(\/|~|name:)/.test(id) && !id.includes('\0') && !id.split('/').some(s => s === '' || s === '.' || s === '..'))
+    if (create && windows && typeof id === 'string' && !id.startsWith('name:')) {
+      let fileId: ReturnType<typeof windowsPathId>;
+      try { fileId = windowsPathId(id); } catch (e) { throw new ProtoError('bad_id', e.message); }
+      if (fileId.kind === 'relative' && fileId.id.includes('/')) ensureNoteDir(fileId.id, this.auth.realNotesDir(), this.auth);
+    } else if (create && typeof id === 'string' && id.includes('/') && !/^(\/|~|name:)/.test(id) && !id.includes('\0') && !id.split('/').some(s => s === '' || s === '.' || s === '..'))
       ensureNoteDir(id, this.auth.realNotesDir(), this.auth);
     let p: ParsedId;
     try { p = this.auth.parseId(id); } catch (e) { if (e instanceof PathError) throw new ProtoError(e.code, e.message); throw e; }
@@ -484,7 +499,7 @@ export class Buffers {
     const real = realEntry;
     const srcAbs = lexicalPath(auth, src);
     let dstAbs = lexicalPath(auth, dst);
-    if (srcAbs === '/') throw new ProtoError('bad_request', 'cannot move /');
+    if (srcAbs === path.parse(srcAbs).root) throw new ProtoError('bad_request', `cannot move ${srcAbs}`);
     try { if (fs.statSync(dstAbs).isDirectory()) dstAbs = path.join(dstAbs, path.basename(srcAbs)); } catch (e) { /* a new name */ }
     if (auth.refused(dstAbs)) throw new ProtoError('refused_path', REFUSED_DST);
     const dstReal = real(dstAbs);
@@ -497,12 +512,13 @@ export class Buffers {
        both spellings of each are compared, so neither the link nor its target moves. */
     for (const root of [auth.notesDir, auth.stateDir, auth.configDir]) {
       let r = root; try { r = fs.realpathSync.native(root); } catch (e) { /* not made yet */ }
-      if ([root, r].some(x => under(x, srcReal) || under(x, srcAbs))) throw new ProtoError('refused_path', `${srcReal}: holds edwind's directory ${root}`);
+      if ([root, r].some(x => underConfigured(x, srcReal) || underConfigured(x, srcAbs))) throw new ProtoError('refused_path', `${srcReal}: holds edwind's directory ${root}`);
     }
     /* edwind's journals, snapshots and image log are its own: nothing moves out of, into or inside stateDir. */
     if (auth.inState(srcReal) || auth.inState(dstReal)) throw new ProtoError('refused_path', `${auth.inState(srcReal) ? srcReal : dstReal}: inside edwind's state directory`);
     const dir = st.isDirectory();
-    if (this.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
+    if (windows && dir) throw new ProtoError('bad_request', 'Node cannot rename a directory over its reserved destination on Windows');
+    if (this.all().some(sb => sb.file && underConfigured(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
     /* Node has no renameat2: the destination is claimed first (an exclusive create, or mkdir), so a name that
        appears meanwhile is never replaced, and the rename then replaces only the claim. */
     try { if (dir) fs.mkdirSync(dstReal, 0o700); else fs.closeSync(fs.openSync(dstReal, 'wx', 0o600)); }
