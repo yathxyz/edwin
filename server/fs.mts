@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ProtoError } from './proto.mts';
-import { PathError, home, realPath, under } from './paths.mts';
+import { PathError, canonicalFilePath, home, realPath, under, underConfigured } from './paths.mts';
 import { REFUSED_DST, lexicalPath, osMessage, realEntry } from './buffers.mts';
 import { fsyncDir } from './files.mts';
 import type { Server } from './main.mts';
@@ -37,8 +37,8 @@ const arg = (args: unknown[]): Record<string, unknown> => (args[0] && typeof arg
 function checkOperand(auth: Authority, real: string): void {
   try { auth.checkWrite(real); } catch (e) { throw bad(e); }
   for (const root of new Set([auth.notesDir, auth.stateDir, auth.configDir, ...auth.writeRootsForFlags()])) {
-    let r = root; try { r = fs.realpathSync.native(root); } catch (e) { /* not made yet */ }
-    if (under(root, real) || under(r, real)) throw new ProtoError('refused_path', `${real}: holds ${root}, a directory edwind is configured with`);
+    let r = root; try { r = canonicalFilePath(root); } catch (e) { /* not made yet */ }
+    if (underConfigured(root, real) || underConfigured(r, real)) throw new ProtoError('refused_path', `${real}: holds ${root}, a directory edwind is configured with`);
   }
   if (auth.inState(real)) throw new ProtoError('refused_path', `${real}: inside edwind's state directory`);
 }
@@ -53,7 +53,7 @@ export class Fs {
   list(dir: unknown): { dir: string; home: string; entries: FsEntry[]; truncated?: true } {
     const auth = this.auth;
     let real: string;
-    try { real = fs.realpathSync.native(dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir)); } catch (e) { throw bad(e); }
+    try { real = canonicalFilePath(dir === undefined || dir === null ? auth.notesDir : lexicalPath(auth, dir)); } catch (e) { throw bad(e); }
     if (auth.inRefused(real)) throw new ProtoError('refused_path', `${real}: refused`);
     let names: string[];
     try { names = fs.readdirSync(real); } catch (e) { throw bad(e); }
@@ -113,7 +113,7 @@ export class Fs {
     if (under(dstReal, srcReal)) throw new ProtoError('bad_request', dstReal === srcReal ? 'source and destination are the same' : 'cannot copy a directory into itself');
     let there = true;
     try { fs.lstatSync(dstReal); } catch (e) { if (e.code !== 'ENOENT') throw bad(e); there = false; }
-    if (there || this.server.buffers.all().some(sb => sb.file && under(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
+    if (there || this.server.buffers.all().some(sb => sb.file && underConfigured(sb.file, dstReal))) throw new ProtoError('bad_request', 'destination exists');
     try { await fs.promises.cp(srcReal, dstReal, { recursive: dir, force: false, errorOnExist: true, verbatimSymlinks: true }); } catch (e) { throw bad(e); }
     fsyncDir(path.dirname(dstReal));
     this.server.log.info('fs-copy', { src: srcReal, dst: dstReal, dir });
@@ -127,8 +127,12 @@ export class Fs {
     let base = abs;
     const rest: string[] = [];
     for (;;) {
-      try { base = fs.realpathSync.native(base); break; }
-      catch (e) { if (e.code !== 'ENOENT' || base === '/') throw bad(e); rest.unshift(path.basename(base)); base = path.dirname(base); }
+      try { base = canonicalFilePath(base); break; }
+      catch (e) {
+        const parent = path.dirname(base);
+        if (e.code !== 'ENOENT' || parent === base) throw bad(e);
+        rest.unshift(path.basename(base)); base = parent;
+      }
     }
     if (!rest.length) throw new ProtoError('bad_request', `${base} exists`);
     const real = path.join(base, ...rest);

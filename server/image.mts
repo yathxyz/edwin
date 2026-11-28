@@ -33,6 +33,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { writeAtomic, sha256 } from './files.mts';
+import { canonicalFilePath, relativeFileId, windowsPathId } from './paths.mts';
 import { ProtoError } from './proto.mts';
 import { ProtectedFileError, type AgentAuthority } from './agent-files.mts';
 import type { By, ImageMsg, VarMsg, EchoMsg } from './proto.mts';
@@ -373,8 +374,20 @@ export class ImageLog {
     }));
     serverOnly(L.D('%edwin-source', 'file line [count]', 'COUNT lines (default 40, at most 400) of the shipped source FILE (as find-definition-location names it, edwin/scm/emacs.scm) from LINE. Read-only; nothing outside the shipped tree.', ([f, ln, n]: SchemeValue[]) => {
       const rel = S.str(f, '%edwin-source').replace(/^edwin\//, '');
-      const real = path.resolve(EDWIN_TREE, rel);
-      if (!real.startsWith(EDWIN_TREE + path.sep) || rel.split('/').includes('node_modules')) throw new S.SchemeError('error', `%edwin-source: ${rel} is not in the shipped tree`, []);
+      const outside = () => new S.SchemeError('error', `%edwin-source: ${rel} is not in the shipped tree`, []);
+      let real: string;
+      if (process.platform === 'win32') {
+        try {
+          if (windowsPathId(rel).kind !== 'relative') throw outside();
+          const root = canonicalFilePath(EDWIN_TREE);
+          real = canonicalFilePath(path.join(root, rel));
+          const id = relativeFileId(real, root);
+          if (id === null || id.toLowerCase().split('/').includes('node_modules')) throw outside();
+        } catch { throw outside(); }
+      } else {
+        real = path.resolve(EDWIN_TREE, rel);
+        if (!real.startsWith(EDWIN_TREE + path.sep) || rel.split('/').includes('node_modules')) throw outside();
+      }
       let text: string;
       try { text = this.readContent(real); } catch (e) { throw new S.SchemeError('error', e instanceof ProtectedFileError ? e.message : `%edwin-source: no file ${rel}`, []); }
       const lines = text.split('\n'), from = Math.max(1, Number(ln) || 1), count = Math.min(400, Math.max(1, n === undefined ? 40 : Number(n) || 40));

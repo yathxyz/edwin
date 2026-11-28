@@ -147,14 +147,33 @@ UNC, or device/extended namespace paths (such as `\\?\`). Empty components, `.` 
 trailing dots or spaces, invalid filename characters (including `:` for alternate streams),
 and DOS device names such as `NUL`, `CON.txt` and `COM1` are refused. Existing files and
 parent directories are resolved by Windows before containment is checked, expanding 8.3 aliases
-when possible; a path that cannot be resolved safely is refused. A different drive is outside the
-notes directory and any write root on the original drive. Explicit absolute IDs outside the
-write roots remain read-only unless a refusal rule blocks them altogether.
+when possible; a path that cannot be resolved safely is refused. Write containment uses the
+exact case of resolved components, so distinct case-sensitive paths cannot grant access to
+one another. Refusals also compare configured spellings without case. A different drive is
+outside the notes directory and any write root on the original drive. Explicit absolute IDs
+outside the write roots remain read-only unless a refusal rule blocks them altogether.
+File operations that act on the link itself (such as delete or rename) refuse a final Windows
+symlink when its own spelling cannot be resolved safely. `rename-file` does not move directories
+on Windows: its no-overwrite contract reserves the destination first, and Node cannot rename
+over that reserved directory.
 
 Private files and directories use Unix modes `0600` and `0700` where applicable. On Windows
 the default config and state directories are in the user's profile and new files inherit access
 rules from their containing directory. edwind does not set Windows ACLs; if you override these
 locations, use directories with suitable access rules.
+
+### Windows: atomic save
+
+edwind flushes a temporary file in the target directory, closes it, and renames it over
+the target. [Node's rename contract](https://nodejs.org/docs/latest-v24.x/api/fs.html#fsrenameoldpath-newpath-callback)
+covers replacement of an existing file, not replacement of an open target. On Windows,
+[libuv uses `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`](https://github.com/nodejs/node/blob/v24.22.2/deps/uv/src/win/fs.c#L2313-L2319);
+an [open target can block replacement](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information#remarks).
+On failure edwind reports the error, removes the temporary file, and leaves the original
+and the unsaved buffer intact; it does not unlink or rewrite the target as a fallback.
+The disk suite exercises both an existing target and a held Node read handle. Windows
+sharing behavior with other applications and crash durability of the directory entry
+are not verified; Node does not provide a Windows directory fsync here.
 
 ## Step E2: the Lisp machine (done)
 

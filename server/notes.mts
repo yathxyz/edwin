@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { ProtoError } from './proto.mts';
 import { writeAtomic } from './files.mts';
-import { PathError, under, realPath } from './paths.mts';
+import { PathError, pathToId, realPath, relativeFileId, under, windowsPathId } from './paths.mts';
 import { parseFile, compileGrammar, NOTE_EXT, ignoreMatcher } from './notes-parse.mts';
 import type { MessagePort } from 'node:worker_threads';
 import type { Authority, ParsedId } from './paths.mts';
@@ -24,6 +24,7 @@ import type {
   ScanEntry, GrepHit, ParseJob, ScanJob, GrepJob, GrepFile, WorkerReply, ScannedReply, GreppedReply, SyncReply,
 } from './notes-parse.mts';
 
+const windows = process.platform === 'win32';
 export const name = 'notes';
 export const EDIT_DEBOUNCE_MS = 300;
 export const FS_DEBOUNCE_MS = 200;
@@ -313,8 +314,13 @@ export class Notes {
         case 'url': return null;
         case 'title': return byOrgId.get(t.replace(/^id:/i, '').trim()) || null;
         case 'file': {
-          let rel = t.replace(/^file:/i, '').split('#')[0].trim();
-          if (rel.startsWith('/')) { if (under(rel, this.realRoot) && rel !== this.realRoot) rel = rel.slice(this.realRoot.length + 1); else if (under(rel, this.root) && rel !== this.root) rel = rel.slice(this.root.length + 1); else return null; }
+          let rel = pathToId(t.replace(/^file:/i, '').split('#')[0].trim());
+          if (rel.startsWith('/') || (windows && path.win32.isAbsolute(rel))) {
+            const native = windows ? path.normalize(rel) : rel;
+            const id = relativeFileId(native, this.realRoot) ?? relativeFileId(native, this.root);
+            if (id === null) return null;
+            rel = id;
+          }
           const fromSrc = path.posix.normalize(path.posix.join(path.posix.dirname(l.srcFile), rel));
           for (const c of [fromSrc, path.posix.normalize(rel)]) { if (this.files.has(c)) return c; const p = byPathNoExt.get(stripExt(c).toLowerCase()); if (p) return p; }
           return resolveName(stripExt(rel), l);
@@ -359,9 +365,8 @@ export class Notes {
   /* The notesDir-relative id of a buffer that the index covers, else null. */
   noteIdOf(sb: SBuf | null | undefined): string | null {
     if (!sb || !sb.file || sb.special || sb.big) return null;
-    if (!under(sb.file, this.realRoot) || sb.file === this.realRoot) return null;
-    const id = sb.file.slice(this.realRoot.length + 1);
-    if (!NOTE_EXT.test(id) || id.split('/').some(s => s.startsWith('.') && s.length > 1 && s !== '..')) return null;
+    const id = relativeFileId(sb.file, this.realRoot);
+    if (id === null || !NOTE_EXT.test(id) || id.split('/').some(s => s.startsWith('.') && s.length > 1 && s !== '..')) return null;
     if (ignoreMatcher(this.ignorePatterns())(id, false)) return null;
     return id;
   }
@@ -413,7 +418,7 @@ export class Notes {
   onFsEvent(fname: string | Buffer | null) {
     if (this.stopped) return;
     if (!fname) { this.scheduleSweep(500); return; }
-    const rel = String(fname).split(path.sep).join('/');
+    const rel = pathToId(String(fname));
     if (this.indexable(rel)) {
       const t = this.fsTimers.get(rel); if (t) clearTimeout(t);
       this.fsTimers.set(rel, setTimeout(() => { this.fsTimers.delete(rel); this.checkFile(rel); }, FS_DEBOUNCE_MS));
@@ -436,13 +441,12 @@ export class Notes {
      are parsed from their text, and what else arrived under notesDir is read by checkFile or, for a directory, by
      the sweep. */
   renamed(from: string, to: string) {
-    const rel = (p: string) => (under(p, this.realRoot) && p !== this.realRoot ? p.slice(this.realRoot.length + 1) : null);
-    const a = rel(from);
+    const a = relativeFileId(from, this.realRoot);
     let dropped = false;
     if (a !== null) for (const id of [...this.files.keys()]) if (id === a || id.startsWith(a + '/')) { this.files.delete(id); dropped = true; }
     if (dropped) this.changed();
     for (const sb of this.server.buffers.all()) if (sb.file && under(sb.file, to) && this.noteIdOf(sb)) this.indexBufferNow(sb);
-    const b = rel(to);
+    const b = relativeFileId(to, this.realRoot);
     if (b === null) return;
     let st;
     try { st = fs.statSync(to); } catch (e) { return; }
@@ -550,8 +554,15 @@ export class Notes {
     return client.by();
   }
   /* The buffer of the notesDir-relative ID (opened or created); a path outside notesDir is bad_request. */
-  noteBuffer(id: unknown, create: boolean): SBuf {
-    if (typeof id !== 'string' || !id) throw bad('path is required');
+  noteBuffer(raw: unknown, create: boolean): SBuf {
+    if (typeof raw !== 'string' || !raw) throw bad('path is required');
+    let id = raw;
+    if (windows) {
+      let fileId: ReturnType<typeof windowsPathId>;
+      try { fileId = windowsPathId(id); } catch (e) { throw bad(e.message); }
+      if (fileId.kind !== 'relative') throw bad(`path must be relative to the notes directory: ${JSON.stringify(id)}`);
+      id = fileId.id;
+    }
     if (id.startsWith('/') || id.startsWith('~') || id.startsWith('name:') || id.includes('\0')) throw bad(`path must be relative to the notes directory: ${JSON.stringify(id)}`);
     const segs = id.split('/');
     if (segs.some(s => s === '' || s === '.' || s === '..')) throw bad(`bad relative path ${JSON.stringify(id)}`);
