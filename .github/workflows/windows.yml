@@ -52,6 +52,8 @@ jobs:
         run: node --test test/ot.test.mts
       - name: conformance
         run: node --test test/conformance.test.mts
+      - name: disk
+        run: node --test test/disk.test.mts
 
   native-build:
     runs-on: windows-latest
